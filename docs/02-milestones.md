@@ -68,11 +68,12 @@
 ## M4 · 发布
 
 - 资产机制：清单（名称→URL+sha256）、运行时下载、镜像可配、`assets pull` 预取。
-- release archive：二进制 + libpdfium + `skills/mimus/` Agent Skill + 许可声明（MIT / PDFium BSD / 模型 Apache-2.0）；macOS arm64/x64 + Linux x64 + Windows x64。
-- 用 skill 创建器校验结构，并在干净环境中前向测试 agent 的三条工作流：翻译 PDF、诊断版面/IL、预取资产；skill 不得读取或回显 API key。
+- release archive：二进制 + libpdfium + 许可声明（MIT / PDFium BSD / 模型 Apache-2.0）；macOS arm64/x64 + Linux x64 + Windows x64。
+- 在仓库发布 `skills/mimus/`，对外安装入口为 `npx skills add eeee0717/mimus`；skill 声明兼容的 CLI 版本，并明确二进制与资产需另行安装。
+- 用 skill 创建器校验结构，并在干净环境中经 `npx skills add` 安装后前向测试 agent 的三条工作流：翻译 PDF、诊断版面/IL、预取资产；skill 不得读取或回显 API key。
 - README / 使用文档 / 术语校对工作流说明。
 
-**收口断言**：在一台干净机器上，从 GitHub Release 下载 archive → 解压 → 首跑自动拉资产 → 完成一篇真实 arXiv 论文的翻译；另由安装了随包 skill 的 agent 通过 CLI 机器协议完成一次 `inspect` 与一次 `translate`，全程不需要人工解析终端文本。
+**收口断言**：在一台干净机器上，从 GitHub Release 下载 archive → 解压 → 首跑自动拉资产 → 完成一篇真实 arXiv 论文的翻译；再执行 `npx skills add eeee0717/mimus` 安装 skill，由 agent 通过 CLI 机器协议完成一次 `inspect` 与一次 `translate`，全程不需要人工解析终端文本。
 
 ## V2 展望（不承诺，触发条件另行立项）
 

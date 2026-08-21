@@ -9,13 +9,14 @@
 
 ## 决策
 
-1. 对外承诺档位：**单目录 archive**——GitHub Releases 发 tar.gz/zip，内含二进制（+ 可能的动态库）与 `skills/mimus/` Agent Skill（ADR-0008），解压即用、无运行时依赖、无 Python。真单文件是努力方向，不是承诺。
+1. 对外承诺档位：**单目录 archive**——GitHub Releases 发 tar.gz/zip，内含二进制（+ 可能的动态库），解压即用、无运行时依赖、无 Python。真单文件是努力方向，不是承诺。
 2. 模型/字体等大资产：**运行时按需下载**（sha256 校验，缓存于用户缓存目录），提供预取子命令；**用户自备路径**作为逃生门（离线环境）。不打包进 release archive。
 3. 下载源可配镜像（国内网络刚需）。
+4. Agent Skill 不放入 release archive；仓库内以 `skills/mimus/` 维护，用户通过 `npx skills add eeee0717/mimus` 安装（ADR-0008）。该命令只安装 skill，不代替二进制与资产安装。
 
 ## 后果
 
 - release 体积与模型版本解耦；离线场景经"预取 + 自备路径"覆盖。
 - 需要一套统一的资产清单机制（名称 → URL + sha256 + 本地路径解析），V1 基础设施。
 - 首次运行需联网下载约 150 MB 资产，需在 CLI 首跑体验中明示进度。
-- Agent Skill 与二进制同版发布，skill 的 CLI 假设必须和 release 版本同步验证。
+- Agent Skill 与二进制分开安装；skill 必须声明兼容的 CLI 版本，并针对受支持 release 做前向验证。

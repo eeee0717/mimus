@@ -7,7 +7,7 @@
 
 | # | 决策 | ADR |
 |---|---|---|
-| 1 | 实现语言 Rust，唯一执行接口为 CLI（暂不做 GUI/MCP）；release 附带薄 Agent Skill 调用 CLI | [ADR-0001](docs/adr/0001-rust-cli.md)、[ADR-0008](docs/adr/0008-agent-skill.md) |
+| 1 | 实现语言 Rust，唯一执行接口为 CLI（暂不做 GUI/MCP）；Agent Skill 通过 `npx skills add eeee0717/mimus` 安装并调用 CLI | [ADR-0001](docs/adr/0001-rust-cli.md)、[ADR-0008](docs/adr/0008-agent-skill.md) |
 | 2 | 版面检测模型：PP-DocLayoutV3 官方 ONNX（131 MB，25 类，含阅读顺序） | [ADR-0002](docs/adr/0002-pp-doclayoutv3.md) |
 | 3 | V1 仅原生 PDF 路径（扫描件报错拒绝）；OCR 后置 V2，IR/架构预留 | [ADR-0003](docs/adr/0003-v1-native-pdf-path.md) |
 | 4 | 许可：MIT 单许可 | [ADR-0004](docs/adr/0004-mit-license.md) |
@@ -36,7 +36,7 @@
 | 27 | 术语细节：用户 `--glossary` 覆盖自动表；`--dump-glossary` 导出复用；`--no-auto-terms` 开关；自动表指纹进缓存键 | — |
 | 28 | 性能：V1 无硬指标；方向值=20 页论文除 LLM 外 <5 分钟（arm64 笔记本）；LLM 段落级并发默认 4、指数退避重试 3 次、重试尽降级保原文 | — |
 | 29 | crate 结构：workspace 两分——`mimus-core`（lib：IL/pass/引擎 trait/翻译层）+ `mimus`（bin：CLI/进度/配置） | — |
-| 30 | Agent 集成：V1 archive 附带一个 `mimus` Agent Skill；skill 仅编排 CLI、不复制业务逻辑；MCP/daemon/vendor plugin 不进 V1 | [ADR-0008](docs/adr/0008-agent-skill.md) |
+| 30 | Agent 集成：仓库提供一个可由 `npx skills add eeee0717/mimus` 安装的 `mimus` Agent Skill；skill 仅编排 CLI、不复制业务逻辑；MCP/daemon/vendor plugin 不进 V1 | [ADR-0008](docs/adr/0008-agent-skill.md) |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
@@ -91,7 +91,8 @@
 
 ### Agent 集成
 
-- **Agent Skill**：随 release archive 附带的 `skills/mimus/` 指令包，使支持 skill 的 agent 能调用 `translate`、`inspect`、`assets pull`。它是 CLI 的薄编排层，不含业务实现。
+- **Agent Skill**：仓库内的 `skills/mimus/` 指令包；用户通过 `npx skills add eeee0717/mimus` 安装，使支持 skill 的 agent 能调用 `translate`、`inspect`、`assets pull`。它是 CLI 的薄编排层，不含业务实现。
+- **Skill 安装边界**：`npx skills add` 只安装指令包，不安装 `mimus` 二进制、模型或字体；skill 需检查 CLI 是否存在及版本是否兼容，资产仍由 CLI 管理。
 - **机器调用协议**：所有子命令的 `--json` 模式；stdout 仅输出带 `schema_version` 的 NDJSON 事件流，并以单个 result/error 事件终结。无 spinner、颜色或交互提示；分类退出码仍是第一层结果信号。
 - **行为真源**：人、脚本和 agent 都通过同一个 CLI 执行；skill 不复制参数语义、翻译策略或错误恢复逻辑。
 

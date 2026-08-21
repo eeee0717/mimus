@@ -9,7 +9,7 @@
 
 ## 决策
 
-用 Rust 实现；V1 的唯一执行接口为 CLI，不做 GUI。release 随包附带的 Agent Skill 只编排 CLI，不构成第二套实现（ADR-0008）；后续如做 GUI、MCP 或其他入口，仍以 CLI/库为内核另行封装。
+用 Rust 实现；V1 的唯一执行接口为 CLI，不做 GUI。仓库提供可通过 `npx skills add eeee0717/mimus` 安装的 Agent Skill，它只编排 CLI，不构成第二套实现（ADR-0008）；后续如做 GUI、MCP 或其他入口，仍以 CLI/库为内核另行封装。
 
 ## 后果
 
