@@ -4,7 +4,7 @@
 // 是 3.5 字宽，因此左右栏同一水平线上的字符会被连成一行。这份 fixture 的作用
 // 就是让这件事可被观察，而不是让它不发生。
 
-#set page(width: 548pt, height: 300pt, margin: 30pt)
+#set page(width: 548pt, height: 176pt, margin: 30pt)
 #set text(size: 10pt, hyphenate: false)
 #set par(justify: true, leading: 4pt, spacing: 12pt)
 

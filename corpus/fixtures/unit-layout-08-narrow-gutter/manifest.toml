@@ -18,12 +18,12 @@ method = "realistic-typesetting"
 engine = "typst"
 source_file = "unit-layout-08-narrow-gutter.typ"
 pdf = "unit-layout-08-narrow-gutter.pdf"
-pdf_sha256 = "ccb23d625159ab93554a3bf2edbc02acfe61d8d00451d18fc96f48642b4d1e14"
+pdf_sha256 = "650dc43331ab84be086ab32b94af475f14c2a61401110137e46c5939f248b950"
 font_provenance = "typst-embedded"
 
 [[page]]
 index = 0
-media_box = [0.0, 0.0, 548.0, 300.0]
+media_box = [0.0, 0.0, 548.0, 176.0]
 rotate = 0
 
 [expected]
@@ -86,7 +86,7 @@ text = "If the two columns come back as one, the cause is the gutter and nothing
 [[expected.behaviour]]
 id = "LAYOUT-08-merge"
 assertion = "栏间距 8pt 下，基于水平距离的行聚类会把左右栏连成一行"
-observable_via = "pdftotext -bbox-layout 与 mutool draw -F stext 报出的块的 x 跨度：超过单栏宽 240pt 即已跨栏"
+observable_via = "pdftotext -bbox-layout 报出的块的 x 跨度：超过单栏宽 240pt 即已跨栏"
 
 [[expected.behaviour]]
 id = "D4-model-coverage"
@@ -98,5 +98,11 @@ checks = ["determinism", "legality", "page-geometry", "glyphs", "render"]
 
 [[adjudication]]
 date = "2026-08-21"
-issue = "栏间距 8pt 下，两个解析器都会跨栏合并——这正是本 fixture 要暴露的现象。合并后的块内文本是左右栏逐行交错的碎片，其切分点由断行决定，无法先于生成手写。"
-resolution = "不声明 structure / reading-order / dual-parser-geometry，改用 glyphs 断言「这一页上有且只有这些字符」。expected.block 记录的是六个段落这一事实（供实验 1 与模型输出对照），而不是某个解析器眼中的块。"
+issue = """\
+两个解析器在这一页上分歧：pdftotext -bbox-layout 把整页并成**一个** 11 行的块，x 跨度 \
+30..519.76pt——它跨过 8pt 的栏间距把左右栏连成了整行；mutool draw -F stext 给出**六个**块，\
+左栏 x 30..274.26、右栏 x 278..522.26，没有合并。块的划分因此无法双解析器裁定。"""
+resolution = """\
+不声明 structure / reading-order / dual-parser-geometry，改用 glyphs 断言「这一页上有且只有\
+这些字符」。expected.block 记录的是六个段落这一事实（供实验 1 与模型输出对照），而不是某个\
+解析器眼中的块。分歧本身就是 LAYOUT-08 要暴露的现象，已由上面的 LAYOUT-08-merge 记录。"""
