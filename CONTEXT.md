@@ -1,7 +1,7 @@
 # CONTEXT
 
 > 项目共享术语与决策索引。术语随设计会话逐轮补充；难以逆转的技术选择在 `docs/adr/` 以 ADR 形式记录。
-> 事实基础：`docs/01-research.md`（2026-08-21 调研报告）+ 2026-08-21 模型/引擎事实查证（要点已并入 ADR-0002/0006）。
+> 事实基础：`docs/01-research.md`（2026-08-21 调研报告）+ 2026-08-21 模型/引擎事实查证（要点已并入 ADR-0002/0006）+ `docs/04-m0-experiment-1.md`（M0 实验 1 的模型实测结论）。
 
 ## 已定决策
 
@@ -137,11 +137,12 @@
 
 - ~~确定性生成的引擎侧机制尚未实测~~ → 已收口（决策 #34）：三条配方实测通过，XeTeX 出局。
 - ~~验收工具链缺四件（qpdf / poppler / mupdf-tools / Typst）~~ → 已收口（决策 #34）：四件齐备并钉死版本。
-- PP-DocLayoutV3 的 25 类是否含目录类未确认 → M0 实验 1 顺带查证。
+- ~~PP-DocLayoutV3 的 25 类是否含目录类未确认~~ → 已结清（M0 实验 1）：**`content` 就是目录类**，`unit-para-04-toc` 上 0.955 一个框盖住整个目录；但模型只给整块框，条目与页码的切分仍需自行实现。见 [docs/04-m0-experiment-1.md](docs/04-m0-experiment-1.md) §4 D7。
 - CJK 输入 fixture 的字体选型 → 独立 ticket（溯源手段已改为对象号 + 子集标签，不再依赖字体族差异）。
 
 **由实验给出结论，不是决策**
 
+- ~~PP-DocLayoutV3 的第 7 列语义、model order 与 D1–D12 红利~~ → 已由 M0 实验 1 结清，结论见 [docs/04-m0-experiment-1.md](docs/04-m0-experiment-1.md)，ADR-0002 已就地修订。
 - 走查与 PDFium 不一致时的仲裁规则（已知分歧：FONT-02、STREAM-02）→ 由 M0 实验 2 的结论文档确立。
 
 V2 展望项（扫描件/OCR、子进程隔离、像素 diff、宋体字族、中→英、GUI）见 `docs/02-milestones.md` 末节，随触发条件另行立项。
