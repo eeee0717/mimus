@@ -615,13 +615,13 @@ fn ordered_texts(
 ) -> Vec<String> {
     let mut blocks: Vec<&crate::manifest::Block> = manifest.expected.block.iter().collect();
     blocks.sort_by_key(|b| key(b));
-    blocks.iter().map(|b| text::normalize(&b.text)).collect()
+    blocks.iter().map(|b| text::compare_key(&b.text)).collect()
 }
 
 fn flatten(pages: &[ParsedPage]) -> Vec<String> {
     pages
         .iter()
-        .flat_map(|p| p.blocks.iter().map(|b| b.text.clone()))
+        .flat_map(|p| p.blocks.iter().map(|b| text::compare_key(&b.text)))
         .collect()
 }
 
@@ -695,7 +695,7 @@ fn check_dual_parser_geometry(
         let p = &poppler[block.reading_order - 1];
 
         // 两个解析器共同报告的量只有文本与 x 跨度——先确认它们说的是同一块。
-        if m.text != p.text {
+        if text::compare_key(&m.text) != text::compare_key(&p.text) {
             problems.push(format!(
                 "块 `{}`：两个解析器指向的不是同一块\n    mutool  {:?}\n    poppler {:?}",
                 block.key, m.text, p.text
@@ -922,6 +922,78 @@ fn indent(s: &str) -> String {
         .map(|l| format!("       {l}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+// ---------------------------------------------------------------- 生成
+
+/// 用引擎配方把 fixture 的 PDF 生成到它自己的目录里，返回 SHA-256。
+///
+/// `pdf_sha256` 是**测出来的**值而不是期望值，所以允许 `--write-hash` 机械回填
+/// ——24 份 fixture 手抄 24 个哈希只会引入抄错。手写的部分是 manifest 的期望，
+/// 那部分工具一个字都不碰。
+pub fn build(
+    manifests: &[Manifest],
+    toolchain: &Toolchain,
+    repo_root: &Path,
+    write_hash: bool,
+) -> Result<bool> {
+    for manifest in manifests {
+        let engine_id = manifest
+            .source
+            .engine
+            .as_deref()
+            .with_context(|| format!("[{}] 没有 engine，无法生成", manifest.id()))?;
+        let engine = toolchain
+            .engine
+            .iter()
+            .find(|e| e.id == engine_id)
+            .with_context(|| format!("[{}] engine `{engine_id}` 不存在", manifest.id()))?;
+
+        let source = manifest.source_path(repo_root)?;
+        let built = determinism::build_source(engine, repo_root, &source, &manifest.dir)?;
+        let target = manifest.pdf_path();
+        if built != target {
+            std::fs::rename(&built, &target).with_context(|| {
+                format!("把 {} 挪到 {} 失败", built.display(), target.display())
+            })?;
+        }
+        let sha = hash::of_file(&target)?;
+
+        if write_hash {
+            rewrite_pdf_hash(manifest, &sha)?;
+        }
+        println!(
+            "  {:<40} {sha}{}",
+            manifest.id(),
+            if write_hash { "  (已回填)" } else { "" }
+        );
+    }
+    Ok(true)
+}
+
+fn rewrite_pdf_hash(manifest: &Manifest, sha: &str) -> Result<()> {
+    let path = manifest.dir.join("manifest.toml");
+    let text = std::fs::read_to_string(&path)?;
+    let mut replaced = 0;
+    let out: Vec<String> = text
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("pdf_sha256") {
+                replaced += 1;
+                format!("pdf_sha256 = \"{sha}\"")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    if replaced != 1 {
+        bail!(
+            "{} 里有 {replaced} 行 pdf_sha256，期望恰好 1 行",
+            path.display()
+        );
+    }
+    std::fs::write(&path, format!("{}\n", out.join("\n")))?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -64,6 +64,15 @@ enum Command {
         id: String,
     },
 
+    /// 用引擎配方生成 fixture 的 PDF 并打印其 SHA-256。
+    Build {
+        /// fixture ID；可给多个，省略时处理全部。
+        ids: Vec<String>,
+        /// 把测得的 SHA-256 回填进 manifest 的 pdf_sha256。
+        #[arg(long)]
+        write_hash: bool,
+    },
+
     /// 对 fixture 跑 §2.8 的独立验收。省略 ID 时验收全部。
     Verify {
         /// fixture ID；可给多个。
@@ -122,6 +131,11 @@ fn run() -> Result<bool> {
             println!("pdfTeX     : \\pdftrailerid{{{id}}}");
             println!("LuaTeX     : \\pdfvariable trailerid{{[<{hex}> <{hex}>]}}");
             Ok(true)
+        }
+        Command::Build { ids, write_hash } => {
+            let toolchain = Toolchain::load(&repo_root)?;
+            let manifests = select(&repo_root, ids)?;
+            verify::build(&manifests, &toolchain, &repo_root, *write_hash)
         }
         Command::Verify { ids } => {
             let toolchain = Toolchain::load(&repo_root)?;
