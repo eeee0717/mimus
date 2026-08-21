@@ -1,0 +1,14 @@
+\input corpus/determinism/pdftex-deterministic.tex
+\pdftrailerid{corpus-determinism-probe}
+%% Corpus v1 · pdfTeX 确定性探针（docs/03-corpus-requirements.md §2.6）
+%% 见 typst-probe.typ 顶部关于「探针必须覆盖子集化与断行」的说明。
+\documentclass[10pt]{article}
+\usepackage[papersize={240pt,160pt},margin=20pt]{geometry}
+\pagestyle{empty}
+\begin{document}
+\noindent Corpus v1 determinism probe. This paragraph is long enough to wrap
+across several lines so that the engine exercises its line-breaking and font
+subsetting paths, not just a single short run of glyphs.
+
+\noindent\textbf{Second font face.} Mixed weights force a second subset.
+\end{document}

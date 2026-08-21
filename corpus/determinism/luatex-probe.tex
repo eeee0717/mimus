@@ -1,0 +1,14 @@
+\input corpus/determinism/luatex-deterministic.tex
+\pdfvariable trailerid{[<636f727075732d64657465726d696e69> <636f727075732d64657465726d696e69>]}
+%% Corpus v1 · LuaTeX 确定性探针（docs/03-corpus-requirements.md §2.6）
+%% trailer ID = "corpus-determinism-probe" 的前 16 字节 hex，见 `corpus trailer-id`。
+\documentclass[10pt]{article}
+\usepackage[papersize={240pt,160pt},margin=20pt]{geometry}
+\pagestyle{empty}
+\begin{document}
+\noindent Corpus v1 determinism probe. This paragraph is long enough to wrap
+across several lines so that the engine exercises its line-breaking and font
+subsetting paths, not just a single short run of glyphs.
+
+\noindent\textbf{Second font face.} Mixed weights force a second subset.
+\end{document}

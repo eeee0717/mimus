@@ -1,0 +1,215 @@
+# Corpus v1 · 工具链钉死表
+#
+# 合同条款：docs/03-corpus-requirements.md §2.5（生成方式）、§2.6（确定性）、
+# §2.8（独立验收）。本文件是那三节的**可执行**形式——`corpus doctor` 逐条比对
+# 实际安装的版本，`corpus determinism` 逐个引擎跑重复生成门禁。
+#
+# 版本比对是**精确匹配**，不是下限。§2.6：「版本变化视为语料变更，需重新走验收」。
+# 升级工具的正确做法是改本文件 + 重跑 `corpus verify --all`，而不是放宽比对。
+
+schema_version = 1
+
+# 版本号提取规则：在命令的合并输出（stdout+stderr）中找到第一行含 `marker` 的行，
+# 取该行第一个以数字开头的空白分隔 token。`marker` 省略时取第一个非空行。
+# `must_contain` 针对整段输出做子串检查，用于钉死发行版（如 TeX Live 年份）。
+
+# ---------------------------------------------------------------- 独立解析器（结构）
+
+[[tool]]
+id = "qpdf"
+role = "独立解析器（结构）· §2.8 合法性核验"
+command = "qpdf"
+args = ["--version"]
+marker = "qpdf version"
+pinned = "12.4.0"
+
+# ---------------------------------------------------------------- 独立解析器（文本与坐标）
+
+[[tool]]
+id = "pdftotext"
+role = "独立解析器（文本与坐标）· §2.1 双解析器裁定的第一方"
+command = "pdftotext"
+args = ["-v"]
+marker = "pdftotext version"
+pinned = "26.08.0"
+
+[[tool]]
+id = "pdfinfo"
+role = "独立解析器（页面几何）· §2.8 步骤 3"
+command = "pdfinfo"
+args = ["-v"]
+marker = "pdfinfo version"
+pinned = "26.08.0"
+
+[[tool]]
+id = "pdftoppm"
+role = "独立渲染器（栅格哈希）· §2.8 步骤 4；同时是实验 1 的模型输入渲染器"
+command = "pdftoppm"
+args = ["-v"]
+marker = "pdftoppm version"
+pinned = "26.08.0"
+
+# ---------------------------------------------------------------- 独立解析器 + 渲染器（MuPDF）
+
+[[tool]]
+id = "mutool"
+role = "独立解析器（文本与坐标）· §2.1 双解析器裁定的第二方；兼独立渲染器"
+command = "mutool"
+args = ["-v"]
+marker = "mutool version"
+pinned = "1.28.2"
+
+[[tool]]
+id = "gs"
+role = "备选独立渲染器 · §2.8 步骤 4"
+command = "gs"
+args = ["--version"]
+pinned = "10.07.1"
+
+# ---------------------------------------------------------------- 现实排版引擎
+
+[[tool]]
+id = "typst"
+role = "现实排版引擎（主力）· §2.5"
+command = "typst"
+args = ["--version"]
+marker = "typst"
+pinned = "0.15.1"
+
+[[tool]]
+id = "pdflatex"
+role = "现实排版引擎（pdfTeX 路径）· §2.5"
+command = "pdflatex"
+args = ["--version"]
+marker = "pdfTeX"
+pinned = "3.141592653-2.6-1.40.29"
+must_contain = ["TeX Live 2026"]
+
+[[tool]]
+id = "lualatex"
+role = "现实排版引擎（LuaTeX 路径）· §2.5"
+command = "lualatex"
+args = ["--version"]
+marker = "Version"
+pinned = "1.24.0"
+must_contain = ["TeX Live 2026", "LuaHBTeX"]
+
+[[tool]]
+id = "xelatex"
+role = "现实排版引擎（XeTeX 路径）· §2.5——已被确定性门禁判定不可用，见 [[engine]] xetex"
+command = "xelatex"
+args = ["--version"]
+marker = "XeTeX"
+pinned = "3.141592653-2.6-0.999998"
+must_contain = ["TeX Live 2026"]
+
+[[tool]]
+id = "xdvipdfmx"
+role = "XeTeX 的 PDF 后端——不确定性的实际来源，钉死版本以便日后复议"
+command = "xdvipdfmx"
+args = ["--version"]
+marker = "xdvipdfmx Version"
+pinned = "20260317"
+
+# ================================================================ 现实排版引擎的确定性配方
+#
+# 每个 engine 的 `args` / `env` 就是合同本身：fixture 由同一段配方生成，
+# `corpus determinism` 用固定探针源文件对同一段配方做重复生成门禁。
+#
+# 占位符：{source} 源文件（仓库相对路径）、{outdir} 输出目录、{output} 输出 PDF、
+#         {stem} 源文件主名。子进程的工作目录固定为仓库根，因此所有路径可复现。
+
+[[engine]]
+id = "typst"
+label = "Typst 0.15.1"
+tool = "typst"
+corpus_v1_usable = true
+command = "typst"
+args = ["compile", "--ignore-system-fonts", "--root", ".", "{source}", "{output}"]
+env = { SOURCE_DATE_EPOCH = "0" }
+output = "{outdir}/{stem}.pdf"
+probe = "corpus/determinism/typst-probe.typ"
+mechanism = """
+SOURCE_DATE_EPOCH=0 使 /CreationDate 与 /ModDate 固定为 D:19700101000000Z；
+trailer /ID 由 Typst 从文档内容派生，因此随时间戳一并固定。
+--ignore-system-fonts 排除系统字体查找（§2.6「不使用系统字体查找」），
+字体来源收敛为 Typst 二进制内嵌集合，由钉死的 Typst 版本本身担保。
+"""
+
+[[engine]]
+id = "pdftex"
+label = "pdfTeX 1.40.29 (TeX Live 2026)"
+tool = "pdflatex"
+corpus_v1_usable = true
+command = "pdflatex"
+args = [
+  "-interaction=batchmode",
+  "-halt-on-error",
+  "-output-directory={outdir}",
+  "{source}",
+]
+env = { SOURCE_DATE_EPOCH = "0", FORCE_SOURCE_DATE = "1" }
+output = "{outdir}/{stem}.pdf"
+probe = "corpus/determinism/pdftex-probe.tex"
+mechanism = """
+源文件首部必须 \\input corpus/determinism/pdftex-deterministic.tex ，它设置
+\\pdfinfoomitdate=1（不写 /CreationDate、/ModDate）、\\pdfsuppressptexinfo=-1
+（不写 PTEX.* 键）、\\pdfomitcharset=1（不写 /CharSet），并要求源文件随后自行
+\\pdftrailerid{<fixture-id>}——trailer /ID 因此是由 fixture ID 派生的常量。
+SOURCE_DATE_EPOCH=0 与 FORCE_SOURCE_DATE=1 覆盖 \\year/\\month/\\day 等
+时间量；由于日期键已被整体省略，它们只影响 .log，是第二道保险。
+注意：\\pdfvariable 是 LuaTeX 语法，pdfTeX 没有该原语——§2.6 早期文字有误，
+本表以实测为准。
+"""
+
+[[engine]]
+id = "luatex"
+label = "LuaHBTeX 1.24.0 (TeX Live 2026)"
+tool = "lualatex"
+corpus_v1_usable = true
+command = "lualatex"
+args = [
+  "-interaction=batchmode",
+  "-halt-on-error",
+  "-output-directory={outdir}",
+  "{source}",
+]
+env = { SOURCE_DATE_EPOCH = "0", FORCE_SOURCE_DATE = "1" }
+output = "{outdir}/{stem}.pdf"
+probe = "corpus/determinism/luatex-probe.tex"
+mechanism = """
+源文件首部必须 \\input corpus/determinism/luatex-deterministic.tex ，它设置
+\\pdfvariable omitcharset=1 与 \\pdfvariable suppressoptionalinfo=511
+（抑制 PTEX.* 四键 + Creator + CreationDate + ModDate + Producer + Trapped，
+保留 /ID），并要求源文件随后自行给出
+\\pdfvariable trailerid{[<32 位 hex> <32 位 hex>]}。
+实测要点：LuaTeX 的 trailerid 是**原样写入 /ID 的记号表**，必须自带完整的
+PDF 数组语法；只写裸文本会产出无法被 qpdf 解析的 xref 流。
+"""
+
+[[engine]]
+id = "xetex"
+label = "XeTeX 0.999998 + xdvipdfmx 20260317 (TeX Live 2026)"
+tool = "xelatex"
+corpus_v1_usable = false
+command = "xelatex"
+args = [
+  "-interaction=batchmode",
+  "-halt-on-error",
+  "-output-directory={outdir}",
+  "{source}",
+]
+env = { SOURCE_DATE_EPOCH = "0", FORCE_SOURCE_DATE = "1" }
+output = "{outdir}/{stem}.pdf"
+probe = "corpus/determinism/xetex-probe.tex"
+mechanism = """
+不可用。xdvipdfmx 20260317 为每个子集化字体生成**随机六字母子集标签**，
+每次运行都不同；SOURCE_DATE_EPOCH 只影响日期，不影响标签。同一份 .xdv
+连续三次转换得到三个不同的标签，命令行也没有对应开关（getopt 串
+`:hD:r:m:g:x:y:o:s:p:clf:i:qtvV:z:d:I:K:P:O:MSC:Ee` 无该选项，-C 的
+0x0080..0x0800 实测无效）。
+两重后果：(1) 违反 §2.6 的 SHA-256 复现门禁；(2) 子集标签是 §2.6 溯源断言
+的载体之一，随机标签让该断言不可写。
+因此 XeTeX 退出 Corpus v1 的现实排版 fixture。它仍可用于 M3 的真实 arXiv
+语料（不入 repo、不做哈希门禁）。复议触发条件：dvipdfmx 提供确定性标签开关。
+"""

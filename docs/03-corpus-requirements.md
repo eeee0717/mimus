@@ -127,28 +127,49 @@ fixture 分两类：
 - **不得使用 mimus 生产侧的 lopdf 或 PDFium 生成测试输入**。用被测组件生成被测输入是循环论证——lopdf 写错的结构，语料会原样接受。
 - 精确 fixture 的 content stream **不压缩**（不使用 `/FlateDecode`）：可读、可 diff、便于字节级变异，且消除 zlib 实现差异。现实排版 fixture 允许压缩（其产物特征本身是被测对象）。
 
-现实排版引擎的选择（本机 TeX Live 2026 已具备，Typst 待装）：
+现实排版引擎的选择（全部已装并钉死版本，见 `corpus/toolchain.toml`）：
 
-- **Typst**：单二进制、版本易钉、`SOURCE_DATE_EPOCH` 可控，作为现实排版的主力；
-- **LaTeX 三引擎**：pdfTeX / XeTeX / LuaTeX 产物差异显著（Type1 vs OpenType 嵌入、CMap 构造、字形命名），是真实 arXiv 语料的主要来源，用于引擎多样性 fixture。
+- **Typst 0.15.1**：单二进制、版本易钉、`SOURCE_DATE_EPOCH` 可控，作为现实排版的主力；
+- **pdfTeX 1.40.29 / LuaHBTeX 1.24.0**（TeX Live 2026）：产物差异显著（Type1 vs OpenType 嵌入、CMap 构造、字形命名），用于引擎多样性 fixture；
+- **XeTeX 0.999998 + xdvipdfmx 20260317：不进 Corpus v1。** 它过不了 §2.6 的重复生成门禁（随机字体子集标签），实测结论见 §2.6。它仍然是真实 arXiv 语料的重要来源——那批语料不入 repo、不做哈希门禁，因此不受影响。
 
 ### 2.6 确定性要求
 
-**同一输入重复生成必须得到相同的 SHA-256。** 这是可执行的门禁，不是口号：CI 重新生成一次，比对哈希，不一致即失败。
+**同一输入重复生成必须得到相同的 SHA-256。** 这是可执行的门禁，不是口号：`corpus determinism` 重新生成一次，比对哈希，不一致即失败。
 
 必须固定或消除的不确定源：
 
 | 不确定源 | 处理 |
 |---|---|
-| `/CreationDate`、`/ModDate` | 精确/畸形 fixture 不写 Info 字典；排版 fixture 用 `SOURCE_DATE_EPOCH=0` + pdfTeX `FORCE_SOURCE_DATE=1` |
-| trailer `/ID` | 固定为由 fixture ID 派生的常量；pdfTeX 用 `\pdfvariable trailerid` 置固定值 |
+| `/CreationDate`、`/ModDate` | 精确/畸形 fixture 不写 Info 字典；排版 fixture 见下表逐引擎的实测开关 |
+| trailer `/ID` | 固定为由 fixture ID 派生的常量（取其 UTF-8 前 16 字节、不足补零；`corpus trailer-id <id>` 生成两种引擎的写法） |
 | XMP metadata 中的时间戳 | 不生成；若排版引擎强制生成，则在 manifest 中记录并由生成脚本剥离 |
 | 对象编号与写出顺序 | writer 按 manifest 声明的固定顺序发号，不依赖字典/哈希遍历顺序 |
-| 字体 | 钉死字体文件 + 记录其 SHA-256；不使用系统字体查找 |
-| 工具版本 | Typst / TeX 引擎 / Python 版本写入 manifest；版本变化视为语料变更，需重新走验收 |
+| **字体子集标签** | 必须由引擎确定性产出——这是 XeTeX 出局的直接原因，见下 |
+| 字体 | 精确 fixture 钉死字体文件 + 记录其 SHA-256；现实排版 fixture 见下表 |
+| 工具版本 | 全部写进 `corpus/toolchain.toml` 并由 `corpus doctor` 精确比对；版本变化视为语料变更，需重新走验收 |
 | 浮点格式化 | 固定小数位数与舍入规则，不用平台默认 `repr` |
 
-上表中排版引擎侧的具体机制（pdfTeX 的 `FORCE_SOURCE_DATE` / `\pdfvariable trailerid` / `suppressoptionalinfo`、XeTeX 经 xdvipdfmx 对 `SOURCE_DATE_EPOCH` 的支持、Typst 的时间戳控制）来自文档层面的认知，**尚未在本机实测**。M-1 的工具链前置工作必须逐项验证："同一源文件生成两次，SHA-256 一致"，验证结论与实际使用的开关写回本节。未通过验证的引擎不得用于现实排版 fixture。
+#### 实测结论（2026-08-21，本机；由 `corpus determinism` 复现）
+
+原先本节的排版引擎机制来自文档层面的认知。逐项实测后，**三条被推翻或修正**，结论如下。可执行形式是 `corpus/toolchain.toml` 的 `[[engine]]` 表——那里的 `args` / `env` 就是配方本身，本表是它的散文版。
+
+| 引擎 | Corpus v1 | 实测生效的机制 |
+|---|---|---|
+| **Typst 0.15.1** | ✅ 可用 | `SOURCE_DATE_EPOCH=0` 把 `/CreationDate`、`/ModDate` 固定为 `D:19700101000000Z`；trailer `/ID` 由文档内容派生，随之固定。`--ignore-system-fonts` 排除系统字体查找。 |
+| **pdfTeX 1.40.29** | ✅ 可用 | `\pdfinfoomitdate=1` + `\pdfsuppressptexinfo=-1` + `\pdfomitcharset=1` + `\pdftrailerid{<fixture-id>}`（见 `corpus/determinism/pdftex-deterministic.tex`）。`SOURCE_DATE_EPOCH=0` 与 `FORCE_SOURCE_DATE=1` 是第二道保险。 |
+| **LuaHBTeX 1.24.0** | ✅ 可用 | `\pdfvariable omitcharset=1` + `\pdfvariable suppressoptionalinfo=511` + `\pdfvariable trailerid{[<hex> <hex>]}`（见 `corpus/determinism/luatex-deterministic.tex`）。 |
+| **XeTeX 0.999998 + xdvipdfmx 20260317** | ❌ **不可用** | 无可用机制。 |
+
+三处对原文的修正：
+
+1. **`\pdfvariable` 不是 pdfTeX 的原语**——那是 LuaTeX 语法。pdfTeX 用的是 `\pdftrailerid` / `\pdfsuppressptexinfo` / `\pdfinfoomitdate` / `\pdfomitcharset` 四个独立原语。原文的写法在 pdfTeX 下直接 `! Undefined control sequence`。
+2. **LuaTeX 的 `trailerid` 是原样写入 `/ID` 的记号表**，必须自带完整的 PDF 数组语法 `[<32 位 hex> <32 位 hex>]`；只写裸文本会产出 qpdf 无法解析的 xref 流（表现为 "unknown token while reading object"），且 `/ID` 实际缺失。LuaTeX 的 `suppressoptionalinfo` 位表也与 pdfTeX 的同名整数不同：`1/2/4/8` 是四个 `PTEX.*` 键，`16` Creator、`32` CreationDate、`64` ModDate、`128` Producer、`256` Trapped、`512` ID；取 `511` 才能全抑制而保留 `/ID`。
+3. **XeTeX 无法用于 Corpus v1。** xdvipdfmx 为每个子集化字体生成**随机六字母子集标签**，每次运行都不同：同一份 `.xdv` 连续三次转换得到 `DLUKLR` / `KBCCUL` / `TBDBBV`。`SOURCE_DATE_EPOCH` 只影响日期不影响标签；命令行 getopt 串 `:hD:r:m:g:x:y:o:s:p:clf:i:qtvV:z:d:I:K:P:O:MSC:Ee` 里没有对应开关，`-C` 的 `0x0080`–`0x0800` 实测无效。这不只是破坏 SHA-256 门禁——**子集标签正是本节溯源手段的载体之一**，随机标签让那条断言根本写不出来。复议触发条件：dvipdfmx 提供确定性标签开关。
+
+**门禁的灵敏度必须自证。** 两次构建若落在同一秒里，写墙钟时间戳的引擎会碰巧通过，门禁就成了摆设。因此 `corpus determinism` 在两次构建之间强制插入 ≥1.2 s 的时钟间隔（跨过一整秒，PDF 日期的最小分辨率）。已验证的反例：去掉 `SOURCE_DATE_EPOCH` 的 Typst、去掉四个开关的 pdfTeX，两者在该间隔下都稳定失败。XeTeX 在表中被标为"期待失败"，它每次跑都在替门禁做灵敏度自检。
+
+**现实排版 fixture 的字体来源**：不额外 vendored 字体文件。Typst 用 `--ignore-system-fonts`，字体集合收敛为 Typst 二进制内嵌的那一份；TeX 引擎用 TeX Live 2026 自带的 Computer Modern 系列。两者都由已钉死的工具版本本身担保，且**字体完整嵌入产出的 PDF**，再 vendored 一份文件只是第二套 pin，不增加信息。上一段表格里"钉死字体文件 + SHA-256"的要求继续对**精确 fixture** 无条件成立——那批 fixture 的期望墨迹盒是手推的，字体度量必须逐字节可控。
 
 **输入字体的选择**：精确 fixture 一律**嵌入钉死的字体文件**（记录 SHA-256），而非依赖 base-14 的隐式度量——否则"期望墨迹盒"取决于消费方的 base-14 度量表，不可判定。例外是专门测试 base-14 / 非嵌入字体处理的 fixture。
 
@@ -176,12 +197,15 @@ fixture 分两类：
 
 每份 fixture 入库前必须通过，**至少一个独立解析器 + 至少一个独立渲染器**，且二者都不得是 mimus 生产侧组件（排除 lopdf 与 PDFium）：
 
-| 角色 | 工具 | 本机状态 |
+| 角色 | 工具 | 钉死版本 |
 |---|---|---|
-| 独立解析器（结构） | `qpdf --check` / 结构 dump | **待装** |
-| 独立解析器（文本与坐标） | poppler `pdftotext -bbox-layout` | **待装** |
-| 独立渲染器 | MuPDF `mutool draw`；备选 Ghostscript | mutool 待装；**gs 10.07.1 已具备** |
-| 独立排版产出 | Typst | **待装** |
+| 独立解析器（结构） | `qpdf --check` / 结构 dump | qpdf **12.4.0** |
+| 独立解析器（文本与坐标） | poppler `pdftotext -bbox-layout` | poppler **26.08.0** |
+| 独立解析器（文本与坐标，第二方） | MuPDF `mutool draw -t` | mutool **1.28.2** |
+| 独立渲染器 | poppler `pdftoppm`、MuPDF `mutool draw`；备选 Ghostscript | 同上；gs **10.07.1** |
+| 独立排版产出 | Typst / pdfTeX / LuaHBTeX | Typst **0.15.1**、TeX Live **2026** |
+
+版本是**精确匹配**，唯一真源是 `corpus/toolchain.toml`，检查入口是 `corpus doctor`。升级工具的正确做法是改那张表并重跑全量验收，不是放宽比对。
 
 验收步骤：
 
@@ -1544,15 +1568,18 @@ mimus 实现同类启发式时的参考起点值。**不是照抄目标**——�
 
 原第 8 条（字体族选择）的**溯源部分**同时收口：改用**对象号 + 子集标签**断言，不再依赖输入输出字体不同族（§2.6）。剩余的选型部分见 6.2。
 
+原第 2、3 条（T02 / issue #4）已于同日实测收口：
+
+| 原条目 | 结论 | 落点 |
+|---|---|---|
+| 确定性生成的引擎侧机制尚未实测 | Typst / pdfTeX / LuaHBTeX 三条配方实测通过；**XeTeX 因 xdvipdfmx 随机子集标签出局**；原文关于 `\pdfvariable` 的两处描述有误已更正 | §2.5 / §2.6 实测结论表 / `corpus/toolchain.toml` |
+| 验收工具链缺四件 | qpdf 12.4.0、poppler 26.08.0、mutool 1.28.2、Typst 0.15.1 均已具备并钉死；检查入口 `corpus doctor` | §2.8 / `corpus/toolchain.toml` |
+
 ### 6.1 仍需决策者拍板
 
 1. **旧语料目录仍在磁盘上**。`~/Downloads/babeldoc-corpus/` 当前仍存在且含 28 项（23 份 PDF + 生成脚本 + MANIFEST + 联系表）。这与"已被删除并正式作废"的表述不符。本次工作全程未读取、未引用其任何几何参数或生成代码，但**该目录的实际删除需要你确认**——它留在原地就存在被后续误引用的风险。
 
 ### 6.2 已定去向，拆票执行（不需再决策）
-
-2. **确定性生成的引擎侧机制尚未实测**（§2.6 已标注）。pdfTeX 的时间戳与 trailer ID 抑制、XeTeX 经 xdvipdfmx 的可重现性、Typst 的时间戳控制——都来自文档层面的认知。M-1 的工具链前置工作必须逐项验证"同一源文件生成两次 SHA-256 一致"，未通过的引擎不得用于现实排版 fixture。
-
-3. **验收工具链缺四件**。本机现有 Ghostscript 10.07.1 与 TeX Live 2026（pdfTeX / XeTeX / LuaTeX）；缺 qpdf（结构解析）、poppler（文本坐标提取）、mupdf-tools（独立渲染 + 操作符 trace）、Typst。需补装并钉死版本记入 §2.5/§2.8。注意 poppler 与 mupdf-tools 现在还额外承担 §2.1 的双解析器裁定职责，是实验 1 的硬前置。
 
 4. **PP-DocLayoutV3 的 25 类是否含目录类未确认**（PARA-04 / 红利清单 D7）。若无目录类，目录页的条目切分需要 mimus 自行实现启发式；这会影响 M1 的工作量估计。由 M0 实验 1 顺带查证。
 

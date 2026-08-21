@@ -1,0 +1,17 @@
+%% Corpus v1 · XeTeX 确定性探针（docs/03-corpus-requirements.md §2.6）
+%%
+%% XeTeX 没有对应的确定性开关文件：xdvipdfmx 的不确定源是**随机子集标签**，
+%% 不是时间戳，源文件层面无从抑制。本探针的作用因此是反向的——它必须持续
+%% 失败，才能证明 `corpus determinism` 的门禁真的能抓到不确定性。
+%% 门禁把本引擎标为 corpus_v1_usable = false 并**期待**它复现失败；哪天它
+%% 通过了，说明 dvipdfmx 提供了确定性标签，届时复议这条 pin。
+\documentclass[10pt]{article}
+\usepackage[papersize={240pt,160pt},margin=20pt]{geometry}
+\pagestyle{empty}
+\begin{document}
+\noindent Corpus v1 determinism probe. This paragraph is long enough to wrap
+across several lines so that the engine exercises its line-breaking and font
+subsetting paths, not just a single short run of glyphs.
+
+\noindent\textbf{Second font face.} Mixed weights force a second subset.
+\end{document}

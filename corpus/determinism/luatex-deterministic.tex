@@ -1,0 +1,19 @@
+%% Corpus v1 · LuaTeX 确定性开关（docs/03-corpus-requirements.md §2.6）
+%%
+%% 用法：源文件的**第一行**写
+%%     \input corpus/determinism/luatex-deterministic.tex
+%% 紧接着写本 fixture 自己的 trailer ID（`corpus trailer-id <id>` 可生成）：
+%%     \pdfvariable trailerid{[<32 位 hex> <32 位 hex>]}
+%% 然后才是 \documentclass。
+%%
+%% suppressoptionalinfo 的位（实测确认，与 pdfTeX 的同名整数不是同一张表）：
+%%     1 PTEX.FullBanner   2 PTEX.FileName   4 PTEX.PageNumber   8 PTEX.InfoDict
+%%    16 Creator          32 CreationDate   64 ModDate         128 Producer
+%%   256 Trapped         512 ID
+%% 取 511 = 全抑制但**保留 /ID**——/ID 要留着装 trailerid，抹掉就等于放弃
+%% §2.6 「trailer /ID 固定为由 fixture ID 派生的常量」这一条。
+
+\pdfvariable omitcharset=1
+\pdfvariable suppressoptionalinfo=511
+
+\endinput
