@@ -151,7 +151,7 @@ BT /F1 11 Tf 72 700 Td (This paper describes how a PDF) Tj ET
 
 - **项目历史**：2024-12-13 起，1834 commits，22 位贡献者，约 20 个月
 - **累计变更**：新增 175,809 行 / 删除 81,700 行，最终留下 77,983 行 —— **写了约 2.25 倍的代码才收敛**（`new_parser` 取代 `pdfminer` 是最大的一次重写）
-- **异常捕获**：354 个 `except`（不含 pdfminer）
+- **异常捕获**：354 个 `except`（不含 pdfminer）⚠️ **后经 AST 复核更正为 263 个**——354 是 grep 匹配 `except` 子串的行数（含注释与字符串），263 才是实际的异常处理器条数。详见 `docs/03-corpus-requirements.md` §3.0。下文出现的 354 同此。
 - **专门的修复函数** 12 个：`fix_null_page_content` / `fix_null_xref` / `fix_filter` / `fix_media_box` / `fix_cmap` / `reproduce_cmap` / `safe_save`（save 失败降级 ez_save）/ `open_pdf_with_save_fallback` / `save_pdf_with_same_path_fallback` / `rebuild_pdf_by_inserting_pages` / `check_cid_char` / `migrate_toc`
 - **两个防崩措施**：`subset_fonts_in_subprocess()`（字体子集化丢子进程隔离）、`save_pdf_with_timeout()`（保存加超时）
 - **测试**：933 行，占代码量 1.2%，且**零 PDF 处理测试**
@@ -409,18 +409,17 @@ layout 推理、OCR 后处理、LLM 层、CLI、进度、资产下载。
 
 ---
 
-## 附录 A · 测试语料
+## 附录 A · 测试语料 ⚠️ 已作废
 
-已生成 23 份压力测试 PDF，每份针对一个失效模式，附 `MANIFEST.md` 记录预期行为与实测属性。当前位置：`~/Downloads/babeldoc-corpus/`（含两个生成脚本，可重新生成或扩展）。
+> **本附录所述的 23 份压力测试 PDF 及其两个生成脚本已于 2026-08-21 正式作废**，原因是部分 fixture 存在坐标偏移与视觉质量问题——fixture 自身的几何不可信，而语料的价值完全建立在期望值可信之上。
+>
+> 根因是生成器与期望值同源：期望值由生成脚本自身产出，因此生成器写错什么，期望值就跟着错什么，偏移无法被自身发现。
+>
+> **不得恢复、复制或参考其几何参数与生成代码，亦不沿用其文件编号。** 语料从零重建，需求矩阵与生成合同见 `docs/03-corpus-requirements.md`，工作纳入里程碑 M-1（`docs/02-milestones.md`）。
 
-覆盖面：
+本报告其余部分（BabelDOC 拆解、组件调研、工作量估算）不受此作废影响。
 
-- **解析器压力**：多字体多字号、Type3 字体、Identity-H 无 ToUnicode、嵌套 Form XObject、矢量路径、`/Rotate` 90/180/270、CropBox ≠ MediaBox
-- **版面/段落**：双栏、公式（独立+内联+上下标+编号）、有线表、无线表、图+caption、页眉页脚多页、arXiv 行号、脚注+参考文献、CJK 横排、CJK 竖排、综合页
-- **OCR 路径**：纯扫描件（0 字符）、扫描件+不可见文字层（`Tr 3`）
-- **畸形输入**：null `/Contents`、缺 MediaBox、`/Filter` 谎报
-
-`[推断]` 这些是受控变量，适合回归。真实世界的畸形程度造不出来，建议另补：arXiv 论文（不同排版引擎：pdfTeX / XeTeX / LuaTeX / Word 导出）、`pdf.js` 的 `test/pdfs/`、PDFium 的 `testing/resources/`。
+原附录中仍然成立的一条判断：合成语料是受控变量、适合回归，但真实世界的畸形程度造不出来，需另补真实语料——arXiv 论文（不同排版引擎：pdfTeX / XeTeX / LuaTeX / Word 导出）、`pdf.js` 的 `test/pdfs/`、PDFium 的 `testing/resources/`。这一判断已被 Corpus v1 采纳。
 
 ---
 
