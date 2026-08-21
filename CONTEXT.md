@@ -30,9 +30,9 @@
 | 21 | 翻译缓存：V1 即做，redb，键含(原文,模型,目标语,prompt 版本,术语指纹)；`--no-cache` | — |
 | 22 | 推理纯 CPU（ort CPU EP）；GPU/NPU EP 不进 V1 | — |
 | 23 | 质量回归四件套：全语料 IL 快照 + 占位符守恒 + 零 panic + 几何断言；**CI 绿才能合并**；渲染像素 diff 待渲染路径稳定后加 | — |
-| 24 | 语料三线：合成语料进 repo `corpus/`（PDF+脚本）；反向语料（354 except → 失效模式 → 扩展生成器）；真实语料不进 repo、发布前人工 checklist | — |
+| 24 | 语料：**Corpus v1 待从零构建**（旧 23 份合成语料已因坐标偏移/视觉质量问题作废，不得参考）。需求矩阵与生成合同见 [docs/03-corpus-requirements.md](docs/03-corpus-requirements.md)，工作纳入里程碑 M-1；真实语料不进 repo、发布前人工 checklist | — |
 | 25 | CLI：子命令结构（`translate` / `assets pull` / `inspect`）；配置三层 flags > env > `~/.config/mimus/config.toml`；API key 不走明文 flag；两级人类可读进度，`--json` 推后；细粒度 flags 随功能里程碑落地 | — |
-| 26 | 里程碑：walking skeleton 五段 M0–M4，以语料断言收口（[docs/02-milestones.md](docs/02-milestones.md)） | — |
+| 26 | 里程碑：M-1（Corpus Foundation，前置且阻塞 M0/M1）+ walking skeleton 五段 M0–M4，以语料断言收口（[docs/02-milestones.md](docs/02-milestones.md)） | — |
 | 27 | 术语细节：用户 `--glossary` 覆盖自动表；`--dump-glossary` 导出复用；`--no-auto-terms` 开关；自动表指纹进缓存键 | — |
 | 28 | 性能：V1 无硬指标；方向值=20 页论文除 LLM 外 <5 分钟（arm64 笔记本）；LLM 段落级并发默认 4、指数退避重试 3 次、重试尽降级保原文 | — |
 | 29 | crate 结构：workspace 两分——`mimus-core`（lib：IL/pass/引擎 trait/翻译层）+ `mimus`（bin：CLI/进度/配置） | — |
@@ -90,8 +90,13 @@
 
 ### 测试
 
-- **合成语料**：脚本生成、每份针对一个失效模式的受控 PDF（现 23 份），入 repo `corpus/`。
-- **反向语料（exception-driven corpus）**：从 BabelDOC 354 except / 12 修复函数反推失效模式逐类造 PDF，端到端回归。
+- **Corpus v1**：从零构建的合成语料，入 repo `corpus/`。**尚未生成任何 PDF**；早期 23 份合成语料已作废（坐标偏移与视觉质量问题），其几何参数与生成代码不得参考。
+- **失效模式（failure mode）/ case**：从 BabelDOC 主链路逆向出的、可由 PDF 输入触发的一类错误。带稳定 case ID，是 Corpus v1 需求矩阵的行。
+- **fixture**：语料中的一份 PDF + 其 manifest。分 **unit**（单变量，与 case 近 1:1）、**mal**（畸形，由合法父本做单变量字节级变异）、**intg**（显式多变量，仅端到端冒烟，严格受限）三类。
+- **生成合同（generation contract）**：fixture 入库前必须满足的约束集合（坐标系、三种盒子、变换规则、单变量、确定性 SHA-256、独立验收等），见 `docs/03-corpus-requirements.md` §2。
+- **expected manifest**：一份 fixture 一份 TOML 规格，**先于生成器手写**，来源是 PDF 规范与字体度量推导而非生成结果回读——生成器由 manifest 检验，不得反向迁就。
+- **三种盒子**：baseline origin（绘制起点）/ 度量盒（字体 ascent/descent × 字号）/ visual bbox（墨迹）。三者独立标注，混用是旧语料偏移问题的疑似根因。
+- **differential signal**：BabelDOC 在同一 fixture 上的行为，仅作差分参考触发人工裁定，**不得作为唯一正确性 oracle**。
 - **真实语料**：arXiv 按排版引擎分层（pdfTeX/XeTeX/LuaTeX/Word）下载，不入 repo，发布前人工 checklist。
 - **质量四件套**：IL 快照（insta）/ 占位符守恒 / 零 panic / 几何断言（译文框不越界不压图）。CI 强制绿。
 - **三层降级**：段落（占位符失败→保原文）→ 页（排版失败→保原页）→ 文档（解析失败→分类退出）。
