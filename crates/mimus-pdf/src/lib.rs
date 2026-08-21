@@ -14,23 +14,13 @@
 //! - [`WriteMode::Rebuild`] emits a fresh document. Lossless *only* when the
 //!   source page is already just a raster -- i.e. the scanned path.
 
-use mimus_ir::Document;
+use mimus_ir::{Document, PageRaster};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteMode {
     Incremental,
     Rebuild,
-}
-
-/// A page rasterised for the vision models.
-pub struct PageRaster {
-    pub width: u32,
-    pub height: u32,
-    /// Tightly packed RGB8.
-    pub rgb: Vec<u8>,
-    /// Scale from raster pixels back to PDF points.
-    pub px_to_pt: f32,
 }
 
 pub trait PdfReader {

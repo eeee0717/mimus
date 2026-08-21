@@ -21,7 +21,11 @@ pub struct FitParams {
 
 impl Default for FitParams {
     fn default() -> Self {
-        Self { min_scale: 0.1, line_skip: 1.5, allow_box_growth: true }
+        Self {
+            min_scale: 0.1,
+            line_skip: 1.5,
+            allow_box_growth: true,
+        }
     }
 }
 

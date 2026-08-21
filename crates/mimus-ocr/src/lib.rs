@@ -16,7 +16,7 @@
 //! Port the thresholds from PaddleOCR's `DBPostProcess` defaults before
 //! inventing your own; they are load-bearing.
 
-use mimus_ir::Box2;
+use mimus_ir::{Box2, PageRaster};
 
 pub struct TextLine {
     pub bbox: Box2,
@@ -25,7 +25,7 @@ pub struct TextLine {
 }
 
 pub trait TextDetector {
-    fn detect(&self, rgb: &[u8], width: u32, height: u32) -> anyhow::Result<Vec<Box2>>;
+    fn detect(&self, page: &PageRaster) -> anyhow::Result<Vec<Box2>>;
 }
 
 pub trait TextRecognizer {

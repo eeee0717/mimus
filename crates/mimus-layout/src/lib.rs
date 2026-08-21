@@ -14,8 +14,7 @@
 //!    letterbox with /255. Getting this wrong yields boxes that look almost
 //!    right, which is worse than boxes that look wrong.
 
-use mimus_ir::Layout;
-use mimus_pdf::PageRaster;
+use mimus_ir::{Layout, PageRaster};
 
 pub trait LayoutModel {
     fn detect(&self, page: &PageRaster) -> anyhow::Result<Vec<Layout>>;
@@ -27,8 +26,17 @@ pub trait LayoutModel {
 pub fn is_translatable(label: &str) -> bool {
     matches!(
         label,
-        "text" | "plain text" | "title" | "paragraph_title" | "abstract"
-            | "content" | "figure_caption" | "table_caption" | "footnote"
-            | "list_item" | "caption" | "doc_title"
+        "text"
+            | "plain text"
+            | "title"
+            | "paragraph_title"
+            | "abstract"
+            | "content"
+            | "figure_caption"
+            | "table_caption"
+            | "footnote"
+            | "list_item"
+            | "caption"
+            | "doc_title"
     )
 }

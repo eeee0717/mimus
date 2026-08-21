@@ -25,9 +25,6 @@ pub trait Translator {
 }
 
 /// Round-trip a paragraph through a translator, restoring placeholders.
-pub fn translate_paragraph(
-    _p: &mut Paragraph,
-    _t: &dyn Translator,
-) -> anyhow::Result<()> {
+pub fn translate_paragraph(_p: &mut Paragraph, _t: &dyn Translator) -> anyhow::Result<()> {
     anyhow::bail!("not implemented")
 }

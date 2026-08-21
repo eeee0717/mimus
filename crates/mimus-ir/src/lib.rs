@@ -9,7 +9,9 @@
 use serde::{Deserialize, Serialize};
 
 pub mod geom;
+pub mod raster;
 pub use geom::{Box2, Matrix};
+pub use raster::PageRaster;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {

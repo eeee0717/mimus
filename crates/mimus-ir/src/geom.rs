@@ -57,10 +57,20 @@ pub struct Matrix {
 }
 
 impl Matrix {
-    pub const IDENTITY: Matrix = Matrix { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+    pub const IDENTITY: Matrix = Matrix {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        e: 0.0,
+        f: 0.0,
+    };
 
     pub fn apply(&self, x: f32, y: f32) -> (f32, f32) {
-        (self.a * x + self.c * y + self.e, self.b * x + self.d * y + self.f)
+        (
+            self.a * x + self.c * y + self.e,
+            self.b * x + self.d * y + self.f,
+        )
     }
 }
 
@@ -70,16 +80,36 @@ mod tests {
 
     #[test]
     fn coverage_is_asymmetric() {
-        let glyph = Box2 { x0: 10.0, y0: 10.0, x1: 20.0, y1: 20.0 };
-        let region = Box2 { x0: 0.0, y0: 0.0, x1: 100.0, y1: 100.0 };
+        let glyph = Box2 {
+            x0: 10.0,
+            y0: 10.0,
+            x1: 20.0,
+            y1: 20.0,
+        };
+        let region = Box2 {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 100.0,
+            y1: 100.0,
+        };
         assert_eq!(glyph.coverage_by(&region), 1.0);
         assert!(region.coverage_by(&glyph) < 0.02);
     }
 
     #[test]
     fn disjoint_boxes_do_not_intersect() {
-        let a = Box2 { x0: 0.0, y0: 0.0, x1: 1.0, y1: 1.0 };
-        let b = Box2 { x0: 2.0, y0: 2.0, x1: 3.0, y1: 3.0 };
+        let a = Box2 {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 1.0,
+            y1: 1.0,
+        };
+        let b = Box2 {
+            x0: 2.0,
+            y0: 2.0,
+            x1: 3.0,
+            y1: 3.0,
+        };
         assert!(a.intersection(&b).is_none());
         assert_eq!(a.coverage_by(&b), 0.0);
     }
