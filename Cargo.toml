@@ -1,7 +1,14 @@
-[package]
-name = "mimus"
+[workspace]
+members = ["crates/mimus", "crates/mimus-core"]
+resolver = "3"
+
+[workspace.package]
 version = "0.0.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/eeee0717/mimus"
+rust-version = "1.85"
 
-[dependencies]
+[workspace.dependencies]
+mimus-core = { path = "crates/mimus-core" }
+clap = { version = "4", features = ["derive"] }
