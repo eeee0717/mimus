@@ -4,18 +4,24 @@
 //! 条款变成命令。它刻意不依赖 `mimus-core`：§2.5 禁止用被测组件生成或裁定被测
 //! 输入，全部 PDF 能力都来自 qpdf / poppler / mutool / Typst / TeX 这些独立工具。
 
+mod adjudicated;
 mod determinism;
 mod doctor;
+mod geom;
 mod hash;
+mod manifest;
+mod oracle;
 mod proc;
 mod repo;
+mod text;
 mod toolchain;
+mod verify;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use toolchain::Toolchain;
@@ -56,6 +62,20 @@ enum Command {
     TrailerId {
         /// fixture ID，例如 unit-order-01-natural。
         id: String,
+    },
+
+    /// 对 fixture 跑 §2.8 的独立验收。省略 ID 时验收全部。
+    Verify {
+        /// fixture ID；可给多个。
+        ids: Vec<String>,
+    },
+
+    /// 重新裁定现实排版 fixture 的几何与参考栅格，写入 adjudicated.toml。
+    ///
+    /// 只有 poppler 与 mutool 在容差内一致时才会落盘（§2.1）。
+    Adjudicate {
+        /// fixture ID；可给多个，省略时处理全部。
+        ids: Vec<String>,
     },
 }
 
@@ -103,5 +123,54 @@ fn run() -> Result<bool> {
             println!("LuaTeX     : \\pdfvariable trailerid{{[<{hex}> <{hex}>]}}");
             Ok(true)
         }
+        Command::Verify { ids } => {
+            let toolchain = Toolchain::load(&repo_root)?;
+            let manifests = select(&repo_root, ids)?;
+            verify::run(
+                &manifests,
+                &toolchain,
+                &repo_root,
+                &work_dir,
+                verify::Mode::Verify,
+            )
+        }
+        Command::Adjudicate { ids } => {
+            let toolchain = Toolchain::load(&repo_root)?;
+            let manifests = select(&repo_root, ids)?;
+            verify::run(
+                &manifests,
+                &toolchain,
+                &repo_root,
+                &work_dir,
+                verify::Mode::Adjudicate,
+            )
+        }
     }
+}
+
+/// 按 ID 过滤 fixture；空表示全部。未知 ID 一律报错，不静默跳过——
+/// 打错一个字就静默变成「零份 fixture 全部通过」是最坏的一种绿。
+fn select(repo_root: &Path, ids: &[String]) -> Result<Vec<manifest::Manifest>> {
+    let all = verify::discover(repo_root)?;
+    if ids.is_empty() {
+        return Ok(all);
+    }
+
+    let mut selected = Vec::new();
+    for id in ids {
+        let found = all
+            .iter()
+            .position(|m| m.id() == id)
+            .with_context(|| format!("corpus/fixtures/ 下没有 fixture `{id}`"))?;
+        selected.push(found);
+    }
+    selected.sort_unstable();
+    selected.dedup();
+
+    Ok(all
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| selected.contains(i))
+        .map(|(_, m)| m)
+        .collect())
 }
