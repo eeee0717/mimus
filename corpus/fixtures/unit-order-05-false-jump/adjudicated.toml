@@ -1,0 +1,41 @@
+# 本文件由 `corpus adjudicate` 生成，**不要手工编辑**。
+# 它是 docs/03-corpus-requirements.md §2.1 唯一例外条款的产物：
+# 现实排版 fixture 的几何期望由两个互相独立的解析器一致确立，
+# 而非从生成器读回。manifest.toml 里的结构化期望仍然是手写的。
+#
+#   metric_box      ← poppler pdftotext -bbox-layout（字体度量盒）
+#   visual_bbox     ← mutool draw -F stext 的字形 quad 并集（墨迹盒）
+#   baseline_origin ← mutool stext 的首字符 origin（绘制起点）
+#
+# 坐标一律在 PDF 页面空间：单位 pt、原点左下、/Rotate 之前（§2.2）。
+
+schema_version = 1
+fixture = "unit-order-05-false-jump"
+tolerance_pt = 0.050000
+
+[[block]]
+key = "B1"
+page = 0
+metric_box = [30.000000, 209.864000, 241.617000, 220.124000]
+visual_bbox = [30.000000, 209.936002, 241.616950, 218.360002]
+baseline_origin = [30.000000, 212.078002]
+
+[[block]]
+key = "B2"
+page = 0
+metric_box = [30.000000, 124.098000, 391.584000, 154.202000]
+visual_bbox = [30.000000, 124.170000, 391.584100, 152.438000]
+baseline_origin = [30.000000, 146.156003]
+
+[[block]]
+key = "B3"
+page = 0
+metric_box = [30.000000, 94.254000, 391.583999, 114.436000]
+visual_bbox = [30.000000, 94.326000, 391.583990, 112.672000]
+baseline_origin = [30.000000, 106.390000]
+
+[[render]]
+page = 0
+dpi = 150
+poppler_sha256 = "fcf34bab227d624b7c23cc93cf10cc24f1fdfa4baf94b9f724d1ef6800e74f74"
+mutool_md5 = "e8489bda70317e58fa7dc18d714a0f27"

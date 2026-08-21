@@ -1,0 +1,69 @@
+# unit-geom-04-oversized-page —— expected manifest
+#
+# 本文件先于 unit-geom-04-oversized-page.tex 手写。页高取 720bp（10 英寸）而非同样取上限：150 dpi 下 200×200 英寸会产生 9 亿像素，超出独立渲染验收的合理开销。
+
+schema_version = 1
+
+[identity]
+id = "unit-geom-04-oversized-page"
+name = "接近规范上限的超大页面"
+class = "unit"
+legality = "legal"
+cases = ["GEOM-05"]
+priority = "M0"
+variable = "页宽取 PDF 实现上限 14400 单位（200 英寸）"
+
+[source]
+method = "realistic-typesetting"
+engine = "pdftex"
+source_file = "unit-geom-04-oversized-page.tex"
+pdf = "unit-geom-04-oversized-page.pdf"
+pdf_sha256 = "07bca0f470b4f70179b061bfb2ddcb51d30329bacd47203b64475c954bc24e88"
+font_provenance = "texlive-bundled"
+
+# MediaBox 来自 \\pdfpagewidth=14400bp / \\pdfpageheight=720bp。
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 14400.0, 720.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+# Computer Modern Type1 下 mutool 的字形 quad 比 poppler 的词盒高出约 0.22pt；
+# 这是字体度量的差，不是解析器分歧，因此与 tolerance_pt 分开声明。
+ink_margin_pt = 0.3
+
+[expected.structure]
+pages = 1
+blocks = 2
+columns = 1
+
+[[expected.block]]
+key = "T1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "Rotation must not move the text in page space."
+
+[[expected.block]]
+key = "T2"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "Second block, second font weight, well below the first."
+
+[[expected.behaviour]]
+id = "GEOM-05-limit"
+assertion = "页宽 14400 单位正是 PDF 1.7 附录 C 的实现上限，qpdf 仍判其合法"
+observable_via = "qpdf --check 无错误无警告；mutool pages 报出的 MediaBox"
+
+[[expected.behaviour]]
+id = "GEOM-05-raster"
+assertion = "150 dpi 下该页出图为 30000×1500 像素，两个独立渲染器都仍能出图"
+observable_via = "pdftoppm -r 150 与 mutool draw -s 5 的逐页哈希"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "reading-order", "dual-parser-geometry", "render"]

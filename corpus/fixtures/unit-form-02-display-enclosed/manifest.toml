@@ -1,0 +1,66 @@
+# unit-form-02-display-enclosed —— expected manifest
+#
+# 本文件先于 unit-form-02-display-enclosed.typ 手写。单块是**设计意图**而非观测结果：公式被刻意放在正文块底边上，让解析器无从分离。
+
+schema_version = 1
+
+[identity]
+id = "unit-form-02-display-enclosed"
+name = "同一公式被正文块吃进去约 60%"
+class = "unit"
+legality = "legal"
+cases = ["LAYOUT-03"]
+priority = "M0"
+variable = "公式骑在正文块底边上，约 60% 的度量盒落在正文块的 y 跨度内"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-form-02-display-enclosed.typ"
+pdf = "unit-form-02-display-enclosed.pdf"
+pdf_sha256 = "aa197aad1b0d6451b215062552a52a5e6ed1204f2f9b99fa9264c82b93eebdf0"
+font_provenance = "typst-embedded"
+
+# 页面尺寸来自源文件的 `#set page(width: 420pt, height: 170pt)`，是规格而非观测值。
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 420.0, 170.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "T1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "A body paragraph runs the full width of the text block. Its final line is forced short so that the space to the right of it stays empty, which is where the same equation goes. It stops here. 𝐸 = 𝑚𝑐2"
+
+[[expected.behaviour]]
+id = "LAYOUT-03-enclosed"
+assertion = "公式与正文合并成同一个块——两个独立解析器都无法把它单独分出来"
+observable_via = "pdftotext -bbox-layout 与 mutool draw -F stext 各自都只报出 1 个块"
+
+[[expected.behaviour]]
+id = "D1-enclosed"
+assertion = "模型若仍报出独立的公式框，则 BabelDOC 的 IoU 重标（D1）在此形状下不必抄回"
+observable_via = "实验 1 的模型输出与本 manifest 的单块划分对照"
+
+[oracle]
+checks = [
+    "determinism",
+    "legality",
+    "page-geometry",
+    "structure",
+    "reading-order",
+    "dual-parser-geometry",
+    "render",
+]

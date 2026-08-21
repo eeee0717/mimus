@@ -89,12 +89,23 @@ impl PageFrame {
         self.effective[3] - self.effective[1]
     }
 
-    /// 解析器报告的页面尺寸（已应用 `/Rotate`）。
+    /// 渲染器出图的像素朝向所对应的尺寸（已应用 `/Rotate`）。
     pub fn viewer_size(self) -> (f64, f64) {
         match self.rotate {
             90 | 270 => (self.height(), self.width()),
             _ => (self.width(), self.height()),
         }
+    }
+
+    /// 有效框自身的尺寸，**不应用** `/Rotate`。
+    ///
+    /// 实测（2026-08-21）：poppler `pdftotext -bbox-layout` 的
+    /// `<page width height>` 报的是这个量——同一份 300×200 的页面，`/Rotate`
+    /// 取 0/90/180/270 时它一律报 300×200，而同一份输出里的**坐标**是转过的。
+    /// 也就是说该属性与坐标不在同一个空间里。渲染侧没有这个问题：
+    /// `pdftoppm -r 72` 对 `/Rotate 90` 出的是 200×300 的图。
+    pub fn box_size(self) -> (f64, f64) {
+        (self.width(), self.height())
     }
 
     /// 观看空间的点 → 页面空间。
@@ -127,6 +138,18 @@ mod tests {
     use super::*;
 
     const BOX: [f64; 4] = [0.0, 0.0, 400.0, 300.0];
+
+    #[test]
+    fn the_box_size_ignores_rotate_but_the_viewer_size_does_not() {
+        for r in [0, 90, 180, 270] {
+            let f = PageFrame::new(BOX, r).unwrap();
+            assert_eq!(f.box_size(), (400.0, 300.0), "/Rotate {r}");
+        }
+        assert_eq!(
+            PageFrame::new(BOX, 90).unwrap().viewer_size(),
+            (300.0, 400.0)
+        );
+    }
 
     #[test]
     fn rotate_zero_only_flips_the_y_axis() {

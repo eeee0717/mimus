@@ -1,0 +1,90 @@
+# unit-order-04-column-continuation —— expected manifest
+#
+# 本文件先于 unit-order-04-column-continuation.typ 手写。L1 与 L2 恰好填满左栏是排版结果，块的划分与文本则是规格。
+
+schema_version = 1
+
+[identity]
+id = "unit-order-04-column-continuation"
+name = "跨栏续接：左栏末句在栏底截断"
+class = "unit"
+legality = "legal"
+cases = ["ORDER-02"]
+priority = "M0"
+variable = "同一句话被栏边界切成左栏末块与右栏首块"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-order-04-column-continuation.typ"
+pdf = "unit-order-04-column-continuation.pdf"
+pdf_sha256 = "e52a7a445b818df81ed56f566b8bae972da739354def40c1185d396e1e6883f1"
+font_provenance = "typst-embedded"
+
+# 页面尺寸来自源文件的 `#set page(width: 420pt, height: 180pt)`，是规格而非观测值。
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 420.0, 180.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 4
+columns = 2
+
+[[expected.block]]
+key = "L1"
+page = 0
+column = "left"
+draw_order = 1
+reading_order = 1
+text = "A long paragraph opens the left column and keeps going for several lines, because the point of this fixture is that the column has to run out of room. Reading order must survive that boundary without inventing a paragraph break where the typesetter merely ran out of vertical space."
+
+[[expected.block]]
+key = "L2"
+page = 0
+column = "left"
+draw_order = 2
+reading_order = 2
+text = "The sentence that matters starts down here, at the foot of the left column, and it does not finish"
+
+[[expected.block]]
+key = "R1"
+page = 0
+column = "right"
+draw_order = 3
+reading_order = 3
+text = "before the column ends, so it picks up again at the top of the right column and completes itself there."
+
+[[expected.block]]
+key = "R2"
+page = 0
+column = "right"
+draw_order = 4
+reading_order = 4
+text = "A final paragraph follows in the right column. It is a separate paragraph, not a continuation of anything, and merging it into the sentence above would be exactly the failure this fixture is built to catch."
+
+[[expected.behaviour]]
+id = "ORDER-02-split"
+assertion = "L2 与 R1 是同一句话被栏边界切开的两半，L2 落在左栏底、R1 落在右栏顶"
+observable_via = "adjudicated.toml 中 L2 与 R1 的度量盒 y 跨度：两者相差接近一个栏高"
+
+[[expected.behaviour]]
+id = "ORDER-02-not-a-paragraph"
+assertion = "L2 与 R1 之间不存在段落边界；把它们当成两段是失效模式而非期望"
+observable_via = "源文件里两者本就是同一句话，manifest 的 text 字段逐字记录了切分位置"
+
+[oracle]
+checks = [
+    "determinism",
+    "legality",
+    "page-geometry",
+    "structure",
+    "reading-order",
+    "dual-parser-geometry",
+    "render",
+]

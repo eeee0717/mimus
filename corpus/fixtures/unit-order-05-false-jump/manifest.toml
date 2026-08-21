@@ -1,0 +1,82 @@
+# unit-order-05-false-jump —— expected manifest
+#
+# 本文件先于 unit-order-05-false-jump.typ 手写。上边距 12pt 与 46pt 空白都是刻意的：把纵向跳变放大到足以触发只看 y 的判据。
+
+schema_version = 1
+
+[identity]
+id = "unit-order-05-false-jump"
+name = "跨栏判据假阳性：单栏内的纯纵向跳变"
+class = "unit"
+legality = "legal"
+cases = ["ORDER-02"]
+priority = "M0"
+variable = "单栏页面内插入一段远大于段间距的纯纵向空白"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-order-05-false-jump.typ"
+pdf = "unit-order-05-false-jump.pdf"
+pdf_sha256 = "95a5c91f2704ecac35715377b98a124dce7f9550fd0b1fe4f983a0fe3445422c"
+font_provenance = "typst-embedded"
+
+# 页面尺寸来自源文件的 `#set page(width: 420pt, height: 230pt)`，是规格而非观测值。
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 420.0, 230.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 3
+columns = 1
+
+[[expected.block]]
+key = "B1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "A single column runs down this page from top to bottom."
+
+[[expected.block]]
+key = "B2"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "The gap above this paragraph is far larger than a paragraph gap. A criterion that decides column switches by looking only at how far the vertical position jumped will fire here, and it will be wrong, because there is no second column on this page to switch into."
+
+[[expected.block]]
+key = "B3"
+page = 0
+column = "full"
+draw_order = 3
+reading_order = 3
+text = "This paragraph follows the previous one at an ordinary distance. Nothing about the pair is unusual, which is the point: the only anomaly on the page is the gap above, and it is purely vertical."
+
+[[expected.behaviour]]
+id = "ORDER-02-false-positive"
+assertion = "B1 与 B2 的 y2 相差远超 20pt，但全页只有一栏，判为栏切换即为假阳性"
+observable_via = "adjudicated.toml 中三块的 x 跨度完全相同，y 跨度上 B1→B2 的间隔远大于 B2→B3"
+
+[[expected.behaviour]]
+id = "ORDER-02-single-column"
+assertion = "三块同属一栏，阅读顺序就是 B1 B2 B3"
+observable_via = "pdftotext -bbox-layout 的版面分析顺序"
+
+[oracle]
+checks = [
+    "determinism",
+    "legality",
+    "page-geometry",
+    "structure",
+    "reading-order",
+    "dual-parser-geometry",
+    "render",
+]

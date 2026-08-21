@@ -1,0 +1,82 @@
+# unit-form-01-display —— expected manifest
+#
+# 本文件先于 unit-form-01-display.typ 手写。三块的划分与文本是规格；公式块的文本是 Unicode 数学斜体 U+1D438 / U+1D45A / U+1D450 加 ASCII 数字 2。
+
+schema_version = 1
+
+[identity]
+id = "unit-form-01-display"
+name = "独立居中的 display 公式"
+class = "unit"
+legality = "legal"
+cases = ["LAYOUT-03"]
+priority = "M0"
+variable = "公式独占一行、上下各留 10pt 净空，不与任何正文块共享纵向带"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-form-01-display.typ"
+pdf = "unit-form-01-display.pdf"
+pdf_sha256 = "07f2e06a80a9591bb13a27f5cc2ae6f87ff54c94fecea6e151e13f8d50a939d7"
+font_provenance = "typst-embedded"
+
+# 页面尺寸来自源文件的 `#set page(width: 420pt, height: 170pt)`，是规格而非观测值。
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 420.0, 170.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 3
+columns = 1
+
+[[expected.block]]
+key = "T1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "The equation below is set on a line of its own, centred, with clear space above it and below it. Nothing else shares its vertical band."
+
+[[expected.block]]
+key = "F1"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "𝐸 = 𝑚𝑐2"
+
+[[expected.block]]
+key = "T2"
+page = 0
+column = "full"
+draw_order = 3
+reading_order = 3
+text = "Body text resumes after the equation. A model that reports a display formula here has nothing to disambiguate, because no text block overlaps it."
+
+[[expected.behaviour]]
+id = "LAYOUT-03-display"
+assertion = "公式自成一块，上下方的正文块都不与它在纵向上重叠"
+observable_via = "adjudicated.toml 中 F1 的度量盒 y 跨度与 T1、T2 无交集"
+
+[[expected.behaviour]]
+id = "D1-display"
+assertion = "模型应把 F1 报成独立公式类；这是 display 侧的无歧义样本"
+observable_via = "实验 1 的模型输出与本 manifest 的块划分对照"
+
+[oracle]
+checks = [
+    "determinism",
+    "legality",
+    "page-geometry",
+    "structure",
+    "reading-order",
+    "dual-parser-geometry",
+    "render",
+]

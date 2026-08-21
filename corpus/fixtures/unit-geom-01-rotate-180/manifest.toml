@@ -1,0 +1,73 @@
+# unit-geom-01-rotate-180 —— expected manifest
+#
+# 本文件先于 unit-geom-01-rotate-180.tex 手写。五份 .tex 只差 \\pdftrailerid 与 /Rotate 的取值，正文与页面尺寸完全一致。
+
+schema_version = 1
+
+[identity]
+id = "unit-geom-01-rotate-180"
+name = "页面旋转 /Rotate 180"
+class = "unit"
+legality = "legal"
+cases = ["GEOM-04"]
+priority = "M0"
+variable = "页面字典的 /Rotate 取 180，内容与其余四份完全相同"
+
+[source]
+method = "realistic-typesetting"
+engine = "pdftex"
+source_file = "unit-geom-01-rotate-180.tex"
+pdf = "unit-geom-01-rotate-180.pdf"
+pdf_sha256 = "9a69fa2e7aa1ec3a69a1c439636b50e5a1754e210ad1a1e77824bc716d856e6b"
+font_provenance = "texlive-bundled"
+
+# MediaBox 来自 \\pdfpagewidth=300bp / \\pdfpageheight=200bp，/Rotate 来自 \\pdfpageattr{/Rotate 180}。
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 180
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+# Computer Modern Type1 下 mutool 的字形 quad 比 poppler 的词盒高出约 0.22pt；
+# 这是字体度量的差，不是解析器分歧，因此与 tolerance_pt 分开声明。
+ink_margin_pt = 0.3
+
+[expected.structure]
+pages = 1
+blocks = 2
+columns = 1
+
+[[expected.block]]
+key = "T1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "Rotation must not move the text in page space."
+
+[[expected.block]]
+key = "T2"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "Second block, second font weight, well below the first."
+
+[[expected.behaviour]]
+id = "GEOM-04-invariance"
+assertion = "换算回页面空间后，两个块的三个盒子与其余四个 /Rotate 取值逐块相同"
+observable_via = "corpus verify 的 group/geom-equal 跨 fixture 断言"
+
+[[expected.behaviour]]
+id = "GEOM-04-raster"
+assertion = "/Rotate 180 下 150 dpi 出图为 625×417 像素"
+observable_via = "pdftoppm -r 150 出的 PNG 的 IHDR 宽高"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "reading-order", "dual-parser-geometry", "render"]
+
+[group]
+name = "rotate-invariance"
+page_geometry_identical_with = ["unit-geom-01-rotate-0", "unit-geom-01-rotate-90", "unit-geom-01-rotate-270", "unit-geom-01-rotate-neg90"]

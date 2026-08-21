@@ -55,6 +55,8 @@ pub struct Report {
     pub draw_order: Vec<Vec<String>>,
     /// 逐页参考栅格。
     pub raster: Vec<PageRaster>,
+    /// 本次裁定出的页面空间块几何；未声明 dual-parser-geometry 时为空。
+    pub geometry: Vec<BlockGeometry>,
 }
 
 impl Report {
@@ -254,14 +256,16 @@ fn verify_one(
         Vec::new()
     };
 
+    if manifest.requires(Check::Render) && manifest.requires(Check::PageGeometry) {
+        outcomes.push(check_raster_orientation(&frames, &raster));
+    }
+
+    let mut geometry = Vec::new();
     if manifest.requires(Check::DualParserGeometry) {
-        outcomes.push(check_dual_parser_geometry(
-            manifest,
-            &mutool_pages,
-            &poppler_pages,
-            &raster,
-            mode,
-        )?);
+        let (outcome, blocks) =
+            check_dual_parser_geometry(manifest, &mutool_pages, &poppler_pages, &raster, mode)?;
+        outcomes.push(outcome);
+        geometry = blocks;
     }
     if manifest.requires(Check::Render) && mode == Mode::Verify {
         outcomes.push(check_render(manifest, &raster)?);
@@ -277,6 +281,7 @@ fn verify_one(
         outcomes,
         draw_order,
         raster,
+        geometry,
     })
 }
 
@@ -536,15 +541,18 @@ fn check_page_geometry(
         Outcome::fail(CHECK, CLAUSE, problems.join("；"))
     }];
 
-    // 第二个解析器：poppler 报的是**观看空间**尺寸，因此它同时校验了
-    // manifest 的 /Rotate 与本工具的换算方向——两者任一错了这里就不符。
+    // 第二个解析器：poppler 独立报出有效框的**尺寸**。它不覆盖 /Rotate——
+    // 见 `PageFrame::box_size` 的实测记录：`-bbox-layout` 的 <page width height>
+    // 不应用 /Rotate，而同一份输出里的坐标应用了。/Rotate 的正确性改由
+    // group/geom-equal 断言（五个取值换算回页面空间后必须逐块相同），那是比
+    // 一对宽高更强的判据。
     let poppler_pages = poppler::blocks(pdf, frames)?;
     let mut size_problems = Vec::new();
     for (frame, page) in frames.iter().zip(&poppler_pages) {
-        let (w, h) = frame.viewer_size();
+        let (w, h) = frame.box_size();
         if !close(w, page.viewer_size.0, tol) || !close(h, page.viewer_size.1, tol) {
             size_problems.push(format!(
-                "第 {} 页观看尺寸：manifest 推得 {w}×{h}，poppler 报 {}×{}",
+                "第 {} 页有效框尺寸：manifest 推得 {w}×{h}，poppler 报 {}×{}",
                 page.index, page.viewer_size.0, page.viewer_size.1
             ));
         }
@@ -553,13 +561,54 @@ fn check_page_geometry(
         Outcome::ok(
             CHECK,
             "§2.3",
-            "poppler 的观看尺寸与 manifest 的 /Rotate 推导一致",
+            "poppler 独立报出的有效框尺寸与 manifest 一致",
         )
     } else {
         Outcome::fail(CHECK, "§2.3", size_problems.join("；"))
     });
 
     Ok(outcomes)
+}
+
+/// 独立渲染器出图的像素朝向是否与 manifest 的 `/Rotate` 一致（§2.3）。
+///
+/// 这是 `/Rotate` 唯一一条**单份 fixture 内部**可判的证据。解析器侧判不了：
+/// poppler 的 `<page width height>` 不应用 /Rotate（见 `PageFrame::box_size`）。
+/// 渲染器侧则毫无歧义——`/Rotate 90` 的 300×200 页面出的就是竖图。
+fn check_raster_orientation(frames: &[PageFrame], raster: &[PageRaster]) -> Outcome {
+    const CHECK: &str = "raster-orientation";
+    const CLAUSE: &str = "§2.3";
+
+    // pdftoppm 按 dpi 取整，容许 1 px 的取整差；90° 交换会差出几百 px，
+    // 这点容差挡不住它。
+    const SLACK: i64 = 1;
+
+    let mut problems = Vec::new();
+    for (i, (frame, page)) in frames.iter().zip(raster).enumerate() {
+        let (w, h) = frame.viewer_size();
+        let px = |pt: f64| (pt * f64::from(render::DPI) / 72.0).round() as i64;
+        let (ew, eh) = (px(w), px(h));
+        let (aw, ah) = (i64::from(page.pixels.0), i64::from(page.pixels.1));
+        if (ew - aw).abs() > SLACK || (eh - ah).abs() > SLACK {
+            problems.push(format!(
+                "第 {i} 页 {} dpi 出图：manifest 推得 {ew}×{eh} px，pdftoppm 出的是 {aw}×{ah} px",
+                render::DPI
+            ));
+        }
+    }
+
+    if problems.is_empty() {
+        Outcome::ok(
+            CHECK,
+            CLAUSE,
+            format!(
+                "{} 页出图的像素朝向与 manifest 的 /Rotate 一致",
+                raster.len()
+            ),
+        )
+    } else {
+        Outcome::fail(CHECK, CLAUSE, problems.join("；"))
+    }
 }
 
 // ---------------------------------------------------------------- §2.1 结构化期望
@@ -671,37 +720,48 @@ fn check_dual_parser_geometry(
     poppler_pages: &[ParsedPage],
     raster: &[PageRaster],
     mode: Mode,
-) -> Result<Outcome> {
+) -> Result<(Outcome, Vec<BlockGeometry>)> {
     const CHECK: &str = "dual-parser-geom";
     const CLAUSE: &str = "§2.1";
 
     if manifest.expected.geometry_source != GeometrySource::DualParserAdjudicated {
-        return Ok(Outcome::fail(
-            CHECK,
-            CLAUSE,
-            "本 fixture 声明的是手写几何，不应走双解析器裁定",
+        return Ok((
+            Outcome::fail(
+                CHECK,
+                CLAUSE,
+                "本 fixture 声明的是手写几何，不应走双解析器裁定",
+            ),
+            Vec::new(),
         ));
     }
 
     let mutool = flatten_blocks(mutool_pages);
     let poppler = flatten_blocks(poppler_pages);
     let tol = manifest.expected.tolerance_pt;
+    let ink = manifest.expected.ink_margin();
 
     let mut blocks = Vec::new();
     let mut problems = Vec::new();
 
     for block in &manifest.expected.block {
-        let m = &mutool[block.draw_order - 1];
-        let p = &poppler[block.reading_order - 1];
+        // 用 manifest 手写的文本去两边各找一块，而不是按次序取第 n 块。
+        // 次序本身是另外两条检查（structure/draw 与 reading-order）的断言对象；
+        // 拿它来配对等于把「顺序对不对」和「几何对不对」搅在一起——实测
+        // poppler 的块顺序在 /Rotate 270 下会翻转，那时几何其实完全正确。
+        let key = text::compare_key(&block.text);
+        let (m, p) = match (pick(&mutool, &key), pick(&poppler, &key)) {
+            (Ok(m), Ok(p)) => (m, p),
+            (m, p) => {
+                for (who, r) in [("mutool", m), ("poppler", p)] {
+                    if let Err(why) = r {
+                        problems.push(format!("块 `{}` 在 {who} 的输出里{why}", block.key));
+                    }
+                }
+                continue;
+            }
+        };
 
-        // 两个解析器共同报告的量只有文本与 x 跨度——先确认它们说的是同一块。
-        if text::compare_key(&m.text) != text::compare_key(&p.text) {
-            problems.push(format!(
-                "块 `{}`：两个解析器指向的不是同一块\n    mutool  {:?}\n    poppler {:?}",
-                block.key, m.text, p.text
-            ));
-            continue;
-        }
+        // 两个解析器共同报告的量只有 x 跨度——文本已由上面的配对保证一致。
         if !close(m.rect.x0, p.rect.x0, tol) || !close(m.rect.x1, p.rect.x1, tol) {
             problems.push(format!(
                 "块 `{}` 的 x 跨度不一致（容差 {tol} pt）：mutool [{:.4}, {:.4}]，poppler [{:.4}, {:.4}]",
@@ -710,10 +770,10 @@ fn check_dual_parser_geometry(
             continue;
         }
         // y 方向两者报的是不同的量（墨迹盒 vs 度量盒），要求相等是错的；
-        // 可判定的关系是包含：墨迹必须落在度量盒内。
-        if !m.rect.contained_in(p.rect, tol) {
+        // 可判定的关系是包含：墨迹必须落在度量盒内（余量见 ink_margin_pt）。
+        if !m.rect.contained_in(p.rect, ink) {
             problems.push(format!(
-                "块 `{}` 的墨迹盒越出度量盒：mutool {:?}，poppler {:?}",
+                "块 `{}` 的墨迹盒越出度量盒超过 {ink} pt：mutool {:?}，poppler {:?}",
                 block.key,
                 m.rect.to_array(),
                 p.rect.to_array()
@@ -724,7 +784,7 @@ fn check_dual_parser_geometry(
             problems.push(format!("块 `{}` 没有 baseline origin", block.key));
             continue;
         };
-        if baseline.y < p.rect.y0 - tol || baseline.y > p.rect.y1 + tol {
+        if baseline.y < p.rect.y0 - ink || baseline.y > p.rect.y1 + ink {
             problems.push(format!(
                 "块 `{}` 的 baseline y={:.4} 落在度量盒 [{:.4}, {:.4}] 之外",
                 block.key, baseline.y, p.rect.y0, p.rect.y1
@@ -739,13 +799,16 @@ fn check_dual_parser_geometry(
 
     if !problems.is_empty() {
         // §2.1：「两者不一致即阻止该 fixture 入库」。这里不写 adjudicated.toml。
-        return Ok(Outcome::fail(
-            CHECK,
-            CLAUSE,
-            format!(
-                "poppler 与 mutool 不一致，按 §2.1 阻止入库：\n{}",
-                indent(&problems.join("\n"))
+        return Ok((
+            Outcome::fail(
+                CHECK,
+                CLAUSE,
+                format!(
+                    "poppler 与 mutool 不一致，按 §2.1 阻止入库：\n{}",
+                    indent(&problems.join("\n"))
+                ),
             ),
+            Vec::new(),
         ));
     }
 
@@ -758,23 +821,23 @@ fn check_dual_parser_geometry(
     };
 
     let path = manifest.adjudicated_path();
-    match mode {
+    let outcome = match mode {
         Mode::Adjudicate => {
             std::fs::write(&path, fresh.to_toml())
                 .with_context(|| format!("写入 {} 失败", path.display()))?;
-            Ok(Outcome::ok(
+            Outcome::ok(
                 CHECK,
                 CLAUSE,
                 format!(
                     "{} 块已由 poppler 与 mutool 一致裁定并写入 adjudicated.toml",
                     fresh.block.len()
                 ),
-            ))
+            )
         }
         Mode::Verify => {
             let recorded = Adjudicated::load(&path)?;
             let diffs = recorded.differences(&fresh);
-            Ok(if diffs.is_empty() {
+            if diffs.is_empty() {
                 Outcome::ok(
                     CHECK,
                     CLAUSE,
@@ -786,13 +849,42 @@ fn check_dual_parser_geometry(
                     CLAUSE,
                     format!("与 adjudicated.toml 不符：\n{}", indent(&diffs.join("\n"))),
                 )
-            })
+            }
         }
-    }
+    };
+    Ok((outcome, fresh.block))
 }
 
 fn flatten_blocks(pages: &[ParsedPage]) -> Vec<crate::oracle::ParsedBlock> {
     pages.iter().flat_map(|p| p.blocks.clone()).collect()
+}
+
+/// 按归一化文本在某个解析器的块列表里挑出**唯一**一块。
+///
+/// 找不到和找到多个都是失败：前者说明 manifest 与生成结果不符，后者说明这份
+/// fixture 里有两块文本完全相同，几何裁定无从分辨该配哪一块——两种情况都不该
+/// 静默挑第一个。
+fn pick<'a>(
+    blocks: &'a [crate::oracle::ParsedBlock],
+    key: &str,
+) -> Result<&'a crate::oracle::ParsedBlock, String> {
+    let mut hits = blocks.iter().filter(|b| text::compare_key(&b.text) == key);
+    let first = hits.next().ok_or_else(|| {
+        format!(
+            "找不到匹配的块。该解析器给出的是：\n{}",
+            indent(
+                &blocks
+                    .iter()
+                    .map(|b| b.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        )
+    })?;
+    if hits.next().is_some() {
+        return Err("有多块文本完全相同，无法配对".to_string());
+    }
+    Ok(first)
 }
 
 // ---------------------------------------------------------------- §2.8 步骤 4
@@ -877,6 +969,49 @@ fn check_groups(manifests: &[Manifest], reports: &[Report]) -> Vec<(String, Outc
             ));
         }
 
+        for peer_id in &group.page_geometry_identical_with {
+            let check = "group/geom-equal";
+            let Some(peer) = by_id.get(peer_id.as_str()) else {
+                outcomes.push((
+                    manifest.id().to_string(),
+                    Outcome::fail(
+                        check,
+                        CLAUSE,
+                        format!("组内 fixture `{peer_id}` 未参与本次验收"),
+                    ),
+                ));
+                continue;
+            };
+            let diffs = geometry_differences(
+                &here.geometry,
+                &peer.geometry,
+                manifest.expected.tolerance_pt,
+            );
+            outcomes.push((
+                manifest.id().to_string(),
+                if diffs.is_empty() {
+                    Outcome::ok(
+                        check,
+                        CLAUSE,
+                        format!(
+                            "{} 块的页面空间几何与 `{peer_id}` 逐块相同（{} 组）",
+                            here.geometry.len(),
+                            group.name
+                        ),
+                    )
+                } else {
+                    Outcome::fail(
+                        check,
+                        CLAUSE,
+                        format!(
+                            "与 `{peer_id}` 的页面空间几何不同：\n{}",
+                            indent(&diffs.join("\n"))
+                        ),
+                    )
+                },
+            ));
+        }
+
         for peer_id in &group.draw_order_differs_from {
             let check = "group/draw-differs";
             let Some(peer) = by_id.get(peer_id.as_str()) else {
@@ -912,6 +1047,38 @@ fn check_groups(manifests: &[Manifest], reports: &[Report]) -> Vec<(String, Outc
 }
 
 // ---------------------------------------------------------------- 杂项
+
+/// 两份裁定结果的页面空间几何是否逐块相同。
+///
+/// 用的是 fixture 自己声明的裁定容差而不是 `adjudicated.toml` 的复现容差
+/// （1e-6）：跨 fixture 比较要穿过一次 `/Rotate` 换算与两个解析器各自的取整，
+/// 拿复现容差去卡会把「同一份内容」判成不同。
+fn geometry_differences(a: &[BlockGeometry], b: &[BlockGeometry], tol: f64) -> Vec<String> {
+    if a.len() != b.len() {
+        return vec![format!("块数：本份 {}，对照 {}", a.len(), b.len())];
+    }
+    let mut out = Vec::new();
+    for (x, y) in a.iter().zip(b) {
+        if x.key != y.key || x.page != y.page {
+            out.push(format!("块身份不同：`{}` vs `{}`", x.key, y.key));
+            continue;
+        }
+        for (field, u, v) in [
+            ("metric_box", &x.metric_box[..], &y.metric_box[..]),
+            ("visual_bbox", &x.visual_bbox[..], &y.visual_bbox[..]),
+            (
+                "baseline_origin",
+                &x.baseline_origin[..],
+                &y.baseline_origin[..],
+            ),
+        ] {
+            if u.iter().zip(v).any(|(p, q)| !close(*p, *q, tol)) {
+                out.push(format!("块 `{}` 的 {field}：{u:?} vs {v:?}", x.key));
+            }
+        }
+    }
+    out
+}
 
 fn arrays_close(a: &[f64; 4], b: &[f64; 4], tol: f64) -> bool {
     a.iter().zip(b).all(|(x, y)| close(*x, *y, tol))
@@ -1031,6 +1198,35 @@ mod tests {
         let b = [0.0, 0.0, 100.0, 100.04];
         assert!(arrays_close(&a, &b, 0.05));
         assert!(!arrays_close(&a, &b, 0.01));
+    }
+
+    fn geom(key: &str, metric: [f64; 4]) -> BlockGeometry {
+        BlockGeometry {
+            key: key.into(),
+            page: 0,
+            metric_box: metric,
+            visual_bbox: metric,
+            baseline_origin: [metric[0], metric[1]],
+        }
+    }
+
+    #[test]
+    fn cross_fixture_geometry_absorbs_rounding_but_not_a_real_shift() {
+        let a = [geom("L1", [10.0, 20.0, 30.0, 40.0])];
+        let rounded = [geom("L1", [10.0, 20.0, 30.0, 40.02])];
+        let shifted = [geom("L1", [10.0, 20.0, 30.0, 41.0])];
+        assert!(geometry_differences(&a, &rounded, 0.05).is_empty());
+        // 变的是上边沿，因此 metric_box 与 visual_bbox 各报一条，
+        // baseline_origin（取左下角）不受影响。
+        assert_eq!(geometry_differences(&a, &shifted, 0.05).len(), 2);
+    }
+
+    #[test]
+    fn cross_fixture_geometry_reports_a_block_count_mismatch_first() {
+        let a = [geom("L1", [0.0, 0.0, 1.0, 1.0])];
+        let diffs = geometry_differences(&a, &[], 0.05);
+        assert_eq!(diffs.len(), 1);
+        assert!(diffs[0].contains("块数"), "{diffs:?}");
     }
 
     #[test]

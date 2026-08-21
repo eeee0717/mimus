@@ -1,0 +1,66 @@
+# unit-form-03-inline —— expected manifest
+#
+# 本文件先于 unit-form-03-inline.typ 手写。行内公式不构成独立块，这是排版事实而非工具行为。
+
+schema_version = 1
+
+[identity]
+id = "unit-form-03-inline"
+name = "同一公式行内嵌在句中"
+class = "unit"
+legality = "legal"
+cases = ["LAYOUT-03"]
+priority = "M0"
+variable = "公式作为行内元素嵌在句子中间，与前后词共享同一条基线"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-form-03-inline.typ"
+pdf = "unit-form-03-inline.pdf"
+pdf_sha256 = "87480ec569067ff22642add6a3d4d23df57290dc8940a9117c2e26e8af840dda"
+font_provenance = "typst-embedded"
+
+# 页面尺寸来自源文件的 `#set page(width: 420pt, height: 170pt)`，是规格而非观测值。
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 420.0, 170.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "T1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "The same equation, 𝐸 = 𝑚𝑐2, is set inside this sentence, where it shares a line with the words around it and rides the same baseline as they do."
+
+[[expected.behaviour]]
+id = "LAYOUT-03-inline"
+assertion = "公式与句子同属一块，且与前后词共享基线"
+observable_via = "adjudicated.toml 中 T1 的 baseline origin 与整块度量盒"
+
+[[expected.behaviour]]
+id = "D1-inline"
+assertion = "模型应把这里报成行内公式；这是 inline 侧的无歧义样本"
+observable_via = "实验 1 的模型输出与本 manifest 的单块划分对照"
+
+[oracle]
+checks = [
+    "determinism",
+    "legality",
+    "page-geometry",
+    "structure",
+    "reading-order",
+    "dual-parser-geometry",
+    "render",
+]

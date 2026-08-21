@@ -158,6 +158,13 @@ pub struct Page {
     pub rotate: i32,
 }
 
+impl Expected {
+    /// 墨迹盒越出度量盒的允许余量。
+    pub fn ink_margin(&self) -> f64 {
+        self.ink_margin_pt.unwrap_or(self.tolerance_pt)
+    }
+}
+
 impl Page {
     /// 观看用的有效框：CropBox 优先，缺失时退回 MediaBox。
     pub fn effective_box(&self) -> [f64; 4] {
@@ -181,7 +188,18 @@ pub enum GeometrySource {
 pub struct Expected {
     pub geometry_source: GeometrySource,
     /// 几何一致性容差。现实排版 fixture 只能取到两个解析器的一致精度（§2.1）。
+    ///
+    /// 只用于**两个解析器报告同一个量**的场合：页面框尺寸、块的 x 跨度。
     pub tolerance_pt: f64,
+    /// 墨迹盒允许越出度量盒的余量；省略时取 `tolerance_pt`。
+    ///
+    /// 这是另一码事：墨迹盒（mutool 的字形 quad）与度量盒（poppler 的词盒）是
+    /// **两个不同的量**，它们之间只有包含关系，而余量的大小是字体度量的性质，
+    /// 不是解析器分歧。实测 Typst 内嵌字体下余量 < 0.05pt，而 TeX Live 的
+    /// Computer Modern Type1 下墨迹会越出约 0.22pt。用同一个数去卡两件事，
+    /// 要么放松了 x 跨度的判据，要么把正常的字体度差判成解析器不一致。
+    #[serde(default)]
+    pub ink_margin_pt: Option<f64>,
     pub structure: Structure,
     pub block: Vec<Block>,
     pub behaviour: Vec<Behaviour>,
@@ -275,6 +293,13 @@ pub struct Group {
     /// 与这些 fixture 的 content stream 绘制顺序必须**不同**。
     #[serde(default)]
     pub draw_order_differs_from: Vec<String>,
+    /// 与这些 fixture 的**页面空间**块几何必须逐块相同。
+    ///
+    /// 这是 GEOM-04 的判据：五个 `/Rotate` 取值下内容完全相同，意味着栅格必然
+    /// 不同（朝向不同）而页面空间几何必须一致。渲染哈希在这里帮不上忙，能判的
+    /// 只有换算回页面空间之后的盒子。
+    #[serde(default)]
+    pub page_geometry_identical_with: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -505,6 +530,11 @@ impl Manifest {
             self.expected.tolerance_pt <= 0.0,
             "§2.2",
             "expected.tolerance_pt 必须为正",
+        )?;
+        fail_if(
+            self.expected.ink_margin_pt.is_some_and(|v| v <= 0.0),
+            "§2.2",
+            "expected.ink_margin_pt 若给出则必须为正",
         )?;
 
         // 绘制序与阅读序都必须是 1..=n 的一个排列——重号或跳号会让「顺序不同」
@@ -760,6 +790,17 @@ text = "world"
         let text = BASE.replace("blocks = 1", "blocks = 2");
         let err = parse(&text).unwrap_err().to_string();
         assert!(err.contains("structure.blocks"), "{err}");
+    }
+
+    #[test]
+    fn the_ink_margin_defaults_to_the_agreement_tolerance() {
+        let m = parse(BASE).unwrap();
+        assert_eq!(m.expected.ink_margin(), m.expected.tolerance_pt);
+        let wider = BASE.replace(
+            "tolerance_pt = 0.05",
+            "tolerance_pt = 0.05\nink_margin_pt = 0.3",
+        );
+        assert_eq!(parse(&wider).unwrap().expected.ink_margin(), 0.3);
     }
 
     #[test]

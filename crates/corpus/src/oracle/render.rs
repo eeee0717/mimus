@@ -24,11 +24,14 @@ pub struct PageRaster {
     pub poppler_sha256: String,
     /// mutool 自报的渲染位图 MD5（`mutool draw -s 5`）。
     pub mutool_md5: String,
+    /// poppler 出图的像素宽高。渲染器**会**应用 /Rotate，因此这一对数字是
+    /// 观看空间朝向的独立证据（解析器那边报的 <page width height> 不是）。
+    pub pixels: (u32, u32),
 }
 
 /// 渲染一份 PDF 的全部页面并求哈希。
 pub fn rasterize(pdf: &Path, work_dir: &Path, pages: usize) -> Result<Vec<PageRaster>> {
-    let poppler = poppler_hashes(pdf, work_dir, pages)?;
+    let poppler = poppler_pages(pdf, work_dir, pages)?;
     let mutool = mutool_hashes(pdf)?;
 
     if poppler.len() != pages || mutool.len() != pages {
@@ -42,13 +45,14 @@ pub fn rasterize(pdf: &Path, work_dir: &Path, pages: usize) -> Result<Vec<PageRa
     Ok((0..pages)
         .map(|i| PageRaster {
             index: i,
-            poppler_sha256: poppler[i].clone(),
+            poppler_sha256: poppler[i].0.clone(),
             mutool_md5: mutool[i].clone(),
+            pixels: poppler[i].1,
         })
         .collect())
 }
 
-fn poppler_hashes(pdf: &Path, work_dir: &Path, pages: usize) -> Result<Vec<String>> {
+fn poppler_pages(pdf: &Path, work_dir: &Path, pages: usize) -> Result<Vec<(String, (u32, u32))>> {
     std::fs::create_dir_all(work_dir)
         .with_context(|| format!("创建渲染目录 {} 失败", work_dir.display()))?;
     let prefix = work_dir.join("page");
@@ -72,9 +76,30 @@ fn poppler_hashes(pdf: &Path, work_dir: &Path, pages: usize) -> Result<Vec<Strin
     (1..=pages)
         .map(|n| {
             let path = work_dir.join(format!("page-{n:0width$}.png"));
-            hash::of_file(&path)
+            Ok((hash::of_file(&path)?, png_size(&path)?))
         })
         .collect()
+}
+
+/// 从 PNG 的 IHDR 读出宽高。
+///
+/// 只读文件头 24 字节，不引入图像解码依赖——这里要的只是「出图是横的还是
+/// 竖的」这一个事实。
+fn png_size(path: &Path) -> Result<(u32, u32)> {
+    let head = {
+        use std::io::Read;
+        let mut buf = [0u8; 24];
+        let mut f =
+            std::fs::File::open(path).with_context(|| format!("打开 {} 失败", path.display()))?;
+        f.read_exact(&mut buf)
+            .with_context(|| format!("{} 不足 24 字节，不是 PNG", path.display()))?;
+        buf
+    };
+    if &head[..8] != b"\x89PNG\r\n\x1a\n" || &head[12..16] != b"IHDR" {
+        bail!("{} 不是 PNG（缺少签名或 IHDR）", path.display());
+    }
+    let n = |i: usize| u32::from_be_bytes([head[i], head[i + 1], head[i + 2], head[i + 3]]);
+    Ok((n(16), n(20)))
 }
 
 fn mutool_hashes(pdf: &Path) -> Result<Vec<String>> {
@@ -129,6 +154,23 @@ fn parse_mutool_md5(output: &str) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_size_out_of_a_png_header() {
+        let dir = std::env::temp_dir().join("corpus-png-size-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.png");
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&625u32.to_be_bytes());
+        bytes.extend_from_slice(&417u32.to_be_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(png_size(&path).unwrap(), (625, 417));
+
+        std::fs::write(&path, b"not a png at all, but long enough........").unwrap();
+        assert!(png_size(&path).is_err());
+    }
 
     #[test]
     fn reads_one_md5_per_page() {
