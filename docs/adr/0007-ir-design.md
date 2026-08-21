@@ -13,6 +13,7 @@ BabelDOC 的 IL 经两年收敛验证了单字符粒度 + 双盒模型；其缺�
 2. **和类型**：段落组成等"多选一"结构一律用 Rust enum，编译器强制穷尽匹配。
 3. **扫描预留**：文本载体为 tagged enum——V1 仅 `Chars` 变体；V2 增加 `OcrLine` 变体不破坏 schema。
 4. **序列化**：serde + JSON，顶层 `schema_version` 字段。`insta` 快照测试与 `--debug` 逐 pass 落盘共用同一条序列化路径。V1 不承诺跨版本 IR 兼容。
+5. **文本朝向**（2026-08-21 补）：字符携带和类型 `TextTransform { Upright, Rotated(deg), Mirrored, Skewed(deg) }`，在**视觉页框**（应用 `/Rotate` 之后）内度量。它是"非直立文本不翻译"政策的载体，与第 2 条同理由——不用几个 `Option<f32>` 表达互斥状态。判定口径见 `CONTEXT.md` 术语表"非直立文本"。
 
 ## 后果
 

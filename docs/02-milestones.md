@@ -25,8 +25,6 @@
 
 ## M0 · 风险探测（不交付功能）
 
-前置工作项：实现确定性 PDF writer 与验收脚本，按 M-1 清单生成首批 unit fixture，逐份通过 `docs/03-corpus-requirements.md` §2.8 验收后入库——三个实验都以这批 fixture 为输入。
-
 三个实验对应三大技术风险，任何一个翻车都在最便宜的时刻翻。每个实验产出一页结论（成 / 败 / 替代方案），失败即触发对应 ADR 复议。
 
 | # | 实验 | 验证的风险 |
@@ -35,17 +33,26 @@
 | 2 | lopdf 原始 content stream 字节 ⇄ pdfium-render text page 对齐 PoC：同一页上自写 tokenizer 的字符定位与 PDFium 结果交叉核对 | 操作符走查可行性（ADR-0006 的核心假设） |
 | 3 | 增量写回 PoC：lopdf 改写一页 content stream + 追加一个字体对象，输出 PDF 在主流阅读器中有效 | 增量改写模型（ADR-0003 §2） |
 
-**收口断言**：三份实验结论文档齐备，无未决风险遗留。
+**内部排期**（决策 #33）：不等齐 M0 的约 45 份 fixture，按实验切分，每组最小 fixture 通过 `docs/03-corpus-requirements.md` §2.8 验收后即启动对应实验。顺序由依赖链决定：
+
+- **实验 1 先行**——它的 fixture 全部由现实排版引擎产出（走 §2.1 的双解析器裁定例外），**不依赖自建的确定性 PDF writer**，依赖链最短；顺带把 ADR-0002 遗留的阅读顺序验证提到最前，而后者决定 midend 要写多少代码。硬前置是补装 poppler 与 mupdf-tools。
+- **实验 2、3 待 writer 就绪后并行**——它们要精确 fixture 与字节级畸形变异，必须等自建 writer 可用。
+
+前置工作项：实现确定性 PDF writer 与验收脚本；最小首批 10 份 fixture 的清单见 §4.2。
+
+**收口断言**：三份实验结论文档齐备，无未决风险遗留；实验 2 的结论文档必须包含"走查与 PDFium 不一致时以谁为准"的明确规则（`docs/03-corpus-requirements.md` §6.3）。
 
 ## M1 · 最小端到端
 
 - workspace 拆分（`mimus-core` + `mimus`）；IL 定义（ADR-0007）+ serde JSON 序列化。
 - 固定 pass 链贯通：Parse → ScanDetect(拒绝) → Layout → ParagraphFind → Typeset → FontEmbed → Write（StylesAndFormulas/ExtractTerms/Translate 留桩）。
+- 两条输入拒绝路径：Parse 打开处拒绝加密 PDF（ADR-0009，判定用 `was_encrypted()`），ScanDetect 拒绝扫描件；两者共用分类退出码 2。
+- IL 携带 `TextTransform`，非直立文本判为 passthrough 单元、不进翻译（决策 #32）。
 - `Translator` trait + `none` 后端；Noto Sans SC 嵌入 + subsetter 子集化。
 - 固化 Agent Skill 所依赖的 CLI 机器调用协议：所有已实现子命令的 `--json` 输出版本化 NDJSON，禁止交互/颜色/spinner，契约测试覆盖终结事件与分类退出码（ADR-0008）。
 - 测试网与 CI 同步建立：insta IL 快照（逐 pass）、全语料零 panic、CI 绿才合并。
 
-**收口断言**：在基线文本 fixture 上以 `none` 后端产出有效 PDF，字符经"解析→排版→写回"往返后，baseline origin 与度量盒仍在 manifest 容差内；扫描件 fixture 按分类退出码拒绝；畸形 fixture 以 manifest 声明的方式 fail-fast，不 panic。
+**收口断言**：在基线文本 fixture 上以 `none` 后端产出有效 PDF，字符经"解析→排版→写回"往返后，baseline origin 与度量盒仍在 manifest 容差内；扫描件与加密 fixture 按分类退出码拒绝（加密的空密码档必须**未产生任何输出文件**——它是"静默放行"这一失败模式的唯一守卫）；非直立 fixture 的 `TextTransform` 取值与 manifest 一致，含 `/Rotate 90` 负例；畸形 fixture 以 manifest 声明的方式 fail-fast，不 panic。
 
 ## M2 · 真翻译
 

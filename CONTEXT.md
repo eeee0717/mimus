@@ -37,6 +37,9 @@
 | 28 | 性能：V1 无硬指标；方向值=20 页论文除 LLM 外 <5 分钟（arm64 笔记本）；LLM 段落级并发默认 4、指数退避重试 3 次、重试尽降级保原文 | — |
 | 29 | crate 结构：workspace 两分——`mimus-core`（lib：IL/pass/引擎 trait/翻译层）+ `mimus`（bin：CLI/进度/配置） | — |
 | 30 | Agent 集成：仓库提供一个可由 `npx skills add eeee0717/mimus` 安装的 `mimus` Agent Skill；skill 仅编排 CLI、不复制业务逻辑；MCP/daemon/vendor plugin 不进 V1 | [ADR-0008](docs/adr/0008-agent-skill.md) |
+| 31 | 加密 PDF：**V1 一律拒绝**（不论是否需要密码、不论 handler），退出码 2；不做权限位尊重、无密码参数、无 `--ignore-permissions`；检测必须用 `was_encrypted()` | [ADR-0009](docs/adr/0009-reject-encrypted-pdf.md) |
+| 32 | 非直立文本（旋转/镜像/斜切 > 20°，在视觉页框内度量）：**不翻译、原样 passthrough**；字符级检测、单元级隔离，同段其余字符照常翻译 | [ADR-0007](docs/adr/0007-ir-design.md) §5 |
+| 33 | M0 内部排期：实验 1 先行（不依赖自建确定性写出器），实验 2/3 待写出器就绪后并行；最小首批 10 份 fixture 独立验收后即启动对应实验，不等齐约 45 份。M-1 仍整体收口 | — |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
@@ -46,6 +49,8 @@
 | 不翻·原样保留 | header, footer, header_image, footer_image, image, chart, seal, algorithm, display_formula, formula_number, number, vertical_text, reference, reference_content, table（表体，`--translate-table` 可开） |
 | 占位符处理 | inline_formula（在所属段落内以 `{v1}` 占位送翻，返回后还原） |
 
+政策表按**版面类别**划分，与之正交的还有一条按**文本朝向**的划分：**非直立文本一律不翻译、原样 passthrough**，优先于类别政策（决策 #32）。
+
 ## 术语表
 
 ### 输入路径
@@ -53,6 +58,7 @@
 - **原生 PDF（born-digital）**：content stream 里有真实文字对象的 PDF。**V1 唯一路径。**
 - **扫描件（scanned）**：页面本体是位图、0 文字对象。V1 检测后明确报错拒绝，V2 经 OCR 路径支持。
 - **OCR 文字层（ocr layer）**：扫描图上叠加的不可见文字（`Tr 3`），他方 OCR 注入的产物；不是 OCR 本身。
+- **加密 PDF**：trailer 带 `/Encrypt` 的文档。V1 在 Parse 打开处一律拒绝（ADR-0009）。注意 lopdf 加载时会先试空密码并抹掉 `/Encrypt`，故判定用 `was_encrypted()` 而非 `is_encrypted()`——用错是静默放行，不是报错。
 
 ### 解析层
 
@@ -65,6 +71,9 @@
 - **IL / IR**：流水线围绕其变换的中间表示，单字符粒度（ADR-0007）。
 - **双盒（dual box）**：`box` 字体度量盒 / `visual_bbox` 墨迹盒；layout 归属用墨迹盒算 IoU。
 - **文本载体 enum**：tagged enum，V1 仅 `Chars`，V2 加 `OcrLine`（扫描预留）。
+- **非直立文本（non-upright text）**：旋转 ≠ 0°、镜像（变换行列式为负）或斜切 > 20° 的字符，三者合并为一个概念。判定在**视觉页框**内做——即先应用页面 `/Rotate`，否则一张 `/Rotate 90` 的页面会整篇被误判为旋转。直立容差 **±0.1°**（沿用 BabelDOC 的实测值），**180° 算非直立**，所以直立窗口只有 `0° ± 0.1°`。斜切 ≤ 20° 且无旋转/镜像分量的**仍算直立、照常翻译**（伪斜体在真实 PDF 中太常见，且字形样式本就按既有 CJK 政策丢弃）。
+- **TextTransform**：非直立判定在 IR 中的载体，和类型 `{ Upright, Rotated(deg), Mirrored, Skewed(deg) }`（ADR-0007 §5）。
+- **单元级隔离**：非直立检测是**字符级**的，但隔离是**单元级**的——非直立字符成为独立的 passthrough 单元，同段其余字符照常翻译。非直立字符**参与** layout 归属、**不参与** fallback 聚类、**计入**扫描件判定的文本对象计数。
 - **fallback_line**：版面模型漏检区域由字符聚类兜底生成的伪 layout，防漏检段落丢失。
 
 ### 版面与推理
@@ -102,7 +111,9 @@
 - **失效模式（failure mode）/ case**：从 BabelDOC 主链路逆向出的、可由 PDF 输入触发的一类错误。带稳定 case ID，是 Corpus v1 需求矩阵的行。
 - **fixture**：语料中的一份 PDF + 其 manifest。分 **unit**（单变量，与 case 近 1:1）、**mal**（畸形，由合法父本做单变量字节级变异）、**intg**（显式多变量，仅端到端冒烟，严格受限）三类。
 - **生成合同（generation contract）**：fixture 入库前必须满足的约束集合（坐标系、三种盒子、变换规则、单变量、确定性 SHA-256、独立验收等），见 `docs/03-corpus-requirements.md` §2。
-- **expected manifest**：一份 fixture 一份 TOML 规格，**先于生成器手写**，来源是 PDF 规范与字体度量推导而非生成结果回读——生成器由 manifest 检验，不得反向迁就。
+- **expected manifest**：一份 fixture 一份 TOML 规格，**先于生成器手写**，来源是 PDF 规范与字体度量推导而非生成结果回读——生成器由 manifest 检验，不得反向迁就。唯一例外是现实排版 fixture（见下）。
+- **现实排版 fixture 的双解析器裁定**：Typst/LaTeX 产出的 fixture 无法手推字形坐标，因此结构化期望仍手写，**几何由两个互相独立的解析器（poppler + mutool）一致确立**；两者不一致即阻止该 fixture 入库。这保住了第一原则的实质——期望值不与生成器同源。见 `docs/03-corpus-requirements.md` §2.1。
+- **溯源断言**：判断输出 PDF 中某字形来自原文还是译文，依据是**对象号 + 子集标签（subset tag）**，不依赖"输入输出字体不同族"——后者对 CJK 输入 fixture 不可得（可选字体少且体积大，可能不得不与 Noto Sans SC 同族）。
 - **三种盒子**：baseline origin（绘制起点）/ 度量盒（字体 ascent/descent × 字号）/ visual bbox（墨迹）。三者独立标注，混用是旧语料偏移问题的疑似根因。
 - **differential signal**：BabelDOC 在同一 fixture 上的行为，仅作差分参考触发人工裁定，**不得作为唯一正确性 oracle**。
 - **真实语料**：arXiv 按排版引擎分层（pdfTeX/XeTeX/LuaTeX/Word）下载，不入 repo，发布前人工 checklist。
@@ -115,4 +126,21 @@
 
 ## 待决清单
 
-Corpus v1 调研新暴露的范围与排期问题仍列在 `docs/03-corpus-requirements.md` §6；其中加密 PDF、任意角度旋转文本和 M0 fixture 切分需在拆票前由决策者收口。V2 展望项（扫描件/OCR、子进程隔离、像素 diff、宋体字族、中→英、GUI）见 `docs/02-milestones.md` 末节，随触发条件另行立项。
+与 `docs/03-corpus-requirements.md` §6 同源，此处为索引。2026-08-21 的设计会话已收口其中三条：加密 PDF（决策 #31 / ADR-0009）、非直立文本（决策 #32）、M0 fixture 排期（决策 #33）。
+
+**仍需决策者拍板（1 条）**
+
+- **旧语料目录的实际删除**：`~/Downloads/babeldoc-corpus/` 当前仍在磁盘上且含 28 项，与"已被删除并正式作废"的表述不符。本轮工作全程未读取其任何几何参数或生成代码，但它留在原地存在被后续误引用的风险。
+
+**已定去向，拆票执行（不需再决策）**
+
+- 确定性生成的引擎侧机制尚未实测 → M-1 工具链前置项。
+- 验收工具链缺四件（qpdf / poppler / mupdf-tools / Typst）→ M-1 工具链前置项。
+- PP-DocLayoutV3 的 25 类是否含目录类未确认 → M0 实验 1 顺带查证。
+- CJK 输入 fixture 的字体选型 → 独立 ticket（溯源手段已改为对象号 + 子集标签，不再依赖字体族差异）。
+
+**由实验给出结论，不是决策**
+
+- 走查与 PDFium 不一致时的仲裁规则（已知分歧：FONT-02、STREAM-02）→ 由 M0 实验 2 的结论文档确立。
+
+V2 展望项（扫描件/OCR、子进程隔离、像素 diff、宋体字族、中→英、GUI）见 `docs/02-milestones.md` 末节，随触发条件另行立项。
