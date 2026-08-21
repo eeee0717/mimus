@@ -1,0 +1,94 @@
+# unit-para-07-line-numbers —— expected manifest
+#
+# 本文件先于 unit-para-07-line-numbers.typ 手写。行号列与正文块的划分是规格。绘制次序是正文先、行号后（源文件如此）；阅读次序按版面从左到右扫描，左边距的行号列在前——但阅读次序不等于翻译次序，行号无论排第几都不进翻译请求。
+
+schema_version = 1
+
+[identity]
+id = "unit-para-07-line-numbers"
+name = "左边距行号与正文"
+class = "unit"
+legality = "legal"
+cases = ["PARA-07"]
+priority = "M0"
+variable = "正文左侧另有一列行号，与正文同属一个版面区域"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-para-07-line-numbers.typ"
+pdf = "unit-para-07-line-numbers.pdf"
+pdf_sha256 = "3ca6cf4722a35fc3c797bbb9281f9acf849717aff4e8122e6aa803b14b1b0d46"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 280.0, 250.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 5
+columns = 1
+
+[[expected.block]]
+key = "N5"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 1
+text = "5"
+
+[[expected.block]]
+key = "N10"
+page = 0
+column = "full"
+draw_order = 3
+reading_order = 2
+text = "10"
+
+[[expected.block]]
+key = "N15"
+page = 0
+column = "full"
+draw_order = 4
+reading_order = 3
+text = "15"
+
+[[expected.block]]
+key = "N20"
+page = 0
+column = "full"
+draw_order = 5
+reading_order = 4
+text = "20"
+
+[[expected.block]]
+key = "BODY"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 5
+text = "This paragraph runs for twenty lines so that a line numbering column has something to number. The numbers sit in the left margin, one every five lines, and they are not part of the sentence they stand beside. A pass that merges alternating line numbers into the body must remove them from the text it sends onward, and must put them back untouched on the way out. The trap in the original implementation is that its predicate returns true for empty text, so any empty paragraph is treated as a line number and merged away. Nothing on this page is empty, which is the point: this fixture isolates the numbering itself and introduces nothing else alongside it. Manuscripts that carry line numbers are common enough to matter: statutes, court filings, and papers circulated for review all use them, and in every one of those documents the numbers are apparatus rather than prose. They must survive the round trip in place, at the same coordinates, in the same size, and they must never reach a translation backend. That is the whole of what this page is for."
+
+[[expected.behaviour]]
+id = "PARA-07-not-body"
+assertion = "四个行号各自成块，均不属于正文；送往翻译后端的文本必须连贯且不含这四个数字"
+observable_via = "manifest 把行号与正文分成两个块，NUM 块的文本就是那四个数字"
+
+[[expected.behaviour]]
+id = "PARA-07-preserved"
+assertion = "行号在输出中原位保留"
+observable_via = "输出 PDF 与输入在 x 0..18pt 一带的栅格差为 0"
+
+[[expected.behaviour]]
+id = "D5-aside-text"
+assertion = "模型若把行号列框成 aside_text，就不需要交替行号合并补丁（红利清单 D5）"
+observable_via = "实验 1 中模型给 NUM 块的类别标签"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "reading-order", "dual-parser-geometry", "render"]

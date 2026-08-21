@@ -246,6 +246,9 @@ fn verify_one(
     if manifest.requires(Check::Structure) {
         outcomes.extend(check_structure(manifest, &mutool_pages, &poppler_pages));
     }
+    if manifest.requires(Check::Glyphs) {
+        outcomes.extend(check_glyphs(manifest, &mutool_pages, &poppler_pages));
+    }
     if manifest.requires(Check::ReadingOrder) {
         outcomes.push(check_reading_order(manifest, &poppler_pages));
     }
@@ -260,16 +263,24 @@ fn verify_one(
         outcomes.push(check_raster_orientation(&frames, &raster));
     }
 
-    let mut geometry = Vec::new();
-    if manifest.requires(Check::DualParserGeometry) {
-        let (outcome, blocks) =
-            check_dual_parser_geometry(manifest, &mutool_pages, &poppler_pages, &raster, mode)?;
+    // 几何裁定与参考栅格共用一份 adjudicated.toml：两者都是**测出来的**结果，
+    // 与手写的 manifest 分开存放（§2.1）。因此落盘与复核也只有一处。
+    let geometry = if manifest.requires(Check::DualParserGeometry) {
+        let (outcome, blocks) = check_dual_parser_geometry(manifest, &mutool_pages, &poppler_pages);
         outcomes.push(outcome);
-        geometry = blocks;
+        blocks
+    } else {
+        Some(Vec::new())
+    };
+    if manifest.requires(Check::DualParserGeometry) || manifest.requires(Check::Render) {
+        outcomes.push(record_adjudicated(
+            manifest,
+            geometry.as_deref(),
+            &raster,
+            mode,
+        )?);
     }
-    if manifest.requires(Check::Render) && mode == Mode::Verify {
-        outcomes.push(check_render(manifest, &raster)?);
-    }
+    let geometry = geometry.unwrap_or_default();
 
     let draw_order = mutool_pages
         .iter()
@@ -647,6 +658,67 @@ fn check_structure(
     ]
 }
 
+/// 两个解析器各自看到的字符多重集与手写文本相同（不涉及次序）。
+fn check_glyphs(
+    manifest: &Manifest,
+    mutool_pages: &[ParsedPage],
+    poppler_pages: &[ParsedPage],
+) -> Vec<Outcome> {
+    let expected = glyph_counts(
+        &manifest
+            .expected
+            .block
+            .iter()
+            .map(|b| b.text.clone())
+            .collect::<Vec<_>>(),
+    );
+    [
+        ("glyphs/mutool", mutool_pages),
+        ("glyphs/poppler", poppler_pages),
+    ]
+    .into_iter()
+    .map(|(check, pages)| {
+        let actual = glyph_counts(&flatten(pages));
+        let mut problems = Vec::new();
+        for (ch, n) in &expected {
+            let got = actual.get(ch).copied().unwrap_or(0);
+            if got != *n {
+                problems.push(format!("{ch:?}：手写 {n} 个，解析器给出 {got} 个"));
+            }
+        }
+        for (ch, n) in &actual {
+            if !expected.contains_key(ch) {
+                problems.push(format!("{ch:?}：手写里没有，解析器给出 {n} 个"));
+            }
+        }
+        if problems.is_empty() {
+            Outcome::ok(
+                check,
+                "§2.1",
+                format!(
+                    "{} 种字符、共 {} 个，与手写文本逐字符相同",
+                    expected.len(),
+                    expected.values().sum::<usize>()
+                ),
+            )
+        } else {
+            Outcome::fail(check, "§2.1", problems.join("；"))
+        }
+    })
+    .collect()
+}
+
+fn glyph_counts(texts: &[String]) -> BTreeMap<char, usize> {
+    let mut counts = BTreeMap::new();
+    for ch in texts
+        .iter()
+        .flat_map(|t| text::compare_key(t).chars().collect::<Vec<_>>())
+    {
+        *counts.entry(ch).or_insert(0) += 1;
+    }
+    counts
+}
+
 /// poppler 的版面分析顺序与手写 `reading_order` 一致。
 fn check_reading_order(manifest: &Manifest, poppler_pages: &[ParsedPage]) -> Outcome {
     compare_sequence(
@@ -718,21 +790,19 @@ fn check_dual_parser_geometry(
     manifest: &Manifest,
     mutool_pages: &[ParsedPage],
     poppler_pages: &[ParsedPage],
-    raster: &[PageRaster],
-    mode: Mode,
-) -> Result<(Outcome, Vec<BlockGeometry>)> {
+) -> (Outcome, Option<Vec<BlockGeometry>>) {
     const CHECK: &str = "dual-parser-geom";
     const CLAUSE: &str = "§2.1";
 
     if manifest.expected.geometry_source != GeometrySource::DualParserAdjudicated {
-        return Ok((
+        return (
             Outcome::fail(
                 CHECK,
                 CLAUSE,
                 "本 fixture 声明的是手写几何，不应走双解析器裁定",
             ),
-            Vec::new(),
-        ));
+            None,
+        );
     }
 
     let mutool = flatten_blocks(mutool_pages);
@@ -798,8 +868,9 @@ fn check_dual_parser_geometry(
     }
 
     if !problems.is_empty() {
-        // §2.1：「两者不一致即阻止该 fixture 入库」。这里不写 adjudicated.toml。
-        return Ok((
+        // §2.1：「两者不一致即阻止该 fixture 入库」。返回 None，adjudicated.toml
+        // 因此不会被写出——不一致的几何一旦落盘就会被当成基线。
+        return (
             Outcome::fail(
                 CHECK,
                 CLAUSE,
@@ -808,20 +879,48 @@ fn check_dual_parser_geometry(
                     indent(&problems.join("\n"))
                 ),
             ),
-            Vec::new(),
-        ));
+            None,
+        );
     }
+
+    (
+        Outcome::ok(
+            CHECK,
+            CLAUSE,
+            format!("{} 块由 poppler 与 mutool 一致裁定", blocks.len()),
+        ),
+        Some(blocks),
+    )
+}
+
+/// 把测出来的几何与参考栅格落盘（`adjudicate`）或与已落盘的比对（`verify`）。
+fn record_adjudicated(
+    manifest: &Manifest,
+    blocks: Option<&[BlockGeometry]>,
+    raster: &[PageRaster],
+    mode: Mode,
+) -> Result<Outcome> {
+    const CHECK: &str = "adjudicated";
+    const CLAUSE: &str = "§2.8";
+
+    let Some(blocks) = blocks else {
+        return Ok(Outcome::fail(
+            CHECK,
+            CLAUSE,
+            "几何裁定未通过，adjudicated.toml 不予写出",
+        ));
+    };
 
     let fresh = Adjudicated {
         schema_version: crate::adjudicated::SUPPORTED_SCHEMA_VERSION,
         fixture: manifest.id().to_string(),
-        tolerance_pt: tol,
-        block: blocks,
+        tolerance_pt: manifest.expected.tolerance_pt,
+        block: blocks.to_vec(),
         render: raster.iter().map(RenderReference::from).collect(),
     };
 
     let path = manifest.adjudicated_path();
-    let outcome = match mode {
+    Ok(match mode {
         Mode::Adjudicate => {
             std::fs::write(&path, fresh.to_toml())
                 .with_context(|| format!("写入 {} 失败", path.display()))?;
@@ -829,8 +928,9 @@ fn check_dual_parser_geometry(
                 CHECK,
                 CLAUSE,
                 format!(
-                    "{} 块已由 poppler 与 mutool 一致裁定并写入 adjudicated.toml",
-                    fresh.block.len()
+                    "{} 块几何 + {} 页参考栅格已写入 adjudicated.toml",
+                    fresh.block.len(),
+                    fresh.render.len()
                 ),
             )
         }
@@ -841,7 +941,11 @@ fn check_dual_parser_geometry(
                 Outcome::ok(
                     CHECK,
                     CLAUSE,
-                    format!("{} 块与已记录的裁定结果一致", fresh.block.len()),
+                    format!(
+                        "{} 块几何 + {} 页参考栅格与已记录的一致",
+                        fresh.block.len(),
+                        fresh.render.len()
+                    ),
                 )
             } else {
                 Outcome::fail(
@@ -851,8 +955,7 @@ fn check_dual_parser_geometry(
                 )
             }
         }
-    };
-    Ok((outcome, fresh.block))
+    })
 }
 
 fn flatten_blocks(pages: &[ParsedPage]) -> Vec<crate::oracle::ParsedBlock> {
@@ -885,35 +988,6 @@ fn pick<'a>(
         return Err("有多块文本完全相同，无法配对".to_string());
     }
     Ok(first)
-}
-
-// ---------------------------------------------------------------- §2.8 步骤 4
-
-fn check_render(manifest: &Manifest, raster: &[PageRaster]) -> Result<Outcome> {
-    const CHECK: &str = "render";
-    const CLAUSE: &str = "§2.8";
-
-    let recorded = Adjudicated::load(&manifest.adjudicated_path())?;
-    let fresh: Vec<RenderReference> = raster.iter().map(RenderReference::from).collect();
-    Ok(if recorded.render == fresh {
-        Outcome::ok(
-            CHECK,
-            CLAUSE,
-            format!(
-                "{} 页在 poppler 与 mutool 下的栅格哈希均与参考一致",
-                fresh.len()
-            ),
-        )
-    } else {
-        Outcome::fail(
-            CHECK,
-            CLAUSE,
-            format!(
-                "栅格哈希与参考不符：\n    参考 {recorded:?}\n    本次 {fresh:?}",
-                recorded = recorded.render
-            ),
-        )
-    })
 }
 
 // ---------------------------------------------------------------- 跨 fixture 断言

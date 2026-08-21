@@ -271,6 +271,13 @@ pub enum Check {
     PageGeometry,
     /// §2.1 例外：结构化期望——块数、文本、以及 mutool 眼中的**绘制顺序**。
     Structure,
+    /// §2.1 例外（弱化版）：两个解析器各自看到的**字符多重集**与手写文本相同。
+    ///
+    /// 给那些块划分或块内字形次序无法被两个解析器一致裁定的 fixture 用——
+    /// 目录的右对齐页码在 poppler 那里自成一块而在 mutool 那里不是；上下标公式
+    /// 的字形次序两者根本不同。这类 fixture 的次序不可断言，但「这一页上有且
+    /// 只有这些字符」仍然可断言，而且足以挡住掉字、多字、字体映射错误。
+    Glyphs,
     /// §2.1 例外：poppler 版面分析给出的**阅读顺序**与手写 reading_order 一致。
     ///
     /// 刻意与 `structure` 分开声明：poppler 的分栏判定有自己的栏间距阈值，
@@ -376,6 +383,13 @@ impl Manifest {
             self.oracle.checks.is_empty(),
             "§2.8",
             "oracle.checks 为空——没有验收手段的 fixture 不得入库",
+        )?;
+        // 手写的 block.text 必须被至少一种手段核对。否则那一串文本就只是注释：
+        // 写错了没人知道，而它恰恰是 §2.1 里最该被守住的东西。
+        fail_if(
+            !self.requires(Check::Structure) && !self.requires(Check::Glyphs),
+            "§2.1",
+            "手写的 block.text 无人核对——oracle.checks 必须含 structure 或 glyphs 之一",
         )?;
 
         Ok(())
@@ -702,7 +716,7 @@ assertion = "断言"
 observable_via = "手段"
 
 [oracle]
-checks = ["determinism"]
+checks = ["determinism", "structure"]
 "#;
 
     fn parse(toml_text: &str) -> Result<Manifest> {
@@ -804,8 +818,18 @@ text = "world"
     }
 
     #[test]
+    fn rejects_a_fixture_whose_hand_written_text_nothing_checks() {
+        let text = BASE.replace(
+            "checks = [\"determinism\", \"structure\"]",
+            "checks = [\"determinism\"]",
+        );
+        let err = parse(&text).unwrap_err().to_string();
+        assert!(err.contains("structure 或 glyphs"), "{err}");
+    }
+
+    #[test]
     fn rejects_an_empty_oracle_list() {
-        let text = BASE.replace("checks = [\"determinism\"]", "checks = []");
+        let text = BASE.replace("checks = [\"determinism\", \"structure\"]", "checks = []");
         let err = parse(&text).unwrap_err().to_string();
         assert!(err.contains("§2.8"), "{err}");
     }

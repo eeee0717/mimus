@@ -1,0 +1,102 @@
+# unit-layout-08-narrow-gutter —— expected manifest
+#
+# 本文件先于 unit-layout-08-narrow-gutter.typ 手写。六个段落是这一页的事实；块级次序不可裁定，理由见文末 [[adjudication]]。
+
+schema_version = 1
+
+[identity]
+id = "unit-layout-08-narrow-gutter"
+name = "栏间距 8pt 的双栏正文"
+class = "unit"
+legality = "legal"
+cases = ["LAYOUT-08"]
+priority = "M0"
+variable = "栏间距压到 8pt（约 0.8 字宽），其余与常规双栏相同"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-layout-08-narrow-gutter.typ"
+pdf = "unit-layout-08-narrow-gutter.pdf"
+pdf_sha256 = "ccb23d625159ab93554a3bf2edbc02acfe61d8d00451d18fc96f48642b4d1e14"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 548.0, 300.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 6
+columns = 2
+
+[[expected.block]]
+key = "L1"
+page = 0
+column = "left"
+draw_order = 1
+reading_order = 1
+text = "The left column carries three paragraphs of ordinary prose, set at ten point with a two hundred and forty point measure."
+
+[[expected.block]]
+key = "L2"
+page = 0
+column = "left"
+draw_order = 2
+reading_order = 2
+text = "Its gutter is eight points wide, which at this size is well under one character width and far under the three and a half character widths that a line clustering pass uses as its radius."
+
+[[expected.block]]
+key = "L3"
+page = 0
+column = "left"
+draw_order = 3
+reading_order = 3
+text = "A pass that clusters characters into lines by horizontal distance will therefore join the left column and the right column into single wide lines."
+
+[[expected.block]]
+key = "R1"
+page = 0
+column = "right"
+draw_order = 4
+reading_order = 4
+text = "The right column carries three more paragraphs, and it is set exactly like the left one so that the only variable on this page is the gutter."
+
+[[expected.block]]
+key = "R2"
+page = 0
+column = "right"
+draw_order = 5
+reading_order = 5
+text = "Nothing else distinguishes the two columns. The measure, the size, the leading and the justification are identical."
+
+[[expected.block]]
+key = "R3"
+page = 0
+column = "right"
+draw_order = 6
+reading_order = 6
+text = "If the two columns come back as one, the cause is the gutter and nothing else."
+
+[[expected.behaviour]]
+id = "LAYOUT-08-merge"
+assertion = "栏间距 8pt 下，基于水平距离的行聚类会把左右栏连成一行"
+observable_via = "pdftotext -bbox-layout 与 mutool draw -F stext 报出的块的 x 跨度：超过单栏宽 240pt 即已跨栏"
+
+[[expected.behaviour]]
+id = "D4-model-coverage"
+assertion = "模型若能正确框出两栏，就不需要 BabelDOC 的兜底聚类（红利清单 D4）"
+observable_via = "实验 1 中模型给出的框是否两栏分明、且不漏检任一段"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "glyphs", "render"]
+
+[[adjudication]]
+date = "2026-08-21"
+issue = "栏间距 8pt 下，两个解析器都会跨栏合并——这正是本 fixture 要暴露的现象。合并后的块内文本是左右栏逐行交错的碎片，其切分点由断行决定，无法先于生成手写。"
+resolution = "不声明 structure / reading-order / dual-parser-geometry，改用 glyphs 断言「这一页上有且只有这些字符」。expected.block 记录的是六个段落这一事实（供实验 1 与模型输出对照），而不是某个解析器眼中的块。"

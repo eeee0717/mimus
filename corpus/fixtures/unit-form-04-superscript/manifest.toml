@@ -1,0 +1,92 @@
+# unit-form-04-superscript —— expected manifest
+#
+# 本文件先于 unit-form-04-superscript.typ 手写。四段的文本逐字写死。A 段的公式部分是 Unicode 数学斜体 U+1D465 / U+1D466 加 ASCII 数字。
+
+schema_version = 1
+
+[identity]
+id = "unit-form-04-superscript"
+name = "上下标双阈值的四种邻近情形"
+class = "unit"
+legality = "legal"
+cases = ["FORM-04"]
+priority = "M0"
+variable = "同一页上并置真上下标、small caps、首字下沉与小字号括注"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-form-04-superscript.typ"
+pdf = "unit-form-04-superscript.pdf"
+pdf_sha256 = "8839b23e35d34d48ea531a89fd9ddc9089f41d957d5f00bf87cc6c74deac84c8"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 380.0, 220.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 4
+columns = 1
+
+[[expected.block]]
+key = "A"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "True superscript and subscript: 𝑥2 + 𝑦1"
+
+[[expected.block]]
+key = "B"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "Small Caps Heading"
+
+[[expected.block]]
+key = "C"
+page = 0
+column = "full"
+draw_order = 3
+reading_order = 3
+text = "Drop caps open this paragraph with a letter three times the body size, after which every remaining character is back at the body size and must stay ordinary text."
+
+[[expected.block]]
+key = "D"
+page = 0
+column = "full"
+draw_order = 4
+reading_order = 4
+text = "A parenthetical set two points smaller (like this one) sits inside an otherwise ordinary sentence and must not turn the sentence into a formula."
+
+[[expected.behaviour]]
+id = "FORM-04-true-only"
+assertion = "只有 A 段的上下标该进公式；B、C、D 三段全部是可翻译文本，占位符数为 0"
+observable_via = "四个块的划分与文本；A 块含 U+1D465 与 U+1D466 两个数学斜体字母"
+
+[[expected.behaviour]]
+id = "FORM-04-drop-cap"
+assertion = "C 段首字是 27pt、其余是 9pt（比值 1/3），维持阈值 1.1 会把整段留在角标态"
+observable_via = "C 块的文本是完整一段普通英文，不含任何数学字符"
+
+[[expected.behaviour]]
+id = "D10-not-delivered"
+assertion = "25 类里没有上下标类，这条红利不兑现，必须自行实现（红利清单 D10）"
+observable_via = "实验 1 中模型对 A 段给出的类别：它至多能说这是公式，不能说哪一部分是角标"
+
+[oracle]
+# 块划分不可裁定，理由见文末 [[adjudication]]。
+checks = ["determinism", "legality", "page-geometry", "glyphs", "render"]
+
+[[adjudication]]
+date = "2026-08-21"
+issue = "两个解析器对这一页的分块都偏离手写的四段，且方向相反：mutool draw -F stext 把 B（small caps 标题）并进 C（首字下沉段），给出 3 块；poppler pdftotext -bbox-layout 把 C 的 27pt 首字 D 单独列成一块，给出 5 块。"
+resolution = "不改 fixture。两处偏离恰好都是 FORM-04 要覆盖的形状——标题与正文字号只差两成会被并块，首字下沉会被切块——把它们调没了这份 fixture 就没有存在意义。改为不声明 structure / reading-order / dual-parser-geometry，用 glyphs 断言字符多重集（首字被切开不影响字符多重集）。分歧记在这里：它说明「首字下沉是不是角标」连解析器层面都没有共识。"

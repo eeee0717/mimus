@@ -1440,6 +1440,28 @@ BabelDOC 的输出**不得作为唯一正确性 oracle**。它是参考实现而
 | `unit-geom-03-nonzero-origin-raster` | GEOM-05 | MediaBox 原点非零且无 CropBox |
 | `unit-geom-04-oversized-page` | GEOM-05 | 接近规范上限的超大页面 |
 
+`mal-geom-02-rotate-45` **推迟到实验 2**：按 §2.5 它必须从合法父本做字节级变异，而字节级变异要等自建的确定性 writer 就绪。
+
+#### 实验 1 · 红利清单验证批（§3.10 的 D1–D12）
+
+D1–D12 决定 midend 要写多少代码，与阅读顺序同属实验 1 的产出，因此这批 fixture 与上表同期入库：
+
+| fixture | 覆盖 case | 验证的红利 | 单一变量 |
+|---|---|---|---|
+| `unit-order-06-cross-page` | ORDER-03 | D3 | 页边界落在一句话中间（真阳性）与落在两个独立段落之间（假阳性）各一处 |
+| `unit-layout-01-nested-boxes` | LAYOUT-01 | D6 | 内层文字 100% 落在表格框内，同时被左侧正文块擦到 2pt |
+| `unit-layout-02-table-only` | LAYOUT-02、TABLE-01 | D4、D9 | 页面上除一个 3×3 有线表格外没有任何正文 |
+| `unit-layout-07-policy-zones` | LAYOUT-07 | D8 | 同一页并置页眉、页脚、参考条目、印章与两段正文 |
+| `unit-layout-08-narrow-gutter` | LAYOUT-08 | D4 | 栏间距压到 8pt（约 0.8 字宽） |
+| `unit-para-04-toc` | PARA-04 | D7 | 同一页并置六种目录 leader |
+| `unit-para-07-line-numbers` | PARA-07 | D5 | 正文左侧另有一列每 5 行一个的行号 |
+| `unit-form-04-superscript` | FORM-04 | D10 | 并置真上下标、small caps、首字下沉与小字号括注 |
+| `unit-form-08-formula-fragments` | FORM-08 | D12 | 每个变量同时带上标与下标 |
+
+D2（跨栏合并）由 `unit-order-01`–`05` 覆盖，D11（公式字体正则）由 `unit-form-01`/`-03` 覆盖，两者不另立 fixture。
+
+其中 6 份（`layout-01`、`layout-02`、`layout-08`、`para-04`、`form-04`、`form-08`）的**块划分本身**被实测证明无法由两个独立解析器一致裁定——这正是它们所对应的失效模式的直接证据。它们改用 `glyphs` 检查断言「这一页有且只有这些字符」，分歧逐条记在各自 manifest 的 `[[adjudication]]` 里。
+
 #### 实验 2 · 走查与 PDFium 对齐（对应 ADR-0006 核心假设）
 
 | fixture | 覆盖 case | 单一变量 |

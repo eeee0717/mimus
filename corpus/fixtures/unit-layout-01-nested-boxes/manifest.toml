@@ -1,0 +1,76 @@
+# unit-layout-01-nested-boxes —— expected manifest
+#
+# 本文件先于 unit-layout-01-nested-boxes.typ 手写。边框是矢量图形，不参与文本块断言；两个文本块的划分与文本是规格。
+
+schema_version = 1
+
+[identity]
+id = "unit-layout-01-nested-boxes"
+name = "嵌套框归属：表格框内的一行说明文字"
+class = "unit"
+legality = "legal"
+cases = ["LAYOUT-01"]
+priority = "M0"
+variable = "内层文字 100% 落在表格框内，同时被左侧正文块擦到 2pt"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-layout-01-nested-boxes.typ"
+pdf = "unit-layout-01-nested-boxes.pdf"
+pdf_sha256 = "9a920878413209bb8eda121e63c6202f26da75dd993ee877175bb9377ee93172"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 430.0, 260.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 2
+columns = 1
+
+[[expected.block]]
+key = "OUT"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "Body text ends here, two points shy of the frame."
+
+[[expected.block]]
+key = "IN"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "Table 1. Throughput measured over ten runs."
+
+[[expected.behaviour]]
+id = "LAYOUT-01-containment"
+assertion = "IN 的度量盒完全落在表格边框（x 85..385，y 45..245 页面空间）之内"
+observable_via = "pdftotext -bbox-layout 报出的 IN 块盒子与源文件里边框的坐标"
+
+[[expected.behaviour]]
+id = "LAYOUT-01-graze"
+assertion = "OUT 的度量盒右缘超出表格框左缘 2pt，两者在 x 上仅重叠这 2pt"
+observable_via = "pdftotext -bbox-layout 报出的 OUT 与 IN 两个块盒子"
+
+[[expected.behaviour]]
+id = "D6-arbitration"
+assertion = "嵌套框仲裁应取「面积最小的包含框」，IN 因此归表格而非正文（红利清单 D6）"
+observable_via = "实验 1 中模型给 IN 的类别标签"
+
+[oracle]
+# 块级次序与几何不可裁定，理由见文末 [[adjudication]]。
+checks = ["determinism", "legality", "page-geometry", "glyphs", "render"]
+
+[[adjudication]]
+date = "2026-08-21"
+issue = "mutool draw -F stext 把 OUT 与 IN 并成一个块（两者在同一条水平带上，文本间距 23pt），poppler 则分成两块。"
+resolution = "不改几何。LAYOUT-01 的形状本身要求正文框与内层文字**相擦**，而相擦就意味着两段文字挨得足够近，近到文本抽取器会把它们并成一块——这件事本身就是这个 case 重要的理由。因此不声明 structure / reading-order / dual-parser-geometry，改用 glyphs 断言字符多重集，几何观测改由 poppler 单方给出并写进期望行为。"

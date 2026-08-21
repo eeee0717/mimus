@@ -1,0 +1,55 @@
+# 本文件由 `corpus adjudicate` 生成，**不要手工编辑**。
+# 它是 docs/03-corpus-requirements.md §2.1 唯一例外条款的产物：
+# 现实排版 fixture 的几何期望由两个互相独立的解析器一致确立，
+# 而非从生成器读回。manifest.toml 里的结构化期望仍然是手写的。
+#
+#   metric_box      ← poppler pdftotext -bbox-layout（字体度量盒）
+#   visual_bbox     ← mutool draw -F stext 的字形 quad 并集（墨迹盒）
+#   baseline_origin ← mutool stext 的首字符 origin（绘制起点）
+#
+# 坐标一律在 PDF 页面空间：单位 pt、原点左下、/Rotate 之前（§2.2）。
+
+schema_version = 1
+fixture = "unit-para-07-line-numbers"
+tolerance_pt = 0.050000
+
+[[block]]
+key = "N5"
+page = 0
+metric_box = [38.815000, 177.184010, 43.000000, 187.444010]
+visual_bbox = [38.815000, 179.299010, 43.000000, 184.897010]
+baseline_origin = [38.815000, 179.398010]
+
+[[block]]
+key = "N10"
+page = 0
+metric_box = [34.630000, 127.584000, 43.000000, 137.844000]
+visual_bbox = [34.630000, 129.708010, 43.000005, 135.288000]
+baseline_origin = [34.630000, 129.798001]
+
+[[block]]
+key = "N15"
+page = 0
+metric_box = [34.630000, 77.984000, 43.000000, 88.244000]
+visual_bbox = [34.630000, 80.099000, 43.000005, 85.696990]
+baseline_origin = [34.630000, 80.198000]
+
+[[block]]
+key = "N20"
+page = 0
+metric_box = [34.630000, 28.384007, 43.000000, 38.644007]
+visual_bbox = [34.630000, 30.508010, 43.000005, 36.088010]
+baseline_origin = [34.630000, 30.598000]
+
+[[block]]
+key = "BODY"
+page = 0
+metric_box = [55.000000, 28.345998, 256.584001, 227.124000]
+visual_bbox = [55.000000, 28.418000, 256.584060, 225.360002]
+baseline_origin = [55.000000, 219.078002]
+
+[[render]]
+page = 0
+dpi = 150
+poppler_sha256 = "405a2d3e9979a9f2590f92e85f03ed934e6a18a2f1a6cbb77171049255893424"
+mutool_md5 = "80b6ed6ff521779e28f8f3f4ea4554e2"
