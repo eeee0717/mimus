@@ -1,5 +1,5 @@
 # mimus
 
-PDF translation that preserves layout.
+Layout-preserving PDF translation as a Rust CLI. Releases will also include a thin Agent Skill that invokes the same CLI for agent-driven workflows.
 
-Early stage — architecture not yet decided. See `docs/`.
+Planning is active and implementation has not started. See `CONTEXT.md` and `docs/`.

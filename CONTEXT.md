@@ -7,7 +7,7 @@
 
 | # | 决策 | ADR |
 |---|---|---|
-| 1 | 实现语言 Rust，交付形态 CLI（暂不做 GUI） | [ADR-0001](docs/adr/0001-rust-cli.md) |
+| 1 | 实现语言 Rust，唯一执行接口为 CLI（暂不做 GUI/MCP）；release 附带薄 Agent Skill 调用 CLI | [ADR-0001](docs/adr/0001-rust-cli.md)、[ADR-0008](docs/adr/0008-agent-skill.md) |
 | 2 | 版面检测模型：PP-DocLayoutV3 官方 ONNX（131 MB，25 类，含阅读顺序） | [ADR-0002](docs/adr/0002-pp-doclayoutv3.md) |
 | 3 | V1 仅原生 PDF 路径（扫描件报错拒绝）；OCR 后置 V2，IR/架构预留 | [ADR-0003](docs/adr/0003-v1-native-pdf-path.md) |
 | 4 | 许可：MIT 单许可 | [ADR-0004](docs/adr/0004-mit-license.md) |
@@ -31,11 +31,12 @@
 | 22 | 推理纯 CPU（ort CPU EP）；GPU/NPU EP 不进 V1 | — |
 | 23 | 质量回归四件套：全语料 IL 快照 + 占位符守恒 + 零 panic + 几何断言；**CI 绿才能合并**；渲染像素 diff 待渲染路径稳定后加 | — |
 | 24 | 语料：**Corpus v1 待从零构建**（旧 23 份合成语料已因坐标偏移/视觉质量问题作废，不得参考）。需求矩阵与生成合同见 [docs/03-corpus-requirements.md](docs/03-corpus-requirements.md)，工作纳入里程碑 M-1；真实语料不进 repo、发布前人工 checklist | — |
-| 25 | CLI：子命令结构（`translate` / `assets pull` / `inspect`）；配置三层 flags > env > `~/.config/mimus/config.toml`；API key 不走明文 flag；两级人类可读进度，`--json` 推后；细粒度 flags 随功能里程碑落地 | — |
+| 25 | CLI：子命令结构（`translate` / `assets pull` / `inspect`）；配置三层 flags > env > `~/.config/mimus/config.toml`；API key 不走明文 flag；两级人类可读进度；V1 `--json` 输出带版本的 NDJSON 机器协议；细粒度 flags 随功能里程碑落地 | [ADR-0008](docs/adr/0008-agent-skill.md) |
 | 26 | 里程碑：M-1（Corpus Foundation，前置且阻塞 M0/M1）+ walking skeleton 五段 M0–M4，以语料断言收口（[docs/02-milestones.md](docs/02-milestones.md)） | — |
 | 27 | 术语细节：用户 `--glossary` 覆盖自动表；`--dump-glossary` 导出复用；`--no-auto-terms` 开关；自动表指纹进缓存键 | — |
 | 28 | 性能：V1 无硬指标；方向值=20 页论文除 LLM 外 <5 分钟（arm64 笔记本）；LLM 段落级并发默认 4、指数退避重试 3 次、重试尽降级保原文 | — |
 | 29 | crate 结构：workspace 两分——`mimus-core`（lib：IL/pass/引擎 trait/翻译层）+ `mimus`（bin：CLI/进度/配置） | — |
+| 30 | Agent 集成：V1 archive 附带一个 `mimus` Agent Skill；skill 仅编排 CLI、不复制业务逻辑；MCP/daemon/vendor plugin 不进 V1 | [ADR-0008](docs/adr/0008-agent-skill.md) |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
@@ -88,6 +89,12 @@
 
 - **资产（assets）机制**：模型/字体统一管理——运行时下载 + sha256 校验 + 缓存 + 镜像可配 + 自备路径逃生门（ADR-0005）。
 
+### Agent 集成
+
+- **Agent Skill**：随 release archive 附带的 `skills/mimus/` 指令包，使支持 skill 的 agent 能调用 `translate`、`inspect`、`assets pull`。它是 CLI 的薄编排层，不含业务实现。
+- **机器调用协议**：所有子命令的 `--json` 模式；stdout 仅输出带 `schema_version` 的 NDJSON 事件流，并以单个 result/error 事件终结。无 spinner、颜色或交互提示；分类退出码仍是第一层结果信号。
+- **行为真源**：人、脚本和 agent 都通过同一个 CLI 执行；skill 不复制参数语义、翻译策略或错误恢复逻辑。
+
 ### 测试
 
 - **Corpus v1**：从零构建的合成语料，入 repo `corpus/`。**尚未生成任何 PDF**；早期 23 份合成语料已作废（坐标偏移与视觉质量问题），其几何参数与生成代码不得参考。
@@ -107,4 +114,4 @@
 
 ## 待决清单
 
-无——设计会话已收口（2026-08-21），全部分支已定案。V2 展望项（扫描件/OCR、子进程隔离、像素 diff、宋体字族、中→英、GUI）见 `docs/02-milestones.md` 末节，随触发条件另行立项。
+Corpus v1 调研新暴露的范围与排期问题仍列在 `docs/03-corpus-requirements.md` §6；其中加密 PDF、任意角度旋转文本和 M0 fixture 切分需在拆票前由决策者收口。V2 展望项（扫描件/OCR、子进程隔离、像素 diff、宋体字族、中→英、GUI）见 `docs/02-milestones.md` 末节，随触发条件另行立项。

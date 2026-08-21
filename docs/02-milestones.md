@@ -42,6 +42,7 @@
 - workspace 拆分（`mimus-core` + `mimus`）；IL 定义（ADR-0007）+ serde JSON 序列化。
 - 固定 pass 链贯通：Parse → ScanDetect(拒绝) → Layout → ParagraphFind → Typeset → FontEmbed → Write（StylesAndFormulas/ExtractTerms/Translate 留桩）。
 - `Translator` trait + `none` 后端；Noto Sans SC 嵌入 + subsetter 子集化。
+- 固化 Agent Skill 所依赖的 CLI 机器调用协议：所有已实现子命令的 `--json` 输出版本化 NDJSON，禁止交互/颜色/spinner，契约测试覆盖终结事件与分类退出码（ADR-0008）。
 - 测试网与 CI 同步建立：insta IL 快照（逐 pass）、全语料零 panic、CI 绿才合并。
 
 **收口断言**：在基线文本 fixture 上以 `none` 后端产出有效 PDF，字符经"解析→排版→写回"往返后，baseline origin 与度量盒仍在 manifest 容差内；扫描件 fixture 按分类退出码拒绝；畸形 fixture 以 manifest 声明的方式 fail-fast，不 panic。
@@ -67,11 +68,12 @@
 ## M4 · 发布
 
 - 资产机制：清单（名称→URL+sha256）、运行时下载、镜像可配、`assets pull` 预取。
-- release archive：二进制 + libpdfium + 许可声明（MIT / PDFium BSD / 模型 Apache-2.0）；macOS arm64/x64 + Linux x64 + Windows x64。
+- release archive：二进制 + libpdfium + `skills/mimus/` Agent Skill + 许可声明（MIT / PDFium BSD / 模型 Apache-2.0）；macOS arm64/x64 + Linux x64 + Windows x64。
+- 用 skill 创建器校验结构，并在干净环境中前向测试 agent 的三条工作流：翻译 PDF、诊断版面/IL、预取资产；skill 不得读取或回显 API key。
 - README / 使用文档 / 术语校对工作流说明。
 
-**收口断言**：在一台干净机器上，从 GitHub Release 下载 archive → 解压 → 首跑自动拉资产 → 完成一篇真实 arXiv 论文的翻译。
+**收口断言**：在一台干净机器上，从 GitHub Release 下载 archive → 解压 → 首跑自动拉资产 → 完成一篇真实 arXiv 论文的翻译；另由安装了随包 skill 的 agent 通过 CLI 机器协议完成一次 `inspect` 与一次 `translate`，全程不需要人工解析终端文本。
 
 ## V2 展望（不承诺，触发条件另行立项）
 
-扫描件/OCR 路径（PP-OCRv6，rebuild writer）、子进程隔离（待真实崩溃数据）、渲染像素 diff 回归、宋体字族映射、中→英（西文断字）、表体翻译转正、GUI。
+扫描件/OCR 路径（PP-OCRv6，rebuild writer）、子进程隔离（待真实崩溃数据）、渲染像素 diff 回归、宋体字族映射、中→英（西文断字）、表体翻译转正、GUI、MCP/常驻 daemon/vendor-specific plugin。
