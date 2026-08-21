@@ -1,0 +1,12 @@
+[package]
+name = "mimus-pdf"
+description = "PDF reading (PDFium) and incremental writing (lopdf)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mimus-ir.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

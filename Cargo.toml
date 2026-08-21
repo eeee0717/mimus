@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/eeee0717/mimus"
+
+[workspace.dependencies]
+mimus-ir = { path = "crates/mimus-ir" }
+mimus-pdf = { path = "crates/mimus-pdf" }
+mimus-layout = { path = "crates/mimus-layout" }
+mimus-ocr = { path = "crates/mimus-ocr" }
+mimus-translate = { path = "crates/mimus-translate" }
+mimus-typeset = { path = "crates/mimus-typeset" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
+# Heavy deps are intentionally NOT pinned here -- run `cargo add` inside the
+# owning crate so you get whatever is current, rather than a version I guessed:
+#   mimus-pdf        cargo add pdfium-render lopdf
+#   mimus-layout     cargo add ort image fast_image_resize
+#   mimus-ocr        cargo add ort imageproc geo
+#   mimus-typeset    cargo add rustybuzz ttf-parser cosmic-text krilla subsetter
+#   mimus-translate  cargo add tokio reqwest rusqlite
+#   mimus-cli        cargo add clap indicatif tracing-subscriber
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

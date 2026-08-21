@@ -1,0 +1,12 @@
+[package]
+name = "mimus-layout"
+description = "Document layout analysis via RT-DETR / PP-DocLayout (ONNX)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mimus-ir.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

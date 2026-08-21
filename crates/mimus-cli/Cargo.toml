@@ -1,0 +1,21 @@
+[package]
+name = "mimus-cli"
+description = "Translate a PDF while preserving its layout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "mimus"
+path = "src/main.rs"
+
+[dependencies]
+mimus-ir.workspace = true
+mimus-pdf.workspace = true
+mimus-layout.workspace = true
+mimus-ocr.workspace = true
+mimus-translate.workspace = true
+mimus-typeset.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
