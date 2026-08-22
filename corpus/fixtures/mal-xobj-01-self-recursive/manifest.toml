@@ -1,0 +1,45 @@
+schema_version = 1
+[identity]
+id = "mal-xobj-01-self-recursive"
+name = "Self-recursive Form XObject"
+class = "mal"
+legality = "malformed"
+cases = ["XOBJ-02"]
+priority = "M0"
+variable = "The page selects Form X1, whose resource dictionary refers to itself"
+[source]
+method = "byte-mutation"
+pdf = "mal-xobj-01-self-recursive.pdf"
+pdf_sha256 = "0cafd3df5b057b7753866a417545c6377b3c771cbea279f4462a33100727d666"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+[lineage]
+parent = "unit-xobj-00-recursion-parent"
+[[lineage.mutations]]
+byte_offset = 4256
+original_byte = 48
+replacement_byte = 49
+description = "change /X0 Do to /X1 Do, selecting the Form whose /X1 resource points to itself"
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "operator-walk:recursive-form-self"
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+[[expected.behaviour]]
+id = "XOBJ-02-self-cycle"
+assertion = "The walk detects object 11 re-entering itself, emits RecursiveForm(path=[11,11]), and stops before depth 2 without panic or unbounded recursion"
+observable_via = "single-byte lineage, object-number recursion trace, bounded process exit and independent renderer"
+[oracle]
+checks = ["determinism","legality","page-geometry","render"]
+[[adjudication]]
+date = "2026-08-22"
+issue = "Form resource names are scope-local and cannot identify recursion reliably"
+resolution = "Detect active Form indirect-object IDs; cap Form recursion at 64 as a second safety boundary"

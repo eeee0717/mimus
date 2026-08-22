@@ -1,0 +1,45 @@
+schema_version = 1
+[identity]
+id = "mal-xobj-02-mutual-recursive"
+name = "Mutually recursive Form XObjects"
+class = "mal"
+legality = "malformed"
+cases = ["XOBJ-02"]
+priority = "M0"
+variable = "The page selects Form X2, which invokes object 13 before object 13 invokes X2 again"
+[source]
+method = "byte-mutation"
+pdf = "mal-xobj-02-mutual-recursive.pdf"
+pdf_sha256 = "fa72bc9b8180299aec918df75130729a1487bca304d96aff352a239c04e559a3"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+[lineage]
+parent = "unit-xobj-00-recursion-parent"
+[[lineage.mutations]]
+byte_offset = 4256
+original_byte = 48
+replacement_byte = 50
+description = "change /X0 Do to /X2 Do, selecting the two-Form cycle between objects 12 and 13"
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "operator-walk:recursive-form-mutual"
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+[[expected.behaviour]]
+id = "XOBJ-02-mutual-cycle"
+assertion = "The walk records path [12,13,12], emits RecursiveForm once, and stops before depth 3 without panic or unbounded recursion"
+observable_via = "single-byte lineage, object-number recursion trace, bounded process exit and independent renderer"
+[oracle]
+checks = ["determinism","legality","page-geometry","render"]
+[[adjudication]]
+date = "2026-08-22"
+issue = "Mutual cycles can evade pointer-identity checks when the same indirect object is decoded twice"
+resolution = "Track active indirect-object IDs across the complete Form call path; retain a hard depth limit of 64"

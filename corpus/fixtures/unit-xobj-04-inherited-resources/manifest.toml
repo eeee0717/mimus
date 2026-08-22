@@ -1,0 +1,88 @@
+schema_version = 1
+[identity]
+id = "unit-xobj-04-inherited-resources"
+name = "Nested Forms with inherited shadowed resources"
+class = "unit"
+legality = "legal"
+cases = ["XOBJ-07"]
+priority = "M0"
+variable = "Inner Form omits Resources and inherits outer F1, which shadows page F1"
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-xobj-04-inherited-resources.pdf"
+pdf_sha256 = "66d813cd7f3685c9e3af8db568544a48c66b87541f6677b5f08b83615e83d8df"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9,10,11,12]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d786f626a2d30342d696e68"
+info_dictionary = false
+metadata_streams = 0
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+[[expected.block]]
+key = "NESTED"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+baseline_origin = [110.0,176.0]
+metric_box = [110.0,173.168,150.656,187.136]
+visual_bbox = [111.177734,175.830078,149.985219,184.90625]
+[[expected.content_stream]]
+object = 10
+compressed = false
+bytes = """q 1 0 0 1 3 4 cm /Inner Do Q
+"""
+[[expected.content_stream]]
+object = 11
+compressed = false
+bytes = """BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET
+"""
+[[expected.content_stream]]
+object = 12
+compressed = false
+bytes = """q 1 0 0 1 10 15 cm /Outer Do Q
+"""
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 12
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 9
+[[expected.reference]]
+from_object = 4
+path = ["/XObject", "/Outer"]
+to_object = 10
+[[expected.behaviour]]
+id = "XOBJ-07-resource-scope"
+assertion = "Inner resolves F1 from outer Form resources, not page Helvetica; decoded text is MIMUS with pinned-font advance"
+observable_via = "qpdf resource graph, embedded font cmap, mutool/poppler text and PDFium"
+[[expected.behaviour]]
+id = "XOBJ-07-ctm-chain"
+assertion = "Baseline is (72,120)+(5,7)+(3,4)+(20,30)+(10,15)=(110,176); each matrix remains visible as a separate trace step"
+observable_via = "raw Form dictionaries/content, mutool trace and PoC CTM trace"
+[oracle]
+checks = ["determinism","legality","page-geometry","structure","hand-written-geometry","pdf-bytes","pdf-structure","render"]
+[[adjudication]]
+date = "2026-08-22"
+issue = "Page and Form resource dictionaries bind the same name F1 to different fonts"
+resolution = "Resolve from the innermost available Form resource scope; inherit only when that Form omits Resources"

@@ -1,0 +1,70 @@
+schema_version = 1
+[identity]
+id = "unit-font-01-std14-custom-widths"
+name = "Helvetica with file-defined custom widths"
+class = "unit"
+legality = "legal"
+cases = ["FONT-02"]
+priority = "M0"
+variable = "BaseFont Helvetica declares 1000-unit widths for A through Z"
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-font-01-std14-custom-widths.pdf"
+pdf_sha256 = "6bbf13245639f1c8d3b88157025af4f5ec9fb458893aa3db5535ec67545180fe"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9,10]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d666f6e742d30312d737464"
+info_dictionary = false
+metadata_streams = 0
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+[[expected.block]]
+key = "F02"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "AAAA"
+baseline_origin = [72.0,120.0]
+metric_box = [72.0,117.516,120.0,128.616]
+visual_bbox = [72.168,120.0,115.848,128.616]
+[[expected.content_stream]]
+object = 10
+compressed = false
+bytes = """BT /F1 12 Tf 1 0 0 1 72 120 Tm (AAAA) Tj ET
+"""
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 10
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 9
+[[expected.behaviour]]
+id = "FONT-02-file-widths"
+assertion = "The four baselines are x=72,84,96,108 and the final text advance ends at x=120; standard Helvetica 667-unit A widths must not override /Widths"
+observable_via = "qpdf font dictionary, mutool trace, PDFium character origins and hand arithmetic"
+[oracle]
+checks = ["determinism","legality","page-geometry","structure","font-advance","pdf-bytes","pdf-structure","render"]
+[[adjudication]]
+date = "2026-08-22"
+issue = "Built-in Standard-14 metrics conflict with explicit file /Widths"
+resolution = "The file width is authoritative for positioning; built-in metrics are fallback only when the width entry is absent"

@@ -228,6 +228,10 @@ pub struct Expected {
     pub pdf: Option<PdfContract>,
     #[serde(default)]
     pub content_stream: Vec<ContentStream>,
+    /// Expected CID/glyph sequence for an Identity-H fixture whose Unicode
+    /// mapping comes from the embedded font cmap rather than ToUnicode.
+    #[serde(default)]
+    pub cid_sequence: Vec<u16>,
     #[serde(default)]
     pub reference: Vec<ObjectReference>,
     #[serde(default)]
@@ -459,6 +463,12 @@ pub enum Check {
     /// painted CharProc bbox. Poppler's synthesized Type3 metric box is kept
     /// as differential evidence rather than treated as the specification.
     Type3Geometry,
+    /// Standard-14 width arbitration: compare the independently observed
+    /// baseline and horizontal text advance with the file /Widths contract.
+    FontAdvance,
+    /// Verify Identity-H CIDToGIDMap identity against the pinned embedded
+    /// TrueType cmap, while treating extractor Unicode as differential data.
+    EmbeddedCmap,
     /// Exact header/object/xref/trailer/content-stream bytes.
     PdfBytes,
     /// Rich outline/action/annotation/form/OCG/name-tree object graph.
@@ -569,7 +579,8 @@ impl Manifest {
         fail_if(
             !self.expected.block.is_empty()
                 && !self.requires(Check::Structure)
-                && !self.requires(Check::Glyphs),
+                && !self.requires(Check::Glyphs)
+                && !self.requires(Check::EmbeddedCmap),
             "§2.1",
             "手写的 block.text 无人核对——oracle.checks 必须含 structure 或 glyphs 之一",
         )?;
@@ -887,7 +898,6 @@ impl Manifest {
             (Check::Determinism, "determinism"),
             (Check::Legality, "legality"),
             (Check::PageGeometry, "page-geometry"),
-            (Check::Structure, "structure"),
             (Check::PdfBytes, "pdf-bytes"),
             (Check::PdfStructure, "pdf-structure"),
             (Check::Render, "render"),
@@ -899,9 +909,17 @@ impl Manifest {
             )?;
         }
         fail_if(
-            !self.requires(Check::HandWrittenGeometry) && !self.requires(Check::Type3Geometry),
+            !self.requires(Check::Structure) && !self.requires(Check::EmbeddedCmap),
             "§2.8",
-            "exact-writer fixture 必须启用 hand-written-geometry 或 type3-geometry 门禁",
+            "exact-writer fixture 必须启用 structure 或 embedded-cmap 门禁",
+        )?;
+        fail_if(
+            !self.requires(Check::HandWrittenGeometry)
+                && !self.requires(Check::Type3Geometry)
+                && !self.requires(Check::FontAdvance)
+                && !self.requires(Check::EmbeddedCmap),
+            "§2.8",
+            "exact-writer fixture 必须启用 hand-written-geometry、type3-geometry、font-advance 或 embedded-cmap 门禁",
         )?;
 
         fail_if(

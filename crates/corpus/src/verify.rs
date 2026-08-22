@@ -329,6 +329,8 @@ fn verify_one(
         Check::DualParserGeometry,
         Check::HandWrittenGeometry,
         Check::Type3Geometry,
+        Check::FontAdvance,
+        Check::EmbeddedCmap,
     ]
     .into_iter()
     .any(|check| manifest.requires(check));
@@ -361,6 +363,12 @@ fn verify_one(
     }
     if manifest.requires(Check::Type3Geometry) {
         outcomes.extend(check_type3_geometry(manifest, &mutool_pages));
+    }
+    if manifest.requires(Check::FontAdvance) {
+        outcomes.extend(check_font_advance(manifest, &mutool_pages));
+    }
+    if manifest.requires(Check::EmbeddedCmap) {
+        outcomes.extend(check_embedded_cmap(manifest, &mutool_pages)?);
     }
     if manifest.requires(Check::RenderDiagnostic) {
         let expected = manifest
@@ -2062,6 +2070,164 @@ fn check_type3_geometry(manifest: &Manifest, mutool_pages: &[ParsedPage]) -> Vec
             "mutool painted CharProc bbox",
         ),
     ]
+}
+
+fn check_font_advance(manifest: &Manifest, mutool_pages: &[ParsedPage]) -> Vec<Outcome> {
+    let observed = flatten_blocks(mutool_pages);
+    let tolerance = manifest.expected.tolerance_pt;
+    let mut baseline_problems = Vec::new();
+    let mut advance_problems = Vec::new();
+    for block in &manifest.expected.block {
+        let key = text::compare_key(&block.text);
+        let Ok(actual) = pick(&observed, &key) else {
+            baseline_problems.push(format!("block {} missing from mutool trace", block.key));
+            continue;
+        };
+        let expected_baseline = block.baseline_origin.expect("validated baseline");
+        let expected_metric = block.metric_box.expect("validated metric box");
+        let Some(actual_baseline) = actual.baseline_origin else {
+            baseline_problems.push(format!("block {} has no mutool baseline", block.key));
+            continue;
+        };
+        if !close(actual_baseline.x, expected_baseline[0], tolerance)
+            || !close(actual_baseline.y, expected_baseline[1], tolerance)
+        {
+            baseline_problems.push(format!(
+                "{} expected {:?}, mutool {:?}",
+                block.key, expected_baseline, actual_baseline
+            ));
+        }
+        if !close(actual.rect.x0, expected_metric[0], tolerance)
+            || !close(actual.rect.x1, expected_metric[2], tolerance)
+        {
+            advance_problems.push(format!(
+                "{} expected x [{},{}], mutool [{},{}]",
+                block.key, expected_metric[0], expected_metric[2], actual.rect.x0, actual.rect.x1
+            ));
+        }
+    }
+    vec![
+        geometry_outcome(
+            "geometry/font-baseline",
+            tolerance,
+            baseline_problems,
+            "mutool text baseline",
+        ),
+        geometry_outcome(
+            "geometry/font-advance",
+            tolerance,
+            advance_problems,
+            "mutool horizontal advance",
+        ),
+    ]
+}
+
+fn check_embedded_cmap(manifest: &Manifest, mutool_pages: &[ParsedPage]) -> Result<Vec<Outcome>> {
+    let font = manifest
+        .source
+        .fonts
+        .first()
+        .context("embedded-cmap check missing pinned font")?;
+    let font_bytes = std::fs::read(manifest.dir.join(&font.file))?;
+    let face = ttf_parser::Face::parse(&font_bytes, 0).context("parse pinned TrueType font")?;
+    let expected_text = manifest
+        .expected
+        .block
+        .first()
+        .context("embedded-cmap check missing expected block")?;
+    let mapped: Vec<u16> = expected_text
+        .text
+        .chars()
+        .map(|character| {
+            face.glyph_index(character)
+                .map(|glyph| glyph.0)
+                .with_context(|| format!("pinned font has no glyph for {character:?}"))
+        })
+        .collect::<Result<_>>()?;
+    let cmap_outcome = if mapped == manifest.expected.cid_sequence {
+        Outcome::ok(
+            "embedded-cmap",
+            "§2.8/CMAP-04",
+            format!("pinned TTF maps {:?} to {:?}", expected_text.text, mapped),
+        )
+    } else {
+        Outcome::fail(
+            "embedded-cmap",
+            "§2.8/CMAP-04",
+            format!(
+                "manifest CID sequence {:?}, pinned TTF glyph IDs {:?}",
+                manifest.expected.cid_sequence, mapped
+            ),
+        )
+    };
+
+    let observed = flatten_blocks(mutool_pages);
+    let mut geometry_problems = Vec::new();
+    if observed.len() != 1 {
+        geometry_problems.push(format!(
+            "mutool reported {} blocks, expected 1",
+            observed.len()
+        ));
+    } else {
+        let actual = &observed[0];
+        let expected_baseline = expected_text.baseline_origin.expect("validated baseline");
+        let expected_metric = expected_text.metric_box.expect("validated metric box");
+        let expected_visual = expected_text.visual_bbox.expect("validated visual bbox");
+        if actual.text.chars().count() != manifest.expected.cid_sequence.len() {
+            geometry_problems.push(format!(
+                "mutool reported {} glyphs, expected {}",
+                actual.text.chars().count(),
+                manifest.expected.cid_sequence.len()
+            ));
+        }
+        if actual.baseline_origin.is_none_or(|point| {
+            !close(
+                point.x,
+                expected_baseline[0],
+                manifest.expected.tolerance_pt,
+            ) || !close(
+                point.y,
+                expected_baseline[1],
+                manifest.expected.tolerance_pt,
+            )
+        }) || !close(
+            actual.rect.x0,
+            expected_metric[0],
+            manifest.expected.tolerance_pt,
+        ) || !close(
+            actual.rect.x1,
+            expected_metric[2],
+            manifest.expected.tolerance_pt,
+        ) || !close(
+            actual.rect.y0,
+            expected_visual[1],
+            manifest.expected.visual_tolerance_pt.unwrap_or(0.01),
+        ) || !close(
+            actual.rect.y1,
+            expected_visual[3],
+            manifest.expected.visual_tolerance_pt.unwrap_or(0.01),
+        ) {
+            geometry_problems.push(format!(
+                "expected baseline {:?}/metric-x [{},{}]/ink-y [{},{}], mutool {:?}/{:?}",
+                expected_baseline,
+                expected_metric[0],
+                expected_metric[2],
+                expected_visual[1],
+                expected_visual[3],
+                actual.baseline_origin,
+                actual.rect.to_array()
+            ));
+        }
+    }
+    Ok(vec![
+        cmap_outcome,
+        geometry_outcome(
+            "geometry/cid-glyphs",
+            manifest.expected.visual_tolerance_pt.unwrap_or(0.01),
+            geometry_problems,
+            "mutool glyph count/baseline/ink bbox",
+        ),
+    ])
 }
 
 fn geometry_outcome(
