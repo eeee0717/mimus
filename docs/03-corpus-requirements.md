@@ -733,8 +733,8 @@ BabelDOC 的输出**不得作为唯一正确性 oracle**。它是参考实现而
 - 源码：`pdf_creater.py:1712-1730`（`except Exception: logger.warning(... continue)`）
 - 触发：XObject 的对象在 ObjStm（压缩对象流）内、只读、或已被前面的修复函数改成 `[]`
 - V1：**高度相关**——该 XObject 保留原文而页面主流已替换，出现"一半译文一半原文"且无错误上报。这正是 mimus 增量写回必须验证的场景
-- 构造：Form XObject 存在 `/Type /ObjStm` 压缩对象流里且含文字；页面上也有文字
-- 预期：能正确"从 ObjStm 取出 → 修改 → 以非压缩对象追加"；断言该 XObject 文本已翻译且原 ObjStm 中其余对象未受影响。若无法处理则文档级 fail-fast，**不产出半译文档**
+- 构造：Form XObject 是合法的普通 stream 对象，Form 的 `/Resources` 字典位于 ObjStm 内且含文字；页面上也有文字。stream object 本身不能作为 ObjStm 成员。
+- 预期：能正确"解析 ObjStm 内 Resources → 修改 Form → 保持普通 stream 可寻址"；断言该 XObject 文本已翻译且 ObjStm 中其余对象未受影响。若无法处理则文档级 fail-fast，**不产出半译文档**
 - oracle：独立解析器展开后逐对象比对 + 输出文本断言 · **M0**（增量写回风险探测）· 合法
 
 #### GEOM — MediaBox / CropBox / Rotate / 坐标系
@@ -1539,8 +1539,10 @@ D2（跨栏合并）由 `unit-order-01`–`05` 覆盖，D11（公式字体正则
 | `unit-write-01-bookmarks-rich` | WRITE-06 | 完整书签结构（= `unit-base-03`） |
 | `unit-write-02-shared-resources` | WRITE-04 | 两页共享同一间接 `/Resources` |
 | `unit-write-03-resources-gen-nonzero` | WRITE-04 | generation ≠ 0 的资源引用 |
-| `unit-write-04-xobj-in-objstm` | XOBJ-10 | Form XObject 位于压缩对象流内 |
+| `unit-write-04-xobj-in-objstm` | XOBJ-10 | Form 的 Resources 位于 ObjStm，含文字的 Form stream 为独立对象 |
+| `unit-parse-11-outline-siblings` | PARSE-11 | 合法 `/Next`/`/Prev` outline sibling 父本 |
 | `unit-write-05-indirect-resources-objstm` | WRITE-01 + WRITE-02 | `/Resources` 间接且指向 ObjStm 内字典 |
+| `unit-write-06-free-object-slot` | WRITE-04 | 保留未使用的 free/deleted xref 对象号 |
 | `unit-geom-05-nonzero-origin-boxes` | GEOM-02 | MediaBox 原点非零 + CropBox 并存 |
 | `unit-cmap-02-mixed-codespace` | CMAP-06 | 混合位宽 codespacerange |
 | `unit-xobj-05-singular-ctm` | XOBJ-08 | 奇异 CTM 后的坐标系恢复 |
