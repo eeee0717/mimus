@@ -7,9 +7,9 @@
 
 ## 结论
 
-**成（PoC 路线可行）**。`lopdf::IncrementalDocument` 能以输入 PDF 的完整字节为前缀追加增量段；新对象从输入最大对象号之后连续分配；共享 `/Resources` 可以 copy-on-write，只改目标页；未修改对象、页面框、书签/命名目标/URI/注释/AcroForm/OCG 结构保持不变。qpdf、Poppler、MuPDF 均能读取并渲染输出。
+**成（PoC 路线可行）**。`lopdf::IncrementalDocument` 能以输入 PDF 的完整字节为前缀追加增量段；新对象从输入最大对象号之后连续分配，不复用独立 free xref slot；共享 `/Resources` 可以 copy-on-write，只改目标页；未修改对象、页面框、书签/命名目标/URI/注释/AcroForm/OCG 结构保持不变。qpdf、Poppler、MuPDF 均能读取并渲染输出，新增字体实际挂入 COW Resources 并用于 `POC`。
 
-**范围限制**：这是可丢弃的 M0 PoC，不是生产 writer。字体对象只放入一个 Type1 marker，未实现字体子集化、翻译内容生成、完整 content-stream 重写或双语页模式。生产实现仍需在 `mimus-core` 的 writer 边界内完成，并以本实验的对象图断言为回归门禁。
+**范围限制**：这是可丢弃的 M0 PoC，不是生产 writer。字体对象只放入一个 Standard-14 marker，未实现字体子集化、翻译内容生成、完整 content-stream 重写或双语页模式。生产实现仍需在 `mimus-core` 的 writer 边界内完成，并以本实验的对象图断言为回归门禁。
 
 ## 环境
 
@@ -28,28 +28,30 @@ PoC crate 位于 [`experiments/m0-experiment-3-poc`](../experiments/m0-experimen
 
 ## #10：fixture 交付
 
-新增 8 份合法 fixture 与 2 份畸形 fixture，均由 exact writer 或单字节变异 API 生成；`corpus doctor`、`corpus determinism`、`corpus verify` 已通过（总计 37 份 fixture）。
+新增 10 份合法 fixture 与 2 份畸形 fixture，均由 exact writer 或单字节变异 API 生成；`corpus doctor`、`corpus determinism`、`corpus verify` 已通过。新增的 outline sibling 父本为 PARSE-11 的合法基线，free-slot fixture 明确保留对象 10 的 free xref 槽。
 
 | Fixture | Case | SHA-256 |
 |---|---|---|
-| `unit-write-01-bookmarks-rich` | WRITE-06 | `625417a93f2764b1937983cb5f647ca3369190487ed25a8507115ba9a3974d42` |
-| `unit-write-02-shared-resources` | WRITE-04 | `fe1ab21b6c6aecaa2399cd38d61a7ba6c6a06d451989e43c7e08e6c4e5416aa8` |
-| `unit-write-03-resources-gen-nonzero` | WRITE-04 | `1f24d31273e50ca71767e1f672ce60fdb8ff20413060424d4611f053d08de108` |
-| `unit-write-04-xobj-in-objstm` | XOBJ-10 | `c41cdec88d931c0120f17c015789920640481520877a9875f1d0b63b0c38dd12` |
-| `unit-write-05-indirect-resources-objstm` | WRITE-01/02 | `9cc9bf198c40fc905270c5accfe6c220f5a2a1a3e19af7de5fc7fc9de44f0076` |
-| `unit-geom-05-nonzero-origin-boxes` | GEOM-02 | `8f9b048dd321dd2367a18c3055986801b26293a61676dc25f1645789799c984d` |
-| `unit-cmap-02-mixed-codespace` | CMAP-06 | `aac3252b5ed89f7cd18b07e27d27c4a30a6620a11de34e668265c565d558a2e5` |
-| `unit-xobj-05-singular-ctm` | XOBJ-08 | `decdbfd155e2322d2a26188d036bc3c0a36db4b17d396dede4b8fc7f2a878466` |
-| `mal-parse-08-broken-objstm` | PARSE-11 | `68de9604a241df6c99ff9d2329ab01bc5fc1f81278bd66c819e1a7d78bc9cb82` |
-| `mal-parse-09-outlines-cycle` | PARSE-11 | `36429acd6d1fb9b90067fc084392acd47cb34a7a62328c97eb00df5ce2a9cc8b` |
+| `unit-write-01-bookmarks-rich` | WRITE-06 | `e845f97f78575c79d57e12372a443c947e3c87708052d48b2fc9e87e55fcf337` |
+| `unit-write-02-shared-resources` | WRITE-04 | `e8c3388835fec5df2927bbbf4c2969c97dfa8abb8ba12d5232c4d2531053d5ee` |
+| `unit-write-03-resources-gen-nonzero` | WRITE-04 | `1113f4558025d67ee58b4fc8a5569d5af6545231aa4f4e187486cb6e3b01c4e0` |
+| `unit-write-04-xobj-in-objstm` | XOBJ-10 | `b88b964e36b7de784d16885c375ef65d6b239160ee4d287029ee7863a41c13ba` |
+| `unit-write-05-indirect-resources-objstm` | WRITE-01/02 | `52abe0b8c06a9cbd6dac8506db0dccb39853c3f363938819915c5a4e95d49d7b` |
+| `unit-geom-05-nonzero-origin-boxes` | GEOM-02 | `c169b3bb8b8f73649ca2070c498c25b8e85de55b895254c4d64a1c2794bb12a0` |
+| `unit-cmap-02-mixed-codespace` | CMAP-06 | `9aa8e3f463ced2f15c45ef1d93da23a6f38be8db04e742db6a44e814d69b1439` |
+| `unit-xobj-05-singular-ctm` | XOBJ-08 | `4f35cd78b35c335c24a195a1c172695c978559aa683179afc985fa55c3217510` |
+| `unit-parse-11-outline-siblings` | PARSE-11 | `e81f83c3a1fc0b4b1bc312603168203af536b75f52f927dabcb829456fe59656` |
+| `unit-write-06-free-object-slot` | WRITE-04 | `41cde56eb8cad1a8cbc3498aef86cd270ab3d136eea5b054ce073e7aea72f4eb` |
+| `mal-parse-08-broken-objstm` | PARSE-11 | `ca1a1357a29087841f308e71d98b7d6f869b32c6f112a09471caf350b9fd0fc0` |
+| `mal-parse-09-outlines-cycle` | PARSE-11 | `5e200fcc2d697965e602fb93f789313f64fce2ced0d585aaea0aed77bb791ec4` |
 
-畸形 fixture 分别把 ObjStm `/N 1` 改为 `/N 2`，以及把 `/Outlines /First` 改成非法引用；两者都保持父本全部其它字节不变，并由 qpdf 以声明的错误类别 fail-fast。
+畸形 fixture 分别把 ObjStm `/N 1` 改为 `/N 2`，以及把合法 sibling 的 `/Next 11 0 R` 单字节变异为真正的 `/Next 10 0 R` 自环；两者都保持父本全部其它字节不变，并由声明的结构 oracle fail-fast。
 
 ## #13：PoC 实验
 
 ### 输入与写回
 
-输入为 `corpus/fixtures/unit-base-03-structured/unit-base-03-structured.pdf`，包含一页、共享资源、三级书签、命名目标、URI action、Link/Text/Widget 注释、AcroForm、OCG 与页面框。PoC 执行以下增量操作：
+主输入为 `corpus/fixtures/unit-base-03-structured/unit-base-03-structured.pdf`，包含一页、共享资源、三级书签、命名目标、URI action、Link/Text/Widget 注释、AcroForm、OCG 与页面框；PoC 同时检查 ObjStm Form、CropBox、generation=7 和 free object 10 的 companion fixtures。PoC 执行以下增量操作：
 
 1. 用 `IncrementalDocument::create_from` 保留原始字节；
 2. clone 目标页的 `/Resources`，追加资源对象并仅让目标页指向它（copy-on-write）；
@@ -61,9 +63,9 @@ PoC crate 位于 [`experiments/m0-experiment-3-poc`](../experiments/m0-experimen
 | 量 | 结果 |
 |---|---:|
 | 输入 SHA-256 | `d2f6df979fb5ef328cf3a1ac666360563d73caf94884b4ec8fa619f90ba0fbd9` |
-| 输出 SHA-256 | `c098c59e943e176df563884dff237b94ef07c2067291dbae8845ee606ddbe6d7` |
-| 输入 / 输出长度 | 5181 / 5799 bytes |
-| 追加字节 | 618 bytes |
+| 输出 SHA-256 | `ef9d1548c3b5b9c18ee65f7381b72affc0c7f928add7555f74489fb7d08dd594` |
+| 输入 / 输出长度 | 5181 / 5809 bytes |
+| 追加字节 | 628 bytes |
 | 输入最大对象号 | 18 |
 | 新 Resources / Content / Font | 19 / 20 / 21 |
 
@@ -93,14 +95,15 @@ PoC 分别注入三类失败，并在每次失败前写入 `known-good` 哨兵�
 
 - 资源复制：在 `add_object` 前注入 `injected resource copy failure`；目标文件不变；
 - 字体追加：在字体 marker 的 `add_object` 前注入 `injected font append failure`；目标文件不变；
-- 保存发布：将目标设为已存在目录 `failed-output/child`，注入 `rename` 失败（`Is a directory (os error 21)`）。
+- 保存发布：先写入已存在的 `existing-output.pdf` 临时目标，保存完成后注入失败。
 
-保存路径先写同目录临时文件，`rename` 失败时主动删除临时文件。`failed-output/sentinel.pdf` 内容仍为 `known-good`，临时文件不存在，因此保存失败不会覆盖既有产物，也不会留下半译输出。资源复制与字体追加共用同一保存事务，若任一步失败则不会发布最终路径。
+保存路径先写同目录临时文件，注入失败时主动删除临时文件；`existing-output.pdf` 的 SHA-256 保持不变，因此保存失败不会覆盖既有产物，也不会留下半译输出。资源复制与字体追加共用同一保存事务，若任一步失败则不会发布最终路径。
 
 ## 可重放命令
 
 ```sh
 ~/.cargo/bin/cargo run --manifest-path experiments/m0-experiment-3-poc/Cargo.toml
+~/.cargo/bin/cargo test --manifest-path experiments/m0-experiment-3-poc/Cargo.toml
 ~/.cargo/bin/cargo fmt --all -- --check
 ~/.cargo/bin/cargo clippy --workspace --all-targets --all-features -- -D warnings
 ~/.cargo/bin/cargo test --workspace --all-targets --all-features

@@ -12,14 +12,14 @@ variable = "The ObjStm /N count is changed by exactly one byte"
 [source]
 method = "byte-mutation"
 pdf = "mal-parse-08-broken-objstm.pdf"
-pdf_sha256 = "68de9604a241df6c99ff9d2329ab01bc5fc1f81278bd66c819e1a7d78bc9cb82"
+pdf_sha256 = "ca1a1357a29087841f308e71d98b7d6f869b32c6f112a09471caf350b9fd0fc0"
 font_provenance = "typst-embedded"
 
 [lineage]
 parent = "unit-write-04-xobj-in-objstm"
 
 [[lineage.mutations]]
-byte_offset = 3463
+byte_offset = 3411
 original_byte = 49
 replacement_byte = 50
 description = "change the ObjStm /N 1 declaration to /N 2 without changing stream bytes"

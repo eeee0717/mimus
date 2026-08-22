@@ -41,6 +41,10 @@ impl Document {
     }
 
     pub fn reference(&self, object: u32, path: &[String]) -> Result<u32> {
+        Ok(self.reference_with_generation(object, path)?.0)
+    }
+
+    pub fn reference_with_generation(&self, object: u32, path: &[String]) -> Result<(u32, u16)> {
         let value = self.value(object, path)?;
         parse_reference(value).with_context(|| {
             format!(
@@ -53,12 +57,14 @@ impl Document {
     pub fn optional_reference(&self, object: u32, path: &[String]) -> Result<Option<u32>> {
         self.optional_value(object, path)?
             .map(|value| {
-                parse_reference(value).with_context(|| {
-                    format!(
-                        "object {object} path {} is not an indirect reference",
-                        path.join("/")
-                    )
-                })
+                parse_reference(value)
+                    .map(|(object, _)| object)
+                    .with_context(|| {
+                        format!(
+                            "object {object} path {} is not an indirect reference",
+                            path.join("/")
+                        )
+                    })
             })
             .transpose()
     }
@@ -71,7 +77,7 @@ impl Document {
             .as_array()
             .with_context(|| format!("object {object} path {} is not an array", path.join("/")))?
             .iter()
-            .map(parse_reference)
+            .map(|value| parse_reference(value).map(|(object, _)| object))
             .collect()
     }
 
@@ -84,7 +90,7 @@ impl Document {
             .map(|page| {
                 page.get("object")
                     .context("qpdf page has no object")
-                    .and_then(parse_reference)
+                    .and_then(|value| parse_reference(value).map(|(object, _)| object))
             })
             .collect()
     }
@@ -191,7 +197,9 @@ impl Document {
             .trailer()?
             .get(key)
             .with_context(|| format!("trailer key {key} is absent"))?;
-        parse_reference(value).with_context(|| format!("trailer {key} is not a reference"))
+        parse_reference(value)
+            .map(|(object, _)| object)
+            .with_context(|| format!("trailer {key} is not a reference"))
     }
 
     pub fn metadata_streams(&self) -> Result<usize> {
@@ -234,7 +242,7 @@ fn count_uri_actions(value: &Value) -> usize {
     }
 }
 
-fn parse_reference(value: &Value) -> Result<u32> {
+fn parse_reference(value: &Value) -> Result<(u32, u16)> {
     let text = value.as_str().context("reference is not a JSON string")?;
     let mut parts = text.split_whitespace();
     let object = parts
@@ -246,7 +254,7 @@ fn parse_reference(value: &Value) -> Result<u32> {
     if generation.parse::<u16>().is_err() || parts.next() != Some("R") || parts.next().is_some() {
         bail!("unsupported reference {text:?}");
     }
-    Ok(object)
+    Ok((object, generation.parse::<u16>()?))
 }
 
 pub fn raw_stream(pdf: &Path, object: u32) -> Result<Vec<u8>> {

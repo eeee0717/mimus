@@ -7,13 +7,13 @@ class = "unit"
 legality = "legal"
 cases = ["WRITE-01", "WRITE-02"]
 priority = "M0"
-variable = "The page resources reference resolves to a compressed dictionary"
+variable = "The page resources reference resolves to a compressed dictionary and its font omits /Widths"
 
 [source]
 method = "exact-writer"
 generator = "corpus-exact-writer-v1"
 pdf = "unit-write-05-indirect-resources-objstm.pdf"
-pdf_sha256 = "9cc9bf198c40fc905270c5accfe6c220f5a2a1a3e19af7de5fc7fc9de44f0076"
+pdf_sha256 = "52abe0b8c06a9cbd6dac8506db0dccb39853c3f363938819915c5a4e95d49d7b"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
 
@@ -50,8 +50,8 @@ draw_order = 1
 reading_order = 1
 text = "MIMUS"
 baseline_origin = [72.0, 120.0]
-metric_box = [72.0, 117.168, 112.656, 131.136]
-visual_bbox = [73.177734, 119.830078, 111.985219, 128.90625]
+metric_box = [72.0, 117.168, 111.996, 131.136]
+visual_bbox = [73.177734, 119.830078, 111.937229, 128.90625]
 
 [[expected.content_stream]]
 object = 9
@@ -70,8 +70,8 @@ to_object = 11
 
 [[expected.behaviour]]
 id = "WRITE-01-02-indirect-resources"
-assertion = "An indirect resources dictionary in an ObjStm resolves without regex fallback or dropped glyphs"
-observable_via = "qpdf compressed object reference and extracted text"
+assertion = "An indirect resources dictionary in an ObjStm resolves without regex fallback; missing /Widths makes encoding width indeterminate, so extracted character count must not decrease"
+observable_via = "qpdf compressed object reference, font dictionary, and independent character-count extraction"
 
 [oracle]
 checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]

@@ -19,7 +19,7 @@ variable = "One uncompressed text-show operation at a known baseline in a minima
 method = "exact-writer"
 generator = "corpus-exact-writer-v1"
 pdf = "unit-base-01-single-line.pdf"
-pdf_sha256 = "697db3190e4b9fee889ff82237412a8817d4e785471e5ad77023aa71ea054675"
+pdf_sha256 = "42c633b4638fc98f09edab9551c4c028d131c7ff19c64c3ebbd06d696288fd3f"
 font_provenance = "vendored"
 fonts = [
     { file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" },

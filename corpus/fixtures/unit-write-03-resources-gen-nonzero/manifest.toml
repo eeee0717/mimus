@@ -13,7 +13,7 @@ variable = "The shared resources reference uses generation seven"
 method = "exact-writer"
 generator = "corpus-exact-writer-v1"
 pdf = "unit-write-03-resources-gen-nonzero.pdf"
-pdf_sha256 = "1f24d31273e50ca71767e1f672ce60fdb8ff20413060424d4611f053d08de108"
+pdf_sha256 = "1113f4558025d67ee58b4fc8a5569d5af6545231aa4f4e187486cb6e3b01c4e0"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
 
@@ -51,7 +51,7 @@ reading_order = 1
 text = "MIMUS"
 baseline_origin = [72.0, 120.0]
 metric_box = [72.0, 117.168, 112.656, 131.136]
-visual_bbox = [72.93237504, 119.723876952, 112.13034376, 128.8919676]
+visual_bbox = [73.177734, 119.830078, 111.985229, 128.90625]
 
 [[expected.content_stream]]
 object = 9
@@ -67,6 +67,7 @@ ET
 from_object = 3
 path = ["/Resources"]
 to_object = 4
+to_generation = 7
 
 [[expected.behaviour]]
 id = "WRITE-04-generation"

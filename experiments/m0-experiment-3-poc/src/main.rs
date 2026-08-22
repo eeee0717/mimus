@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use lopdf::{Document, IncrementalDocument, Object, Stream, dictionary};
 use sha2::{Digest, Sha256};
 
@@ -14,8 +14,7 @@ fn main() -> Result<()> {
     let work = root.join(".context/m0-lab/poc");
     fs::create_dir_all(&work)?;
     let output = work.join("incremental-output.pdf");
-    let failed = work.join("failed-output");
-    let report = run(&input, &output, &failed)?;
+    let report = run(&input, &output)?;
     println!("{report}");
     Ok(())
 }
@@ -28,7 +27,10 @@ fn repo_root() -> Result<PathBuf> {
         .context("cannot locate repository root")
 }
 
-fn run(input: &Path, output: &Path, failed: &Path) -> Result<String> {
+fn run(input: &Path, output: &Path) -> Result<String> {
+    let work = output.parent().context("output has no parent")?;
+    let root = repo_root()?;
+    verify_companion_inputs(&root)?;
     let before = fs::read(input)?;
     let before_sha = sha256(&before);
     let document = Document::load(input).context("load input with lopdf")?;
@@ -52,6 +54,20 @@ fn run(input: &Path, output: &Path, failed: &Path) -> Result<String> {
     incremental.opt_clone_object_to_new_document(input_page)?;
     let resources = document.get_object(resources_id)?.clone();
     let new_resources = copy_resources(&mut incremental, resources, false)?;
+    // Append a real Standard-14 font and wire it into the copied resource
+    // dictionary. The new content must reference this font; an unreferenced
+    // marker would not exercise glyph preservation at all.
+    let marker_id = append_font_marker(&mut incremental, false)?;
+    {
+        let resources = incremental
+            .new_document
+            .get_object_mut(new_resources)?
+            .as_dict_mut()?;
+        resources
+            .get_mut(b"Font")?
+            .as_dict_mut()?
+            .set("F2", marker_id);
+    }
     {
         let page = incremental
             .new_document
@@ -60,9 +76,10 @@ fn run(input: &Path, output: &Path, failed: &Path) -> Result<String> {
         page.set("Resources", new_resources);
     }
 
+    let content = b"BT\n/F2 12 Tf\n1 0 0 1 72 120 Tm\n(POC) Tj\nET\n";
     let content_id = incremental.new_document.add_object(Stream::new(
-        dictionary! { "Length" => Object::Integer(42) },
-        b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(POC) Tj\nET\n".to_vec(),
+        dictionary! { "Length" => Object::Integer(content.len() as i64) },
+        content.to_vec(),
     ));
     incremental
         .new_document
@@ -70,11 +87,7 @@ fn run(input: &Path, output: &Path, failed: &Path) -> Result<String> {
         .as_dict_mut()?
         .set("Contents", content_id);
 
-    // A tiny appended font marker exercises the same object-allocation path as
-    // a real embedded font while keeping this experiment independent of font
-    // subsetting and translation code.
-    let marker_id = append_font_marker(&mut incremental, false)?;
-    let output_bytes = save_incremental(&mut incremental, output)?;
+    let output_bytes = save_incremental(&mut incremental, output, false)?;
     let output_sha = sha256(&output_bytes);
     ensure!(
         output_bytes.starts_with(&before),
@@ -86,6 +99,7 @@ fn run(input: &Path, output: &Path, failed: &Path) -> Result<String> {
     );
     ensure!(new_resources.0 > max_id, "COW resource was not appended");
     ensure!(content_id.0 > max_id, "content object is not appended");
+    ensure!(marker_id.0 != 10 && new_resources.0 != 10 && content_id.0 != 10);
     ensure!(
         fs::read(output)? == output_bytes,
         "output changed after save"
@@ -109,6 +123,17 @@ fn run(input: &Path, output: &Path, failed: &Path) -> Result<String> {
     ensure!(
         output_resources == new_resources,
         "target page did not use COW resources"
+    );
+    let output_font = reloaded
+        .get_object(output_resources)?
+        .as_dict()?
+        .get(b"Font")?
+        .as_dict()?
+        .get(b"F2")?
+        .as_reference()?;
+    ensure!(
+        output_font == marker_id,
+        "new font is not referenced by COW resources"
     );
     ensure!(reloaded.get_object(resources_id)? == &input_page_resources);
     let root = reloaded.trailer.get(b"Root")?.as_reference()?;
@@ -159,16 +184,14 @@ fn run(input: &Path, output: &Path, failed: &Path) -> Result<String> {
 
     // Failure injection: an unwritable destination must not replace an
     // existing file, and the temporary output must be cleaned up.
-    fs::create_dir_all(&failed)?;
-    let failed_sentinel = failed.join("sentinel.pdf");
-    fs::write(&failed_sentinel, b"known-good")?;
-    let blocked_target = failed.join("child");
-    fs::create_dir_all(&blocked_target)?;
     let mut failed_incremental = IncrementalDocument::create_from(before.clone(), document);
-    let failure = save_incremental(&mut failed_incremental, &blocked_target)
-        .expect_err("directory target should fail");
-    ensure!(fs::read(&failed_sentinel)? == b"known-good");
-    let temp = failed.join(format!(".{}.tmp", std::process::id()));
+    let failed_target = work.join("existing-output.pdf");
+    fs::write(&failed_target, b"known-good")?;
+    let before_failed = sha256(&fs::read(&failed_target)?);
+    let failure = save_incremental(&mut failed_incremental, &failed_target, true)
+        .expect_err("injected save failure should fail");
+    ensure!(sha256(&fs::read(&failed_target)?) == before_failed);
+    let temp = work.join(format!(".{}.tmp", std::process::id()));
     ensure!(!temp.exists(), "failed save left a temporary file");
     let failure_text = format!("{failure:#}");
 
@@ -182,6 +205,81 @@ fn run(input: &Path, output: &Path, failed: &Path) -> Result<String> {
         content_id.0,
         marker_id.0,
     ))
+}
+
+fn verify_companion_inputs(root: &Path) -> Result<()> {
+    let objstm_path =
+        root.join("corpus/fixtures/unit-write-04-xobj-in-objstm/unit-write-04-xobj-in-objstm.pdf");
+    let objstm_bytes = fs::read(&objstm_path)?;
+    ensure!(objstm_bytes.windows(13).any(|w| w == b"/Type /ObjStm"));
+    let objstm = Document::load(&objstm_path)?;
+    let page = objstm
+        .get_pages()
+        .into_iter()
+        .next()
+        .context("ObjStm fixture has no page")?
+        .1;
+    let resources = objstm
+        .get_object(page)?
+        .as_dict()?
+        .get(b"Resources")?
+        .as_reference()?;
+    let xobject = objstm
+        .get_object(resources)?
+        .as_dict()?
+        .get(b"XObject")?
+        .as_dict()?
+        .get(b"X1")?
+        .as_reference()?;
+    let form = objstm.get_object(xobject)?.as_stream()?;
+    ensure!(form.content.windows(4).any(|w| w == b"FORM"));
+
+    let geometry_path = root.join(
+        "corpus/fixtures/unit-geom-05-nonzero-origin-boxes/unit-geom-05-nonzero-origin-boxes.pdf",
+    );
+    let geometry = Document::load(&geometry_path)?;
+    let geometry_page = geometry
+        .get_pages()
+        .into_iter()
+        .next()
+        .context("geometry fixture has no page")?
+        .1;
+    let geometry_dict = geometry.get_object(geometry_page)?.as_dict()?;
+    ensure!(geometry_dict.get(b"MediaBox")?.as_array()?.len() == 4);
+    ensure!(geometry_dict.get(b"CropBox")?.as_array()?.len() == 4);
+
+    let generation_path = root.join(
+        "corpus/fixtures/unit-write-03-resources-gen-nonzero/unit-write-03-resources-gen-nonzero.pdf",
+    );
+    let generation = Document::load(&generation_path)?;
+    ensure!(generation.objects.contains_key(&(4, 7)));
+    let generation_page = generation
+        .get_pages()
+        .into_iter()
+        .next()
+        .context("generation fixture has no page")?
+        .1;
+    ensure!(
+        generation
+            .get_object(generation_page)?
+            .as_dict()?
+            .get(b"Resources")?
+            .as_reference()?
+            == (4, 7)
+    );
+
+    let free_path = root
+        .join("corpus/fixtures/unit-write-06-free-object-slot/unit-write-06-free-object-slot.pdf");
+    let free_bytes = fs::read(&free_path)?;
+    ensure!(free_bytes.windows(10).any(|w| w == b"xref\n0 11\n"));
+    ensure!(
+        free_bytes
+            .windows(20)
+            .any(|w| w == b"0000000000 00000 f \n")
+    );
+    let free = Document::load(&free_path)?;
+    ensure!(!object_numbers(&free).contains(&10));
+    Ok(())
 }
 
 fn copy_resources(
@@ -214,7 +312,11 @@ fn work_sentinel(output: &Path, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn save_incremental(document: &mut IncrementalDocument, output: &Path) -> Result<Vec<u8>> {
+fn save_incremental(
+    document: &mut IncrementalDocument,
+    output: &Path,
+    inject_failure: bool,
+) -> Result<Vec<u8>> {
     let parent = output.parent().context("output has no parent")?;
     fs::create_dir_all(parent)?;
     let temp = parent.join(format!(".{}.tmp", std::process::id()));
@@ -223,6 +325,10 @@ fn save_incremental(document: &mut IncrementalDocument, output: &Path) -> Result
         .save_to(&mut bytes)
         .context("serialize incremental lopdf document")?;
     fs::write(&temp, &bytes)?;
+    if inject_failure {
+        let _ = fs::remove_file(&temp);
+        return Err(anyhow!("injected save failure after temporary write"));
+    }
     if let Err(error) = fs::rename(&temp, output) {
         let _ = fs::remove_file(&temp);
         return Err(error).with_context(|| format!("rename {}", temp.display()));
@@ -238,4 +344,25 @@ fn sha256(bytes: &[u8]) -> String {
     let mut digest = Sha256::new();
     digest.update(bytes);
     format!("{:x}", digest.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incremental_writeback_keeps_prefix_and_publishes_referenced_font() {
+        let root = repo_root().unwrap();
+        let work = std::env::temp_dir().join(format!(
+            "mimus-m0-experiment-3-poc-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&work).unwrap();
+        let input = root.join(INPUT);
+        let output = work.join("output.pdf");
+        let report = run(&input, &output).unwrap();
+        assert!(report.contains("new_font=20"));
+        assert!(report.contains("save_failure=injected save failure"));
+        std::fs::remove_dir_all(work).unwrap();
+    }
 }

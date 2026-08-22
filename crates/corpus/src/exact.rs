@@ -29,6 +29,8 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
         "unit-xobj-05-singular-ctm" => singular_ctm(repo_root),
         "unit-write-04-xobj-in-objstm" => xobject_in_object_stream(repo_root),
         "unit-write-05-indirect-resources-objstm" => resources_in_object_stream(repo_root),
+        "unit-parse-11-outline-siblings" => outline_siblings(repo_root),
+        "unit-write-06-free-object-slot" => free_object_slot(repo_root),
         _ => bail!("exact fixture `{fixture_id}` is not implemented"),
     }
 }
@@ -244,7 +246,7 @@ fn shared_resources(repo_root: &Path) -> Result<Vec<u8>> {
     pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 5 0 R /Contents 11 0 R >>")?;
     pdf.object(b"<< /Font << /F1 6 0 R >> >>")?;
     pdf.object(font_dictionary_with_descriptor(9, 7).as_bytes())?;
-    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 8 0 R >>")?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
     pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
     pdf.stream(b"/Type /CMap", to_unicode())?;
     pdf.stream(b"", b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n")?;
@@ -262,7 +264,7 @@ fn shared_resources_generation(repo_root: &Path) -> Result<Vec<u8>> {
     )?;
     pdf.object_with_generation(b"<< /Font << /F1 5 0 R >> >>", 7)?;
     pdf.object(font_dictionary(8).as_bytes())?;
-    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 8 0 R >>")?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
     pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
     pdf.stream(b"/Type /CMap", to_unicode())?;
     pdf.stream(b"", b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n")?;
@@ -282,16 +284,22 @@ fn nonzero_origin_boxes(repo_root: &Path) -> Result<Vec<u8>> {
 }
 
 fn mixed_codespace(repo_root: &Path) -> Result<Vec<u8>> {
-    simple_font_page_cmap(
-        repo_root,
-        "unit-cmap-02-mixed-codespace",
-        [0, 0, 300, 200],
-        None,
-        "4 0 R",
-        b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n",
-        0,
-        mixed_to_unicode(),
-    )
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-cmap-02-mixed-codespace");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 10 0 R >>")?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    pdf.object(b"<< /Type /Font /Subtype /Type0 /BaseFont /MIMUSI+DejaVuSans /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 9 0 R >>")?;
+    pdf.object(b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /MIMUSI+DejaVuSans /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 7 0 R /CIDToGIDMap /Identity /W [3 [600] 6 [600] 7 [600] 9 [600] 11 [600]] >>")?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 8 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", mixed_to_unicode())?;
+    pdf.stream(
+        b"",
+        b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n<000700060007000B0009> Tj\nET\n",
+    )?;
+    pdf.finish(1)
 }
 
 fn singular_ctm(repo_root: &Path) -> Result<Vec<u8>> {
@@ -312,8 +320,8 @@ fn singular_ctm(repo_root: &Path) -> Result<Vec<u8>> {
         b"q\n0 0 0 0 0 0 cm\n/X1 Do\nQ\nBT\n/F1 12 Tf\n1 0 0 1 100 100 Tm\n(MIMUS) Tj\nET\n",
     )?;
     pdf.stream(
-        b"/Type /XObject /Subtype /Form /BBox [0 0 10 10]",
-        b"q\n0 0 0 0 0 0 cm\nQ\n",
+        b"/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources 4 0 R",
+        b"q\n0 0 0 0 0 0 cm\nBT\n/F1 12 Tf\n1 0 0 1 0 0 Tm\n(FORM) Tj\nET\nQ\n",
     )?;
     pdf.finish(1)
 }
@@ -326,7 +334,7 @@ fn xobject_in_object_stream(repo_root: &Path) -> Result<Vec<u8>> {
     pdf.object(
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 9 0 R >>",
     )?;
-    pdf.object(b"<< /Font << /F1 5 0 R >> /XObject << /X1 11 0 R >> >>")?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> /XObject << /X1 12 0 R >> >>")?;
     pdf.object(font_dictionary(8).as_bytes())?;
     pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
     pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
@@ -335,10 +343,17 @@ fn xobject_in_object_stream(repo_root: &Path) -> Result<Vec<u8>> {
         b"",
         b"q\n/X1 Do\nQ\nBT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n",
     )?;
-    pdf.finish_with_object_stream(
+    let form_content = b"BT\n/F1 12 Tf\n1 0 0 1 0 0 Tm\n(FORM) Tj\nET\n";
+    let form_body = format!(
+        "<< /Length {} /Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources 11 0 R >>\nstream\n{}endstream",
+        form_content.len(),
+        String::from_utf8_lossy(form_content)
+    );
+    pdf.finish_with_object_stream_with_tail(
         1,
         11,
-        b"<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << >> >>\nstream\nq\nQ\nendstream",
+        b"<< /Font << /F1 5 0 R >> >>",
+        form_body.as_bytes(),
     )
 }
 
@@ -349,12 +364,57 @@ fn resources_in_object_stream(repo_root: &Path) -> Result<Vec<u8>> {
     pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
     pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 11 0 R /Contents 9 0 R >>")?;
     pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
-    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(font_dictionary_without_widths(8).as_bytes())?;
     pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
     pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
     pdf.stream(b"/Type /CMap", to_unicode())?;
     pdf.stream(b"", b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n")?;
     pdf.finish_with_object_stream(1, 11, b"<< /Font << /F1 5 0 R >> >>")
+}
+
+fn outline_siblings(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-parse-11-outline-siblings");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R /Outlines 9 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 12 0 R >>",
+    )?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(
+        b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>",
+    )?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", to_unicode())?;
+    pdf.object(b"<< /Type /Outlines /First 10 0 R /Last 11 0 R /Count 2 >>")?;
+    pdf.object(
+        b"<< /Title (First sibling) /Parent 9 0 R /Next 11 0 R /Dest [3 0 R /XYZ 72 120 1] >>",
+    )?;
+    pdf.object(
+        b"<< /Title (Second sibling) /Parent 9 0 R /Prev 10 0 R /Dest [3 0 R /XYZ 72 100 1] >>",
+    )?;
+    pdf.stream(b"", b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n")?;
+    pdf.finish(1)
+}
+
+fn free_object_slot(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-write-06-free-object-slot");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 9 0 R >>",
+    )?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(
+        b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>",
+    )?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", to_unicode())?;
+    pdf.stream(b"", b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n")?;
+    pdf.finish_with_free_object(1, 10)
 }
 
 const FONT_SHA256: &str = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735";
@@ -395,6 +455,14 @@ fn font_dictionary_with_descriptor(to_unicode_object: u32, descriptor_object: u3
     )
 }
 
+fn font_dictionary_without_widths(to_unicode_object: u32) -> String {
+    format!(
+        "<< /Type /Font /Subtype /TrueType /BaseFont /MIMUSI+DejaVuSans \
+         /FirstChar 32 /LastChar 85 /FontDescriptor 6 0 R \
+         /Encoding /WinAnsiEncoding /ToUnicode {to_unicode_object} 0 R >>"
+    )
+}
+
 fn to_unicode() -> &'static [u8] {
     b"/CIDInit /ProcSet findresource begin\n\
 12 dict begin\n\
@@ -405,16 +473,11 @@ begincmap\n\
 1 begincodespacerange\n\
 <00> <FF>\n\
 endcodespacerange\n\
-9 beginbfchar\n\
-<20> <0020>\n\
-<43> <0043>\n\
-<45> <0045>\n\
-<49> <0049>\n\
-<4D> <004D>\n\
-<52> <0052>\n\
-<53> <0053>\n\
-<54> <0054>\n\
-<55> <0055>\n\
+5 beginbfchar\n\
+<0006> <0049>\n\
+<0007> <004D>\n\
+<0009> <0053>\n\
+<000B> <0055>\n\
 endbfchar\n\
 endcmap\n\
 CMapName currentdict /CMap defineresource pop\n\
@@ -433,16 +496,11 @@ begincmap\n\
 <00> <FF>\n\
 <0000> <FFFF>\n\
 endcodespacerange\n\
-9 beginbfchar\n\
-<20> <0020>\n\
-<43> <0043>\n\
-<45> <0045>\n\
-<49> <0049>\n\
-<4D> <004D>\n\
-<52> <0052>\n\
-<53> <0053>\n\
-<54> <0054>\n\
-<55> <0055>\n\
+5 beginbfchar\n\
+<0006> <0049>\n\
+<0007> <004D>\n\
+<0009> <0053>\n\
+<000B> <0055>\n\
 endbfchar\n\
 endcmap\n\
 CMapName currentdict /CMap defineresource pop\n\
@@ -533,14 +591,69 @@ impl RawPdf {
         Ok(self.bytes)
     }
 
+    fn finish_with_free_object(mut self, root_object: u32, free_object: u32) -> Result<Vec<u8>> {
+        ensure!(free_object == self.offsets.len() as u32 + 1);
+        let xref_offset = self.bytes.len();
+        let size = self.offsets.len() + 2;
+        self.bytes
+            .extend_from_slice(format!("xref\n0 {size}\n0000000000 65535 f \n").as_bytes());
+        for (offset, generation) in self.offsets.iter().zip(&self.generations) {
+            ensure!(
+                *offset <= 9_999_999_999,
+                "PDF offset exceeds classic xref width"
+            );
+            self.bytes
+                .extend_from_slice(format!("{offset:010} {generation:05} n \n").as_bytes());
+        }
+        self.bytes.extend_from_slice(b"0000000000 00000 f \n");
+        let id = hash::trailer_id_hex(&self.fixture_id);
+        self.bytes.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {size} /Root {root_object} 0 R /ID [<{id}> <{id}>] >>\nstartxref\n{xref_offset}\n%%EOF\n"
+            )
+            .as_bytes(),
+        );
+        Ok(self.bytes)
+    }
+
     /// Finish with one compressed object and an xref stream. The object stream
     /// is intentionally tiny so independent tools can inspect it without any
     /// producer-specific assumptions.
     fn finish_with_object_stream(
+        self,
+        root_object: u32,
+        compressed_object: u32,
+        compressed_body: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.finish_with_object_stream_and_tail(
+            root_object,
+            compressed_object,
+            compressed_body,
+            None,
+        )
+    }
+
+    fn finish_with_object_stream_with_tail(
+        self,
+        root_object: u32,
+        compressed_object: u32,
+        compressed_body: &[u8],
+        tail_body: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.finish_with_object_stream_and_tail(
+            root_object,
+            compressed_object,
+            compressed_body,
+            Some(tail_body),
+        )
+    }
+
+    fn finish_with_object_stream_and_tail(
         mut self,
         root_object: u32,
         compressed_object: u32,
         compressed_body: &[u8],
+        tail_body: Option<&[u8]>,
     ) -> Result<Vec<u8>> {
         ensure!(compressed_object == self.offsets.len() as u32 + 2);
         let object_stream = self.offsets.len() as u32 + 1;
@@ -564,7 +677,22 @@ impl RawPdf {
         self.bytes.extend_from_slice(&stream);
         self.bytes.extend_from_slice(b"\nendstream\nendobj\n");
 
-        let xref_object = object_stream + 2;
+        let tail_object = if let Some(body) = tail_body {
+            let tail_object = object_stream + 2;
+            self.offsets.push(self.bytes.len());
+            self.generations.push(0);
+            self.bytes
+                .extend_from_slice(format!("{tail_object} 0 obj\n").as_bytes());
+            self.bytes.extend_from_slice(body);
+            if !body.ends_with(b"\n") {
+                self.bytes.push(b'\n');
+            }
+            self.bytes.extend_from_slice(b"endobj\n");
+            tail_object
+        } else {
+            object_stream + 1
+        };
+        let xref_object = tail_object + 1;
         let size = xref_object + 1;
         let xref_offset = self.bytes.len();
         let mut entries = Vec::with_capacity(size as usize * 7);
@@ -579,6 +707,14 @@ impl RawPdf {
         entries.push(2);
         entries.extend_from_slice(&object_stream.to_be_bytes());
         entries.extend_from_slice(&[0, 0]);
+        if tail_body.is_some() {
+            // The compressed member has no physical offset in this vector,
+            // so the regular tail object is one slot earlier than its number.
+            let offset = self.offsets[(tail_object - 2) as usize] as u32;
+            entries.push(1);
+            entries.extend_from_slice(&offset.to_be_bytes());
+            entries.extend_from_slice(&[0, 0]);
+        }
         entries.push(1);
         entries.extend_from_slice(&(xref_offset as u32).to_be_bytes());
         entries.extend_from_slice(&[0, 0]);

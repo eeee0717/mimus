@@ -13,7 +13,7 @@ variable = "MediaBox and CropBox both have non-zero origins"
 method = "exact-writer"
 generator = "corpus-exact-writer-v1"
 pdf = "unit-geom-05-nonzero-origin-boxes.pdf"
-pdf_sha256 = "8f9b048dd321dd2367a18c3055986801b26293a61676dc25f1645789799c984d"
+pdf_sha256 = "c169b3bb8b8f73649ca2070c498c25b8e85de55b895254c4d64a1c2794bb12a0"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
 
@@ -51,7 +51,7 @@ draw_order = 1
 reading_order = 1
 text = "MIMUS"
 baseline_origin = [150.0, 220.0]
-metric_box = [170.0, 197.168, 210.656, 211.136]
+metric_box = [150.0, 217.168, 190.656, 231.136]
 visual_bbox = [151.177734, 219.830078, 189.985219, 228.90625]
 
 [[expected.content_stream]]

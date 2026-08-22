@@ -2,27 +2,27 @@ schema_version = 1
 
 [identity]
 id = "mal-parse-09-outlines-cycle"
-name = "Outline root redirected into its own subtree"
+name = "Outline /Next self-cycle"
 class = "mal"
 legality = "malformed"
 cases = ["PARSE-11"]
 priority = "M0"
-variable = "The first outline child reference is changed by one byte to point at the outline root"
+variable = "A legal sibling /Next 11 0 R reference is changed by one byte to self-reference 10 0 R"
 
 [source]
 method = "byte-mutation"
 pdf = "mal-parse-09-outlines-cycle.pdf"
-pdf_sha256 = "36429acd6d1fb9b90067fc084392acd47cb34a7a62328c97eb00df5ce2a9cc8b"
+pdf_sha256 = "5e200fcc2d697965e602fb93f789313f64fce2ced0d585aaea0aed77bb791ec4"
 font_provenance = "typst-embedded"
 
 [lineage]
-parent = "unit-write-01-bookmarks-rich"
+parent = "unit-parse-11-outline-siblings"
 
 [[lineage.mutations]]
-byte_offset = 3236
+byte_offset = 3397
 original_byte = 49
 replacement_byte = 48
-description = "redirect /Outlines /First 10 0 R to the invalid root reference 00 0 R"
+description = "change the legal sibling /Next 11 0 R into a self-cycle /Next 10 0 R"
 
 [[page]]
 index = 0
@@ -32,7 +32,7 @@ rotate = 0
 [expected]
 geometry_source = "hand-written"
 tolerance_pt = 0.001
-declared_failure = "bad indirect reference"
+declared_failure = "outline cycle"
 block = []
 
 [expected.structure]
@@ -43,7 +43,7 @@ columns = 1
 [[expected.behaviour]]
 id = "PARSE-11-outlines-cycle"
 assertion = "A corrupt outline graph is rejected rather than rebuilt into a document with lost bookmarks"
-observable_via = "qpdf --check error text and exit status"
+observable_via = "semantic outline walker rejects the /Next self-cycle"
 
 [oracle]
 checks = ["legality", "structure"]

@@ -13,7 +13,7 @@ variable = "Both pages point at one indirect resources object"
 method = "exact-writer"
 generator = "corpus-exact-writer-v1"
 pdf = "unit-write-02-shared-resources.pdf"
-pdf_sha256 = "fe1ab21b6c6aecaa2399cd38d61a7ba6c6a06d451989e43c7e08e6c4e5416aa8"
+pdf_sha256 = "e8c3388835fec5df2927bbbf4c2969c97dfa8abb8ba12d5232c4d2531053d5ee"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 6, descriptor_object = 7, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
 
@@ -55,7 +55,7 @@ reading_order = 1
 text = "MIMUS"
 baseline_origin = [72.0, 120.0]
 metric_box = [72.0, 117.168, 112.656, 131.136]
-visual_bbox = [73.177734, 119.830078, 111.985219, 128.90625]
+visual_bbox = [72.93237504, 119.723876952, 112.13034376, 128.8919676]
 
 [[expected.block]]
 key = "P2"
@@ -66,7 +66,7 @@ reading_order = 2
 text = "MIMUSC"
 baseline_origin = [72.0, 120.0]
 metric_box = [72.0, 117.168, 121.032, 131.136]
-visual_bbox = [73.17773436, 119.830078128, 120.38452588, 128.90625]
+visual_bbox = [72.93237504, 119.723876952, 120.509806, 128.8919676]
 
 [[expected.content_stream]]
 object = 10

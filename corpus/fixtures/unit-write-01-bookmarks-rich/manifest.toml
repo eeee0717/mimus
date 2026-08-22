@@ -18,7 +18,7 @@ variable = "One legal page carrying a fixed rich document structure around exact
 method = "exact-writer"
 generator = "corpus-exact-writer-v1"
 pdf = "unit-write-01-bookmarks-rich.pdf"
-pdf_sha256 = "625417a93f2764b1937983cb5f647ca3369190487ed25a8507115ba9a3974d42"
+pdf_sha256 = "e845f97f78575c79d57e12372a443c947e3c87708052d48b2fc9e87e55fcf337"
 font_provenance = "vendored"
 fonts = [
     { file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" },

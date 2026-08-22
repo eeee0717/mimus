@@ -29,3 +29,6 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --all-targets --all-features
+
+      - name: Incremental writeback PoC
+        run: cargo test --manifest-path experiments/m0-experiment-3-poc/Cargo.toml

@@ -17,5 +17,5 @@ tolerance_pt = 0.001000
 [[render]]
 page = 0
 dpi = 150
-poppler_sha256 = "63d7de6c7aba19276f363497bf1e9b2b1e558eeab9048801e1de0d3f4cf46af5"
-mutool_md5 = "a64e3cc51a69b0852ef9f8803d2f299c"
+poppler_sha256 = "c72dd65c1e894c9573afa8a9fff6112d97998a4381a305ac778d75f727f1d6ae"
+mutool_md5 = "419c5749b3c22c3d27eb5d1092c2290b"
