@@ -108,7 +108,7 @@
 
 ### 测试
 
-- **Corpus v1**：从零构建的合成语料，入 repo `corpus/`。**尚未生成任何 PDF**；早期 23 份合成语料已作废（坐标偏移与视觉质量问题），其几何参数与生成代码不得参考。
+- **Corpus v1**：从零构建的合成语料，入 repo `corpus/`。首批 M0 fixture 已按生成合同独立验收入库；早期 23 份合成语料仍已作废（坐标偏移与视觉质量问题），其几何参数与生成代码不得参考。
 - **失效模式（failure mode）/ case**：从 BabelDOC 主链路逆向出的、可由 PDF 输入触发的一类错误。带稳定 case ID，是 Corpus v1 需求矩阵的行。
 - **fixture**：语料中的一份 PDF + 其 manifest。分 **unit**（单变量，与 case 近 1:1）、**mal**（畸形，由合法父本做单变量字节级变异）、**intg**（显式多变量，仅端到端冒烟，严格受限）三类。
 - **生成合同（generation contract）**：fixture 入库前必须满足的约束集合（坐标系、三种盒子、变换规则、单变量、确定性 SHA-256、独立验收等），见 `docs/03-corpus-requirements.md` §2。

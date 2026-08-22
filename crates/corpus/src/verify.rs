@@ -4,18 +4,21 @@
 //! 而是「这份 fixture 违反了某条约定」——不指出是哪一条，排查就得从头读一遍
 //! 合同。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use serde_json::Value;
 
 use crate::adjudicated::{Adjudicated, BlockGeometry, RenderReference};
 use crate::determinism;
-use crate::geom::{PageFrame, close};
+use crate::exact;
+use crate::geom::{PageFrame, Rect, close};
 use crate::hash;
 use crate::manifest::{Check, GeometrySource, Legality, Manifest, Method};
+use crate::mutation::{self, MutationSpec};
 use crate::oracle::render::PageRaster;
-use crate::oracle::{ParsedPage, mupdf, poppler, qpdf, render};
+use crate::oracle::{ParsedPage, mupdf, mupdf_svg, poppler, qpdf, render};
 use crate::text;
 use crate::toolchain::Toolchain;
 
@@ -103,12 +106,13 @@ pub fn run(
         return Ok(true);
     }
 
+    let all_manifests = discover(repo_root)?;
     let mut reports = Vec::new();
     for manifest in manifests {
         let mut report = verify_one(manifest, toolchain, repo_root, work_dir, mode)?;
         report
             .outcomes
-            .insert(0, check_lineage(manifest, manifests));
+            .insert(0, check_lineage(manifest, &all_manifests));
         print_report(manifest, &report);
         reports.push(report);
     }
@@ -135,6 +139,31 @@ pub fn run(
         }
     );
     Ok(all_ok)
+}
+
+/// Add corpus-owned exact/mutation recipes to `corpus determinism`, alongside
+/// the external-engine probes in `determinism::run`.
+pub fn run_owned_determinism(
+    manifests: &[Manifest],
+    toolchain: &Toolchain,
+    repo_root: &Path,
+    work_dir: &Path,
+) -> Result<bool> {
+    let owned: Vec<&Manifest> = manifests
+        .iter()
+        .filter(|manifest| manifest.source.method != Method::RealisticTypesetting)
+        .collect();
+    if owned.is_empty() {
+        return Ok(true);
+    }
+    println!("\nCorpus-owned fixture recipes:");
+    let mut passed = true;
+    for manifest in owned {
+        let outcome = check_determinism(manifest, toolchain, repo_root, work_dir)?;
+        print_outcome(&outcome);
+        passed &= outcome.passed;
+    }
+    Ok(passed)
 }
 
 fn print_report(manifest: &Manifest, report: &Report) {
@@ -168,25 +197,58 @@ fn check_lineage(manifest: &Manifest, all: &[Manifest]) -> Outcome {
     let Some(lineage) = &manifest.lineage else {
         return Outcome::ok(CHECK, CLAUSE, "合法 fixture，无谱系");
     };
-    if all.iter().any(|m| m.id() == lineage.parent) {
-        Outcome::ok(
-            CHECK,
-            CLAUSE,
-            format!(
-                "父本 `{}`，{} 处变异",
-                lineage.parent,
-                lineage.mutations.len()
-            ),
-        )
-    } else {
-        Outcome::fail(
+    let Some(parent) = all
+        .iter()
+        .find(|candidate| candidate.id() == lineage.parent)
+    else {
+        return Outcome::fail(
             CHECK,
             CLAUSE,
             format!(
                 "声明的合法父本 `{}` 不在本次验收的 fixture 集合里",
                 lineage.parent
             ),
-        )
+        );
+    };
+    if parent.identity.legality != Legality::Legal {
+        return Outcome::fail(
+            CHECK,
+            CLAUSE,
+            format!("父本 `{}` 本身不是 legal", parent.id()),
+        );
+    }
+
+    let checked = (|| -> Result<String> {
+        let mutation = lineage
+            .mutations
+            .first()
+            .context("manifest schema should require exactly one mutation")?;
+        let parent_bytes = std::fs::read(parent.pdf_path())?;
+        let child_bytes = std::fs::read(manifest.pdf_path())?;
+        let derived = mutation::derive(
+            &parent_bytes,
+            MutationSpec {
+                parent_fixture_id: &lineage.parent,
+                byte_offset: usize::try_from(mutation.byte_offset)
+                    .context("mutation offset exceeds usize")?,
+                expected_byte: mutation.original_byte,
+                replacement_byte: mutation.replacement_byte,
+                semantics: &mutation.description,
+            },
+        )?;
+        mutation::verify(&parent_bytes, &child_bytes, &derived.record)?;
+        if derived.bytes != child_bytes {
+            bail!("child bytes do not equal the single-byte derivation");
+        }
+        Ok(format!(
+            "父本 `{}`，唯一偏移 {}：{}",
+            lineage.parent, mutation.byte_offset, mutation.description
+        ))
+    })();
+
+    match checked {
+        Ok(detail) => Outcome::ok(CHECK, CLAUSE, detail),
+        Err(error) => Outcome::fail(CHECK, CLAUSE, format!("谱系字节核验失败：{error:#}")),
     }
 }
 
@@ -238,6 +300,25 @@ fn verify_one(
     if manifest.requires(Check::PageGeometry) {
         outcomes.extend(check_page_geometry(manifest, &pdf, &frames)?);
     }
+    let qpdf_document =
+        if manifest.requires(Check::PdfBytes) || manifest.requires(Check::PdfStructure) {
+            Some(qpdf::Document::load(&pdf)?)
+        } else {
+            None
+        };
+    if manifest.requires(Check::PdfBytes) {
+        outcomes.push(check_pdf_bytes(
+            manifest,
+            &pdf,
+            qpdf_document.as_ref().context("qpdf document missing")?,
+        )?);
+    }
+    if manifest.requires(Check::PdfStructure) {
+        outcomes.push(check_pdf_structure(
+            manifest,
+            qpdf_document.as_ref().context("qpdf document missing")?,
+        )?);
+    }
 
     // 结构、几何裁定与渲染共用同一批解析结果，一次算好。
     let mutool_pages = mupdf::blocks(&pdf, &frames)?;
@@ -252,6 +333,15 @@ fn verify_one(
     if manifest.requires(Check::ReadingOrder) {
         outcomes.push(check_reading_order(manifest, &poppler_pages));
     }
+    if manifest.requires(Check::HandWrittenGeometry) {
+        outcomes.extend(check_hand_written_geometry(
+            manifest,
+            &pdf,
+            &frames,
+            &mutool_pages,
+            &poppler_pages,
+        )?);
+    }
 
     let raster = if manifest.requires(Check::Render) {
         render::rasterize(&pdf, &fixture_work.join("raster"), manifest.page.len())?
@@ -263,8 +353,9 @@ fn verify_one(
         outcomes.push(check_raster_orientation(&frames, &raster));
     }
 
-    // 几何裁定与参考栅格共用一份 adjudicated.toml：两者都是**测出来的**结果，
-    // 与手写的 manifest 分开存放（§2.1）。因此落盘与复核也只有一处。
+    // 双解析器几何裁定与参考栅格共用一份 adjudicated.toml：两者都是**测出来的**
+    // 结果，与手写的 manifest 分开存放（§2.1）。精确 fixture 在这里记录空几何和
+    // 渲染哈希；其三种手写几何由 hand-written-geometry 单独核验。
     let geometry = if manifest.requires(Check::DualParserGeometry) {
         let (outcome, blocks) = check_dual_parser_geometry(manifest, &mutool_pages, &poppler_pages);
         outcomes.push(outcome);
@@ -369,50 +460,51 @@ fn check_determinism(
         ));
     }
 
-    if manifest.source.method != Method::RealisticTypesetting {
-        return Ok(Outcome::fail(
-            CHECK,
-            CLAUSE,
-            format!(
-                "method = {:?} 的重复生成尚未实现（本里程碑只交付现实排版路径）",
-                manifest.source.method
-            ),
-        ));
-    }
-
-    let engine_id = manifest
-        .source
-        .engine
-        .as_deref()
-        .context("现实排版 fixture 缺少 engine")?;
-    let Some(engine) = toolchain.engine.iter().find(|e| e.id == engine_id) else {
-        return Ok(Outcome::fail(
-            CHECK,
-            CLAUSE,
-            format!("engine `{engine_id}` 不在 corpus/toolchain.toml 里"),
-        ));
+    let hashes = match manifest.source.method {
+        Method::ExactWriter => [
+            hash::of_bytes(&exact::generate(manifest.id(), repo_root)?),
+            hash::of_bytes(&exact::generate(manifest.id(), repo_root)?),
+        ],
+        Method::ByteMutation => [
+            hash::of_bytes(&regenerate_mutation(manifest, repo_root)?),
+            hash::of_bytes(&regenerate_mutation(manifest, repo_root)?),
+        ],
+        Method::RealisticTypesetting => {
+            let engine_id = manifest
+                .source
+                .engine
+                .as_deref()
+                .context("现实排版 fixture 缺少 engine")?;
+            let Some(engine) = toolchain.engine.iter().find(|e| e.id == engine_id) else {
+                return Ok(Outcome::fail(
+                    CHECK,
+                    CLAUSE,
+                    format!("engine `{engine_id}` 不在 corpus/toolchain.toml 里"),
+                ));
+            };
+            if !engine.corpus_v1_usable {
+                return Ok(Outcome::fail(
+                    CHECK,
+                    CLAUSE,
+                    format!("engine `{engine_id}` 已被判定不可用于 Corpus v1"),
+                ));
+            }
+            let source = manifest.source_path(repo_root)?;
+            let mut hashes = Vec::new();
+            for slot in ["rebuild-a", "rebuild-b"] {
+                let outdir = work_dir.join(slot);
+                if outdir.exists() {
+                    std::fs::remove_dir_all(&outdir)?;
+                }
+                let built = determinism::build_source(engine, repo_root, &source, &outdir)?;
+                hashes.push(hash::of_file(&built)?);
+                if slot == "rebuild-a" {
+                    std::thread::sleep(determinism::DEFAULT_GAP);
+                }
+            }
+            [hashes.remove(0), hashes.remove(0)]
+        }
     };
-    if !engine.corpus_v1_usable {
-        return Ok(Outcome::fail(
-            CHECK,
-            CLAUSE,
-            format!("engine `{engine_id}` 已被判定不可用于 Corpus v1"),
-        ));
-    }
-
-    let source = manifest.source_path(repo_root)?;
-    let mut hashes = Vec::new();
-    for slot in ["rebuild-a", "rebuild-b"] {
-        let outdir = work_dir.join(slot);
-        if outdir.exists() {
-            std::fs::remove_dir_all(&outdir)?;
-        }
-        let built = determinism::build_source(engine, repo_root, &source, &outdir)?;
-        hashes.push(hash::of_file(&built)?);
-        if slot == "rebuild-a" {
-            std::thread::sleep(determinism::DEFAULT_GAP);
-        }
-    }
 
     if hashes[0] != hashes[1] {
         return Ok(Outcome::fail(
@@ -437,6 +529,34 @@ fn check_determinism(
             &committed[..16]
         ),
     ))
+}
+
+fn regenerate_mutation(manifest: &Manifest, repo_root: &Path) -> Result<Vec<u8>> {
+    let lineage = manifest
+        .lineage
+        .as_ref()
+        .context("byte mutation missing lineage")?;
+    let parent = discover(repo_root)?
+        .into_iter()
+        .find(|candidate| candidate.id() == lineage.parent)
+        .with_context(|| format!("找不到合法父本 `{}`", lineage.parent))?;
+    let mutation = lineage
+        .mutations
+        .first()
+        .context("byte mutation missing mutation record")?;
+    let parent_bytes = std::fs::read(parent.pdf_path())?;
+    Ok(mutation::derive(
+        &parent_bytes,
+        MutationSpec {
+            parent_fixture_id: &lineage.parent,
+            byte_offset: usize::try_from(mutation.byte_offset)
+                .context("mutation offset exceeds usize")?,
+            expected_byte: mutation.original_byte,
+            replacement_byte: mutation.replacement_byte,
+            semantics: &mutation.description,
+        },
+    )?
+    .bytes)
 }
 
 // ---------------------------------------------------------------- §2.8 步骤 2
@@ -486,6 +606,770 @@ fn check_legality(manifest: &Manifest, pdf: &Path) -> Result<Outcome> {
             })
         }
     }
+}
+
+// ---------------------------------------------------------------- 精确 PDF 字节与对象合同
+
+fn check_pdf_bytes(manifest: &Manifest, pdf: &Path, document: &qpdf::Document) -> Result<Outcome> {
+    const CHECK: &str = "pdf-bytes";
+    const CLAUSE: &str = "§2.5/§2.6";
+
+    let contract = manifest
+        .expected
+        .pdf
+        .as_ref()
+        .context("pdf-bytes check requires expected.pdf")?;
+    let bytes = std::fs::read(pdf)?;
+    let mut problems = Vec::new();
+
+    let prefix = decode_hex(&contract.header_prefix_hex)?;
+    if !bytes.starts_with(&prefix) {
+        problems.push(format!(
+            "输入前缀不符：期望 {}，实际 {}",
+            contract.header_prefix_hex,
+            encode_hex(&bytes[..bytes.len().min(prefix.len())])
+        ));
+    }
+    if document.pdf_version()? != contract.version {
+        problems.push(format!(
+            "PDF version：manifest {}，qpdf {}",
+            contract.version,
+            document.pdf_version()?
+        ));
+    }
+    let actual_objects = document.object_numbers()?;
+    if actual_objects != contract.object_numbers {
+        problems.push(format!(
+            "对象号：manifest {:?}，qpdf {:?}",
+            contract.object_numbers, actual_objects
+        ));
+    }
+    let mut positions = Vec::new();
+    for object in &contract.object_numbers {
+        let marker = format!("{object} 0 obj\n");
+        match find_bytes(&bytes, marker.as_bytes()) {
+            Some(position) => positions.push(position),
+            None => problems.push(format!("原始字节中找不到 object {object}")),
+        }
+    }
+    if positions.windows(2).any(|pair| pair[0] >= pair[1]) {
+        problems.push("对象写出顺序与 object_numbers 不一致".to_string());
+    }
+    match contract.xref_kind {
+        crate::manifest::XrefKind::Table => {
+            if find_bytes(&bytes, b"\nxref\n").is_none()
+                || find_bytes(&bytes, b"\ntrailer\n").is_none()
+            {
+                problems.push("缺少 classic xref/trailer".to_string());
+            }
+        }
+    }
+    if document.trailer_reference("/Root")? != contract.root_object {
+        problems.push(format!("trailer /Root 不是 {} 0 R", contract.root_object));
+    }
+    let expected_size = u64::try_from(contract.object_numbers.len() + 1)?;
+    if document.trailer()?.get("/Size").and_then(Value::as_u64) != Some(expected_size) {
+        problems.push(format!("trailer /Size 不是 {expected_size}"));
+    }
+
+    let expected_id = decode_hex(&contract.trailer_id_hex)?;
+    let ids = document.trailer()?.get("/ID").and_then(Value::as_array);
+    let ids_match = ids.is_some_and(|values| {
+        values.len() == 2
+            && values.iter().all(|value| {
+                value
+                    .as_str()
+                    .and_then(|text| text.strip_prefix("u:"))
+                    .is_some_and(|text| text.as_bytes() == expected_id)
+            })
+    });
+    if !ids_match {
+        problems.push(format!("trailer /ID 不是两份 {}", contract.trailer_id_hex));
+    }
+    let has_info = document.trailer()?.contains_key("/Info");
+    if has_info != contract.info_dictionary {
+        problems.push(format!(
+            "Info 字典有无：manifest {}，qpdf {has_info}",
+            contract.info_dictionary
+        ));
+    }
+    let metadata = document.metadata_streams()?;
+    if metadata != contract.metadata_streams {
+        problems.push(format!(
+            "metadata stream 数：manifest {}，qpdf {metadata}",
+            contract.metadata_streams
+        ));
+    }
+
+    for reference in &manifest.expected.reference {
+        match document.reference(reference.from_object, &reference.path) {
+            Ok(actual) if actual == reference.to_object => {}
+            Ok(actual) => problems.push(format!(
+                "{}:{} -> {} 0 R，期望 {} 0 R",
+                reference.from_object,
+                reference.path.join("/"),
+                actual,
+                reference.to_object
+            )),
+            Err(error) => problems.push(format!(
+                "{}:{} 无法解析：{error:#}",
+                reference.from_object,
+                reference.path.join("/")
+            )),
+        }
+    }
+    for font in &manifest.source.fonts {
+        let Some(object) = font.pdf_object else {
+            continue;
+        };
+        let descriptor = font
+            .descriptor_object
+            .context("exact font missing descriptor_object")?;
+        let subset_tag = font
+            .subset_tag
+            .as_deref()
+            .context("exact font missing subset_tag")?;
+        let base_name = font
+            .base_name
+            .as_deref()
+            .context("exact font missing base_name")?;
+        let expected_name = format!("/{subset_tag}+{base_name}");
+        let dictionary = document.dictionary(object)?;
+        if dictionary.get("/BaseFont").and_then(Value::as_str) != Some(&expected_name) {
+            problems.push(format!(
+                "font object {object} /BaseFont 不是 {expected_name}"
+            ));
+        }
+        match document.reference(object, &["/FontDescriptor".to_string()]) {
+            Ok(actual) if actual == descriptor => {}
+            Ok(actual) => problems.push(format!(
+                "font object {object} /FontDescriptor 是 {actual} 0 R，期望 {descriptor} 0 R"
+            )),
+            Err(error) => problems.push(format!(
+                "font object {object} /FontDescriptor 无法解析：{error:#}"
+            )),
+        }
+        if document
+            .dictionary(descriptor)?
+            .get("/FontName")
+            .and_then(Value::as_str)
+            != Some(&expected_name)
+        {
+            problems.push(format!(
+                "font descriptor {descriptor} /FontName 不是 {expected_name}"
+            ));
+        }
+    }
+    for stream in &manifest.expected.content_stream {
+        let dictionary = document.stream_dictionary(stream.object)?;
+        let compressed = dictionary.contains_key("/Filter");
+        if compressed != stream.compressed {
+            problems.push(format!(
+                "content object {} 压缩状态：manifest {}，qpdf {compressed}",
+                stream.object, stream.compressed
+            ));
+        }
+        let actual = qpdf::raw_stream(pdf, stream.object)?;
+        if actual.as_bytes() != stream.bytes.as_bytes() {
+            problems.push(format!(
+                "content object {} 字节不符：manifest {:?}，qpdf raw {:?}",
+                stream.object, stream.bytes, actual
+            ));
+        }
+    }
+
+    Ok(if problems.is_empty() {
+        Outcome::ok(
+            CHECK,
+            CLAUSE,
+            format!(
+                "{} 个对象顺序、xref/trailer、{} 条引用、{} 个字体溯源、{} 个未压缩 content stream 均与手写合同一致",
+                contract.object_numbers.len(),
+                manifest.expected.reference.len(),
+                manifest.source.fonts.len(),
+                manifest.expected.content_stream.len()
+            ),
+        )
+    } else {
+        Outcome::fail(CHECK, CLAUSE, problems.join("；"))
+    })
+}
+
+fn check_pdf_structure(manifest: &Manifest, document: &qpdf::Document) -> Result<Outcome> {
+    use crate::manifest::{AnnotationSubtype, BookmarkTarget};
+
+    const CHECK: &str = "pdf-structure";
+    const CLAUSE: &str = "§2.7/§2.9";
+    let tolerance = manifest.expected.tolerance_pt;
+    let mut problems = Vec::new();
+    let contract = manifest
+        .expected
+        .pdf
+        .as_ref()
+        .context("pdf-structure check requires expected.pdf")?;
+
+    let outline_root =
+        document.optional_reference(contract.root_object, &["/Outlines".to_string()])?;
+    let observed_outline = match outline_root {
+        Some(root) => walk_outline(document, root)?,
+        None => Vec::new(),
+    };
+    let expected_outline: Vec<u32> = manifest
+        .expected
+        .bookmark
+        .iter()
+        .map(|bookmark| bookmark.object)
+        .collect();
+    compare_object_set(
+        "bookmark objects",
+        &expected_outline,
+        observed_outline
+            .iter()
+            .map(|bookmark| bookmark.object)
+            .collect(),
+        &mut problems,
+    );
+    for observed in &observed_outline {
+        let Some(expected) = manifest
+            .expected
+            .bookmark
+            .iter()
+            .find(|bookmark| bookmark.object == observed.object)
+        else {
+            continue;
+        };
+        if observed.parent != expected.parent_object || observed.level != expected.level {
+            problems.push(format!(
+                "bookmark {} hierarchy: qpdf parent/level {}/{}, manifest {}/{}",
+                observed.object,
+                observed.parent,
+                observed.level,
+                expected.parent_object,
+                expected.level
+            ));
+        }
+    }
+    let observed_depth = observed_outline
+        .iter()
+        .map(|bookmark| bookmark.level)
+        .max()
+        .unwrap_or(0);
+    if observed_depth != manifest.expected.structure.bookmark_depth {
+        problems.push(format!(
+            "bookmark depth: qpdf {observed_depth}, manifest {}",
+            manifest.expected.structure.bookmark_depth
+        ));
+    }
+
+    let mut actual_annotations = Vec::new();
+    for page in document.page_objects()? {
+        actual_annotations.extend(document.optional_references(page, &["/Annots".to_string()])?);
+    }
+    let expected_annotations: Vec<u32> = manifest
+        .expected
+        .annotation
+        .iter()
+        .map(|annotation| annotation.object)
+        .collect();
+    compare_object_set(
+        "annotations",
+        &expected_annotations,
+        actual_annotations,
+        &mut problems,
+    );
+
+    let field_roots = document.optional_references(
+        contract.root_object,
+        &["/AcroForm".to_string(), "/Fields".to_string()],
+    )?;
+    let actual_fields = walk_reference_tree(document, &field_roots, "/Kids")?;
+    let expected_fields: Vec<u32> = manifest
+        .expected
+        .annotation
+        .iter()
+        .filter(|annotation| annotation.subtype == AnnotationSubtype::Widget)
+        .map(|annotation| annotation.object)
+        .collect();
+    compare_object_set(
+        "form fields",
+        &expected_fields,
+        actual_fields,
+        &mut problems,
+    );
+
+    let actual_ocgs = document.optional_references(
+        contract.root_object,
+        &["/OCProperties".to_string(), "/OCGs".to_string()],
+    )?;
+    let expected_ocgs: Vec<u32> = manifest
+        .expected
+        .optional_content_group
+        .iter()
+        .map(|group| group.object)
+        .collect();
+    compare_object_set("OCGs", &expected_ocgs, actual_ocgs, &mut problems);
+    let actual_ocg_order = document.optional_references(
+        contract.root_object,
+        &[
+            "/OCProperties".to_string(),
+            "/D".to_string(),
+            "/Order".to_string(),
+        ],
+    )?;
+    compare_object_set("OCG order", &expected_ocgs, actual_ocg_order, &mut problems);
+    let expected_visible_ocgs: Vec<u32> = manifest
+        .expected
+        .optional_content_group
+        .iter()
+        .filter(|group| group.initially_visible)
+        .map(|group| group.object)
+        .collect();
+    let actual_visible_ocgs = document.optional_references(
+        contract.root_object,
+        &[
+            "/OCProperties".to_string(),
+            "/D".to_string(),
+            "/ON".to_string(),
+        ],
+    )?;
+    compare_object_set(
+        "visible OCGs",
+        &expected_visible_ocgs,
+        actual_visible_ocgs,
+        &mut problems,
+    );
+
+    for bookmark in &manifest.expected.bookmark {
+        let dictionary = document.dictionary(bookmark.object)?;
+        if dictionary.get("/Title").and_then(pdf_text) != Some(bookmark.title.as_str()) {
+            problems.push(format!("bookmark {} title 不符", bookmark.object));
+        }
+        if document.reference(bookmark.object, &["/Parent".to_string()])? != bookmark.parent_object
+        {
+            problems.push(format!("bookmark {} parent 不符", bookmark.object));
+        }
+        let count = dictionary.get("/Count").and_then(Value::as_i64);
+        if count != bookmark.count.map(i64::from) {
+            problems.push(format!(
+                "bookmark {} /Count：manifest {:?}，qpdf {count:?}",
+                bookmark.object, bookmark.count
+            ));
+        }
+        let flags = dictionary.get("/F").and_then(Value::as_u64).unwrap_or(0);
+        if flags != u64::from(bookmark.style_flags) {
+            problems.push(format!(
+                "bookmark {} /F：manifest {}，qpdf {flags}",
+                bookmark.object, bookmark.style_flags
+            ));
+        }
+        match (bookmark.color, dictionary.get("/C")) {
+            (Some(expected), Some(actual))
+                if numeric_array(actual, 3)?
+                    .iter()
+                    .zip(expected)
+                    .all(|(left, right)| close(*left, right, tolerance)) => {}
+            (None, None) => {}
+            (expected, actual) => problems.push(format!(
+                "bookmark {} /C：manifest {expected:?}，qpdf {actual:?}",
+                bookmark.object
+            )),
+        }
+
+        match bookmark.target {
+            BookmarkTarget::Xyz => {
+                let destination = dictionary
+                    .get("/Dest")
+                    .context("XYZ bookmark missing /Dest")?;
+                if !destination_matches(
+                    destination,
+                    bookmark.page_object.context("XYZ bookmark missing page")?,
+                    bookmark.xyz.context("XYZ bookmark missing coordinates")?,
+                    tolerance,
+                )? {
+                    problems.push(format!("bookmark {} XYZ destination 不符", bookmark.object));
+                }
+            }
+            BookmarkTarget::Named => {
+                if dictionary.get("/Dest").and_then(pdf_text) != bookmark.name.as_deref() {
+                    problems.push(format!(
+                        "bookmark {} named destination 不符",
+                        bookmark.object
+                    ));
+                }
+            }
+            BookmarkTarget::Uri => {
+                let action = dictionary
+                    .get("/A")
+                    .and_then(Value::as_object)
+                    .context("URI bookmark missing /A")?;
+                if action.get("/S").and_then(Value::as_str) != Some("/URI")
+                    || action.get("/URI").and_then(pdf_text) != bookmark.uri.as_deref()
+                {
+                    problems.push(format!("bookmark {} URI action 不符", bookmark.object));
+                }
+            }
+        }
+    }
+
+    for annotation in &manifest.expected.annotation {
+        let dictionary = document.dictionary(annotation.object)?;
+        let expected_subtype = match annotation.subtype {
+            AnnotationSubtype::Link => "/Link",
+            AnnotationSubtype::Text => "/Text",
+            AnnotationSubtype::Widget => "/Widget",
+        };
+        if dictionary.get("/Subtype").and_then(Value::as_str) != Some(expected_subtype) {
+            problems.push(format!("annotation {} subtype 不符", annotation.object));
+        }
+        let rect = dictionary
+            .get("/Rect")
+            .context("annotation missing /Rect")?;
+        if !numeric_array(rect, 4)?
+            .iter()
+            .zip(annotation.rect)
+            .all(|(left, right)| close(*left, right, tolerance))
+        {
+            problems.push(format!("annotation {} rect 不符", annotation.object));
+        }
+        if let Some(expected_uri) = &annotation.uri {
+            let action = dictionary
+                .get("/A")
+                .and_then(Value::as_object)
+                .context("link annotation missing /A")?;
+            if action.get("/S").and_then(Value::as_str) != Some("/URI")
+                || action.get("/URI").and_then(pdf_text) != Some(expected_uri)
+            {
+                problems.push(format!("annotation {} URI 不符", annotation.object));
+            }
+        }
+        if dictionary.get("/Contents").and_then(pdf_text) != annotation.contents.as_deref() {
+            problems.push(format!("annotation {} contents 不符", annotation.object));
+        }
+        if let Some(field_name) = &annotation.field_name {
+            if dictionary.get("/T").and_then(pdf_text) != Some(field_name)
+                || dictionary.get("/FT").and_then(Value::as_str) != Some("/Tx")
+            {
+                problems.push(format!("widget {} field name/type 不符", annotation.object));
+            }
+        }
+    }
+
+    {
+        let tree = document.optional_reference(
+            contract.root_object,
+            &["/Names".to_string(), "/Dests".to_string()],
+        )?;
+        let names: &[Value] = match tree {
+            Some(tree) => document
+                .value(tree, &["/Names".to_string()])?
+                .as_array()
+                .context("destination name tree /Names is not an array")?,
+            None => &[],
+        };
+        if names.len() % 2 != 0 {
+            problems.push(format!(
+                "destination name tree has odd /Names length {}",
+                names.len()
+            ));
+        }
+        let expected_names: Vec<String> = manifest
+            .expected
+            .named_destination
+            .iter()
+            .map(|destination| destination.name.clone())
+            .collect();
+        let actual_names: Vec<String> = names
+            .chunks_exact(2)
+            .filter_map(|pair| pdf_text(&pair[0]).map(str::to_string))
+            .collect();
+        compare_string_set(
+            "named destinations",
+            &expected_names,
+            actual_names,
+            &mut problems,
+        );
+        for expected in &manifest.expected.named_destination {
+            let mut found = false;
+            for pair in names.chunks_exact(2) {
+                if pdf_text(&pair[0]) == Some(expected.name.as_str()) {
+                    found = destination_matches(
+                        &pair[1],
+                        expected.page_object,
+                        expected.xyz,
+                        tolerance,
+                    )?;
+                    break;
+                }
+            }
+            if !found {
+                problems.push(format!("named destination {:?} 不符", expected.name));
+            }
+        }
+    }
+
+    for group in &manifest.expected.optional_content_group {
+        let dictionary = document.dictionary(group.object)?;
+        if dictionary.get("/Type").and_then(Value::as_str) != Some("/OCG")
+            || dictionary.get("/Name").and_then(pdf_text) != Some(group.name.as_str())
+        {
+            problems.push(format!("OCG {} type/name 不符", group.object));
+        }
+        let on = document
+            .value(
+                contract.root_object,
+                &[
+                    "/OCProperties".to_string(),
+                    "/D".to_string(),
+                    "/ON".to_string(),
+                ],
+            )?
+            .as_array()
+            .context("catalog OCProperties /ON is not an array")?;
+        let visible = on
+            .iter()
+            .any(|value| reference_number(value) == Some(group.object));
+        if visible != group.initially_visible {
+            problems.push(format!("OCG {} initial visibility 不符", group.object));
+        }
+        let resource_key = format!("/{}", group.resource_name);
+        if !manifest.expected.reference.iter().any(|reference| {
+            reference.to_object == group.object && reference.path.last() == Some(&resource_key)
+        }) {
+            problems.push(format!(
+                "OCG {} 没有通过 resource name /{} 引用",
+                group.object, group.resource_name
+            ));
+        }
+    }
+
+    let actual_uri_actions = document.uri_action_count()?;
+    if actual_uri_actions != manifest.expected.structure.uri_actions {
+        problems.push(format!(
+            "URI actions: qpdf {actual_uri_actions}, manifest {}",
+            manifest.expected.structure.uri_actions
+        ));
+    }
+
+    Ok(if problems.is_empty() {
+        Outcome::ok(
+            CHECK,
+            CLAUSE,
+            format!(
+                "{} 层/{} 项书签、{} 个注释、{} 个表单域、{} 个 OCG、{} 个命名目标、{} 个 URI action 均精确匹配",
+                manifest.expected.structure.bookmark_depth,
+                manifest.expected.structure.bookmarks,
+                manifest.expected.structure.annotations,
+                manifest.expected.structure.form_fields,
+                manifest.expected.structure.optional_content_groups,
+                manifest.expected.structure.named_destinations,
+                manifest.expected.structure.uri_actions
+            ),
+        )
+    } else {
+        Outcome::fail(CHECK, CLAUSE, problems.join("；"))
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ObservedBookmark {
+    object: u32,
+    parent: u32,
+    level: usize,
+}
+
+fn walk_outline(document: &qpdf::Document, root: u32) -> Result<Vec<ObservedBookmark>> {
+    let mut observed = Vec::new();
+    let mut seen = BTreeSet::new();
+    walk_outline_children(document, root, 1, &mut seen, &mut observed)?;
+    Ok(observed)
+}
+
+fn walk_outline_children(
+    document: &qpdf::Document,
+    parent: u32,
+    level: usize,
+    seen: &mut BTreeSet<u32>,
+    observed: &mut Vec<ObservedBookmark>,
+) -> Result<()> {
+    let dictionary = document.dictionary(parent)?;
+    let first = optional_reference(dictionary.get("/First"))?;
+    let last = optional_reference(dictionary.get("/Last"))?;
+    if first.is_none() != last.is_none() {
+        bail!("outline parent {parent} must have both /First and /Last or neither");
+    }
+
+    let mut current = first;
+    let mut previous = None;
+    while let Some(object) = current {
+        if !seen.insert(object) {
+            bail!("outline cycle or duplicate object {object}");
+        }
+        let child = document.dictionary(object)?;
+        if optional_reference(child.get("/Parent"))? != Some(parent) {
+            bail!("outline object {object} has the wrong /Parent");
+        }
+        if optional_reference(child.get("/Prev"))? != previous {
+            bail!("outline object {object} has the wrong /Prev sibling");
+        }
+        observed.push(ObservedBookmark {
+            object,
+            parent,
+            level,
+        });
+        walk_outline_children(document, object, level + 1, seen, observed)?;
+        previous = Some(object);
+        current = optional_reference(child.get("/Next"))?;
+    }
+    if previous != last {
+        bail!(
+            "outline parent {parent} /Last is {:?}, traversed {:?}",
+            last,
+            previous
+        );
+    }
+    Ok(())
+}
+
+fn optional_reference(value: Option<&Value>) -> Result<Option<u32>> {
+    value
+        .map(|value| reference_number(value).context("outline value is not an indirect reference"))
+        .transpose()
+}
+
+fn walk_reference_tree(
+    document: &qpdf::Document,
+    roots: &[u32],
+    kids_key: &str,
+) -> Result<Vec<u32>> {
+    fn visit(
+        document: &qpdf::Document,
+        object: u32,
+        kids_key: &str,
+        seen: &mut BTreeSet<u32>,
+        observed: &mut Vec<u32>,
+    ) -> Result<()> {
+        if !seen.insert(object) {
+            bail!("reference tree cycle or duplicate object {object}");
+        }
+        let kids = document.optional_references(object, &[kids_key.to_string()])?;
+        if kids.is_empty() {
+            observed.push(object);
+        } else {
+            for kid in kids {
+                visit(document, kid, kids_key, seen, observed)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut observed = Vec::new();
+    for root in roots {
+        visit(document, *root, kids_key, &mut seen, &mut observed)?;
+    }
+    Ok(observed)
+}
+
+fn compare_object_set(
+    label: &str,
+    expected: &[u32],
+    mut actual: Vec<u32>,
+    problems: &mut Vec<String>,
+) {
+    let mut expected = expected.to_vec();
+    expected.sort_unstable();
+    actual.sort_unstable();
+    if actual != expected {
+        problems.push(format!(
+            "{label}: qpdf objects {actual:?}, manifest {expected:?}"
+        ));
+    }
+}
+
+fn compare_string_set(
+    label: &str,
+    expected: &[String],
+    mut actual: Vec<String>,
+    problems: &mut Vec<String>,
+) {
+    let mut expected = expected.to_vec();
+    expected.sort();
+    actual.sort();
+    if actual != expected {
+        problems.push(format!("{label}: qpdf {actual:?}, manifest {expected:?}"));
+    }
+}
+
+fn pdf_text(value: &Value) -> Option<&str> {
+    value.as_str().and_then(|text| text.strip_prefix("u:"))
+}
+
+fn numeric_array(value: &Value, length: usize) -> Result<Vec<f64>> {
+    let array = value.as_array().context("expected a numeric array")?;
+    if array.len() != length {
+        bail!(
+            "numeric array has length {}, expected {length}",
+            array.len()
+        );
+    }
+    array
+        .iter()
+        .map(|number| number.as_f64().context("array member is not numeric"))
+        .collect()
+}
+
+fn destination_matches(
+    value: &Value,
+    page_object: u32,
+    xyz: [f64; 3],
+    tolerance: f64,
+) -> Result<bool> {
+    let array = value.as_array().context("destination is not an array")?;
+    if array.len() != 5
+        || reference_number(&array[0]) != Some(page_object)
+        || array[1].as_str() != Some("/XYZ")
+    {
+        return Ok(false);
+    }
+    Ok(array[2..].iter().zip(xyz).all(|(actual, expected)| {
+        actual
+            .as_f64()
+            .is_some_and(|value| close(value, expected, tolerance))
+    }))
+}
+
+fn reference_number(value: &Value) -> Option<u32> {
+    let mut parts = value.as_str()?.split_whitespace();
+    let number = parts.next()?.parse().ok()?;
+    (parts.next() == Some("0") && parts.next() == Some("R") && parts.next().is_none())
+        .then_some(number)
+}
+
+fn decode_hex(text: &str) -> Result<Vec<u8>> {
+    if text.len() % 2 != 0 {
+        bail!("odd-length hex string");
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|index| {
+            u8::from_str_radix(&text[index..index + 2], 16)
+                .with_context(|| format!("invalid hex at byte {index}"))
+        })
+        .collect()
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut output, byte| {
+        let _ = write!(output, "{byte:02x}");
+        output
+    })
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 // ---------------------------------------------------------------- §2.2 / §2.3
@@ -893,6 +1777,193 @@ fn check_dual_parser_geometry(
     )
 }
 
+// ---------------------------------------------------------------- §2.2 手写三盒
+
+fn check_hand_written_geometry(
+    manifest: &Manifest,
+    pdf: &Path,
+    frames: &[PageFrame],
+    mutool_pages: &[ParsedPage],
+    poppler_pages: &[ParsedPage],
+) -> Result<Vec<Outcome>> {
+    let outlines = outline_blocks(manifest, pdf, frames)?;
+    let mut baseline_problems = Vec::new();
+    let mut metric_problems = Vec::new();
+    let mut visual_problems = Vec::new();
+    let arithmetic_tolerance = manifest.expected.tolerance_pt;
+    let visual_tolerance = manifest
+        .expected
+        .visual_tolerance_pt
+        .context("hand-written geometry missing visual_tolerance_pt")?;
+    let mutool = flatten_blocks(mutool_pages);
+    let poppler = flatten_blocks(poppler_pages);
+
+    for block in &manifest.expected.block {
+        let key = text::compare_key(&block.text);
+        let expected_baseline = block
+            .baseline_origin
+            .context("hand-written block missing baseline_origin")?;
+        let expected_metric = block
+            .metric_box
+            .context("hand-written block missing metric_box")?;
+        let expected_visual = block
+            .visual_bbox
+            .context("hand-written block missing visual_bbox")?;
+
+        match pick(&mutool, &key) {
+            Ok(observed) => match observed.baseline_origin {
+                Some(point)
+                    if close(point.x, expected_baseline[0], arithmetic_tolerance)
+                        && close(point.y, expected_baseline[1], arithmetic_tolerance) => {}
+                Some(point) => baseline_problems.push(format!(
+                    "块 `{}`：manifest {:?}，mutool {:?}",
+                    block.key,
+                    expected_baseline,
+                    point.to_array()
+                )),
+                None => {
+                    baseline_problems.push(format!("块 `{}`：mutool 未报告 baseline", block.key))
+                }
+            },
+            Err(error) => baseline_problems.push(format!("块 `{}`：{error}", block.key)),
+        }
+
+        match pick(&poppler, &key) {
+            Ok(observed)
+                if arrays_close(
+                    &observed.rect.to_array(),
+                    &expected_metric,
+                    arithmetic_tolerance,
+                ) => {}
+            Ok(observed) => metric_problems.push(format!(
+                "块 `{}`：manifest {:?}，poppler {:?}",
+                block.key,
+                expected_metric,
+                observed.rect.to_array()
+            )),
+            Err(error) => metric_problems.push(format!("块 `{}`：{error}", block.key)),
+        }
+
+        let observed_visual = outlines
+            .get(&block.key)
+            .with_context(|| format!("outline oracle missing block `{}`", block.key))?;
+        if !arrays_close(
+            &observed_visual.to_array(),
+            &expected_visual,
+            visual_tolerance,
+        ) {
+            visual_problems.push(format!(
+                "块 `{}`：manifest {:?}，mutool SVG {:?}",
+                block.key,
+                expected_visual,
+                observed_visual.to_array()
+            ));
+        }
+    }
+
+    Ok(vec![
+        geometry_outcome(
+            "geometry/baseline",
+            arithmetic_tolerance,
+            baseline_problems,
+            "mutool stext baseline",
+        ),
+        geometry_outcome(
+            "geometry/metric-box",
+            arithmetic_tolerance,
+            metric_problems,
+            "poppler bbox-layout",
+        ),
+        geometry_outcome(
+            "geometry/visual-bbox",
+            visual_tolerance,
+            visual_problems,
+            "mutool SVG glyph outlines",
+        ),
+    ])
+}
+
+fn geometry_outcome(
+    check: &'static str,
+    tolerance: f64,
+    problems: Vec<String>,
+    source: &str,
+) -> Outcome {
+    if problems.is_empty() {
+        Outcome::ok(
+            check,
+            "§2.2",
+            format!("与手写值一致（{source}，容差 {tolerance} pt）"),
+        )
+    } else {
+        Outcome::fail(check, "§2.2", problems.join("；"))
+    }
+}
+
+fn outline_blocks(
+    manifest: &Manifest,
+    pdf: &Path,
+    frames: &[PageFrame],
+) -> Result<BTreeMap<String, Rect>> {
+    let mut by_page: BTreeMap<usize, Vec<&crate::manifest::Block>> = BTreeMap::new();
+    for block in &manifest.expected.block {
+        by_page.entry(block.page).or_default().push(block);
+    }
+    for blocks in by_page.values_mut() {
+        blocks.sort_by_key(|block| block.draw_order);
+    }
+
+    let mut result = BTreeMap::new();
+    for (page, blocks) in by_page {
+        let glyphs = mupdf_svg::glyphs(pdf, page)?;
+        let frame = frames
+            .get(page)
+            .with_context(|| format!("outline page {page} has no PageFrame"))?;
+        let mut cursor = 0usize;
+        for block in blocks {
+            let expected: Vec<char> = block
+                .text
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect();
+            let mut bounds: Option<Rect> = None;
+            for character in expected {
+                let glyph = glyphs.get(cursor).with_context(|| {
+                    format!("块 `{}` 的 SVG glyph 在第 {cursor} 个处提前结束", block.key)
+                })?;
+                let mut observed = glyph.text.chars();
+                let scalar = observed.next().context("SVG glyph data-text is empty")?;
+                if observed.next().is_some() || scalar != character {
+                    bail!(
+                        "块 `{}` 第 {} 个 glyph：期望 {character:?}，mutool SVG 给出 {:?}",
+                        block.key,
+                        cursor + 1,
+                        glyph.text
+                    );
+                }
+                let rect =
+                    frame.rect_to_page(glyph.rect.x0, glyph.rect.y0, glyph.rect.x1, glyph.rect.y1);
+                bounds = Some(match bounds {
+                    Some(current) => current.union(rect),
+                    None => rect,
+                });
+                cursor += 1;
+            }
+            result.insert(
+                block.key.clone(),
+                bounds.with_context(|| format!("块 `{}` 没有可见 glyph", block.key))?,
+            );
+        }
+        if cursor != glyphs.len() {
+            bail!(
+                "第 {page} 页有 {} 个未被手写 block 消费的 SVG glyph",
+                glyphs.len() - cursor
+            );
+        }
+    }
+    Ok(result)
+}
+
 /// 把测出来的几何与参考栅格落盘（`adjudicate`）或与已落盘的比对（`verify`）。
 fn record_adjudicated(
     manifest: &Manifest,
@@ -1178,27 +2249,59 @@ pub fn build(
     repo_root: &Path,
     write_hash: bool,
 ) -> Result<bool> {
+    let all_manifests = discover(repo_root)?;
     for manifest in manifests {
-        let engine_id = manifest
-            .source
-            .engine
-            .as_deref()
-            .with_context(|| format!("[{}] 没有 engine，无法生成", manifest.id()))?;
-        let engine = toolchain
-            .engine
-            .iter()
-            .find(|e| e.id == engine_id)
-            .with_context(|| format!("[{}] engine `{engine_id}` 不存在", manifest.id()))?;
-
-        let source = manifest.source_path(repo_root)?;
-        let built = determinism::build_source(engine, repo_root, &source, &manifest.dir)?;
         let target = manifest.pdf_path();
-        if built != target {
-            std::fs::rename(&built, &target).with_context(|| {
-                format!("把 {} 挪到 {} 失败", built.display(), target.display())
-            })?;
-        }
-        let sha = hash::of_file(&target)?;
+        let sha = match manifest.source.method {
+            Method::RealisticTypesetting => {
+                let engine_id = manifest
+                    .source
+                    .engine
+                    .as_deref()
+                    .with_context(|| format!("[{}] 没有 engine，无法生成", manifest.id()))?;
+                let engine = toolchain
+                    .engine
+                    .iter()
+                    .find(|e| e.id == engine_id)
+                    .with_context(|| format!("[{}] engine `{engine_id}` 不存在", manifest.id()))?;
+                let source = manifest.source_path(repo_root)?;
+                let built = determinism::build_source(engine, repo_root, &source, &manifest.dir)?;
+                if built != target {
+                    std::fs::rename(&built, &target).with_context(|| {
+                        format!("把 {} 挪到 {} 失败", built.display(), target.display())
+                    })?;
+                }
+                hash::of_file(&target)?
+            }
+            Method::ExactWriter => exact::write_atomic(manifest.id(), repo_root, &target)?,
+            Method::ByteMutation => {
+                let lineage = manifest
+                    .lineage
+                    .as_ref()
+                    .context("byte-mutation fixture 缺少 lineage")?;
+                let parent = all_manifests
+                    .iter()
+                    .find(|candidate| candidate.id() == lineage.parent)
+                    .with_context(|| format!("找不到合法父本 `{}`", lineage.parent))?;
+                let mutation = lineage
+                    .mutations
+                    .first()
+                    .context("byte-mutation fixture 没有变异记录")?;
+                let parent_bytes = std::fs::read(parent.pdf_path())?;
+                let derived = mutation::derive(
+                    &parent_bytes,
+                    MutationSpec {
+                        parent_fixture_id: &lineage.parent,
+                        byte_offset: usize::try_from(mutation.byte_offset)
+                            .context("mutation offset exceeds usize")?,
+                        expected_byte: mutation.original_byte,
+                        replacement_byte: mutation.replacement_byte,
+                        semantics: &mutation.description,
+                    },
+                )?;
+                exact::write_bytes_atomic(&derived.bytes, &target)?
+            }
+        };
 
         if write_hash {
             rewrite_pdf_hash(manifest, &sha)?;
@@ -1241,6 +2344,23 @@ fn rewrite_pdf_hash(manifest: &Manifest, sha: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn outline_document(last: u32) -> qpdf::Document {
+        qpdf::Document::parse(&format!(
+            r#"{{
+              "qpdf": [
+                {{"jsonversion": 2, "pdfversion": "1.7", "maxobjectid": 11}},
+                {{
+                  "obj:8 0 R": {{"value": {{"/First": "9 0 R", "/Last": "{last} 0 R"}}}},
+                  "obj:9 0 R": {{"value": {{"/Parent": "8 0 R", "/First": "11 0 R", "/Last": "11 0 R", "/Next": "10 0 R"}}}},
+                  "obj:10 0 R": {{"value": {{"/Parent": "8 0 R", "/Prev": "9 0 R"}}}},
+                  "obj:11 0 R": {{"value": {{"/Parent": "9 0 R"}}}}
+                }}
+              ]
+            }}"#
+        ))
+        .unwrap()
+    }
+
     #[test]
     fn a_matching_sequence_passes() {
         let expected = vec!["a".to_string(), "b".to_string()];
@@ -1272,6 +2392,44 @@ mod tests {
         let b = [0.0, 0.0, 100.0, 100.04];
         assert!(arrays_close(&a, &b, 0.05));
         assert!(!arrays_close(&a, &b, 0.01));
+    }
+
+    #[test]
+    fn walks_the_complete_outline_hierarchy_and_checks_sibling_links() {
+        let observed = walk_outline(&outline_document(10), 8).unwrap();
+        assert_eq!(
+            observed,
+            vec![
+                ObservedBookmark {
+                    object: 9,
+                    parent: 8,
+                    level: 1,
+                },
+                ObservedBookmark {
+                    object: 11,
+                    parent: 9,
+                    level: 2,
+                },
+                ObservedBookmark {
+                    object: 10,
+                    parent: 8,
+                    level: 1,
+                },
+            ]
+        );
+
+        let error = walk_outline(&outline_document(9), 8)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("/Last"), "{error}");
+    }
+
+    #[test]
+    fn exact_structure_sets_reject_undeclared_extra_objects() {
+        let mut problems = Vec::new();
+        compare_object_set("annotations", &[12], vec![12, 13], &mut problems);
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].contains("13"), "{:?}", problems);
     }
 
     fn geom(key: &str, metric: [f64; 4]) -> BlockGeometry {

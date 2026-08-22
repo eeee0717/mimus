@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::{exact, hash};
+
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
 /// 合同条款编号，用于把失败信息定位到具体条款。
@@ -95,6 +97,10 @@ pub enum Method {
 #[serde(deny_unknown_fields)]
 pub struct Source {
     pub method: Method,
+    /// Corpus-owned generator contract. Exact fixtures pin this to the
+    /// versioned raw-byte writer; realistic fixtures pin an external engine.
+    #[serde(default)]
+    pub generator: Option<String>,
     /// `corpus/toolchain.toml` 里的 `[[engine]].id`；现实排版 fixture 必填。
     #[serde(default)]
     pub engine: Option<String>,
@@ -127,6 +133,16 @@ pub enum FontProvenance {
 pub struct FontPin {
     pub file: String,
     pub sha256: String,
+    /// Exact-fixture traceability: indirect font and descriptor objects plus
+    /// the embedded PDF font name. Realistic fixtures leave these unset.
+    #[serde(default)]
+    pub pdf_object: Option<u32>,
+    #[serde(default)]
+    pub descriptor_object: Option<u32>,
+    #[serde(default)]
+    pub subset_tag: Option<String>,
+    #[serde(default)]
+    pub base_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +157,8 @@ pub struct Lineage {
 #[serde(deny_unknown_fields)]
 pub struct Mutation {
     pub byte_offset: u64,
+    pub original_byte: u8,
+    pub replacement_byte: u8,
     pub description: String,
 }
 
@@ -191,6 +209,9 @@ pub struct Expected {
     ///
     /// 只用于**两个解析器报告同一个量**的场合：页面框尺寸、块的 x 跨度。
     pub tolerance_pt: f64,
+    /// Exact outline bbox tolerance (§2.2); distinct from arithmetic geometry.
+    #[serde(default)]
+    pub visual_tolerance_pt: Option<f64>,
     /// 墨迹盒允许越出度量盒的余量；省略时取 `tolerance_pt`。
     ///
     /// 这是另一码事：墨迹盒（mutool 的字形 quad）与度量盒（poppler 的词盒）是
@@ -202,6 +223,21 @@ pub struct Expected {
     pub ink_margin_pt: Option<f64>,
     pub structure: Structure,
     pub block: Vec<Block>,
+    /// Exact byte/object contract. Required for exact-writer fixtures.
+    #[serde(default)]
+    pub pdf: Option<PdfContract>,
+    #[serde(default)]
+    pub content_stream: Vec<ContentStream>,
+    #[serde(default)]
+    pub reference: Vec<ObjectReference>,
+    #[serde(default)]
+    pub bookmark: Vec<Bookmark>,
+    #[serde(default)]
+    pub annotation: Vec<Annotation>,
+    #[serde(default)]
+    pub named_destination: Vec<NamedDestination>,
+    #[serde(default)]
+    pub optional_content_group: Vec<OptionalContentGroup>,
     pub behaviour: Vec<Behaviour>,
     /// 畸形 fixture 必填：`qpdf --check` 的输出里必须出现的子串。
     ///
@@ -219,6 +255,125 @@ pub struct Structure {
     pub blocks: usize,
     /// 栏数；单栏写 1。
     pub columns: usize,
+    #[serde(default)]
+    pub bookmarks: usize,
+    #[serde(default)]
+    pub bookmark_depth: usize,
+    #[serde(default)]
+    pub annotations: usize,
+    #[serde(default)]
+    pub form_fields: usize,
+    #[serde(default)]
+    pub optional_content_groups: usize,
+    #[serde(default)]
+    pub named_destinations: usize,
+    #[serde(default)]
+    pub uri_actions: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PdfContract {
+    pub version: String,
+    pub header_prefix_hex: String,
+    pub object_numbers: Vec<u32>,
+    pub root_object: u32,
+    pub xref_kind: XrefKind,
+    pub trailer_id_hex: String,
+    pub info_dictionary: bool,
+    pub metadata_streams: usize,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum XrefKind {
+    Table,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentStream {
+    pub object: u32,
+    pub compressed: bool,
+    pub bytes: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectReference {
+    pub from_object: u32,
+    pub path: Vec<String>,
+    pub to_object: u32,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum BookmarkTarget {
+    Xyz,
+    Named,
+    Uri,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Bookmark {
+    pub object: u32,
+    pub parent_object: u32,
+    pub level: usize,
+    pub title: String,
+    #[serde(default)]
+    pub count: Option<i32>,
+    #[serde(default)]
+    pub color: Option<[f64; 3]>,
+    pub style_flags: u32,
+    pub target: BookmarkTarget,
+    #[serde(default)]
+    pub page_object: Option<u32>,
+    #[serde(default)]
+    pub xyz: Option<[f64; 3]>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub uri: Option<String>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum AnnotationSubtype {
+    Link,
+    Text,
+    Widget,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Annotation {
+    pub object: u32,
+    pub subtype: AnnotationSubtype,
+    pub rect: [f64; 4],
+    #[serde(default)]
+    pub uri: Option<String>,
+    #[serde(default)]
+    pub contents: Option<String>,
+    #[serde(default)]
+    pub field_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamedDestination {
+    pub name: String,
+    pub page_object: u32,
+    pub xyz: [f64; 3],
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OptionalContentGroup {
+    pub object: u32,
+    pub name: String,
+    pub resource_name: String,
+    pub initially_visible: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -286,6 +441,12 @@ pub enum Check {
     ReadingOrder,
     /// §2.1 例外：poppler 与 mutool 的几何一致裁定。
     DualParserGeometry,
+    /// §2.2: compare all three hand-written geometry quantities independently.
+    HandWrittenGeometry,
+    /// Exact header/object/xref/trailer/content-stream bytes.
+    PdfBytes,
+    /// Rich outline/action/annotation/form/OCG/name-tree object graph.
+    PdfStructure,
     /// §2.8 步骤 4：独立渲染器出图并存参考栅格哈希。
     Render,
 }
@@ -442,6 +603,29 @@ impl Manifest {
             "§2.5",
             "合法 fixture 不应有 [lineage]",
         )?;
+        if let Some(lineage) = &self.lineage {
+            fail_if(
+                self.source.method != Method::ByteMutation,
+                "§2.5",
+                "带 lineage 的 fixture 必须使用 method = \"byte-mutation\"",
+            )?;
+            fail_if(
+                lineage.mutations.len() != 1,
+                "§2.4/§2.5",
+                "畸形派生必须且只能声明一处字节变异",
+            )?;
+            let mutation = &lineage.mutations[0];
+            fail_if(
+                mutation.original_byte == mutation.replacement_byte,
+                "§2.4",
+                "变异前后 byte 必须不同",
+            )?;
+            fail_if(
+                mutation.description.trim().is_empty(),
+                "§2.7",
+                "变异语义描述不得为空",
+            )?;
+        }
 
         fail_if(
             self.identity.cases.is_empty(),
@@ -466,6 +650,16 @@ impl Manifest {
             }
             Method::ExactWriter => {
                 fail_if(
+                    self.source.generator.as_deref() != Some(exact::GENERATOR),
+                    "§2.5",
+                    &format!("精确 fixture 必须钉死 generator = {:?}", exact::GENERATOR),
+                )?;
+                fail_if(
+                    self.source.engine.is_some() || self.source.source_file.is_some(),
+                    "§2.5",
+                    "精确 fixture 由内置 recipe 生成，不应声明外部 engine/source_file",
+                )?;
+                fail_if(
                     self.source.font_provenance != FontProvenance::Vendored,
                     "§2.6",
                     "精确 fixture 必须嵌入钉死的字体文件（font_provenance = \"vendored\"）",
@@ -475,6 +669,16 @@ impl Manifest {
                     "§2.6",
                     "精确 fixture 必须逐个列出字体文件及其 SHA-256",
                 )?;
+                for font in &self.source.fonts {
+                    fail_if(
+                        font.pdf_object.is_none()
+                            || font.descriptor_object.is_none()
+                            || font.subset_tag.as_deref().is_none_or(str::is_empty)
+                            || font.base_name.as_deref().is_none_or(str::is_empty),
+                        "§2.6",
+                        "精确字体必须钉死 PDF font object、descriptor object、subset tag 与 base name",
+                    )?;
+                }
             }
             Method::ByteMutation => {
                 fail_if(
@@ -549,6 +753,13 @@ impl Manifest {
             self.expected.ink_margin_pt.is_some_and(|v| v <= 0.0),
             "§2.2",
             "expected.ink_margin_pt 若给出则必须为正",
+        )?;
+        fail_if(
+            self.expected
+                .visual_tolerance_pt
+                .is_some_and(|value| value <= 0.0),
+            "§2.2",
+            "expected.visual_tolerance_pt 若给出则必须为正",
         )?;
 
         // 绘制序与阅读序都必须是 1..=n 的一个排列——重号或跳号会让「顺序不同」
@@ -627,6 +838,10 @@ impl Manifest {
             "双解析器裁定是现实排版 fixture 的**唯一例外**；其余 fixture 的几何期望必须手写",
         )?;
 
+        if self.source.method == Method::ExactWriter {
+            self.validate_exact_contract()?;
+        }
+
         fail_if(
             self.expected.behaviour.is_empty(),
             "§2.9",
@@ -644,6 +859,245 @@ impl Manifest {
             "§2.8",
             "合法 fixture 不应声明 declared_failure",
         )
+    }
+
+    fn validate_exact_contract(&self) -> Result<()> {
+        fail_if(
+            self.expected.geometry_source != GeometrySource::HandWritten,
+            "§2.1",
+            "exact-writer fixture 的三种盒子必须先行手写",
+        )?;
+        fail_if(
+            self.expected.tolerance_pt > 0.001,
+            "§2.2",
+            "exact baseline/metric tolerance 不得超过 0.001 pt",
+        )?;
+        fail_if(
+            self.expected
+                .visual_tolerance_pt
+                .is_none_or(|value| value > 0.01),
+            "§2.2",
+            "exact visual bbox 必须声明不超过 0.01 pt 的独立容差",
+        )?;
+        fail_if(
+            !self.requires(Check::HandWrittenGeometry),
+            "§2.2",
+            "exact-writer fixture 必须启用 hand-written-geometry 门禁",
+        )?;
+        fail_if(
+            !self.requires(Check::PdfBytes),
+            "§2.5/§2.6",
+            "exact-writer fixture 必须启用 pdf-bytes 门禁",
+        )?;
+
+        let pdf = self
+            .expected
+            .pdf
+            .as_ref()
+            .context("[§2.5] exact-writer fixture 缺少 [expected.pdf]")?;
+        fail_if(
+            pdf.version != "1.7",
+            "§2.5",
+            "精确 writer 当前只生成 PDF 1.7",
+        )?;
+        fail_if(
+            pdf.header_prefix_hex.len() % 2 != 0
+                || !pdf.header_prefix_hex.bytes().all(|b| b.is_ascii_hexdigit()),
+            "§2.5",
+            "expected.pdf.header_prefix_hex 必须是偶数位十六进制",
+        )?;
+        fail_if(
+            pdf.trailer_id_hex.len() != 32
+                || !pdf.trailer_id_hex.bytes().all(|b| b.is_ascii_hexdigit()),
+            "§2.6",
+            "trailer_id_hex 必须是 16 字节（32 位十六进制）",
+        )?;
+        fail_if(
+            pdf.trailer_id_hex != hash::trailer_id_hex(self.id()),
+            "§2.6",
+            "trailer_id_hex 不符合 fixture ID 截断/补零规则",
+        )?;
+        let expected_numbers: Vec<u32> = (1..=pdf.object_numbers.len() as u32).collect();
+        fail_if(
+            pdf.object_numbers != expected_numbers,
+            "§2.5",
+            "exact writer 的 object_numbers 必须从 1 起连续且按写出顺序声明",
+        )?;
+        fail_if(
+            !pdf.object_numbers.contains(&pdf.root_object),
+            "§2.5",
+            "root_object 不在 object_numbers 中",
+        )?;
+        fail_if(
+            pdf.info_dictionary || pdf.metadata_streams != 0,
+            "§2.6",
+            "精确 fixture 禁止 Info 字典与 metadata stream",
+        )?;
+        fail_if(
+            self.expected.content_stream.is_empty(),
+            "§2.5",
+            "exact-writer fixture 必须手写至少一个 content stream",
+        )?;
+        for stream in &self.expected.content_stream {
+            fail_if(
+                !pdf.object_numbers.contains(&stream.object),
+                "§2.5",
+                &format!("content stream object {} 不在对象计划中", stream.object),
+            )?;
+            fail_if(stream.compressed, "§2.5", "精确 content stream 禁止压缩")?;
+            fail_if(
+                stream.bytes.is_empty(),
+                "§2.1",
+                "手写 content stream 字节不得为空",
+            )?;
+        }
+        for reference in &self.expected.reference {
+            fail_if(
+                !pdf.object_numbers.contains(&reference.from_object)
+                    || !pdf.object_numbers.contains(&reference.to_object),
+                "§2.5",
+                &format!(
+                    "引用 {} -> {} 超出对象计划",
+                    reference.from_object, reference.to_object
+                ),
+            )?;
+            fail_if(
+                reference.path.is_empty() || reference.path.iter().any(|part| part.is_empty()),
+                "§2.5",
+                "对象引用 path 不得为空",
+            )?;
+        }
+        for font in &self.source.fonts {
+            let object = font
+                .pdf_object
+                .context("[§2.6] exact font missing pdf_object")?;
+            let descriptor = font
+                .descriptor_object
+                .context("[§2.6] exact font missing descriptor_object")?;
+            fail_if(
+                !pdf.object_numbers.contains(&object) || !pdf.object_numbers.contains(&descriptor),
+                "§2.6",
+                "精确字体的 PDF object/descriptor object 超出对象计划",
+            )?;
+        }
+
+        let structure = &self.expected.structure;
+        fail_if(
+            self.expected.bookmark.len() != structure.bookmarks,
+            "§2.7",
+            "bookmark 明细数与 expected.structure.bookmarks 不一致",
+        )?;
+        let depth = self
+            .expected
+            .bookmark
+            .iter()
+            .map(|bookmark| bookmark.level)
+            .max()
+            .unwrap_or(0);
+        fail_if(
+            depth != structure.bookmark_depth,
+            "§2.7",
+            "bookmark 最大层级与 expected.structure.bookmark_depth 不一致",
+        )?;
+        fail_if(
+            self.expected.annotation.len() != structure.annotations,
+            "§2.7",
+            "annotation 明细数与 expected.structure.annotations 不一致",
+        )?;
+        let form_fields = self
+            .expected
+            .annotation
+            .iter()
+            .filter(|annotation| annotation.subtype == AnnotationSubtype::Widget)
+            .count();
+        fail_if(
+            form_fields != structure.form_fields,
+            "§2.7",
+            "widget 明细数与 expected.structure.form_fields 不一致",
+        )?;
+        fail_if(
+            self.expected.optional_content_group.len() != structure.optional_content_groups,
+            "§2.7",
+            "OCG 明细数与 expected.structure.optional_content_groups 不一致",
+        )?;
+        fail_if(
+            self.expected.named_destination.len() != structure.named_destinations,
+            "§2.7",
+            "named destination 明细数与 expected.structure.named_destinations 不一致",
+        )?;
+        let uri_actions = self
+            .expected
+            .bookmark
+            .iter()
+            .filter(|bookmark| bookmark.target == BookmarkTarget::Uri)
+            .count()
+            + self
+                .expected
+                .annotation
+                .iter()
+                .filter(|annotation| annotation.uri.is_some())
+                .count();
+        fail_if(
+            uri_actions != structure.uri_actions,
+            "§2.7",
+            "URI action 明细数与 expected.structure.uri_actions 不一致",
+        )?;
+        fail_if(
+            !self.requires(Check::PdfStructure),
+            "§2.8",
+            "exact-writer fixture 必须启用 pdf-structure 门禁，包括验证零项结构确实不存在",
+        )?;
+
+        for bookmark in &self.expected.bookmark {
+            fail_if(
+                !pdf.object_numbers.contains(&bookmark.object)
+                    || !pdf.object_numbers.contains(&bookmark.parent_object),
+                "§2.5",
+                "bookmark object/parent_object 超出对象计划",
+            )?;
+            fail_if(
+                bookmark.level == 0 || bookmark.title.is_empty() || bookmark.style_flags > 3,
+                "§2.7",
+                "bookmark 的 level/title/style_flags 无效",
+            )?;
+            let target_valid = match bookmark.target {
+                BookmarkTarget::Xyz => {
+                    bookmark.page_object.is_some()
+                        && bookmark.xyz.is_some()
+                        && bookmark.name.is_none()
+                        && bookmark.uri.is_none()
+                }
+                BookmarkTarget::Named => {
+                    bookmark.name.is_some()
+                        && bookmark.page_object.is_none()
+                        && bookmark.xyz.is_none()
+                        && bookmark.uri.is_none()
+                }
+                BookmarkTarget::Uri => {
+                    bookmark.uri.is_some()
+                        && bookmark.page_object.is_none()
+                        && bookmark.xyz.is_none()
+                        && bookmark.name.is_none()
+                }
+            };
+            fail_if(!target_valid, "§2.7", "bookmark target 字段组合不自洽")?;
+        }
+        for annotation in &self.expected.annotation {
+            fail_if(
+                !pdf.object_numbers.contains(&annotation.object)
+                    || annotation.rect[0] >= annotation.rect[2]
+                    || annotation.rect[1] >= annotation.rect[3],
+                "§2.7",
+                "annotation object 或 rect 无效",
+            )?;
+            fail_if(
+                annotation.subtype == AnnotationSubtype::Widget
+                    && annotation.field_name.as_deref().is_none_or(str::is_empty),
+                "§2.7",
+                "widget annotation 必须声明 field_name",
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -743,12 +1197,12 @@ checks = ["determinism", "structure"]
     fn rejects_dual_parser_adjudication_outside_realistic_typesetting() {
         let text = BASE
             .replace(
-                "method = \"realistic-typesetting\"",
-                "method = \"exact-writer\"",
+                "method = \"realistic-typesetting\"\nengine = \"typst\"\nsource_file = \"unit-demo-01-sample.typ\"",
+                "method = \"exact-writer\"\ngenerator = \"corpus-exact-writer-v1\"",
             )
             .replace(
                 "font_provenance = \"typst-embedded\"",
-                "font_provenance = \"vendored\"\nfonts = [{ file = \"f.ttf\", sha256 = \"x\" }]",
+                "font_provenance = \"vendored\"\nfonts = [{ file = \"f.ttf\", sha256 = \"x\", pdf_object = 1, descriptor_object = 2, subset_tag = \"DEMOAA\", base_name = \"Demo\" }]",
             );
         let err = parse(&text).unwrap_err().to_string();
         assert!(err.contains("§2.1"), "{err}");
@@ -839,5 +1293,45 @@ text = "world"
         let text = BASE.replace("index = 0", "index = 1");
         let err = parse(&text).unwrap_err().to_string();
         assert!(err.contains("index"), "{err}");
+    }
+
+    #[test]
+    fn accepts_the_hand_written_exact_baseline_contract() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/fixtures/unit-base-01-single-line");
+        let manifest = Manifest::load(&dir).unwrap();
+        assert_eq!(manifest.id(), "unit-base-01-single-line");
+        assert_eq!(manifest.source.method, Method::ExactWriter);
+        assert_eq!(
+            manifest.expected.geometry_source,
+            GeometrySource::HandWritten
+        );
+    }
+
+    #[test]
+    fn exact_baseline_requires_executable_font_traceability() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/fixtures/unit-base-01-single-line");
+        let mut manifest = Manifest::load(&dir).unwrap();
+        manifest.source.fonts[0].subset_tag = None;
+
+        let error = manifest.validate().unwrap_err().to_string();
+
+        assert!(error.contains("subset tag"), "{error}");
+    }
+
+    #[test]
+    fn exact_baseline_requires_structure_gate_even_when_every_count_is_zero() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/fixtures/unit-base-01-single-line");
+        let mut manifest = Manifest::load(&dir).unwrap();
+        manifest
+            .oracle
+            .checks
+            .retain(|check| *check != Check::PdfStructure);
+
+        let error = manifest.validate().unwrap_err().to_string();
+
+        assert!(error.contains("pdf-structure"), "{error}");
     }
 }

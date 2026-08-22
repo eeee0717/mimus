@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use serde_json::{Map, Value};
 
 use crate::proc;
 
@@ -11,6 +12,254 @@ use crate::proc;
 pub struct CheckResult {
     pub passed: bool,
     pub report: String,
+}
+
+pub struct Document {
+    raw: Value,
+}
+
+impl Document {
+    pub(crate) fn parse(json: &str) -> Result<Self> {
+        let raw: Value = serde_json::from_str(json).context("qpdf JSON 无法解析")?;
+        let document = Self { raw };
+        document.objects()?;
+        Ok(document)
+    }
+
+    pub fn load(pdf: &Path) -> Result<Self> {
+        let args = vec![
+            "--json".to_string(),
+            "--json-stream-data=none".to_string(),
+            pdf.display().to_string(),
+        ];
+        let output =
+            proc::run("qpdf", &args, Path::new("."), &BTreeMap::new())?.context("qpdf 未安装")?;
+        if !output.success() {
+            bail!("qpdf --json 失败：{}", output.combined);
+        }
+        Self::parse(&output.combined)
+    }
+
+    pub fn reference(&self, object: u32, path: &[String]) -> Result<u32> {
+        let value = self.value(object, path)?;
+        parse_reference(value).with_context(|| {
+            format!(
+                "object {object} path {} is not an indirect reference",
+                path.join("/")
+            )
+        })
+    }
+
+    pub fn optional_reference(&self, object: u32, path: &[String]) -> Result<Option<u32>> {
+        self.optional_value(object, path)?
+            .map(|value| {
+                parse_reference(value).with_context(|| {
+                    format!(
+                        "object {object} path {} is not an indirect reference",
+                        path.join("/")
+                    )
+                })
+            })
+            .transpose()
+    }
+
+    pub fn optional_references(&self, object: u32, path: &[String]) -> Result<Vec<u32>> {
+        let Some(value) = self.optional_value(object, path)? else {
+            return Ok(Vec::new());
+        };
+        value
+            .as_array()
+            .with_context(|| format!("object {object} path {} is not an array", path.join("/")))?
+            .iter()
+            .map(parse_reference)
+            .collect()
+    }
+
+    pub fn page_objects(&self) -> Result<Vec<u32>> {
+        self.raw
+            .get("pages")
+            .and_then(Value::as_array)
+            .context("qpdf JSON has no pages array")?
+            .iter()
+            .map(|page| {
+                page.get("object")
+                    .context("qpdf page has no object")
+                    .and_then(parse_reference)
+            })
+            .collect()
+    }
+
+    pub fn uri_action_count(&self) -> Result<usize> {
+        Ok(self
+            .objects()?
+            .values()
+            .filter_map(|entry| entry.get("value"))
+            .map(count_uri_actions)
+            .sum())
+    }
+
+    pub fn value(&self, object: u32, path: &[String]) -> Result<&Value> {
+        self.optional_value(object, path)?
+            .with_context(|| format!("object {object} path {} is absent", path.join("/")))
+    }
+
+    fn optional_value(&self, object: u32, path: &[String]) -> Result<Option<&Value>> {
+        if path.is_empty() {
+            bail!("object value path must not be empty");
+        }
+        let Some(mut value) = self.dictionary(object)?.get(&path[0]) else {
+            return Ok(None);
+        };
+        for part in &path[1..] {
+            let next = if let Ok(index) = part.parse::<usize>() {
+                value
+                    .as_array()
+                    .with_context(|| format!("object {object} path before {part} is not an array"))?
+                    .get(index)
+            } else {
+                value
+                    .as_object()
+                    .with_context(|| {
+                        format!("object {object} path before {part} is not a dictionary")
+                    })?
+                    .get(part)
+            };
+            let Some(next) = next else {
+                return Ok(None);
+            };
+            value = next;
+        }
+        Ok(Some(value))
+    }
+
+    pub fn dictionary(&self, object: u32) -> Result<&Map<String, Value>> {
+        self.objects()?
+            .get(&format!("obj:{object} 0 R"))
+            .with_context(|| format!("qpdf JSON has no object {object} 0 R"))?
+            .get("value")
+            .and_then(Value::as_object)
+            .with_context(|| format!("object {object} is not a dictionary object"))
+    }
+
+    pub fn stream_dictionary(&self, object: u32) -> Result<&Map<String, Value>> {
+        self.objects()?
+            .get(&format!("obj:{object} 0 R"))
+            .and_then(|entry| entry.get("stream"))
+            .and_then(|stream| stream.get("dict"))
+            .and_then(Value::as_object)
+            .with_context(|| format!("object {object} is not a stream"))
+    }
+
+    pub fn object_numbers(&self) -> Result<Vec<u32>> {
+        let mut numbers = Vec::new();
+        for key in self.objects()?.keys() {
+            let Some(reference) = key.strip_prefix("obj:") else {
+                continue;
+            };
+            let number = reference
+                .split_whitespace()
+                .next()
+                .context("empty qpdf object key")?
+                .parse::<u32>()
+                .with_context(|| format!("invalid qpdf object key {key}"))?;
+            numbers.push(number);
+        }
+        numbers.sort_unstable();
+        Ok(numbers)
+    }
+
+    pub fn pdf_version(&self) -> Result<&str> {
+        self.raw
+            .get("qpdf")
+            .and_then(Value::as_array)
+            .and_then(|array| array.first())
+            .and_then(|header| header.get("pdfversion"))
+            .and_then(Value::as_str)
+            .context("qpdf JSON has no pdfversion")
+    }
+
+    pub fn trailer(&self) -> Result<&Map<String, Value>> {
+        self.objects()?
+            .get("trailer")
+            .and_then(|entry| entry.get("value"))
+            .and_then(Value::as_object)
+            .context("qpdf JSON has no trailer dictionary")
+    }
+
+    pub fn trailer_reference(&self, key: &str) -> Result<u32> {
+        let value = self
+            .trailer()?
+            .get(key)
+            .with_context(|| format!("trailer key {key} is absent"))?;
+        parse_reference(value).with_context(|| format!("trailer {key} is not a reference"))
+    }
+
+    pub fn metadata_streams(&self) -> Result<usize> {
+        let mut count = 0;
+        for entry in self.objects()?.values() {
+            let Some(dictionary) = entry
+                .get("stream")
+                .and_then(|stream| stream.get("dict"))
+                .and_then(Value::as_object)
+            else {
+                continue;
+            };
+            if dictionary.get("/Type").and_then(Value::as_str) == Some("/Metadata") {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    fn objects(&self) -> Result<&Map<String, Value>> {
+        self.raw
+            .get("qpdf")
+            .and_then(Value::as_array)
+            .and_then(|array| array.get(1))
+            .and_then(Value::as_object)
+            .context("qpdf JSON has no object table")
+    }
+}
+
+fn count_uri_actions(value: &Value) -> usize {
+    match value {
+        Value::Array(values) => values.iter().map(count_uri_actions).sum(),
+        Value::Object(dictionary) => {
+            usize::from(
+                dictionary.get("/S").and_then(Value::as_str) == Some("/URI")
+                    && dictionary.contains_key("/URI"),
+            ) + dictionary.values().map(count_uri_actions).sum::<usize>()
+        }
+        _ => 0,
+    }
+}
+
+fn parse_reference(value: &Value) -> Result<u32> {
+    let text = value.as_str().context("reference is not a JSON string")?;
+    let mut parts = text.split_whitespace();
+    let object = parts
+        .next()
+        .context("empty reference")?
+        .parse::<u32>()
+        .context("invalid reference object number")?;
+    if parts.next() != Some("0") || parts.next() != Some("R") || parts.next().is_some() {
+        bail!("unsupported reference {text:?}");
+    }
+    Ok(object)
+}
+
+pub fn raw_stream(pdf: &Path, object: u32) -> Result<String> {
+    let args = vec![
+        format!("--show-object={object}"),
+        "--raw-stream-data".to_string(),
+        pdf.display().to_string(),
+    ];
+    let output =
+        proc::run("qpdf", &args, Path::new("."), &BTreeMap::new())?.context("qpdf 未安装")?;
+    if !output.success() {
+        bail!("qpdf raw stream {object} 失败：{}", output.combined);
+    }
+    Ok(output.combined)
 }
 
 /// 对一份 PDF 跑 `qpdf --check`。
@@ -25,4 +274,54 @@ pub fn check(pdf: &Path) -> Result<CheckResult> {
         passed: out.status == Some(0),
         report: out.combined,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn follows_dictionary_and_array_paths_to_an_indirect_reference() {
+        let json = r#"{
+          "qpdf": [
+            {"jsonversion": 2, "pdfversion": "1.7", "maxobjectid": 3},
+            {"obj:1 0 R": {"value": {"/Kids": ["3 0 R"]}}}
+          ]
+        }"#;
+        let document = Document::parse(json).unwrap();
+        assert_eq!(
+            document
+                .reference(1, &["/Kids".to_string(), "0".to_string()])
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn enumerates_actual_page_references_and_uri_actions() {
+        let json = r#"{
+          "pages": [{"object": "3 0 R"}],
+          "qpdf": [
+            {"jsonversion": 2, "pdfversion": "1.7", "maxobjectid": 14},
+            {
+              "obj:1 0 R": {"value": {
+                "/Fields": ["14 0 R"],
+                "/A": {"/S": "/URI", "/URI": "u:https://example.com"}
+              }},
+              "obj:3 0 R": {"value": {"/Annots": ["14 0 R"]}},
+              "obj:14 0 R": {"value": {"/Subtype": "/Widget"}}
+            }
+          ]
+        }"#;
+        let document = Document::parse(json).unwrap();
+
+        assert_eq!(document.page_objects().unwrap(), vec![3]);
+        assert_eq!(
+            document
+                .optional_references(1, &["/Fields".to_string()])
+                .unwrap(),
+            vec![14]
+        );
+        assert_eq!(document.uri_action_count().unwrap(), 1);
+    }
 }
