@@ -308,10 +308,13 @@ fn verify_one(
         outcomes.push(check_legality(manifest, &pdf)?);
     }
     // A malformed fixture's contract is the declared parser failure itself.
-    // Once qpdf has observed that failure, invoking independent text/render
-    // parsers would turn the expected negative case into an infrastructure
-    // error and obscure the useful result.
+    // Independent text/render parsers cannot provide a meaningful structure
+    // result for a deliberately broken object graph, so run the declared
+    // structure gate against qpdf's diagnostic before returning.
     if manifest.identity.legality == Legality::Malformed && manifest.requires(Check::Legality) {
+        if manifest.requires(Check::Structure) {
+            outcomes.push(check_malformed_structure(manifest, &pdf)?);
+        }
         return Ok(Report {
             fixture: manifest.id().to_string(),
             outcomes,
@@ -423,6 +426,38 @@ fn verify_one(
         draw_order,
         raster,
         geometry,
+    })
+}
+
+fn check_malformed_structure(manifest: &Manifest, pdf: &Path) -> Result<Outcome> {
+    const CHECK: &str = "structure";
+    const CLAUSE: &str = "§2.1/§2.9";
+    let declared = manifest
+        .expected
+        .declared_failure
+        .as_deref()
+        .context("malformed fixture missing expected.declared_failure")?;
+    let result = qpdf::check(pdf)?;
+    let report = result.report.to_ascii_lowercase();
+    let matches = match declared {
+        "outline cycle" => report.contains("loop detected"),
+        other => report.contains(&other.to_ascii_lowercase()),
+    };
+    Ok(if matches {
+        Outcome::ok(
+            CHECK,
+            CLAUSE,
+            format!("结构门禁观察到声明的失败：{declared:?}"),
+        )
+    } else {
+        Outcome::fail(
+            CHECK,
+            CLAUSE,
+            format!(
+                "结构门禁未观察到声明的失败 {declared:?}：{}",
+                indent(&result.report)
+            ),
+        )
     })
 }
 
@@ -617,17 +652,15 @@ fn check_legality(manifest: &Manifest, pdf: &Path) -> Result<Outcome> {
             .context("outline-cycle fixture missing declared_failure")?;
         let result = qpdf::check(pdf)?;
         let report = result.report.to_ascii_lowercase();
-        return Ok(
-            if !result.passed && (report.contains("loop detected") || report.contains("cycle")) {
-                Outcome::ok(CHECK, CLAUSE, format!("以声明的方式失败：{declared:?}"))
-            } else {
-                Outcome::fail(
-                    CHECK,
-                    CLAUSE,
-                    format!("outline cycle 未被 qpdf 以声明方式拒绝：{}", result.report),
-                )
-            },
-        );
+        return Ok(if !result.passed && report.contains("loop detected") {
+            Outcome::ok(CHECK, CLAUSE, format!("以声明的方式失败：{declared:?}"))
+        } else {
+            Outcome::fail(
+                CHECK,
+                CLAUSE,
+                format!("outline cycle 未被 qpdf 以声明方式拒绝：{}", result.report),
+            )
+        });
     }
 
     let result = qpdf::check(pdf)?;

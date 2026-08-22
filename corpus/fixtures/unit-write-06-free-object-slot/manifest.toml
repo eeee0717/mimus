@@ -13,7 +13,7 @@ variable = "The xref declares object slot 10 free and the live object graph stop
 method = "exact-writer"
 generator = "corpus-exact-writer-v1"
 pdf = "unit-write-06-free-object-slot.pdf"
-pdf_sha256 = "41cde56eb8cad1a8cbc3498aef86cd270ab3d136eea5b054ce073e7aea72f4eb"
+pdf_sha256 = "2926af8fe9f1ad4c8d00bebb2d70733bb2982d109bdc6f4b6281054a49c0d2b2"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
 

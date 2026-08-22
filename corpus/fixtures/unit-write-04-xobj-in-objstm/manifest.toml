@@ -13,7 +13,7 @@ variable = "The Form Resources dictionary is compressed in an ObjStm while the F
 method = "exact-writer"
 generator = "corpus-exact-writer-v1"
 pdf = "unit-write-04-xobj-in-objstm.pdf"
-pdf_sha256 = "b88b964e36b7de784d16885c375ef65d6b239160ee4d287029ee7863a41c13ba"
+pdf_sha256 = "b0b3d9400fe9ae7e898cc2426b19a53287b0037aaa469265923ed2bc0b7c4278"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
 

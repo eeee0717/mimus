@@ -288,16 +288,17 @@ fn mixed_codespace(repo_root: &Path) -> Result<Vec<u8>> {
     let mut pdf = RawPdf::new("unit-cmap-02-mixed-codespace");
     pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
     pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
-    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 10 0 R >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 11 0 R >>")?;
     pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
-    pdf.object(b"<< /Type /Font /Subtype /Type0 /BaseFont /MIMUSI+DejaVuSans /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 9 0 R >>")?;
+    pdf.object(b"<< /Type /Font /Subtype /Type0 /BaseFont /MIMUSI+DejaVuSans /Encoding 9 0 R /DescendantFonts [6 0 R] /ToUnicode 10 0 R >>")?;
     pdf.object(b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /MIMUSI+DejaVuSans /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 7 0 R /CIDToGIDMap /Identity /W [3 [600] 6 [600] 7 [600] 9 [600] 11 [600]] >>")?;
     pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 8 0 R >>")?;
     pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", mixed_encoding())?;
     pdf.stream(b"/Type /CMap", mixed_to_unicode())?;
     pdf.stream(
         b"",
-        b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n<000700060007000B0009> Tj\nET\n",
+        b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n<070681400B09> Tj\nET\n",
     )?;
     pdf.finish(1)
 }
@@ -473,12 +474,36 @@ begincmap\n\
 1 begincodespacerange\n\
 <00> <FF>\n\
 endcodespacerange\n\
-5 beginbfchar\n\
-<0006> <0049>\n\
-<0007> <004D>\n\
-<0009> <0053>\n\
-<000B> <0055>\n\
+4 beginbfchar\n\
+<49> <0049>\n\
+<4D> <004D>\n\
+<53> <0053>\n\
+<55> <0055>\n\
 endbfchar\n\
+endcmap\n\
+CMapName currentdict /CMap defineresource pop\n\
+end\n\
+end\n"
+}
+
+fn mixed_encoding() -> &'static [u8] {
+    b"/CIDInit /ProcSet findresource begin\n\
+12 dict begin\n\
+begincmap\n\
+/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def\n\
+/CMapName /MimusMixed-Encoding def\n\
+/CMapType 1 def\n\
+2 begincodespacerange\n\
+<00> <80>\n\
+<8140> <FEFE>\n\
+endcodespacerange\n\
+5 begincidchar\n\
+<06> 6\n\
+<07> 7\n\
+<09> 9\n\
+<0B> 11\n\
+<8140> 7\n\
+endcidchar\n\
 endcmap\n\
 CMapName currentdict /CMap defineresource pop\n\
 end\n\
@@ -493,14 +518,15 @@ begincmap\n\
 /CMapName /MimusMixed-UCS def\n\
 /CMapType 2 def\n\
 2 begincodespacerange\n\
-<00> <FF>\n\
-<0000> <FFFF>\n\
+<00> <80>\n\
+<8140> <FEFE>\n\
 endcodespacerange\n\
 5 beginbfchar\n\
-<0006> <0049>\n\
-<0007> <004D>\n\
-<0009> <0053>\n\
-<000B> <0055>\n\
+<06> <0049>\n\
+<07> <004D>\n\
+<09> <0053>\n\
+<0B> <0055>\n\
+<8140> <004D>\n\
 endbfchar\n\
 endcmap\n\
 CMapName currentdict /CMap defineresource pop\n\
@@ -818,6 +844,24 @@ mod tests {
                 String::from_utf8_lossy(expected)
             );
         }
+    }
+
+    #[test]
+    fn cmap_contracts_keep_simple_codes_single_byte_and_mixed_codes_explicit() {
+        let simple = to_unicode();
+        assert!(contains(simple, b"1 begincodespacerange\n<00> <FF>"));
+        assert!(contains(simple, b"4 beginbfchar"));
+        assert!(!contains(simple, b"5 beginbfchar"));
+        assert!(contains(simple, b"<4D> <004D>"));
+
+        let encoding = mixed_encoding();
+        assert!(contains(encoding, b"<00> <80>"));
+        assert!(contains(encoding, b"<8140> <FEFE>"));
+        assert!(contains(encoding, b"5 begincidchar"));
+
+        let mixed = mixed_to_unicode();
+        assert!(contains(mixed, b"<8140> <004D>"));
+        assert!(contains(mixed, b"5 beginbfchar"));
     }
 
     #[test]

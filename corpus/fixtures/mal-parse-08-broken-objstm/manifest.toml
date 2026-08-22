@@ -12,14 +12,15 @@ variable = "The ObjStm /N count is changed by exactly one byte"
 [source]
 method = "byte-mutation"
 pdf = "mal-parse-08-broken-objstm.pdf"
-pdf_sha256 = "ca1a1357a29087841f308e71d98b7d6f869b32c6f112a09471caf350b9fd0fc0"
-font_provenance = "typst-embedded"
+pdf_sha256 = "0a27820506acda4e7532c2b5baf1393dce2ce2919047a5d52251b065d4ee749a"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
 
 [lineage]
 parent = "unit-write-04-xobj-in-objstm"
 
 [[lineage.mutations]]
-byte_offset = 3411
+byte_offset = 3403
 original_byte = 49
 replacement_byte = 50
 description = "change the ObjStm /N 1 declaration to /N 2 without changing stream bytes"

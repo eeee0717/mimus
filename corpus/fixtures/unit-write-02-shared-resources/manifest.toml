@@ -13,7 +13,7 @@ variable = "Both pages point at one indirect resources object"
 method = "exact-writer"
 generator = "corpus-exact-writer-v1"
 pdf = "unit-write-02-shared-resources.pdf"
-pdf_sha256 = "e8c3388835fec5df2927bbbf4c2969c97dfa8abb8ba12d5232c4d2531053d5ee"
+pdf_sha256 = "9746381d2af8b44a7f5d9579a2d6745b952eba25f4a149a7cecbaa0ea14ced27"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 6, descriptor_object = 7, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
 

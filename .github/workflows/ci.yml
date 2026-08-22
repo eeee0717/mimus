@@ -21,6 +21,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install PDF validation tools
+        run: sudo apt-get update && sudo apt-get install --yes qpdf poppler-utils mupdf-tools
+
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -32,3 +35,22 @@ jobs:
 
       - name: Incremental writeback PoC
         run: cargo test --manifest-path experiments/m0-experiment-3-poc/Cargo.toml
+
+      - name: Validate PoC with independent PDF tools
+        shell: bash
+        run: |
+          cargo run --manifest-path experiments/m0-experiment-3-poc/Cargo.toml
+          output=.context/m0-lab/poc/incremental-output.pdf
+          qpdf --check "$output"
+          test "$(pdftotext "$output" - | tr -d '[:space:]')" = POC
+          mutool draw -F stext "$output" > .context/m0-lab/poc/mutool-stext.xml
+          grep -q 'c="P"' .context/m0-lab/poc/mutool-stext.xml
+          grep -q 'c="O"' .context/m0-lab/poc/mutool-stext.xml
+          grep -q 'c="C"' .context/m0-lab/poc/mutool-stext.xml
+          pdftoppm -png -singlefile -r 150 "$output" .context/m0-lab/poc/poppler-render
+          mutool draw -o .context/m0-lab/poc/mupdf-render.png -r 150 "$output"
+          test -s .context/m0-lab/poc/poppler-render.png
+          test -s .context/m0-lab/poc/mupdf-render.png
+          for companion in .context/m0-lab/poc/companion-*-output.pdf; do
+            qpdf --check "$companion"
+          done

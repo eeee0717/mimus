@@ -12,14 +12,15 @@ variable = "A legal sibling /Next 11 0 R reference is changed by one byte to sel
 [source]
 method = "byte-mutation"
 pdf = "mal-parse-09-outlines-cycle.pdf"
-pdf_sha256 = "5e200fcc2d697965e602fb93f789313f64fce2ced0d585aaea0aed77bb791ec4"
-font_provenance = "typst-embedded"
+pdf_sha256 = "c40323553be0a9e5503a4e2872da19aeee8a1743b04c416361a10ff9bb61f107"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
 
 [lineage]
 parent = "unit-parse-11-outline-siblings"
 
 [[lineage.mutations]]
-byte_offset = 3397
+byte_offset = 3389
 original_byte = 49
 replacement_byte = 48
 description = "change the legal sibling /Next 11 0 R into a self-cycle /Next 10 0 R"

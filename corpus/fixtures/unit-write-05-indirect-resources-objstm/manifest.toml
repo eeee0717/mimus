@@ -13,7 +13,7 @@ variable = "The page resources reference resolves to a compressed dictionary and
 method = "exact-writer"
 generator = "corpus-exact-writer-v1"
 pdf = "unit-write-05-indirect-resources-objstm.pdf"
-pdf_sha256 = "52abe0b8c06a9cbd6dac8506db0dccb39853c3f363938819915c5a4e95d49d7b"
+pdf_sha256 = "43eebfe5d90dc0a3a61144e43b26e5b5e88ac29f57f9b70c74615b85fa655cd2"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
 

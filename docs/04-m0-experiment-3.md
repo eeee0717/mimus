@@ -32,18 +32,18 @@ PoC crate 位于 [`experiments/m0-experiment-3-poc`](../experiments/m0-experimen
 
 | Fixture | Case | SHA-256 |
 |---|---|---|
-| `unit-write-01-bookmarks-rich` | WRITE-06 | `e845f97f78575c79d57e12372a443c947e3c87708052d48b2fc9e87e55fcf337` |
-| `unit-write-02-shared-resources` | WRITE-04 | `e8c3388835fec5df2927bbbf4c2969c97dfa8abb8ba12d5232c4d2531053d5ee` |
-| `unit-write-03-resources-gen-nonzero` | WRITE-04 | `1113f4558025d67ee58b4fc8a5569d5af6545231aa4f4e187486cb6e3b01c4e0` |
-| `unit-write-04-xobj-in-objstm` | XOBJ-10 | `b88b964e36b7de784d16885c375ef65d6b239160ee4d287029ee7863a41c13ba` |
-| `unit-write-05-indirect-resources-objstm` | WRITE-01/02 | `52abe0b8c06a9cbd6dac8506db0dccb39853c3f363938819915c5a4e95d49d7b` |
-| `unit-geom-05-nonzero-origin-boxes` | GEOM-02 | `c169b3bb8b8f73649ca2070c498c25b8e85de55b895254c4d64a1c2794bb12a0` |
-| `unit-cmap-02-mixed-codespace` | CMAP-06 | `9aa8e3f463ced2f15c45ef1d93da23a6f38be8db04e742db6a44e814d69b1439` |
-| `unit-xobj-05-singular-ctm` | XOBJ-08 | `4f35cd78b35c335c24a195a1c172695c978559aa683179afc985fa55c3217510` |
-| `unit-parse-11-outline-siblings` | PARSE-11 | `e81f83c3a1fc0b4b1bc312603168203af536b75f52f927dabcb829456fe59656` |
-| `unit-write-06-free-object-slot` | WRITE-04 | `41cde56eb8cad1a8cbc3498aef86cd270ab3d136eea5b054ce073e7aea72f4eb` |
-| `mal-parse-08-broken-objstm` | PARSE-11 | `ca1a1357a29087841f308e71d98b7d6f869b32c6f112a09471caf350b9fd0fc0` |
-| `mal-parse-09-outlines-cycle` | PARSE-11 | `5e200fcc2d697965e602fb93f789313f64fce2ced0d585aaea0aed77bb791ec4` |
+| `unit-write-01-bookmarks-rich` | WRITE-06 | `1e38b1cbc1c450e14e7b2be0f467a541f0295fe6d73bb05336ca70ac2e13d726` |
+| `unit-write-02-shared-resources` | WRITE-04 | `9746381d2af8b44a7f5d9579a2d6745b952eba25f4a149a7cecbaa0ea14ced27` |
+| `unit-write-03-resources-gen-nonzero` | WRITE-04 | `6b4dfce2bc5eea7587c20f158270e113858715359f1d8482fd6c17a19fc6e0d2` |
+| `unit-write-04-xobj-in-objstm` | XOBJ-10 | `b0b3d9400fe9ae7e898cc2426b19a53287b0037aaa469265923ed2bc0b7c4278` |
+| `unit-write-05-indirect-resources-objstm` | WRITE-01/02 | `43eebfe5d90dc0a3a61144e43b26e5b5e88ac29f57f9b70c74615b85fa655cd2` |
+| `unit-geom-05-nonzero-origin-boxes` | GEOM-02 | `e882ed610d1c5976cce3c8256ffd9d30731bccf9f56982d3c8e061eebbb5fd14` |
+| `unit-cmap-02-mixed-codespace` | CMAP-06 | `0ba78e199877361fadf1709b08ad7c60dc4e787384c8de737896edeec13966a5` |
+| `unit-xobj-05-singular-ctm` | XOBJ-08 | `59e15b706fc8c7129e36b72bafd6c69913762c2c705fdbd9632a037f86c4742e` |
+| `unit-parse-11-outline-siblings` | PARSE-11 | `26a21392e2df687718b72b3da2fed51bba1fc2c57e0731988753f49110f049ec` |
+| `unit-write-06-free-object-slot` | WRITE-04 | `2926af8fe9f1ad4c8d00bebb2d70733bb2982d109bdc6f4b6281054a49c0d2b2` |
+| `mal-parse-08-broken-objstm` | PARSE-11 | `0a27820506acda4e7532c2b5baf1393dce2ce2919047a5d52251b065d4ee749a` |
+| `mal-parse-09-outlines-cycle` | PARSE-11 | `c40323553be0a9e5503a4e2872da19aeee8a1743b04c416361a10ff9bb61f107` |
 
 畸形 fixture 分别把 ObjStm `/N 1` 改为 `/N 2`，以及把合法 sibling 的 `/Next 11 0 R` 单字节变异为真正的 `/Next 10 0 R` 自环；两者都保持父本全部其它字节不变，并由声明的结构 oracle fail-fast。
 
@@ -51,7 +51,7 @@ PoC crate 位于 [`experiments/m0-experiment-3-poc`](../experiments/m0-experimen
 
 ### 输入与写回
 
-主输入为 `corpus/fixtures/unit-base-03-structured/unit-base-03-structured.pdf`，包含一页、共享资源、三级书签、命名目标、URI action、Link/Text/Widget 注释、AcroForm、OCG 与页面框；PoC 同时检查 ObjStm Form、CropBox、generation=7 和 free object 10 的 companion fixtures。PoC 执行以下增量操作：
+主输入为 `corpus/fixtures/unit-base-03-structured/unit-base-03-structured.pdf`，包含一页、三级书签、命名目标、URI action、Link/Text/Widget 注释、AcroForm、OCG 与页面框。PoC 还对 ObjStm Form、CropBox、generation=7、free object 10 和两页共享 Resources 的 companion fixtures 各自产生增量输出并检查对象图。PoC 执行以下增量操作：
 
 1. 用 `IncrementalDocument::create_from` 保留原始字节；
 2. clone 目标页的 `/Resources`，追加资源对象并仅让目标页指向它（copy-on-write）；
@@ -62,18 +62,18 @@ PoC crate 位于 [`experiments/m0-experiment-3-poc`](../experiments/m0-experimen
 
 | 量 | 结果 |
 |---|---:|
-| 输入 SHA-256 | `d2f6df979fb5ef328cf3a1ac666360563d73caf94884b4ec8fa619f90ba0fbd9` |
-| 输出 SHA-256 | `ef9d1548c3b5b9c18ee65f7381b72affc0c7f928add7555f74489fb7d08dd594` |
-| 输入 / 输出长度 | 5181 / 5809 bytes |
+| 输入 SHA-256 | `17159c6958a5ea359d53e26115aeef01f8917203ac90bfdf1797df0c5c0f46f4` |
+| 输出 SHA-256 | `84599f43f20b732c84dca00c0b287dccd519189232c1bca47d82db86799e6bba` |
+| 输入 / 输出长度 | 5121 / 5749 bytes |
 | 追加字节 | 628 bytes |
 | 输入最大对象号 | 18 |
-| 新 Resources / Content / Font | 19 / 20 / 21 |
+| 新 Resources / Font / Content | 19 / 20 / 21 |
 
-输出以输入的 5181 字节完整前缀开头。所有新增对象号均大于 18；没有复用 free/deleted object number。原资源对象仍被 AcroForm 默认资源引用，目标页才使用对象 19。
+输出以输入的 5121 字节完整前缀开头。所有新增对象号均大于 18；free-slot companion 的输入 `/Size 11`、最大 live object 9，实际新增对象从 11 开始，没有复用对象 10。原资源对象仍被 AcroForm 默认资源引用，目标页才使用对象 19。
 
 ### 对象、xref 与引用差异
 
-增量段新增对象 19、20、21，并新增 xref/trailer 链接到上一段；原始对象 1–18 的字节与对象值未改变。唯一业务引用变化是目标页对象 3 的 `/Resources` 从 `4 0 R` 改为 `19 0 R`，`/Contents` 改为 `20 0 R`；对象 4、书签 8–11、注释 12–14、OCG 15、命名目标 16、ToUnicode 17 与原页面结构引用保持不变。页面 `MediaBox`、`CropBox`、`Rotate` 逐项相等。
+增量段新增对象 19、20、21，并新增 xref/trailer 链接到上一段；原始对象 1–18 的字节与对象值未改变。唯一业务引用变化是目标页对象 3 的 `/Resources` 从 `4 0 R` 改为 `19 0 R`，`/Contents` 改为 `21 0 R`；对象 4、书签 8–11、注释 12–14、OCG 15、命名目标 16、ToUnicode 17 与原页面结构引用保持不变。页面 `MediaBox`、`CropBox`、`Rotate` 逐项相等。ObjStm companion 把原 Form 12 复制并修改为非压缩对象 14；generation companion 保留原 `4 7 R`；共享资源 companion 只改第一页，第二页继续引用 `5 0 R`。
 
 ### 独立工具验收
 

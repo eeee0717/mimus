@@ -13,7 +13,7 @@ variable = "The shared resources reference uses generation seven"
 method = "exact-writer"
 generator = "corpus-exact-writer-v1"
 pdf = "unit-write-03-resources-gen-nonzero.pdf"
-pdf_sha256 = "1113f4558025d67ee58b4fc8a5569d5af6545231aa4f4e187486cb6e3b01c4e0"
+pdf_sha256 = "6b4dfce2bc5eea7587c20f158270e113858715359f1d8482fd6c17a19fc6e0d2"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
 

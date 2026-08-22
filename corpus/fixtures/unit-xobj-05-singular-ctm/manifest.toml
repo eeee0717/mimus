@@ -13,7 +13,7 @@ variable = "A singular CTM precedes a text-bearing form invocation and is restor
 method = "exact-writer"
 generator = "corpus-exact-writer-v1"
 pdf = "unit-xobj-05-singular-ctm.pdf"
-pdf_sha256 = "4f35cd78b35c335c24a195a1c172695c978559aa683179afc985fa55c3217510"
+pdf_sha256 = "59e15b706fc8c7129e36b72bafd6c69913762c2c705fdbd9632a037f86c4742e"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
 
