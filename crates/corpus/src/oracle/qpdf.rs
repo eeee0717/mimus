@@ -35,9 +35,9 @@ impl Document {
         let output =
             proc::run("qpdf", &args, Path::new("."), &BTreeMap::new())?.context("qpdf 未安装")?;
         if !output.success() {
-            bail!("qpdf --json 失败：{}", output.combined);
+            bail!("qpdf --json 失败：{}", output.diagnostics());
         }
-        Self::parse(&output.combined)
+        Self::parse(output.stdout_text()?)
     }
 
     pub fn reference(&self, object: u32, path: &[String]) -> Result<u32> {
@@ -248,7 +248,7 @@ fn parse_reference(value: &Value) -> Result<u32> {
     Ok(object)
 }
 
-pub fn raw_stream(pdf: &Path, object: u32) -> Result<String> {
+pub fn raw_stream(pdf: &Path, object: u32) -> Result<Vec<u8>> {
     let args = vec![
         format!("--show-object={object}"),
         "--raw-stream-data".to_string(),
@@ -256,10 +256,61 @@ pub fn raw_stream(pdf: &Path, object: u32) -> Result<String> {
     ];
     let output =
         proc::run("qpdf", &args, Path::new("."), &BTreeMap::new())?.context("qpdf 未安装")?;
+    raw_stream_output(output, object)
+}
+
+fn raw_stream_output(output: proc::Output, object: u32) -> Result<Vec<u8>> {
     if !output.success() {
-        bail!("qpdf raw stream {object} 失败：{}", output.combined);
+        bail!("qpdf raw stream {object} 失败：{}", output.diagnostics());
     }
-    Ok(output.combined)
+    Ok(output.stdout)
+}
+
+/// Return generation-zero, uncompressed object offsets from qpdf's xref view.
+pub fn xref_offsets(pdf: &Path) -> Result<BTreeMap<u32, usize>> {
+    let args = vec!["--show-xref".to_string(), pdf.display().to_string()];
+    let output =
+        proc::run("qpdf", &args, Path::new("."), &BTreeMap::new())?.context("qpdf 未安装")?;
+    if !output.success() {
+        bail!("qpdf --show-xref 失败：{}", output.diagnostics());
+    }
+    parse_xref_offsets(output.stdout_text()?)
+}
+
+fn parse_xref_offsets(report: &str) -> Result<BTreeMap<u32, usize>> {
+    let mut offsets = BTreeMap::new();
+    for line in report.lines().filter(|line| !line.trim().is_empty()) {
+        let (reference, entry) = line
+            .split_once(':')
+            .with_context(|| format!("qpdf xref 行缺少冒号：{line:?}"))?;
+        let (object, generation) = reference
+            .split_once('/')
+            .with_context(|| format!("qpdf xref 引用格式无效：{reference:?}"))?;
+        let object = object
+            .parse::<u32>()
+            .with_context(|| format!("qpdf xref 对象号无效：{object:?}"))?;
+        let generation = generation
+            .parse::<u32>()
+            .with_context(|| format!("qpdf xref generation 无效：{generation:?}"))?;
+        if generation != 0 {
+            continue;
+        }
+
+        let entry = entry.trim();
+        let Some(offset) = entry.strip_prefix("uncompressed; offset = ") else {
+            if entry.starts_with("compressed;") {
+                continue;
+            }
+            bail!("qpdf xref entry 格式无效：{line:?}");
+        };
+        let offset = offset
+            .parse::<usize>()
+            .with_context(|| format!("qpdf xref offset 无效：{offset:?}"))?;
+        if offsets.insert(object, offset).is_some() {
+            bail!("qpdf xref 重复报告 object {object}");
+        }
+    }
+    Ok(offsets)
 }
 
 /// 对一份 PDF 跑 `qpdf --check`。
@@ -272,7 +323,7 @@ pub fn check(pdf: &Path) -> Result<CheckResult> {
     let out = proc::run("qpdf", &args, Path::new("."), &BTreeMap::new())?.context("qpdf 未安装")?;
     Ok(CheckResult {
         passed: out.status == Some(0),
-        report: out.combined,
+        report: out.combined_text()?,
     })
 }
 
@@ -323,5 +374,30 @@ mod tests {
             vec![14]
         );
         assert_eq!(document.uri_action_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn raw_stream_preserves_non_utf8_font_bytes() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let expected = std::fs::read(root.join("corpus/fonts/MimusExact.ttf")).unwrap();
+        let output = proc::Output {
+            status: Some(0),
+            stdout: expected.clone(),
+            stderr: Vec::new(),
+        };
+
+        let actual = raw_stream_output(output, 7).unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn parses_uncompressed_xref_offsets_without_inventing_compressed_offsets() {
+        let offsets = parse_xref_offsets(
+            "1/0: uncompressed; offset = 15\n2/0: compressed; stream = 9, index = 0\n3/0: uncompressed; offset = 121\n",
+        )
+        .unwrap();
+
+        assert_eq!(offsets, BTreeMap::from([(1, 15), (3, 121)]));
     }
 }

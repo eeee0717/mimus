@@ -56,19 +56,18 @@ pub fn check_tool(tool: &Tool, repo_root: &Path) -> Result<Finding> {
     let Some(out) = proc::run(&tool.command, &tool.args, repo_root, &BTreeMap::new())? else {
         return Ok(Finding::Missing);
     };
+    let combined = out.combined_text()?;
 
     for needle in &tool.must_contain {
-        if !out.combined.contains(needle) {
+        if !combined.contains(needle) {
             return Ok(Finding::MissingMarker {
                 marker: needle.clone(),
             });
         }
     }
 
-    let Some(found) = extract_version(&out.combined, tool.marker.as_deref()) else {
-        return Ok(Finding::VersionUnreadable {
-            output: out.combined,
-        });
+    let Some(found) = extract_version(&combined, tool.marker.as_deref()) else {
+        return Ok(Finding::VersionUnreadable { output: combined });
     };
 
     if found == tool.pinned {

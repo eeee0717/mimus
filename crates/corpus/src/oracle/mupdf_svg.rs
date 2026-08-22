@@ -30,9 +30,9 @@ pub fn glyphs(pdf: &Path, page_index: usize) -> Result<Vec<OutlineGlyph>> {
     let output =
         proc::run("mutool", &args, Path::new("."), &BTreeMap::new())?.context("mutool 未安装")?;
     if !output.success() {
-        bail!("mutool draw -F svg 失败：{}", output.combined);
+        bail!("mutool draw -F svg 失败：{}", output.diagnostics());
     }
-    parse_svg(&output.combined)
+    parse_svg(output.stdout_text()?)
 }
 
 fn parse_svg(svg: &str) -> Result<Vec<OutlineGlyph>> {

@@ -27,9 +27,9 @@ fn dump(pdf: &Path) -> Result<String> {
     let out = proc::run("pdftotext", &args, Path::new("."), &BTreeMap::new())?
         .context("pdftotext 未安装")?;
     if !out.success() {
-        bail!("pdftotext -bbox-layout 失败：{}", out.combined);
+        bail!("pdftotext -bbox-layout 失败：{}", out.diagnostics());
     }
-    Ok(out.combined)
+    Ok(out.stdout_text()?.to_string())
 }
 
 fn parse(xml: &str, frames: &[PageFrame]) -> Result<Vec<ParsedPage>> {

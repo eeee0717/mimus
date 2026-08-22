@@ -68,7 +68,7 @@ fn poppler_pages(pdf: &Path, work_dir: &Path, pages: usize) -> Result<Vec<(Strin
     let out = proc::run("pdftoppm", &args, Path::new("."), &BTreeMap::new())?
         .context("pdftoppm 未安装")?;
     if !out.success() {
-        bail!("pdftoppm 失败：{}", out.combined);
+        bail!("pdftoppm 失败：{}", out.diagnostics());
     }
 
     // pdftoppm 的页码位数随总页数变化（1..9 → `-1`，10..99 → `-01`）。
@@ -132,9 +132,9 @@ fn mutool_hashes(pdf: &Path) -> Result<Vec<String>> {
     let out =
         proc::run("mutool", &args, Path::new("."), &BTreeMap::new())?.context("mutool 未安装")?;
     if !out.success() {
-        bail!("mutool draw 失败：{}", out.combined);
+        bail!("mutool draw 失败：{}", out.diagnostics());
     }
-    parse_mutool_md5(&out.combined)
+    parse_mutool_md5(&out.combined_text()?)
 }
 
 /// `mutool draw -s 5` 每页打印一行 `page <file> <n> <md5>`。

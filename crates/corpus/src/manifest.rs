@@ -862,6 +862,23 @@ impl Manifest {
     }
 
     fn validate_exact_contract(&self) -> Result<()> {
+        for (check, name) in [
+            (Check::Determinism, "determinism"),
+            (Check::Legality, "legality"),
+            (Check::PageGeometry, "page-geometry"),
+            (Check::Structure, "structure"),
+            (Check::HandWrittenGeometry, "hand-written-geometry"),
+            (Check::PdfBytes, "pdf-bytes"),
+            (Check::PdfStructure, "pdf-structure"),
+            (Check::Render, "render"),
+        ] {
+            fail_if(
+                !self.requires(check),
+                "§2.8",
+                &format!("exact-writer fixture 必须启用 {name} 门禁"),
+            )?;
+        }
+
         fail_if(
             self.expected.geometry_source != GeometrySource::HandWritten,
             "§2.1",
@@ -879,17 +896,6 @@ impl Manifest {
             "§2.2",
             "exact visual bbox 必须声明不超过 0.01 pt 的独立容差",
         )?;
-        fail_if(
-            !self.requires(Check::HandWrittenGeometry),
-            "§2.2",
-            "exact-writer fixture 必须启用 hand-written-geometry 门禁",
-        )?;
-        fail_if(
-            !self.requires(Check::PdfBytes),
-            "§2.5/§2.6",
-            "exact-writer fixture 必须启用 pdf-bytes 门禁",
-        )?;
-
         let pdf = self
             .expected
             .pdf
@@ -1042,12 +1048,6 @@ impl Manifest {
             "§2.7",
             "URI action 明细数与 expected.structure.uri_actions 不一致",
         )?;
-        fail_if(
-            !self.requires(Check::PdfStructure),
-            "§2.8",
-            "exact-writer fixture 必须启用 pdf-structure 门禁，包括验证零项结构确实不存在",
-        )?;
-
         for bookmark in &self.expected.bookmark {
             fail_if(
                 !pdf.object_numbers.contains(&bookmark.object)
@@ -1333,5 +1333,30 @@ text = "world"
         let error = manifest.validate().unwrap_err().to_string();
 
         assert!(error.contains("pdf-structure"), "{error}");
+    }
+
+    #[test]
+    fn exact_baseline_requires_every_independent_acceptance_gate() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/fixtures/unit-base-01-single-line");
+
+        for required in [
+            Check::Determinism,
+            Check::Legality,
+            Check::PageGeometry,
+            Check::Structure,
+            Check::HandWrittenGeometry,
+            Check::PdfBytes,
+            Check::PdfStructure,
+            Check::Render,
+        ] {
+            let mut manifest = Manifest::load(&dir).unwrap();
+            manifest.oracle.checks.retain(|check| *check != required);
+
+            assert!(
+                manifest.validate().is_err(),
+                "exact manifest accepted without {required:?}"
+            );
+        }
     }
 }

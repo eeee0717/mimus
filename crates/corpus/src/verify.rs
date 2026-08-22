@@ -644,17 +644,12 @@ fn check_pdf_bytes(manifest: &Manifest, pdf: &Path, document: &qpdf::Document) -
             contract.object_numbers, actual_objects
         ));
     }
-    let mut positions = Vec::new();
-    for object in &contract.object_numbers {
-        let marker = format!("{object} 0 obj\n");
-        match find_bytes(&bytes, marker.as_bytes()) {
-            Some(position) => positions.push(position),
-            None => problems.push(format!("原始字节中找不到 object {object}")),
-        }
-    }
-    if positions.windows(2).any(|pair| pair[0] >= pair[1]) {
-        problems.push("对象写出顺序与 object_numbers 不一致".to_string());
-    }
+    let xref_offsets = qpdf::xref_offsets(pdf)?;
+    problems.extend(object_plan_problems(
+        &bytes,
+        &contract.object_numbers,
+        &xref_offsets,
+    ));
     match contract.xref_kind {
         crate::manifest::XrefKind::Table => {
             if find_bytes(&bytes, b"\nxref\n").is_none()
@@ -770,10 +765,12 @@ fn check_pdf_bytes(manifest: &Manifest, pdf: &Path, document: &qpdf::Document) -
             ));
         }
         let actual = qpdf::raw_stream(pdf, stream.object)?;
-        if actual.as_bytes() != stream.bytes.as_bytes() {
+        if actual != stream.bytes.as_bytes() {
             problems.push(format!(
                 "content object {} 字节不符：manifest {:?}，qpdf raw {:?}",
-                stream.object, stream.bytes, actual
+                stream.object,
+                stream.bytes,
+                String::from_utf8_lossy(&actual)
             ));
         }
     }
@@ -1370,6 +1367,33 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+fn object_plan_problems(
+    bytes: &[u8],
+    object_numbers: &[u32],
+    xref_offsets: &BTreeMap<u32, usize>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut positions = Vec::new();
+    for object in object_numbers {
+        let marker = format!("{object} 0 obj\n");
+        let Some(position) = xref_offsets.get(object).copied() else {
+            problems.push(format!("xref 中找不到 uncompressed object {object}"));
+            continue;
+        };
+        positions.push(position);
+        let end = position.checked_add(marker.len());
+        if end.and_then(|end| bytes.get(position..end)) != Some(marker.as_bytes()) {
+            problems.push(format!(
+                "xref object {object} offset {position} 不指向精确对象头 {marker:?}"
+            ));
+        }
+    }
+    if positions.windows(2).any(|pair| pair[0] >= pair[1]) {
+        problems.push("对象写出顺序与 object_numbers 不一致".to_string());
+    }
+    problems
 }
 
 // ---------------------------------------------------------------- §2.2 / §2.3
@@ -2430,6 +2454,39 @@ mod tests {
         compare_object_set("annotations", &[12], vec![12, 13], &mut problems);
         assert_eq!(problems.len(), 1);
         assert!(problems[0].contains("13"), "{:?}", problems);
+    }
+
+    #[test]
+    fn object_order_uses_xref_offsets_not_stream_markers() {
+        let bytes = b"stream\n1 0 obj\nendstream\n2 0 obj\n(two)\nendobj\n1 0 obj\n(one)\nendobj\n";
+        let real_object_2 = find_bytes(bytes, b"2 0 obj\n").unwrap();
+        let real_object_1 = bytes
+            .windows(b"1 0 obj\n".len())
+            .rposition(|window| window == b"1 0 obj\n")
+            .unwrap();
+        let xref_offsets = BTreeMap::from([(1, real_object_1), (2, real_object_2)]);
+
+        let problems = object_plan_problems(bytes, &[1, 2], &xref_offsets);
+
+        assert!(
+            problems.iter().any(|problem| problem.contains("写出顺序")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn xref_offset_must_point_to_the_exact_object_header() {
+        let bytes = b"garbage before 1 0 obj\n(one)\nendobj\n";
+        let xref_offsets = BTreeMap::from([(1, 0)]);
+
+        let problems = object_plan_problems(bytes, &[1], &xref_offsets);
+
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("不指向精确对象头")),
+            "{problems:?}"
+        );
     }
 
     fn geom(key: &str, metric: [f64; 4]) -> BlockGeometry {
