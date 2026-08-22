@@ -1,6 +1,6 @@
 # Corpus v1 · 需求矩阵与生成合同
 
-> 状态：需求定义（M-1），**尚未生成任何 PDF**
+> 状态：生成合同已执行；首批 M0 fixture 正按 §4 清单逐批入库
 > 日期：2026-08-21
 > 事实基础：BabelDOC 主链路源码（`~/Code/03_Forks/BabelDOC`，commit `79146c3`）第一手分析
 > 决策基础：`CONTEXT.md`、`docs/adr/`、GitHub Issue #1
@@ -127,6 +127,26 @@ fixture 分两类：
 - **不得使用 mimus 生产侧的 lopdf 或 PDFium 生成测试输入**。用被测组件生成被测输入是循环论证——lopdf 写错的结构，语料会原样接受。
 - 精确 fixture 的 content stream **不压缩**（不使用 `/FlateDecode`）：可读、可 diff、便于字节级变异，且消除 zlib 实现差异。现实排版 fixture 允许压缩（其产物特征本身是被测对象）。
 
+#### Corpus 自有精确 writer（M0）
+
+精确 writer 位于非生产 crate `crates/corpus`，只服务 M0 语料制造，不是 mimus 的
+生产 PDF writer。其依赖闭包不得包含 lopdf、PDFium、`pdfium-render` 或
+`mimus-core`。writer 以固定调用顺序分配对象号，显式写出 PDF header、每个
+indirect object、经典 xref、trailer、`startxref` 和 EOF；字典项与 content stream
+也由 fixture 配方固定，不经过无序容器或 PDF 库重排。
+
+精确 fixture 不写 Info 字典、日期或 XMP，trailer `/ID` 按 §2.6 从 fixture ID
+确定性派生。PDF 先完整生成在内存中，再通过同目录临时文件原子替换目标；生成、写入
+或替换失败时不得留下半成品，也不得破坏既有目标。`corpus build` 负责复现提交的
+PDF，`corpus determinism` 对同一配方连续生成两次并比较 SHA-256。
+
+#### 单字节畸形派生接口
+
+畸形 fixture 的 manifest 必须记录合法父本 fixture ID，并且恰好包含一条变异记录：
+唯一字节偏移、原字节、替换字节和变异语义。派生时先核对父本在该偏移的原字节，产出
+后再比较完整父子字节串，要求长度不变且差异集合严格等于该唯一偏移。这样后续畸形
+fixture 可以复用同一 API，同时仍满足 §2.4 的单变量原则。
+
 现实排版引擎的选择（全部已装并钉死版本，见 `corpus/toolchain.toml`）：
 
 - **Typst 0.15.1**：单二进制、版本易钉、`SOURCE_DATE_EPOCH` 可控，作为现实排版的主力；
@@ -193,6 +213,19 @@ fixture 分两类：
 - **优先级**：M0 / M1 / M3
 - **裁定记录**：manifest 与生成器发生过的不一致及其裁定结论
 
+畸形 fixture 的谱系记录至少采用以下形状；数字 byte 使用 `0..255` 的十进制表示：
+
+```toml
+[lineage]
+parent = "unit-base-01-single-line"
+
+[[lineage.mutations]]
+byte_offset = 123
+original_byte = 84
+replacement_byte = 81
+description = "replace the selected T operator byte with Q"
+```
+
 ### 2.8 独立验收
 
 每份 fixture 入库前必须通过，**至少一个独立解析器 + 至少一个独立渲染器**，且二者都不得是 mimus 生产侧组件（排除 lopdf 与 PDFium）：
@@ -226,6 +259,7 @@ fixture 分两类：
 | O3 | mutool 的 stext 在 `/Rotate 270` 下**不把多行聚合成段落**（四行正文报成四个块）；`0`/`90`/`180` 正常。 | GEOM 系列 fixture 的正文缩成两行、彼此相距 60bp——那批 fixture 的被观察量是页面几何，行→段聚合不该混进来（§2.4）。 |
 | O4 | poppler 的版面分析在两栏的块**逐行对齐成网格**时退化为行优先；栏间距 20pt→80pt 均无变化，判据是行对齐而非栏间距。 | `unit-order-01/02/03` 的纵向槽位改成真实双栏正文的样子（只有首行对齐）。网格式对齐是表格版面，本不该出现在双栏正文 fixture 里。 |
 | O5 | 栏间距压到 8pt（约 0.8 字宽）时 poppler 把整页并成**一个**跨栏的块（`unit-layout-08` 上是 11 行、x 跨度 30..519.76pt），mutool 仍给出干净的 6 块。O4 说的是「栏间距在 20–80pt 区间内不影响」，这条说的是「到某个下限就影响」，两者不矛盾。 | `unit-layout-08-narrow-gutter` 的块划分无法双解析器裁定，改用 `glyphs`。分歧本身就是 LAYOUT-08 要暴露的现象。 |
+| O6 | MuPDF `stext` 的字符 quad 横向覆盖 advance 范围，不是字形轮廓的真实墨迹外接框；两者对 `MIMUS` 等文本可明显不同。 | 精确 fixture 的 visual bbox 不再用 `stext` quad 裁定。manifest 先按钉死字体轮廓手推，验收时用 `mutool draw -F svg` 导出的字形 path，并计算直线、二次及三次 Bezier 的真实极值；空白与注释外观不计入文本墨迹。现实排版 fixture 继续把 stext quad 作为 §2.1 双解析器裁定下的近似值。 |
 
 还有一条关于字体而非解析器的：mutool 的字形 quad（墨迹盒）会比 poppler 的词盒（度量盒）略大，Typst 内嵌字体下 < 0.05pt，TeX Live 的 Computer Modern Type1 下约 0.22pt。因此 manifest 把「两个解析器报同一个量」的容差（`tolerance_pt`）与「墨迹盒允许越出度量盒的余量」（`ink_margin_pt`）分开声明——用同一个数去卡两件事，要么放松了 x 跨度判据，要么把正常的字体度差判成解析器不一致。
 
@@ -250,7 +284,7 @@ BabelDOC 的输出**不得作为唯一正确性 oracle**。它是参考实现而
 格式：`<class>-<domain>-<nn>-<slug>`，例如 `unit-geom-03-rotate-90`、`mal-parse-01-null-contents`、`intg-01-two-column-formula`。
 
 - `class`：`unit` / `mal`（malformed，仍是 unit 的一种，但独立前缀便于批量处理）/ `intg`
-- `domain`：与需求矩阵的 case ID 前缀一致（`parse`/`stream`/`font`/`cmap`/`xobj`/`geom`/`write`/`doc`/`para`/`form`/`table`/`order`/`layout`/`type`/`scan`）
+- `domain`：通常与需求矩阵的 case ID 前缀一致（`parse`/`stream`/`font`/`cmap`/`xobj`/`geom`/`write`/`doc`/`para`/`form`/`table`/`order`/`layout`/`type`/`scan`）；`base` 是 §4.1 三份合法父本专用的保留 domain
 - 编号在 domain 内单调递增，**永不复用**；fixture 作废时保留编号并标注 retired
 
 不使用旧语料的 `01_…`–`23_…` 编号体系。
@@ -1401,7 +1435,7 @@ BabelDOC 的输出**不得作为唯一正确性 oracle**。它是参考实现而
 
 ## 4. 首批 fixture 清单（M0 / M1）
 
-本节把矩阵中标为 M0 / M1 的 case 落成具体 fixture。**M-1 的交付物是这份清单本身，不是 PDF**——每份 fixture 在实际生成时必须逐一通过 §2 的生成合同与 §2.8 的独立验收。
+本节把矩阵中标为 M0 / M1 的 case 落成具体 fixture。M-1 当时的交付物是这份清单本身；进入后续实现 issue 后，每份 PDF 仍必须逐一通过 §2 的生成合同与 §2.8 的独立验收才能入库。
 
 ### 4.1 基线 fixture（变异父本与往返参照）
 

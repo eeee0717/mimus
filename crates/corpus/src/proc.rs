@@ -6,24 +6,57 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output as ProcessOutput};
 
 use anyhow::{Context, Result};
 
-/// 一次子进程调用的结果。stdout 与 stderr 合并——版本号在两者之间的分布因工具
-/// 而异（poppler 走 stderr、qpdf 走 stdout），分开处理只会让配置多一个字段。
+/// 一次子进程调用的结果。二进制 stdout 必须原样保留；调用方只有在明确消费文本
+/// 协议时才做 UTF-8 转换。
 pub struct Output {
     pub status: Option<i32>,
-    pub combined: String,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
 }
 
 impl Output {
     pub fn success(&self) -> bool {
         self.status == Some(0)
     }
+
+    pub fn stdout_text(&self) -> Result<&str> {
+        std::str::from_utf8(&self.stdout).context("子进程 stdout 不是 UTF-8")
+    }
+
+    /// 版本命令等文本接口可能把有效输出写到任一通道。
+    pub fn combined_text(&self) -> Result<String> {
+        let stdout = self.stdout_text()?;
+        let stderr = std::str::from_utf8(&self.stderr).context("子进程 stderr 不是 UTF-8")?;
+        Ok(format!("{stdout}{stderr}"))
+    }
+
+    /// 命令失败时优先显示 stderr；若工具只写 stdout，则回退到 stdout。诊断信息
+    /// 不参与任何字节合同，因此允许有损展示。
+    pub fn diagnostics(&self) -> String {
+        let bytes = if self.stderr.is_empty() {
+            &self.stdout
+        } else {
+            &self.stderr
+        };
+        String::from_utf8_lossy(bytes).into_owned()
+    }
 }
 
-/// 在 `cwd` 下执行 `command`，返回合并输出。命令不存在不是错误，返回 `Ok(None)`
+impl From<ProcessOutput> for Output {
+    fn from(output: ProcessOutput) -> Self {
+        Self {
+            status: output.status.code(),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        }
+    }
+}
+
+/// 在 `cwd` 下执行 `command`，返回原始 stdout/stderr。命令不存在不是错误，返回 `Ok(None)`
 /// ——「工具没装」是 doctor 要报告的正常结论，不是工具本身的故障。
 pub fn run(
     command: &str,
@@ -38,14 +71,7 @@ pub fn run(
     }
 
     match cmd.output() {
-        Ok(out) => {
-            let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
-            combined.push_str(&String::from_utf8_lossy(&out.stderr));
-            Ok(Some(Output {
-                status: out.status.code(),
-                combined,
-            }))
-        }
+        Ok(out) => Ok(Some(out.into())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("执行 `{command}` 失败")),
     }
@@ -73,5 +99,20 @@ mod tests {
     fn leaves_unknown_placeholders_alone() {
         let vars = BTreeMap::from([("a", "1".to_string())]);
         assert_eq!(expand("{a}/{b}", &vars), "1/{b}");
+    }
+
+    #[test]
+    fn preserves_non_utf8_process_output_as_separate_byte_vectors() {
+        let mut process_output = Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .output()
+            .unwrap();
+        process_output.stdout = vec![0x00, 0xff, 0x80, 0x41];
+        process_output.stderr = vec![0xfe, 0x42];
+
+        let output = Output::from(process_output);
+
+        assert_eq!(output.stdout, [0x00, 0xff, 0x80, 0x41]);
+        assert_eq!(output.stderr, [0xfe, 0x42]);
     }
 }

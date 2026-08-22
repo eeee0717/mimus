@@ -7,9 +7,11 @@
 mod adjudicated;
 mod determinism;
 mod doctor;
+mod exact;
 mod geom;
 mod hash;
 mod manifest;
+mod mutation;
 mod oracle;
 mod proc;
 mod repo;
@@ -79,9 +81,9 @@ enum Command {
         ids: Vec<String>,
     },
 
-    /// 重新裁定现实排版 fixture 的几何与参考栅格，写入 adjudicated.toml。
+    /// 重新裁定现实排版几何和所有 fixture 的参考栅格，写入 adjudicated.toml。
     ///
-    /// 只有 poppler 与 mutool 在容差内一致时才会落盘（§2.1）。
+    /// 现实排版几何只有 poppler 与 mutool 在容差内一致时才会落盘（§2.1）。
     Adjudicate {
         /// fixture ID；可给多个，省略时处理全部。
         ids: Vec<String>,
@@ -118,12 +120,16 @@ fn run() -> Result<bool> {
         }
         Command::Determinism { gap_ms } => {
             let toolchain = Toolchain::load(&repo_root)?;
-            determinism::run(
+            let engines_ok = determinism::run(
                 &toolchain,
                 &repo_root,
                 &work_dir,
                 Duration::from_millis(*gap_ms),
-            )
+            )?;
+            let manifests = verify::discover(&repo_root)?;
+            let fixtures_ok =
+                verify::run_owned_determinism(&manifests, &toolchain, &repo_root, &work_dir)?;
+            Ok(engines_ok && fixtures_ok)
         }
         Command::TrailerId { id } => {
             let hex = hash::trailer_id_hex(id);

@@ -74,7 +74,7 @@ pub fn build_source(
                 "引擎 `{}` 第 {pass} 遍构建失败（退出码 {:?}）：\n{}",
                 engine.id,
                 out.status,
-                tail(&out.combined, 20)
+                tail(&out.diagnostics(), 20)
             );
         }
     }

@@ -1,8 +1,9 @@
-//! `adjudicated.toml` —— 由两个独立解析器一致确立的几何与参考栅格哈希。
+//! `adjudicated.toml` —— 独立工具测得的几何裁定与参考栅格哈希。
 //!
 //! 这份文件**不是手写的**，因此和 manifest 分开存放：manifest 是先于生成写死的
-//! 规格，这里是事后测出来的裁定结果（§2.1 唯一例外条款）。混在一起就分不清哪些
-//! 数字是「说好的」、哪些是「量出来的」。
+//! 规格，这里是事后测出来的观测结果。现实排版 fixture 可以按 §2.1 唯一例外记录
+//! 双解析器几何；精确 fixture 的三种几何仍只在 manifest 中手写，这里只存渲染哈希。
+//! 混在一起就分不清哪些数字是「说好的」、哪些是「量出来的」。
 
 use std::path::Path;
 
@@ -34,11 +35,11 @@ pub struct Adjudicated {
 pub struct BlockGeometry {
     pub key: String,
     pub page: usize,
-    /// 字体度量盒。来源：poppler `pdftotext -bbox-layout` 的词盒并集。
+    /// 现实排版裁定的字体度量盒：poppler `pdftotext -bbox-layout` 词盒并集。
     pub metric_box: [f64; 4],
-    /// 墨迹盒。来源：mutool `draw -F stext` 的字形 quad 并集。
+    /// 现实排版裁定的近似墨迹盒：mutool `draw -F stext` 字形 quad 并集。
     pub visual_bbox: [f64; 4],
-    /// 首字符绘制起点。来源：mutool stext 的 char origin。
+    /// 现实排版裁定的首字符绘制起点：mutool stext 的 char origin。
     pub baseline_origin: [f64; 2],
 }
 
@@ -123,12 +124,13 @@ impl Adjudicated {
     pub fn to_toml(&self) -> String {
         let mut s = String::new();
         s.push_str("# 本文件由 `corpus adjudicate` 生成，**不要手工编辑**。\n");
-        s.push_str("# 它是 docs/03-corpus-requirements.md §2.1 唯一例外条款的产物：\n");
-        s.push_str("# 现实排版 fixture 的几何期望由两个互相独立的解析器一致确立，\n");
-        s.push_str("# 而非从生成器读回。manifest.toml 里的结构化期望仍然是手写的。\n#\n");
-        s.push_str("#   metric_box      ← poppler pdftotext -bbox-layout（字体度量盒）\n");
-        s.push_str("#   visual_bbox     ← mutool draw -F stext 的字形 quad 并集（墨迹盒）\n");
-        s.push_str("#   baseline_origin ← mutool stext 的首字符 origin（绘制起点）\n#\n");
+        s.push_str("# 它只保存独立工具测得的结果，与先行手写的 manifest.toml 分开：\n");
+        s.push_str("# 现实排版 fixture 可按 §2.1 唯一例外记录双解析器裁定的 [[block]]；\n");
+        s.push_str("# 精确 fixture 的 baseline/metric/visual 三种几何仍以 manifest 为准，\n");
+        s.push_str("# 本文件只为它记录独立渲染器的 [[render]] 哈希。\n#\n");
+        s.push_str("#   metric_box      ← poppler pdftotext -bbox-layout（现实排版裁定）\n");
+        s.push_str("#   visual_bbox     ← mutool draw -F stext 字形 quad（现实排版近似值）\n");
+        s.push_str("#   baseline_origin ← mutool stext 首字符 origin（现实排版裁定）\n#\n");
         s.push_str("# 坐标一律在 PDF 页面空间：单位 pt、原点左下、/Rotate 之前（§2.2）。\n\n");
 
         s.push_str(&format!("schema_version = {}\n", self.schema_version));

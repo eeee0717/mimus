@@ -25,9 +25,9 @@ pub fn pages(pdf: &Path) -> Result<Vec<PageBoxes>> {
     let out =
         proc::run("mutool", &args, Path::new("."), &BTreeMap::new())?.context("mutool 未安装")?;
     if !out.success() {
-        bail!("mutool pages 失败：{}", out.combined);
+        bail!("mutool pages 失败：{}", out.diagnostics());
     }
-    parse_pages(&out.combined)
+    parse_pages(out.stdout_text()?)
 }
 
 fn parse_pages(xml: &str) -> Result<Vec<PageBoxes>> {
@@ -89,9 +89,9 @@ fn dump_stext(pdf: &Path) -> Result<String> {
     let out =
         proc::run("mutool", &args, Path::new("."), &BTreeMap::new())?.context("mutool 未安装")?;
     if !out.success() {
-        bail!("mutool draw -F stext 失败：{}", out.combined);
+        bail!("mutool draw -F stext 失败：{}", out.diagnostics());
     }
-    Ok(out.combined)
+    Ok(out.stdout_text()?.to_string())
 }
 
 fn parse_stext(xml: &str, frames: &[PageFrame]) -> Result<Vec<ParsedPage>> {

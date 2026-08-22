@@ -14,6 +14,7 @@
 //! 要求相等是错的，因此改判包含关系。
 
 pub mod mupdf;
+pub mod mupdf_svg;
 pub mod poppler;
 pub mod qpdf;
 pub mod render;

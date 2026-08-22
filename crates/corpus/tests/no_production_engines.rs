@@ -9,8 +9,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-/// 生产侧引擎的 crate 名。命中即违规。
-const FORBIDDEN: &[&str] = &["lopdf", "pdfium-render", "pdfium", "pdfium-sys"];
+/// 生产侧 crate 与引擎的 crate 名。命中即违规。
+const FORBIDDEN: &[&str] = &[
+    "mimus-core",
+    "lopdf",
+    "pdfium-render",
+    "pdfium",
+    "pdfium-sys",
+];
 
 /// 闭包的起点。
 const ROOT: &str = "corpus";
@@ -25,16 +31,11 @@ fn the_corpus_tool_never_reaches_a_production_pdf_engine() {
         "Cargo.lock 里没有 `{ROOT}` 包——这个测试失去了意义，先修它"
     );
 
-    let reachable = closure(&graph, ROOT);
-    let violations: Vec<&str> = FORBIDDEN
-        .iter()
-        .copied()
-        .filter(|name| reachable.contains(*name))
-        .collect();
+    let violations = find_violations(&graph, ROOT);
 
     assert!(
         violations.is_empty(),
-        "[§2.5] `{ROOT}` 的依赖闭包里出现了 mimus 生产侧的 PDF 引擎：{violations:?}。\n\
+        "[§2.5] `{ROOT}` 的依赖闭包里出现了 mimus 生产侧 crate 或 PDF 引擎：{violations:?}。\n\
          语料工具必须只经由 qpdf / poppler / mutool / Typst / TeX 这些独立工具工作，\n\
          否则「被测组件生成被测输入」的循环论证就成立了。"
     );
@@ -50,6 +51,16 @@ fn the_guard_would_actually_fire() {
     ]);
     let reachable = closure(&graph, ROOT);
     assert!(reachable.contains("lopdf"), "闭包没能穿过一层间接依赖");
+}
+
+#[test]
+fn the_guard_rejects_mimus_core_before_it_gains_pdf_dependencies() {
+    let graph = BTreeMap::from([
+        (ROOT.to_string(), vec!["mimus-core".to_string()]),
+        ("mimus-core".to_string(), vec![]),
+    ]);
+
+    assert_eq!(find_violations(&graph, ROOT), vec!["mimus-core"]);
 }
 
 #[test]
@@ -123,4 +134,13 @@ fn closure(graph: &BTreeMap<String, Vec<String>>, root: &str) -> BTreeSet<String
     }
     seen.remove(root);
     seen
+}
+
+fn find_violations(graph: &BTreeMap<String, Vec<String>>, root: &str) -> Vec<&'static str> {
+    let reachable = closure(graph, root);
+    FORBIDDEN
+        .iter()
+        .copied()
+        .filter(|name| reachable.contains(*name))
+        .collect()
 }
