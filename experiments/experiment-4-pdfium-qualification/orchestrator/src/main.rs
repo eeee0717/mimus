@@ -9,8 +9,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use experiment_4_common::{
-    atomic_write_json, BatchInput, BatchReport, BatchRequest, ComparisonReport, ComparisonResult,
-    Difference, RunOutcome, RunReport, SCHEMA_VERSION,
+    atomic_write_json, atomic_write_text, batch_job_checkpoint_dir, load_batch_job_checkpoints,
+    BatchInput, BatchJob, BatchReport, BatchRequest, ComparisonReport, ComparisonResult,
+    Difference, RunOutcome, RunReport, BACKEND_REVISION_FIRECRAWL, BACKEND_REVISION_PDFIUM_RENDER,
+    SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use wait_timeout::ChildExt;
@@ -71,6 +73,8 @@ struct BenchmarkArgs {
     process_counts: String,
     #[arg(long, default_value_t = 1800)]
     timeout_seconds: u64,
+    #[arg(long, default_value_t = 5)]
+    iterations: u32,
 }
 
 #[derive(Debug, Args)]
@@ -582,6 +586,7 @@ fn difference(
 #[derive(Debug, Serialize, Deserialize)]
 struct BenchmarkSummary {
     schema_version: u32,
+    iterations: u32,
     runs: Vec<BenchmarkRun>,
 }
 
@@ -621,6 +626,7 @@ fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
                 .output
                 .join(format!("reference-{}-t1.json", pdfium.release)),
             1,
+            args.iterations,
             timeout,
         )?);
         for threads in &thread_counts {
@@ -633,6 +639,7 @@ fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
                     .output
                     .join(format!("candidate-{}-t{threads}.json", pdfium.release)),
                 *threads,
+                args.iterations,
                 timeout,
             )?);
         }
@@ -643,6 +650,7 @@ fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
                 &request,
                 &args.output,
                 *processes,
+                args.iterations,
                 timeout,
             )?);
         }
@@ -651,11 +659,13 @@ fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
         &args.output.join("benchmark-summary.json"),
         &BenchmarkSummary {
             schema_version: SCHEMA_VERSION,
+            iterations: args.iterations,
             runs,
         },
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_batch_benchmark(
     backend: &str,
     runner: &Path,
@@ -663,9 +673,10 @@ fn run_batch_benchmark(
     request: &Path,
     checkpoint: &Path,
     threads: usize,
+    iterations: u32,
     timeout: Duration,
 ) -> Result<BenchmarkRun> {
-    let _ = fs::remove_file(checkpoint);
+    clear_batch_checkpoint(checkpoint)?;
     let mut command = Command::new(runner);
     command
         .arg("batch")
@@ -678,7 +689,10 @@ fn run_batch_benchmark(
         .arg("--checkpoint")
         .arg(checkpoint)
         .arg("--warmup-rounds")
-        .arg("1");
+        .arg("1")
+        .arg("--iterations")
+        .arg(iterations.to_string())
+        .arg("--no-durable-checkpoints");
     if backend == "candidate" {
         command.arg("--threads").arg(threads.to_string());
     }
@@ -693,15 +707,26 @@ fn run_batch_benchmark(
     benchmark_from_capture(backend, &pdfium.release, "threads", threads, capture)
 }
 
+fn clear_batch_checkpoint(checkpoint: &Path) -> Result<()> {
+    if checkpoint.is_file() {
+        fs::remove_file(checkpoint)?;
+    }
+    let job_directory = batch_job_checkpoint_dir(checkpoint)?;
+    if job_directory.is_dir() {
+        fs::remove_dir_all(job_directory)?;
+    }
+    Ok(())
+}
+
 fn run_process_benchmark(
     runner: &Path,
     pdfium: &PdfiumSpec,
     request: &BatchRequest,
     output: &Path,
     processes: usize,
+    iterations: u32,
     timeout: Duration,
 ) -> Result<BenchmarkRun> {
-    let started = Instant::now();
     let captures = thread::scope(|scope| -> Result<Vec<Captured>> {
         let mut handles = Vec::new();
         for process_index in 0..processes {
@@ -724,7 +749,7 @@ fn run_process_benchmark(
                 pdfium.release
             ));
             atomic_write_json(&request_path, &partition)?;
-            let _ = fs::remove_file(&checkpoint);
+            clear_batch_checkpoint(&checkpoint)?;
             handles.push(scope.spawn(move || {
                 let mut command = Command::new(runner);
                 command
@@ -740,7 +765,10 @@ fn run_process_benchmark(
                     .arg("--threads")
                     .arg("1")
                     .arg("--warmup-rounds")
-                    .arg("1");
+                    .arg("1")
+                    .arg("--iterations")
+                    .arg(iterations.to_string())
+                    .arg("--no-durable-checkpoints");
                 capture_command(
                     command,
                     timeout,
@@ -756,7 +784,6 @@ fn run_process_benchmark(
             .map(|handle| handle.join().expect("process benchmark thread panicked"))
             .collect()
     })?;
-    let elapsed_us = started.elapsed().as_micros() as u64;
     let mut reports = Vec::new();
     let mut peak_rss_kib = 0;
     let mut rss_samples = Vec::new();
@@ -781,6 +808,11 @@ fn run_process_benchmark(
         .iter()
         .flat_map(|report| report.jobs.iter().map(|job| job.elapsed_us))
         .collect::<Vec<_>>();
+    let elapsed_us = reports
+        .iter()
+        .map(|report| report.elapsed_us)
+        .max()
+        .unwrap_or(0);
     Ok(BenchmarkRun {
         backend: "candidate".to_owned(),
         pdfium_release: pdfium.release.clone(),
@@ -813,15 +845,16 @@ fn benchmark_from_capture(
         .map(|job| job.elapsed_us)
         .collect::<Vec<_>>();
     let pages = report.jobs.iter().map(|job| job.page_count).sum();
+    let elapsed_us = report.elapsed_us;
     Ok(BenchmarkRun {
         backend: backend.to_owned(),
         pdfium_release: release.to_owned(),
         mode: mode.to_owned(),
         concurrency,
-        elapsed_us: capture.elapsed_us,
+        elapsed_us,
         jobs: report.jobs.len(),
         pages,
-        throughput_pages_per_second: throughput(pages, capture.elapsed_us),
+        throughput_pages_per_second: throughput(pages, elapsed_us),
         p50_document_us: percentile(&durations, 0.50),
         p95_document_us: percentile(&durations, 0.95),
         peak_rss_kib: capture.peak_rss_kib,
@@ -1040,13 +1073,61 @@ fn run_long_run_process(
             start_after: Some(warmup_marker),
         }),
     )?;
-    let report: BatchReport = if checkpoint.is_file() {
-        serde_json::from_slice(&fs::read(&checkpoint)?)?
-    } else {
-        serde_json::from_str(capture.stdout.trim())
-            .with_context(|| format!("parse long-run {backend} output: {}", capture.stderr))?
-    };
+    let report = load_long_run_checkpoint(backend, pdfium, &checkpoint, capture.elapsed_us)?;
     analyze_long_run_report(backend, pdfium, request, max_rounds, capture, report)
+}
+
+fn load_long_run_checkpoint(
+    backend: &str,
+    pdfium: &PdfiumSpec,
+    checkpoint_path: &Path,
+    elapsed_us: u64,
+) -> Result<BatchReport> {
+    let backend_revision = match backend {
+        "reference" => BACKEND_REVISION_PDFIUM_RENDER,
+        "candidate" => BACKEND_REVISION_FIRECRAWL,
+        _ => anyhow::bail!("unsupported backend {backend}"),
+    };
+    let mut jobs = BTreeMap::<String, BatchJob>::new();
+    if checkpoint_path.is_file() {
+        let report: BatchReport = serde_json::from_slice(&fs::read(checkpoint_path)?)?;
+        anyhow::ensure!(
+            report.schema_version == SCHEMA_VERSION,
+            "checkpoint schema mismatch"
+        );
+        anyhow::ensure!(report.backend == backend, "checkpoint backend mismatch");
+        anyhow::ensure!(
+            report.backend_revision == backend_revision,
+            "checkpoint backend revision mismatch"
+        );
+        anyhow::ensure!(
+            report.pdfium_release == pdfium.release,
+            "checkpoint PDFium release mismatch"
+        );
+        anyhow::ensure!(report.threads == 1, "checkpoint thread count mismatch");
+        jobs.extend(
+            report
+                .jobs
+                .into_iter()
+                .map(|job| (job.input_id.clone(), job)),
+        );
+    }
+    jobs.extend(load_batch_job_checkpoints(
+        checkpoint_path,
+        backend,
+        backend_revision,
+        &pdfium.release,
+        1,
+    )?);
+    Ok(BatchReport {
+        schema_version: SCHEMA_VERSION,
+        backend: backend.to_owned(),
+        backend_revision: backend_revision.to_owned(),
+        pdfium_release: pdfium.release.clone(),
+        threads: 1,
+        elapsed_us,
+        jobs: jobs.into_values().collect(),
+    })
 }
 
 fn analyze_long_run_report(
@@ -1310,16 +1391,20 @@ fn process_rss_kib(pid: u32) -> Option<u64> {
 }
 
 fn write_capture(path: &Path, capture: &Captured) -> Result<()> {
-    let parsed =
-        serde_json::from_str::<serde_json::Value>(capture.stdout.trim()).unwrap_or_else(|_| {
-            serde_json::json!({
+    let stdout = capture.stdout.trim();
+    if serde_json::from_str::<RunReport>(stdout).is_ok() {
+        atomic_write_text(path, stdout)
+    } else {
+        atomic_write_json(
+            path,
+            &serde_json::json!({
                 "stdout": capture.stdout,
                 "stderr": capture.stderr,
                 "timed_out": capture.timed_out,
                 "exit": capture.status.as_ref().and_then(ExitStatus::code),
-            })
-        });
-    atomic_write_json(path, &parsed)
+            }),
+        )
+    }
 }
 
 fn discover_corpus(repo_root: &Path) -> Result<BatchRequest> {

@@ -23,6 +23,11 @@ workspace 包含三个可执行程序和一个只承载 JSON schema 的共享 cr
 以及文本、渲染和总耗时。比较器使用 schema，不解析人类日志；几何容差是 `0.001 pt`，
 其余字段精确比较。
 
+报告中的完整文本是逐字符 `FPDFText_GetUnicode` code 序列的 UTF-16 解码，两端共用同一个
+纯函数。不能混用 wrapper 的便捷全文 API：PDFium 对断词伪字符会分别从
+`FPDFText_GetUnicode` / `FPDFText_GetBoundedText` 返回 `U+0002`，从 `FPDFText_GetText`
+返回 `U+FFFE`。逐字符视图才与字符数、index 和几何处在同一个索引域。
+
 `candidate-runner probe-is-generated` 是隔离的 `libloading` 探针。它直接解析 PDFium symbol
 并自行管理 document/page/text-page handle，不把它冒充为 `firecrawl-pdfium::sys` 能力。
 
@@ -61,6 +66,7 @@ export EXP4=experiments/experiment-4-pdfium-qualification
 export ORCHESTRATOR="$EXP4/target/release/orchestrator"
 export REFERENCE="$EXP4/target/release/reference-runner"
 export CANDIDATE="$EXP4/target/release/candidate-runner"
+export PDFIUM_7763=/path/to/api-7763/libpdfium.dylib
 export PDFIUM_7988=.context/experiment-4/pdfium/chromium-7988/lib/libpdfium.dylib
 export PDFIUM_8009=.context/experiment-4/pdfium/chromium-8009/lib/libpdfium.dylib
 export HELLO_WORLD_PDF=.context/experiment-4/hello_world.pdf
@@ -69,7 +75,7 @@ export HELLO_WORLD_PDF=.context/experiment-4/hello_world.pdf
 先校验 dylib；不要在哈希不符时继续：
 
 ```bash
-shasum -a 256 "$PDFIUM_7988" "$PDFIUM_8009"
+shasum -a 256 "$PDFIUM_7763" "$PDFIUM_7988" "$PDFIUM_8009"
 ```
 
 ## 正确性与有界失败
@@ -81,6 +87,7 @@ shasum -a 256 "$PDFIUM_7988" "$PDFIUM_8009"
 "$ORCHESTRATOR" matrix \
   --reference-runner "$REFERENCE" \
   --candidate-runner "$CANDIDATE" \
+  --pdfium "api-7763=$PDFIUM_7763" \
   --pdfium "chromium-7988=$PDFIUM_7988" \
   --pdfium "chromium-8009=$PDFIUM_8009" \
   --repo-root . \
@@ -100,27 +107,34 @@ malformed 可以有等价的分类失败差异，但 crash、hang 和协议错�
 "$ORCHESTRATOR" benchmark \
   --reference-runner "$REFERENCE" \
   --candidate-runner "$CANDIDATE" \
+  --pdfium "api-7763=$PDFIUM_7763" \
   --pdfium "chromium-7988=$PDFIUM_7988" \
   --pdfium "chromium-8009=$PDFIUM_8009" \
   --request .context/experiment-4/results/correctness/legal-request.json \
   --output .context/experiment-4/results/performance \
   --thread-counts 1,2,4,8 \
-  --process-counts 1,2,4,8
+  --process-counts 1,2,4,8 \
+  --iterations 5
 ```
 
 runner 先执行一轮 warm-up。摘要记录吞吐、文档 p50/p95、peak RSS 和 RSS samples。
+默认再执行 5 轮 measured iteration；其间传入 `--no-durable-checkpoints`，吞吐分母取 runner
+报告的 warm-up 后 `elapsed_us`，避免 checkpoint I/O 与进程启动时间污染测量。
 
 ## 常驻进程长跑
 
 每个 backend/PDFium 组合只启动一个 `batch` 进程。runner 在同一进程中完成最多 200 轮，
-每个 fixture 后原子写 checkpoint；orchestrator 在一个全局 8 小时截止点内持续等待，超时会
-杀进程并 `wait`，不会留下后台任务。RSS 从 runner 写出 warm-up-complete marker 后开始每秒
-采样。
+每个 fixture 后将 `BatchJobCheckpoint` 原子写入
+`checkpoint.json.jobs/<sha256(input_id)>.json`；正常结束时才汇总完整 `BatchReport`。恢复时会
+校验 schema/backend/revision/PDFium/threads 和 sidecar 文件名，再跳过已完成 job，因而 checkpoint
+写入量随 job 数线性增长。orchestrator 在一个全局 8 小时截止点内持续等待，超时会杀进程并
+`wait`，不会留下后台任务。RSS 从 runner 写出 warm-up-complete marker 后开始每秒采样。
 
 ```bash
 "$ORCHESTRATOR" long-run \
   --reference-runner "$REFERENCE" \
   --candidate-runner "$CANDIDATE" \
+  --pdfium "api-7763=$PDFIUM_7763" \
   --pdfium "chromium-7988=$PDFIUM_7988" \
   --pdfium "chromium-8009=$PDFIUM_8009" \
   --request .context/experiment-4/results/correctness/legal-request.json \

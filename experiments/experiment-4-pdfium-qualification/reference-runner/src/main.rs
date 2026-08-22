@@ -7,7 +7,8 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use experiment_4_common::{
-    atomic_write_json, content_sha256, error_class, micros_since, sha256_bytes, sha256_file,
+    atomic_write_batch_job_checkpoint, atomic_write_json, content_sha256, error_class,
+    load_batch_job_checkpoints, micros_since, sha256_bytes, sha256_file, text_from_character_codes,
     BatchJob, BatchReport, BatchRequest, CharacterReport, PageReport, PageTimings, Point, Rect,
     RenderReport, RunOutcome, RunReport, StageTimings, BACKEND_REVISION_PDFIUM_RENDER,
     SCHEMA_VERSION,
@@ -48,6 +49,8 @@ enum Command {
         warmup_complete_marker: Option<PathBuf>,
         #[arg(long, default_value_t = 1)]
         iterations: u32,
+        #[arg(long, default_value_t = false)]
+        no_durable_checkpoints: bool,
     },
 }
 
@@ -81,6 +84,7 @@ fn run_main() -> Result<u8> {
             warmup_rounds,
             warmup_complete_marker,
             iterations,
+            no_durable_checkpoints,
         } => {
             let report = run_batch(
                 &request,
@@ -90,6 +94,7 @@ fn run_main() -> Result<u8> {
                 warmup_rounds,
                 warmup_complete_marker.as_deref(),
                 iterations,
+                !no_durable_checkpoints,
             )?;
             println!("{}", serde_json::to_string(&report)?);
             Ok(if report.jobs.iter().all(|job| job.success) {
@@ -102,8 +107,18 @@ fn run_main() -> Result<u8> {
 }
 
 fn run_one(pdf_path: &Path, input_id: &str, library_path: &Path, release: &str) -> RunReport {
-    let total_start = Instant::now();
     let library_sha = sha256_file(library_path).unwrap_or_default();
+    run_one_with_library_sha(pdf_path, input_id, library_path, release, &library_sha)
+}
+
+fn run_one_with_library_sha(
+    pdf_path: &Path,
+    input_id: &str,
+    library_path: &Path,
+    release: &str,
+    library_sha: &str,
+) -> RunReport {
+    let total_start = Instant::now();
     let pdf_bytes = match fs::read(pdf_path) {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -111,7 +126,7 @@ fn run_one(pdf_path: &Path, input_id: &str, library_path: &Path, release: &str) 
                 "reference",
                 BACKEND_REVISION_PDFIUM_RENDER,
                 release,
-                library_sha,
+                library_sha.to_owned(),
                 input_id.to_owned(),
                 String::new(),
                 StageTimings {
@@ -137,7 +152,7 @@ fn run_one(pdf_path: &Path, input_id: &str, library_path: &Path, release: &str) 
                 "reference",
                 BACKEND_REVISION_PDFIUM_RENDER,
                 release,
-                library_sha,
+                library_sha.to_owned(),
                 input_id.to_owned(),
                 pdf_sha,
                 timings,
@@ -159,7 +174,7 @@ fn run_one(pdf_path: &Path, input_id: &str, library_path: &Path, release: &str) 
                 "reference",
                 BACKEND_REVISION_PDFIUM_RENDER,
                 release,
-                library_sha,
+                library_sha.to_owned(),
                 input_id.to_owned(),
                 pdf_sha,
                 timings,
@@ -178,7 +193,7 @@ fn run_one(pdf_path: &Path, input_id: &str, library_path: &Path, release: &str) 
                 backend: "reference".to_owned(),
                 backend_revision: BACKEND_REVISION_PDFIUM_RENDER.to_owned(),
                 pdfium_release: release.to_owned(),
-                pdfium_library_sha256: library_sha,
+                pdfium_library_sha256: library_sha.to_owned(),
                 input_id: input_id.to_owned(),
                 pdf_sha256: pdf_sha,
                 pages,
@@ -193,7 +208,7 @@ fn run_one(pdf_path: &Path, input_id: &str, library_path: &Path, release: &str) 
                 "reference",
                 BACKEND_REVISION_PDFIUM_RENDER,
                 release,
-                library_sha,
+                library_sha.to_owned(),
                 input_id.to_owned(),
                 pdf_sha,
                 timings,
@@ -282,23 +297,6 @@ fn rect(value: PdfRect) -> Rect {
     }
 }
 
-fn text_from_character_codes(characters: &[CharacterReport]) -> String {
-    let units = characters
-        .iter()
-        .flat_map(|character| {
-            if let Ok(unit) = u16::try_from(character.code) {
-                vec![unit]
-            } else if let Some(value) = char::from_u32(character.code) {
-                let mut encoded = [0; 2];
-                value.encode_utf16(&mut encoded).to_vec()
-            } else {
-                vec![char::REPLACEMENT_CHARACTER as u16]
-            }
-        })
-        .collect::<Vec<_>>();
-    String::from_utf16_lossy(&units)
-}
-
 fn dimension(points: f32) -> Result<u32> {
     let rounded = points.round();
     if !rounded.is_finite() || rounded <= 0.0 || rounded > i32::MAX as f32 {
@@ -307,6 +305,7 @@ fn dimension(points: f32) -> Result<u32> {
     Ok(rounded as u32)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_batch(
     request_path: &Path,
     library_path: &Path,
@@ -315,6 +314,7 @@ fn run_batch(
     warmup_rounds: u32,
     warmup_complete_marker: Option<&Path>,
     iterations: u32,
+    durable_checkpoints: bool,
 ) -> Result<BatchReport> {
     anyhow::ensure!(iterations > 0, "iterations must be at least one");
     let request: BatchRequest = serde_json::from_slice(
@@ -324,13 +324,15 @@ fn run_batch(
         request.schema_version == SCHEMA_VERSION,
         "unsupported batch schema"
     );
+    let library_sha = sha256_file(library_path)?;
     for _ in 0..warmup_rounds {
         for input in &request.inputs {
-            let report = run_one(
+            let report = run_one_with_library_sha(
                 Path::new(&input.path),
                 &input.input_id,
                 library_path,
                 release,
+                &library_sha,
             );
             anyhow::ensure!(
                 matches!(report.outcome, RunOutcome::Success),
@@ -357,7 +359,13 @@ fn run_batch(
                 continue;
             }
             let start = Instant::now();
-            let report = run_one(Path::new(&input.path), &job_id, library_path, release);
+            let report = run_one_with_library_sha(
+                Path::new(&input.path),
+                &job_id,
+                library_path,
+                release,
+                &library_sha,
+            );
             let job = BatchJob {
                 input_id: job_id.clone(),
                 report_sha256: if matches!(report.outcome, RunOutcome::Success) {
@@ -373,13 +381,17 @@ fn run_batch(
                     RunOutcome::Success => None,
                 },
             };
+            if durable_checkpoints {
+                atomic_write_batch_job_checkpoint(
+                    checkpoint_path,
+                    "reference",
+                    BACKEND_REVISION_PDFIUM_RENDER,
+                    release,
+                    1,
+                    &job,
+                )?;
+            }
             completed.insert(job_id, job);
-            write_batch_checkpoint(
-                checkpoint_path,
-                release,
-                micros_since(batch_start),
-                &completed,
-            )?;
         }
     }
     let report = batch_report(release, micros_since(batch_start), completed);
@@ -396,32 +408,38 @@ fn batch_job_id(iteration: u32, iterations: u32, input_id: &str) -> String {
 }
 
 fn load_completed(path: &Path, release: &str) -> Result<BTreeMap<String, BatchJob>> {
-    if !path.exists() {
-        return Ok(BTreeMap::new());
-    }
-    let report: BatchReport = serde_json::from_slice(&fs::read(path)?)?;
-    anyhow::ensure!(
-        report.schema_version == SCHEMA_VERSION,
-        "checkpoint schema mismatch"
-    );
-    anyhow::ensure!(
-        report.pdfium_release == release,
-        "checkpoint release mismatch"
-    );
-    Ok(report
-        .jobs
-        .into_iter()
-        .map(|job| (job.input_id.clone(), job))
-        .collect())
-}
-
-fn write_batch_checkpoint(
-    path: &Path,
-    release: &str,
-    elapsed_us: u64,
-    jobs: &BTreeMap<String, BatchJob>,
-) -> Result<()> {
-    atomic_write_json(path, &batch_report(release, elapsed_us, jobs.clone()))
+    let mut completed = if path.exists() {
+        let report: BatchReport = serde_json::from_slice(&fs::read(path)?)?;
+        anyhow::ensure!(
+            report.schema_version == SCHEMA_VERSION,
+            "checkpoint schema mismatch"
+        );
+        anyhow::ensure!(report.backend == "reference", "checkpoint backend mismatch");
+        anyhow::ensure!(
+            report.backend_revision == BACKEND_REVISION_PDFIUM_RENDER,
+            "checkpoint backend revision mismatch"
+        );
+        anyhow::ensure!(
+            report.pdfium_release == release,
+            "checkpoint release mismatch"
+        );
+        anyhow::ensure!(report.threads == 1, "checkpoint thread count mismatch");
+        report
+            .jobs
+            .into_iter()
+            .map(|job| (job.input_id.clone(), job))
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+    completed.extend(load_batch_job_checkpoints(
+        path,
+        "reference",
+        BACKEND_REVISION_PDFIUM_RENDER,
+        release,
+        1,
+    )?);
+    Ok(completed)
 }
 
 fn batch_report(release: &str, elapsed_us: u64, jobs: BTreeMap<String, BatchJob>) -> BatchReport {
