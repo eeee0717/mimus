@@ -199,6 +199,7 @@ fn simple_font_page(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn simple_font_page_cmap(
     repo_root: &Path,
     fixture_id: &str,
@@ -211,7 +212,7 @@ fn simple_font_page_cmap(
 ) -> Result<Vec<u8>> {
     let font = pinned_font(repo_root)?;
     let mut pdf = RawPdf::new(fixture_id);
-    pdf.object(format!("<< /Type /Catalog /Pages 2 0 R >>").as_bytes())?;
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
     pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
     let crop = crop_box.map_or(String::new(), |b| {
         format!(" /CropBox [{} {} {} {}]", b[0], b[1], b[2], b[3])
