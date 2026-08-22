@@ -9,7 +9,7 @@
 
 **成（PoC 路线可行）**。`lopdf::IncrementalDocument` 能以输入 PDF 的完整字节为前缀追加增量段；新对象从输入最大对象号之后连续分配，不复用独立 free xref slot；共享 `/Resources` 可以 copy-on-write，只改目标页；未修改对象、页面框、书签/命名目标/URI/注释/AcroForm/OCG 结构保持不变。qpdf、Poppler、MuPDF 均能读取并渲染输出，新增字体实际挂入 COW Resources 并用于 `POC`。
 
-**范围限制**：这是可丢弃的 M0 PoC，不是生产 writer。字体对象只放入一个 Standard-14 marker，未实现字体子集化、翻译内容生成、完整 content-stream 重写或双语页模式。生产实现仍需在 `mimus-core` 的 writer 边界内完成，并以本实验的对象图断言为回归门禁。
+**范围限制**：这是可丢弃的 M0 PoC，不是生产 writer。字体对象只放入一个 Standard-14 marker，未实现字体子集化、翻译内容生成、完整 content-stream 重写或双语页模式。候选写回路径只消费主输入及 ObjStm Form、GEOM、generation、free-slot、shared-resources 五类 companion；singular CTM、mixed codespace 和两份 malformed fixture 只通过 Corpus 输入门禁，没有参与写回，因此本实验不声称这些边缘写回路径已经成立。生产实现仍需在 `mimus-core` 的 writer 边界内完成，并以本实验已证明的对象图断言为回归门禁。
 
 ## 环境
 
@@ -56,7 +56,7 @@ PoC crate 位于 [`experiments/m0-experiment-3-poc`](../experiments/m0-experimen
 1. 用 `IncrementalDocument::create_from` 保留原始字节；
 2. clone 目标页的 `/Resources`，追加资源对象并仅让目标页指向它（copy-on-write）；
 3. 追加 content stream 和 font marker；
-4. 保存到同目录临时文件后 `rename`，避免覆盖原文件或留下半成品。
+4. 保存到同目录临时文件，只有资源复制、字体追加和临时文件写入均成功后才 `rename` 发布。
 
 实测结果：
 
@@ -88,15 +88,15 @@ python3 experiments/m0-experiment-3-poc/verify_outputs.py
 
 结果：主输出与全部 companion 均通过 qpdf 结构检查；主输出文本为 `POC`，XOBJ 输出为 `FORM COW` + `MIMUS`，GEOM 输出为可见的 `POC`，shared 输出第二页仍为 `MIMUSC`。qpdf JSON 独立确认原富结构对象不变、新对象引用链有效、Form 仍被活动 Contents 执行、generation 7 保留、free object 10 未复用；Poppler 与 MuPDF 均确认上述文本，且两者对 XOBJ/GEOM 的栅格都不是空白页。
 
-### 失败原子性
+### 已注入失败的原子性
 
-PoC 分别注入三类失败。每次先把真实输入 PDF 写到即将传给 `incremental_rewrite` 的实际输出目标，再经同一完整写回/发布入口注入失败：
+PoC 分别注入三类发生在原子 `rename` 前的失败。每次先把真实输入 PDF 写到即将传给 `incremental_rewrite` 的实际输出目标，再经同一完整写回/发布入口注入失败：
 
 - 资源复制：`failure-resource.pdf` 在 COW Resources 的 `add_object` 前失败；
 - 字体追加：`failure-font.pdf` 在字体 marker 的 `add_object` 前失败；
 - 保存发布：`failure-save.pdf` 完成临时文件写入后、原子 rename 前失败。
 
-三个实际目标均保持与输入 PDF 逐字节相同，并继续通过 qpdf；保存失败主动删除同目录临时文件。因此资源复制、字体追加和保存失败都不会覆盖既有产物或留下半译输出。
+三个实际目标均保持与输入 PDF 逐字节相同，并继续通过 qpdf；保存失败主动删除同目录临时文件。因此本实验只证明资源复制、字体追加和临时文件写入后的这三个已注入失败不会覆盖既有产物或留下半译输出，不把结论外推到发布后的 reload 等任意失败。
 
 ## 可重放命令
 
