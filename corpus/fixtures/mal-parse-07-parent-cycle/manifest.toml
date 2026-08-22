@@ -36,6 +36,7 @@ tolerance_pt = 0.001
 block = []
 declared_failure = "operator-walk:page-tree-cycle"
 operator_walk_diagnostics = ["page-tree-cycle"]
+renderer_diagnostic = "Fixing bad parent in pagetree"
 
 [expected.structure]
 pages = 1
@@ -45,7 +46,7 @@ columns = 1
 [[expected.behaviour]]
 id = "PARSE-10-parent-cycle"
 assertion = "The walker detects page object 3 re-entering itself through Parent and reports PageTreeCycle without walking the page contents"
-observable_via = "single-byte lineage, page-tree object IDs, stable operator-walk diagnostic and bounded process completion"
+observable_via = "single-byte lineage, page-tree object IDs, stable operator-walk diagnostic, bounded process completion and MuPDF repair diagnostic"
 
 [oracle]
-checks = ["determinism", "legality", "operator-walk"]
+checks = ["determinism", "legality", "operator-walk", "render-diagnostic"]

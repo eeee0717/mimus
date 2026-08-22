@@ -164,7 +164,7 @@ fixture 都输出独立 token 序列，也没有声称每个 operator 的完整 
 |---|---|---|
 | `mal-parse-05-contents-array-string-split` | `unterminated-string` | 在 object 9 停页，不读 object 10，不产生级联错误 |
 | `mal-parse-06-deep-nesting` | `nesting-too-deep-128` | 第 129 层停止，无 panic / stack overflow |
-| `mal-parse-07-parent-cycle` | `page-tree-cycle` | object path `[3,3]`，不走查页面 content stream，进程正常返回 |
+| `mal-parse-07-parent-cycle` | `page-tree-cycle` | object path `[3,3]`，不走查 content；MuPDF 独立报告 `Fixing bad parent in pagetree` |
 | `mal-stream-03-arity-excess` | `arity-excess` | 尾六个数形成 CTM，baseline `(630,823)`；前缀在 operator 边界丢弃 |
 | `mal-stream-04-arity-short` | `arity-short` | `cm` 原子跳过，baseline 仍 `(72,120)` |
 | `mal-stream-05-unbalanced-Q` | `graphics-stack-underflow` x2 | base CTM 不变，baseline `(72,120)` |
@@ -256,7 +256,8 @@ mise exec -- cargo run -p corpus -- verify
 PDFium dylib 是实验测试的强制输入：环境变量缺失或路径不存在时测试明确失败；CI 下载
 固定 archive 并校验 SHA-256 后运行全 workspace 测试，不再允许静默 skip。实验测试为
 8/8，其中 PDFium 强制交叉校验覆盖 20 份合法 fixture；Corpus v1 为 62/62 fixture 通过
-独立验收，且每份 `operator-walk:*` check 都实际执行 PoC 并比较去重后的诊断 ID 集合。
+独立验收；通用 manifest 校验强制每份 fixture 声明 `render` 或 `render-diagnostic`，且每份
+`operator-walk:*` check 都实际执行 PoC 并比较去重后的诊断 ID 集合。
 
 结论为**成**：自写走查能
 在规范输入上达到 `0.001 pt` 合同，PDFium 可继续位于 ADR-0006 的 trait 边界后做

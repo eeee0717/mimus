@@ -581,6 +581,11 @@ impl Manifest {
             "§2.8",
             "oracle.checks 为空——没有验收手段的 fixture 不得入库",
         )?;
+        fail_if(
+            !self.requires(Check::Render) && !self.requires(Check::RenderDiagnostic),
+            "§2.8",
+            "oracle.checks 必须含 render 或 render-diagnostic——每份 fixture 都要有独立渲染器证据",
+        )?;
         // 手写的 block.text 必须被至少一种手段核对。否则那一串文本就只是注释：
         // 写错了没人知道，而它恰恰是 §2.1 里最该被守住的东西。
         fail_if(
@@ -1275,7 +1280,7 @@ assertion = "断言"
 observable_via = "手段"
 
 [oracle]
-checks = ["determinism", "structure"]
+checks = ["determinism", "structure", "render"]
 "#;
 
     fn parse(toml_text: &str) -> Result<Manifest> {
@@ -1379,8 +1384,8 @@ text = "world"
     #[test]
     fn rejects_a_fixture_whose_hand_written_text_nothing_checks() {
         let text = BASE.replace(
-            "checks = [\"determinism\", \"structure\"]",
-            "checks = [\"determinism\"]",
+            "checks = [\"determinism\", \"structure\", \"render\"]",
+            "checks = [\"determinism\", \"render\"]",
         );
         let err = parse(&text).unwrap_err().to_string();
         assert!(
@@ -1391,9 +1396,28 @@ text = "world"
 
     #[test]
     fn rejects_an_empty_oracle_list() {
-        let text = BASE.replace("checks = [\"determinism\", \"structure\"]", "checks = []");
+        let text = BASE.replace(
+            "checks = [\"determinism\", \"structure\", \"render\"]",
+            "checks = []",
+        );
         let err = parse(&text).unwrap_err().to_string();
         assert!(err.contains("§2.8"), "{err}");
+    }
+
+    #[test]
+    fn every_fixture_requires_an_independent_renderer_gate() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/fixtures/unit-base-02-two-column");
+        let mut manifest = Manifest::load(&dir).unwrap();
+        manifest
+            .oracle
+            .checks
+            .retain(|check| !matches!(check, Check::Render | Check::RenderDiagnostic));
+
+        let error = manifest.validate().unwrap_err().to_string();
+
+        assert!(error.contains("render 或 render-diagnostic"), "{error}");
+        assert!(error.contains("§2.8"), "{error}");
     }
 
     #[test]
