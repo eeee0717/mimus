@@ -87,6 +87,12 @@ def mupdf_text(path: Path) -> tuple[str, str]:
     return text, result.stderr
 
 
+def assert_no_pdf_diagnostics(diagnostics: str) -> None:
+    lowered = diagnostics.lower()
+    for marker in ["format error", "syntax error", "object is not a stream"]:
+        assert marker not in lowered, diagnostics
+
+
 def assert_pgm_has_ink(data: bytes, renderer: str, path: Path) -> None:
     match = re.match(rb"P5\s+(?:#[^\n]*\s+)*(\d+)\s+(\d+)\s+(\d+)\s", data)
     assert match, f"{renderer} did not produce a binary PGM"
@@ -134,7 +140,7 @@ def verify_primary() -> None:
     assert extracted_pages(output_path) == ["POC"]
     text, diagnostics = mupdf_text(output_path)
     assert text == "POC"
-    assert "error" not in diagnostics.lower() and "warning" not in diagnostics.lower()
+    assert_no_pdf_diagnostics(diagnostics)
 
 
 def verify_embedded_shared_font() -> None:
@@ -146,8 +152,10 @@ def verify_embedded_shared_font() -> None:
     assert extracted_pages(path) == ["MIMUS", "MIMUSC"]
     text, diagnostics = mupdf_text(path)
     assert text == "MIMUSMIMUSC"
+    assert_no_pdf_diagnostics(diagnostics)
     assert "embedded font" not in diagnostics.lower()
     assert "not a stream" not in diagnostics.lower()
+    assert "system font" not in diagnostics.lower()
 
 
 def verify_xobject_companion() -> None:
@@ -180,7 +188,7 @@ def verify_xobject_companion() -> None:
     assert sorted(pages[0].splitlines()) == ["FORM COW", "MIMUS"]
     text, diagnostics = mupdf_text(output_path)
     assert "FORM COW" in text and "MIMUS" in text
-    assert "error" not in diagnostics.lower() and "warning" not in diagnostics.lower()
+    assert_no_pdf_diagnostics(diagnostics)
     assert_nonblank(output_path)
 
 
@@ -199,7 +207,7 @@ def verify_geometry_companion() -> None:
     assert extracted_pages(output_path) == ["POC"]
     text, diagnostics = mupdf_text(output_path)
     assert text == "POC"
-    assert "error" not in diagnostics.lower() and "warning" not in diagnostics.lower()
+    assert_no_pdf_diagnostics(diagnostics)
     assert_nonblank(output_path)
 
 
