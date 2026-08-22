@@ -8,6 +8,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail, ensure};
+use flate2::Compression;
+use flate2::write::ZlibEncoder;
 
 use crate::hash;
 
@@ -19,8 +21,264 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
     match fixture_id {
         "unit-base-01-single-line" => single_line(repo_root),
         "unit-base-03-structured" => structured(repo_root),
+        "unit-parse-01-ascii85" => filtered_text(fixture_id, repo_root, FilterRecipe::Ascii85),
+        "unit-parse-02-cascade" => filtered_text(fixture_id, repo_root, FilterRecipe::Ascii85Flate),
+        "unit-parse-03-lzw-earlychange" => {
+            filtered_text(fixture_id, repo_root, FilterRecipe::LzwEarlyChange0)
+        }
+        "unit-parse-04-contents-array-numeric-split" => contents_array_numeric_split(repo_root),
+        "unit-parse-05-contents-array-string-parent" => contents_array_string_parent(repo_root),
+        "unit-stream-00-malformed-parent" => malformed_stream_parent(repo_root),
+        "unit-stream-01-bx-ex-unknown-op" => basic_text(
+            fixture_id,
+            repo_root,
+            b"BX /Foo 1 2 3 SomeVendorOp EX\nBT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n",
+        ),
+        "unit-stream-02-type3-d1" => type3_d1(repo_root),
+        "unit-stream-08-inline-image-EI-in-data" => inline_image(fixture_id, repo_root, false),
+        "unit-stream-09-inline-image-no-L" => inline_image(fixture_id, repo_root, true),
         _ => bail!("exact fixture `{fixture_id}` is not implemented"),
     }
+}
+
+const STANDARD_CONTENT: &[u8] = b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n";
+
+enum FilterRecipe {
+    Ascii85,
+    Ascii85Flate,
+    LzwEarlyChange0,
+}
+
+fn filtered_text(fixture_id: &str, repo_root: &Path, recipe: FilterRecipe) -> Result<Vec<u8>> {
+    let (dictionary, encoded) = match recipe {
+        FilterRecipe::Ascii85 => (
+            "/Filter /ASCII85Decode".to_string(),
+            ascii85(STANDARD_CONTENT),
+        ),
+        FilterRecipe::Ascii85Flate => {
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+            encoder.write_all(STANDARD_CONTENT)?;
+            let compressed = encoder.finish()?;
+            (
+                "/Filter [/ASCII85Decode /FlateDecode]".to_string(),
+                ascii85(&compressed),
+            )
+        }
+        FilterRecipe::LzwEarlyChange0 => (
+            "/Filter /LZWDecode /DecodeParms << /EarlyChange 0 >>".to_string(),
+            lzw_early_change_0(STANDARD_CONTENT),
+        ),
+    };
+    basic_pdf(fixture_id, repo_root, "9 0 R", &[(dictionary, encoded)])
+}
+
+fn basic_text(fixture_id: &str, repo_root: &Path, content: &[u8]) -> Result<Vec<u8>> {
+    basic_pdf(
+        fixture_id,
+        repo_root,
+        "9 0 R",
+        &[(String::new(), content.to_vec())],
+    )
+}
+
+fn basic_pdf(
+    fixture_id: &str,
+    repo_root: &Path,
+    contents: &str,
+    streams: &[(String, Vec<u8>)],
+) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new(fixture_id);
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents {contents} >>"
+        )
+        .as_bytes(),
+    )?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(
+        b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>",
+    )?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", to_unicode())?;
+    for (dictionary, data) in streams {
+        pdf.stream(dictionary.as_bytes(), data)?;
+    }
+    pdf.finish(1)
+}
+
+fn contents_array_numeric_split(repo_root: &Path) -> Result<Vec<u8>> {
+    basic_pdf(
+        "unit-parse-04-contents-array-numeric-split",
+        repo_root,
+        "[9 0 R 10 0 R]",
+        &[
+            (String::new(), b"q 1 0 0 1 10".to_vec()),
+            (
+                String::new(),
+                b" 20 cm\nBT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET\nQ\n".to_vec(),
+            ),
+        ],
+    )
+}
+
+fn contents_array_string_parent(repo_root: &Path) -> Result<Vec<u8>> {
+    basic_pdf(
+        "unit-parse-05-contents-array-string-parent",
+        repo_root,
+        "[9 0 R 10 0 R]",
+        &[
+            (
+                String::new(),
+                b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) ".to_vec(),
+            ),
+            (String::new(), b"(MIMUS) Tj ET\n".to_vec()),
+        ],
+    )
+}
+
+fn malformed_stream_parent(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-stream-00-malformed-parent");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 10 0 R >>")?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", to_unicode())?;
+    pdf.object(b"<< /MimusFixturePadding true >>")?;
+    pdf.stream(b"", STANDARD_CONTENT)?;
+    pdf.stream(
+        b"",
+        b"q 1 2 3 4 5 6 7 cm BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET Q\n",
+    )?;
+    pdf.stream(
+        b"",
+        b"q 1 0 0 1 100 cm BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET Q\n",
+    )?;
+    pdf.stream(b"", b"Q Q BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET\n")?;
+    pdf.stream(b"", b"BT /F1 12Tf 100 120Td (MIMUS) Tj ET\n")?;
+    pdf.stream(
+        b"",
+        b"BT /F1 12 Tf 1 0 0 1 72 120 Tm 10.5.3 Tc (MIMUS) Tj ET\n",
+    )?;
+    let mut nested = b"BT /F1 12 Tf 1 0 0 1 72 120 Tm ".to_vec();
+    nested.extend(std::iter::repeat_n(b'[', 512));
+    nested.extend_from_slice(b"(MIMUS)");
+    nested.extend(std::iter::repeat_n(b']', 512));
+    nested.extend_from_slice(b" TJ ET\n");
+    pdf.stream(b"", &nested)?;
+    pdf.finish(1)
+}
+
+fn type3_d1(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-stream-02-type3-d1");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 11 0 R >>")?;
+    pdf.object(b"<< /Font << /F1 5 0 R /FT3 9 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", to_unicode())?;
+    pdf.object(b"<< /Type /Font /Subtype /Type3 /Name /FT3 /FontBBox [0 0 1000 1000] /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /M 10 0 R >> /Encoding << /Type /Encoding /Differences [77 /M] >> /FirstChar 77 /LastChar 77 /Widths [1000] /Resources << >> >>")?;
+    pdf.stream(b"", b"1000 0 0 0 1000 1000 d1\n0 0 1000 1000 re f\n")?;
+    pdf.stream(b"", b"BT /FT3 12 Tf 1 0 0 1 72 120 Tm (M) Tj ET\n")?;
+    pdf.finish(1)
+}
+
+fn inline_image(fixture_id: &str, repo_root: &Path, unknown_after: bool) -> Result<Vec<u8>> {
+    let mut content = if unknown_after {
+        b"q\nBX\nBI /W 8 /H 8 /BPC 8 /CS /G ID\n".to_vec()
+    } else {
+        b"q\nBI /W 8 /H 8 /BPC 8 /CS /G ID\n".to_vec()
+    };
+    let mut pixels = [96u8; 64];
+    pixels[20..24].copy_from_slice(b" EI ");
+    content.extend_from_slice(&pixels);
+    if unknown_after {
+        content.extend_from_slice(b"\nEI\n1 SomeVendorOp\nEX\nQ\n");
+    } else {
+        content.extend_from_slice(b"\nEI\nQ\n");
+    }
+    content.extend_from_slice(STANDARD_CONTENT);
+    basic_text(fixture_id, repo_root, &content)
+}
+
+fn ascii85(bytes: &[u8]) -> Vec<u8> {
+    let mut output = Vec::new();
+    for chunk in bytes.chunks(4) {
+        let mut padded = [0u8; 4];
+        padded[..chunk.len()].copy_from_slice(chunk);
+        let value = u32::from_be_bytes(padded);
+        if chunk.len() == 4 && value == 0 {
+            output.push(b'z');
+            continue;
+        }
+        let mut digits = [0u8; 5];
+        let mut value = value;
+        for digit in digits.iter_mut().rev() {
+            *digit = (value % 85) as u8 + b'!';
+            value /= 85;
+        }
+        output.extend_from_slice(&digits[..chunk.len() + 1]);
+    }
+    output.extend_from_slice(b"~>");
+    output
+}
+
+fn lzw_early_change_0(bytes: &[u8]) -> Vec<u8> {
+    use std::collections::BTreeMap;
+
+    let mut dictionary: BTreeMap<Vec<u8>, u16> =
+        (0u16..=255).map(|byte| (vec![byte as u8], byte)).collect();
+    let mut next_code = 258u16;
+    let mut codes = vec![256u16];
+    let Some((&first, rest)) = bytes.split_first() else {
+        return pack_9_bit(&[256, 257]);
+    };
+    let mut current = vec![first];
+    for &byte in rest {
+        let mut extended = current.clone();
+        extended.push(byte);
+        if dictionary.contains_key(&extended) {
+            current = extended;
+        } else {
+            codes.push(dictionary[&current]);
+            dictionary.insert(extended, next_code);
+            next_code += 1;
+            current.clear();
+            current.push(byte);
+        }
+    }
+    codes.push(dictionary[&current]);
+    codes.push(257);
+    pack_9_bit(&codes)
+}
+
+fn pack_9_bit(codes: &[u16]) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut buffer = 0u32;
+    let mut bits = 0u8;
+    for &code in codes {
+        buffer = (buffer << 9) | u32::from(code);
+        bits += 9;
+        while bits >= 8 {
+            bits -= 8;
+            output.push((buffer >> bits) as u8);
+            buffer &= (1u32 << bits).wrapping_sub(1);
+        }
+    }
+    if bits > 0 {
+        output.push((buffer << (8 - bits)) as u8);
+    }
+    output
 }
 
 /// Generate completely in memory, then atomically replace `target`.

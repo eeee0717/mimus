@@ -239,12 +239,15 @@ pub struct Expected {
     #[serde(default)]
     pub optional_content_group: Vec<OptionalContentGroup>,
     pub behaviour: Vec<Behaviour>,
-    /// 畸形 fixture 必填：`qpdf --check` 的输出里必须出现的子串。
-    ///
-    /// §2.8 步骤 2：畸形 fixture 必须以 manifest **声明的方式**失败——失败方式
-    /// 不符也是失败，说明变异没打中目标。
+    /// 畸形 fixture 必填。结构畸形写 qpdf 输出中必须出现的子串；content
+    /// 语义畸形写 `operator-walk:<stable-error-id>`，此时 qpdf 必须确认 PDF
+    /// 容器本身合法，错误由实验 2 的隔离走查器断言。
     #[serde(default)]
     pub declared_failure: Option<String>,
+    /// Independent renderer diagnostic required for a malformed fixture that
+    /// cannot produce a reference raster by design.
+    #[serde(default)]
+    pub renderer_diagnostic: Option<String>,
 }
 
 /// 结构化期望——**先于生成写死**，生成结果不符即为失败（§2.1 例外条款）。
@@ -295,7 +298,16 @@ pub enum XrefKind {
 pub struct ContentStream {
     pub object: u32,
     pub compressed: bool,
+    #[serde(default)]
     pub bytes: String,
+    #[serde(default)]
+    pub bytes_hex: Option<String>,
+    #[serde(default)]
+    pub decoded_bytes: Option<String>,
+    #[serde(default)]
+    pub decoded_bytes_hex: Option<String>,
+    #[serde(default)]
+    pub filters: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -443,12 +455,19 @@ pub enum Check {
     DualParserGeometry,
     /// §2.2: compare all three hand-written geometry quantities independently.
     HandWrittenGeometry,
+    /// Type3 d1 geometry: MuPDF independently observes baseline and the
+    /// painted CharProc bbox. Poppler's synthesized Type3 metric box is kept
+    /// as differential evidence rather than treated as the specification.
+    Type3Geometry,
     /// Exact header/object/xref/trailer/content-stream bytes.
     PdfBytes,
     /// Rich outline/action/annotation/form/OCG/name-tree object graph.
     PdfStructure,
     /// §2.8 步骤 4：独立渲染器出图并存参考栅格哈希。
     Render,
+    /// A malformed fixture is independently observed through a stable mutool
+    /// trace diagnostic instead of a successful reference raster.
+    RenderDiagnostic,
 }
 
 #[derive(Debug, Deserialize)]
@@ -548,7 +567,9 @@ impl Manifest {
         // 手写的 block.text 必须被至少一种手段核对。否则那一串文本就只是注释：
         // 写错了没人知道，而它恰恰是 §2.1 里最该被守住的东西。
         fail_if(
-            !self.requires(Check::Structure) && !self.requires(Check::Glyphs),
+            !self.expected.block.is_empty()
+                && !self.requires(Check::Structure)
+                && !self.requires(Check::Glyphs),
             "§2.1",
             "手写的 block.text 无人核对——oracle.checks 必须含 structure 或 glyphs 之一",
         )?;
@@ -867,7 +888,6 @@ impl Manifest {
             (Check::Legality, "legality"),
             (Check::PageGeometry, "page-geometry"),
             (Check::Structure, "structure"),
-            (Check::HandWrittenGeometry, "hand-written-geometry"),
             (Check::PdfBytes, "pdf-bytes"),
             (Check::PdfStructure, "pdf-structure"),
             (Check::Render, "render"),
@@ -878,6 +898,11 @@ impl Manifest {
                 &format!("exact-writer fixture 必须启用 {name} 门禁"),
             )?;
         }
+        fail_if(
+            !self.requires(Check::HandWrittenGeometry) && !self.requires(Check::Type3Geometry),
+            "§2.8",
+            "exact-writer fixture 必须启用 hand-written-geometry 或 type3-geometry 门禁",
+        )?;
 
         fail_if(
             self.expected.geometry_source != GeometrySource::HandWritten,
@@ -950,11 +975,25 @@ impl Manifest {
                 "§2.5",
                 &format!("content stream object {} 不在对象计划中", stream.object),
             )?;
-            fail_if(stream.compressed, "§2.5", "精确 content stream 禁止压缩")?;
             fail_if(
-                stream.bytes.is_empty(),
+                stream.bytes.is_empty() == stream.bytes_hex.is_none(),
                 "§2.1",
-                "手写 content stream 字节不得为空",
+                "content stream 必须且只能用 bytes / bytes_hex 之一手写 raw bytes",
+            )?;
+            fail_if(
+                stream.compressed
+                    && (stream.filters.is_empty()
+                        || (stream.decoded_bytes.is_none() == stream.decoded_bytes_hex.is_none())),
+                "§2.1/§2.5",
+                "带过滤器的精确 stream 必须声明 filters，且只能用 decoded_bytes / decoded_bytes_hex 之一声明解码结果",
+            )?;
+            fail_if(
+                !stream.compressed
+                    && (!stream.filters.is_empty()
+                        || stream.decoded_bytes.is_some()
+                        || stream.decoded_bytes_hex.is_some()),
+                "§2.5",
+                "未过滤 stream 不应声明 filters 或 decoded bytes",
             )?;
         }
         for reference in &self.expected.reference {

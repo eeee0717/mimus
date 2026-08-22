@@ -1,0 +1,70 @@
+schema_version = 1
+[identity]
+id = "unit-stream-00-malformed-parent"
+name = "Legal switchboard parent for operator mutations"
+class = "unit"
+legality = "legal"
+cases = ["STREAM-02","STREAM-04","STREAM-06","PARSE-08"]
+priority = "M0"
+variable = "The page references the sole well-formed stream while malformed candidates remain unreferenced"
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-stream-00-malformed-parent.pdf"
+pdf_sha256 = "bc752a5b09476a2aa651143b7334faa47fb58ffbacc59b56579a1f62985c0883"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d73747265616d2d30302d6d"
+info_dictionary = false
+metadata_streams = 0
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+[[expected.block]]
+key = "L1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+baseline_origin = [72.0,120.0]
+metric_box = [72.0,117.168,112.656,131.136]
+visual_bbox = [73.177734,119.830078,111.985219,128.90625]
+[[expected.content_stream]]
+object = 10
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 120 Tm
+(MIMUS) Tj
+ET
+"""
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 10
+[[expected.behaviour]]
+id = "M0-malformed-parent"
+assertion = "The legal parent renders only object 10; each child changes the final digit of that one reference"
+observable_via = "qpdf xref/object graph, exact byte diff, and independent renderers"
+[oracle]
+checks = ["determinism","legality","page-geometry","structure","hand-written-geometry","pdf-bytes","pdf-structure","render"]
+[[adjudication]]
+date = "2026-08-22"
+issue = "Single-byte malformed children need otherwise byte-identical candidate programs"
+resolution = "Keep candidates in opaque unreferenced streams and mutate only /Contents 10 0 R"
