@@ -1,0 +1,62 @@
+# 本文件由 `corpus adjudicate` 生成，**不要手工编辑**。
+# 它是 docs/03-corpus-requirements.md §2.1 唯一例外条款的产物：
+# 现实排版 fixture 的几何期望由两个互相独立的解析器一致确立，
+# 而非从生成器读回。manifest.toml 里的结构化期望仍然是手写的。
+#
+#   metric_box      ← poppler pdftotext -bbox-layout（字体度量盒）
+#   visual_bbox     ← mutool draw -F stext 的字形 quad 并集（墨迹盒）
+#   baseline_origin ← mutool stext 的首字符 origin（绘制起点）
+#
+# 坐标一律在 PDF 页面空间：单位 pt、原点左下、/Rotate 之前（§2.2）。
+
+schema_version = 1
+fixture = "unit-layout-07-policy-zones"
+tolerance_pt = 0.050000
+
+[[block]]
+key = "HDR"
+page = 0
+metric_box = [25.000000, 228.763000, 129.895000, 236.743000]
+visual_bbox = [25.000000, 228.819000, 129.895000, 235.371000]
+baseline_origin = [25.000000, 230.485000]
+
+[[block]]
+key = "P1"
+page = 0
+metric_box = [25.000000, 192.942000, 354.999998, 213.124000]
+visual_bbox = [25.000000, 193.014010, 355.000000, 213.124000]
+baseline_origin = [25.000000, 205.078002]
+
+[[block]]
+key = "P2"
+page = 0
+metric_box = [25.000000, 138.942000, 354.999998, 159.124000]
+visual_bbox = [25.000000, 139.014010, 354.999950, 157.360000]
+baseline_origin = [25.000000, 151.078000]
+
+[[block]]
+key = "REF"
+page = 0
+metric_box = [25.000000, 96.672000, 210.724000, 104.652000]
+visual_bbox = [25.000000, 96.756000, 210.724060, 103.321990]
+baseline_origin = [25.000000, 98.394000]
+
+[[block]]
+key = "SEAL"
+page = 0
+metric_box = [295.454500, 52.671997, 330.545500, 60.651997]
+visual_bbox = [295.454500, 54.310000, 330.545500, 59.000000]
+baseline_origin = [295.454500, 54.394000]
+
+[[block]]
+key = "FTR"
+page = 0
+metric_box = [186.745000, 33.671997, 193.255000, 41.651997]
+visual_bbox = [186.745000, 35.303000, 193.255000, 39.692000]
+baseline_origin = [186.745000, 35.394000]
+
+[[render]]
+page = 0
+dpi = 150
+poppler_sha256 = "57c3b006caff8c040433dd25d401401e27f72793b2d2b0e622dd69fad16950ac"
+mutool_md5 = "0be99f1631395588e68edaede3afdaee"

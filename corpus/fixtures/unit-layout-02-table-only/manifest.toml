@@ -1,0 +1,132 @@
+# unit-layout-02-table-only —— expected manifest
+#
+# 本文件先于 unit-layout-02-table-only.typ 手写。三个块按行划分：两个解析器都把同一行的三个单元格并成一行文本。
+
+schema_version = 1
+
+[identity]
+id = "unit-layout-02-table-only"
+name = "整页只有一个 3×3 有线表格"
+class = "unit"
+legality = "legal"
+cases = ["LAYOUT-02", "TABLE-01"]
+priority = "M0"
+variable = "页面上除表格外没有任何正文"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-layout-02-table-only.typ"
+pdf = "unit-layout-02-table-only.pdf"
+pdf_sha256 = "fc4cafda597db96b6a3640e3823e9a0758899dc29a935e3d47b124781bd03f19"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 340.0, 160.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 9
+columns = 1
+
+[[expected.block]]
+key = "C11"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "Run"
+
+[[expected.block]]
+key = "C12"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "Throughput"
+
+[[expected.block]]
+key = "C13"
+page = 0
+column = "full"
+draw_order = 3
+reading_order = 3
+text = "Latency"
+
+[[expected.block]]
+key = "C21"
+page = 0
+column = "full"
+draw_order = 4
+reading_order = 4
+text = "first"
+
+[[expected.block]]
+key = "C22"
+page = 0
+column = "full"
+draw_order = 5
+reading_order = 5
+text = "1204 ops"
+
+[[expected.block]]
+key = "C23"
+page = 0
+column = "full"
+draw_order = 6
+reading_order = 6
+text = "8.1 ms"
+
+[[expected.block]]
+key = "C31"
+page = 0
+column = "full"
+draw_order = 7
+reading_order = 7
+text = "second"
+
+[[expected.block]]
+key = "C32"
+page = 0
+column = "full"
+draw_order = 8
+reading_order = 8
+text = "1198 ops"
+
+[[expected.block]]
+key = "C33"
+page = 0
+column = "full"
+draw_order = 9
+reading_order = 9
+text = "8.3 ms"
+
+[[expected.behaviour]]
+id = "LAYOUT-02-no-requests"
+assertion = "表格内文字不得进入任何翻译请求；本页的请求列表应为空"
+observable_via = "实验 1 中模型给整页的类别标签：应为 table 而非正文类"
+
+[[expected.behaviour]]
+id = "D4-no-fallback"
+assertion = "若模型能框出整张表，就不需要 BabelDOC 的 9 个魔数兜底聚类（红利清单 D4）"
+observable_via = "实验 1 中模型是否漏检本页的表格"
+
+[[expected.behaviour]]
+id = "D9-cell-granularity"
+assertion = "单元格粒度是否可得，决定二级表格检测模型是否要抄回（红利清单 D9）"
+observable_via = "实验 1 中模型是否给出 table_cell 类的框"
+
+[oracle]
+# 块级次序与几何不可裁定，理由见文末 [[adjudication]]。
+checks = ["determinism", "legality", "page-geometry", "glyphs", "render"]
+
+[[adjudication]]
+date = "2026-08-21"
+issue = "首版 manifest 按「行」写了 3 个块。实测两个解析器的分块粒度不同：mutool draw -F stext 给出 3 个行块，poppler pdftotext -bbox-layout 给出 9 个单元格块。两者不可能同时成立。"
+resolution = "manifest 改写成 9 个单元格块——那是表格的事实结构，不迁就任何一方；同时不声明 structure / reading-order / dual-parser-geometry，改用 glyphs 断言字符多重集。粒度分歧本身记在这里，它正是 D9（单元格粒度是否可得）要在实验 1 里回答的问题。"

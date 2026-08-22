@@ -1,0 +1,74 @@
+# 本文件由 `corpus adjudicate` 生成，**不要手工编辑**。
+# 它是 docs/03-corpus-requirements.md §2.1 唯一例外条款的产物：
+# 现实排版 fixture 的几何期望由两个互相独立的解析器一致确立，
+# 而非从生成器读回。manifest.toml 里的结构化期望仍然是手写的。
+#
+#   metric_box      ← poppler pdftotext -bbox-layout（字体度量盒）
+#   visual_bbox     ← mutool draw -F stext 的字形 quad 并集（墨迹盒）
+#   baseline_origin ← mutool stext 的首字符 origin（绘制起点）
+#
+# 坐标一律在 PDF 页面空间：单位 pt、原点左下、/Rotate 之前（§2.2）。
+
+schema_version = 1
+fixture = "unit-order-06-cross-page"
+tolerance_pt = 0.050000
+
+[[block]]
+key = "A1"
+page = 0
+metric_box = [25.000000, 106.942000, 274.999999, 127.124000]
+visual_bbox = [25.000000, 107.014000, 275.000070, 127.124002]
+baseline_origin = [25.000000, 119.078002]
+
+[[block]]
+key = "A2"
+page = 0
+metric_box = [25.000000, 77.098000, 274.999998, 97.280000]
+visual_bbox = [25.000000, 78.115000, 275.000000, 97.280000]
+baseline_origin = [25.000000, 89.234000]
+
+[[block]]
+key = "B1"
+page = 1
+metric_box = [25.000000, 106.942000, 275.000000, 127.124000]
+visual_bbox = [25.000000, 106.941996, 275.000000, 125.360002]
+baseline_origin = [25.000000, 119.078002]
+
+[[block]]
+key = "B2"
+page = 1
+metric_box = [25.000000, 67.176000, 275.000001, 97.280000]
+visual_bbox = [25.000000, 67.248000, 275.000040, 95.516001]
+baseline_origin = [25.000000, 89.234000]
+
+[[block]]
+key = "C1"
+page = 2
+metric_box = [25.000000, 116.981000, 77.740000, 127.241000]
+visual_bbox = [25.000000, 117.089000, 77.740009, 125.477000]
+baseline_origin = [25.000000, 119.195000]
+
+[[block]]
+key = "C2"
+page = 2
+metric_box = [25.000000, 77.215000, 275.000000, 107.318995]
+visual_bbox = [25.000000, 77.287000, 275.000070, 107.318991]
+baseline_origin = [25.000000, 99.272994]
+
+[[render]]
+page = 0
+dpi = 150
+poppler_sha256 = "72c5ea7e4f286a0b5d174c3b7365882704706c2e3f5b32561966f37b82e8366d"
+mutool_md5 = "87c5f7d25ef5e6c2dc0cf011377a6afe"
+
+[[render]]
+page = 1
+dpi = 150
+poppler_sha256 = "9ae3bfddded0b778afdb1f6ab95bca2f0d8133b691d586bbd2be2c3dbd1b335c"
+mutool_md5 = "60bdcc97c2e0af68339165b801b0657d"
+
+[[render]]
+page = 2
+dpi = 150
+poppler_sha256 = "150e4eaf8c1ec8b1ec20accf9503a64aff1ca736727bba9f28b9f26c7625e34a"
+mutool_md5 = "53fb97cbbc5178dc8c149b88a89cd0e4"

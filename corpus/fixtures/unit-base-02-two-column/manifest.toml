@@ -1,0 +1,107 @@
+# unit-base-02-two-column —— expected manifest
+#
+# 本文件先于 unit-base-02-two-column.typ 手写。它同时是三份 order fixture 的对照组：同样的正文、
+# 同样的栏宽与栏间距，但由排版引擎自然分栏，绘制次序与阅读次序一致。
+
+schema_version = 1
+
+[identity]
+id = "unit-base-02-two-column"
+name = "双栏正文基线：真实分栏流"
+class = "unit"
+legality = "legal"
+cases = ["ORDER-01"]
+priority = "M0"
+variable = "由排版引擎自然分栏（Typst columns），content stream 次序与阅读次序天然一致"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-base-02-two-column.typ"
+pdf = "unit-base-02-two-column.pdf"
+pdf_sha256 = "4db74866c879f7222cba8d98aa20f41e7f7e451632aa81e64b96a37a0a536f32"
+font_provenance = "typst-embedded"
+
+# 页面尺寸来自源文件的 `#set page(width: 420pt, height: 220pt)`，是规格而非观测值。
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 420.0, 220.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 6
+columns = 2
+
+[[expected.block]]
+key = "L1"
+page = 0
+column = "left"
+draw_order = 1
+reading_order = 1
+text = "Layout preservation is the whole point of this tool. A translated page must land its text in the same columns, in the same reading order, as the source page."
+
+[[expected.block]]
+key = "L2"
+page = 0
+column = "left"
+draw_order = 2
+reading_order = 2
+text = "The model supplies the reading order. Everything downstream consumes that order rather than the order in which glyphs happen to be drawn."
+
+[[expected.block]]
+key = "L3"
+page = 0
+column = "left"
+draw_order = 3
+reading_order = 3
+text = "Where the model is silent, geometry takes over. A fallback sort by column and baseline keeps the pipeline honest when detection misses a block."
+
+[[expected.block]]
+key = "R1"
+page = 0
+column = "right"
+draw_order = 4
+reading_order = 4
+text = "Content stream order is not reading order. Engines emit footnotes before body text, and some tools interleave columns line by line."
+
+[[expected.block]]
+key = "R2"
+page = 0
+column = "right"
+draw_order = 5
+reading_order = 5
+text = "This fixture exists to make that distinction observable. Two independent parsers report the same page from two different angles."
+
+[[expected.block]]
+key = "R3"
+page = 0
+column = "right"
+draw_order = 6
+reading_order = 6
+text = "Nothing here is adjusted to match what the tools produced. The structure was written down first."
+
+[[expected.behaviour]]
+id = "BASE-02-flow"
+assertion = "六段正文三三分入左右两栏，绘制次序与阅读次序同为 L1 L2 L3 R1 R2 R3"
+observable_via = "mutool draw -F stext 的绘制顺序与 pdftotext -bbox-layout 的版面顺序同时成立"
+
+[[expected.behaviour]]
+id = "BASE-02-columns"
+assertion = "栏宽 165pt、栏间距 30pt，左栏起于 x=30pt、右栏起于 x=225pt"
+observable_via = "adjudicated.toml 中各块度量盒的 x 跨度"
+
+[oracle]
+checks = [
+    "determinism",
+    "legality",
+    "page-geometry",
+    "structure",
+    "reading-order",
+    "dual-parser-geometry",
+    "render",
+]

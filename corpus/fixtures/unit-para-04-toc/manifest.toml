@@ -1,0 +1,67 @@
+# unit-para-04-toc —— expected manifest
+#
+# 本文件先于 unit-para-04-toc.typ 手写。六个条目的标题、leader 与页码逐字写死；它们合起来是这一页的全部文本。
+
+schema_version = 1
+
+[identity]
+id = "unit-para-04-toc"
+name = "六种 leader 的目录条目"
+class = "unit"
+legality = "legal"
+cases = ["PARA-04"]
+priority = "M0"
+variable = "同一页上并置六种目录 leader（40 点 / 8 点 / U+22EF / 纯右对齐 / U+00B7 / 纯右对齐）"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-para-04-toc.typ"
+pdf = "unit-para-04-toc.pdf"
+pdf_sha256 = "9f4bff4cd1bd319631f7275408c7a49de22b0719bfe6466b8e26da39418899a6"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 340.0, 160.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "TOC"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "1 Introduction........................................3 1.1 Background........7 2 Method⋯⋯⋯⋯⋯⋯⋯⋯12 2.1 Setup18 3 Results············24 4 Conclusion31"
+
+[[expected.behaviour]]
+id = "PARA-04-threshold"
+assertion = "40 点的条目过「连续 20 个点」阈值，8 点的不过；两者都必须切出条目与页码"
+observable_via = "本页的 leader 长度写死在源文件里，可逐字符数出来"
+
+[[expected.behaviour]]
+id = "PARA-04-non-dot-leader"
+assertion = "U+22EF 与 U+00B7 两种 leader 完全不含 ASCII 点号，点数判据对它们一律失效"
+observable_via = "glyphs 检查报出的字符多重集里 U+22EF 8 个、U+00B7 12 个、ASCII 点号只来自条目编号与两段点线"
+
+[[expected.behaviour]]
+id = "D7-toc-class"
+assertion = "模型 25 类中若含目录类，就不需要点线切段补丁（红利清单 D7）"
+observable_via = "实验 1 中模型给本页的类别标签"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "glyphs", "render"]
+
+[[adjudication]]
+date = "2026-08-21"
+issue = "两个纯右对齐条目（2.1 Setup / 4 Conclusion，无 leader）的页码在 poppler 眼里各自成为一个独立的块，在 mutool 眼里仍留在目录块内。块划分因此无法被两者一致裁定。"
+resolution = "不改 fixture——纯右对齐正是 PARA-04 要覆盖的六种 leader 之一，去掉它等于把 case 削掉一角。改为不声明 structure / reading-order / dual-parser-geometry，用 glyphs 断言字符多重集。分歧本身记在这里：它说明「目录页码与条目的归属」连独立解析器之间都没有共识，正是 D7 要在实验 1 里回答的问题。"

@@ -1,0 +1,112 @@
+# unit-order-06-cross-page —— expected manifest
+#
+# 本文件先于 unit-order-06-cross-page.typ 手写。三页页面尺寸相同，唯一的变量是页边界落在哪里。
+
+schema_version = 1
+
+[identity]
+id = "unit-order-06-cross-page"
+name = "跨页续段与跨页假阳性"
+class = "unit"
+legality = "legal"
+cases = ["ORDER-03"]
+priority = "M0"
+variable = "页边界落在一句话中间（p1→p2）与落在两个独立段落之间（p2→p3）"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-order-06-cross-page.typ"
+pdf = "unit-order-06-cross-page.pdf"
+pdf_sha256 = "484c5435428cd279ab96c84ad3d33aabdbd4cd5397b6754e23e938380715315f"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 150.0]
+rotate = 0
+
+[[page]]
+index = 1
+media_box = [0.0, 0.0, 300.0, 150.0]
+rotate = 0
+
+[[page]]
+index = 2
+media_box = [0.0, 0.0, 300.0, 150.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 3
+blocks = 6
+columns = 1
+
+[[expected.block]]
+key = "A1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "A first page opens with an ordinary paragraph. It begins and ends on this page, and nothing about it reaches across the page boundary."
+
+[[expected.block]]
+key = "A2"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "The last paragraph of the first page is cut off by the page boundary in the middle of a sentence, which means it does not end with a"
+
+[[expected.block]]
+key = "B1"
+page = 1
+column = "full"
+draw_order = 3
+reading_order = 3
+text = "full stop and therefore continues at the top of the second page, where the remainder of the same sentence finally arrives."
+
+[[expected.block]]
+key = "B2"
+page = 1
+column = "full"
+draw_order = 4
+reading_order = 4
+text = "The last paragraph of the second page, by contrast, ends properly with a full stop. It is complete, and joining it to whatever follows would be wrong."
+
+[[expected.block]]
+key = "C1"
+page = 2
+column = "full"
+draw_order = 5
+reading_order = 5
+text = "Chapter Two"
+
+[[expected.block]]
+key = "C2"
+page = 2
+column = "full"
+draw_order = 6
+reading_order = 6
+text = "The third page opens a new chapter. Its first paragraph has nothing to do with the last paragraph of the previous page, and a rule that always joins them will always be wrong here."
+
+[[expected.behaviour]]
+id = "ORDER-03-true-join"
+assertion = "A2 与 B1 是同一句话被页边界切开的两半，合并它们是对的"
+observable_via = "A2 的文本不以句号结尾，B1 的文本不以大写字母开头；两者拼接成一句完整的话"
+
+[[expected.behaviour]]
+id = "ORDER-03-false-join"
+assertion = "B2 以句号完整结束，C1 是新章节标题；把 B2 与 C1/C2 合并是错的"
+observable_via = "B2 的文本以句号结尾；C1 用粗体且自成一块"
+
+[[expected.behaviour]]
+id = "D3-not-delivered"
+assertion = "模型的阅读顺序是页内的，跨页合并必须由 mimus 自行实现（红利清单 D3）"
+observable_via = "实验 1 的模型输出里不存在跨页的顺序信息"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "reading-order", "dual-parser-geometry", "render"]

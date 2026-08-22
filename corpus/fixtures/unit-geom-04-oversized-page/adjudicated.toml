@@ -1,0 +1,34 @@
+# 本文件由 `corpus adjudicate` 生成，**不要手工编辑**。
+# 它是 docs/03-corpus-requirements.md §2.1 唯一例外条款的产物：
+# 现实排版 fixture 的几何期望由两个互相独立的解析器一致确立，
+# 而非从生成器读回。manifest.toml 里的结构化期望仍然是手写的。
+#
+#   metric_box      ← poppler pdftotext -bbox-layout（字体度量盒）
+#   visual_bbox     ← mutool draw -F stext 的字形 quad 并集（墨迹盒）
+#   baseline_origin ← mutool stext 的首字符 origin（绘制起点）
+#
+# 坐标一律在 PDF 页面空间：单位 pt、原点左下、/Rotate 之前（§2.2）。
+
+schema_version = 1
+fixture = "unit-geom-04-oversized-page"
+tolerance_pt = 0.050000
+
+[[block]]
+key = "T1"
+page = 0
+metric_box = [25.000000, 683.104256, 233.630792, 691.951044]
+visual_bbox = [25.000000, 682.984690, 233.636810, 691.951030]
+baseline_origin = [25.000000, 685.036986]
+
+[[block]]
+key = "T2"
+page = 0
+metric_box = [25.000000, 611.149256, 269.455305, 619.996044]
+visual_bbox = [25.000000, 611.029680, 269.462350, 620.105603]
+baseline_origin = [25.000000, 613.081970]
+
+[[render]]
+page = 0
+dpi = 150
+poppler_sha256 = "1357030958c2ebf379afc3fb32abeea65dfc4c16dbbbb6fd9e883d23757e6db6"
+mutool_md5 = "8581d480c05640174a6282a31c653019"

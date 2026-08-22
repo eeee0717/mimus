@@ -1,0 +1,102 @@
+# unit-layout-07-policy-zones —— expected manifest
+#
+# 本文件先于 unit-layout-07-policy-zones.typ 手写。印章用红色圆环加环内文字近似，不引入位图——单变量原则要求这一页只引入「政策区并置」这一个变量。
+
+schema_version = 1
+
+[identity]
+id = "unit-layout-07-policy-zones"
+name = "页眉、页脚、参考条目与印章四个政策区"
+class = "unit"
+legality = "legal"
+cases = ["LAYOUT-07"]
+priority = "M0"
+variable = "同一页上并置四类不可翻译区域与两段正文"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-layout-07-policy-zones.typ"
+pdf = "unit-layout-07-policy-zones.pdf"
+pdf_sha256 = "bb9a6316939edc37ae616375b09f4a5de0a4c4301842e0832aa87511b5c414e2"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 380.0, 260.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 6
+columns = 1
+
+[[expected.block]]
+key = "HDR"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "Journal of Reproducible Layout, Vol. 3"
+
+[[expected.block]]
+key = "P1"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "The first body paragraph is the only kind of text on this page that a translator should ever see. Everything around it belongs to a policy zone."
+
+[[expected.block]]
+key = "P2"
+page = 0
+column = "full"
+draw_order = 3
+reading_order = 3
+text = "The second body paragraph is likewise ordinary prose. Between them the page carries a running head, a folio, a reference entry and a seal."
+
+[[expected.block]]
+key = "REF"
+page = 0
+column = "full"
+draw_order = 4
+reading_order = 4
+text = "[1] Smith et al. Layout preservation in machine translation. 2024."
+
+[[expected.block]]
+key = "SEAL"
+page = 0
+column = "full"
+draw_order = 5
+reading_order = 5
+text = "APPROVED"
+
+[[expected.block]]
+key = "FTR"
+page = 0
+column = "full"
+draw_order = 6
+reading_order = 6
+text = "17"
+
+[[expected.behaviour]]
+id = "LAYOUT-07-two-requests"
+assertion = "翻译请求恰好 2 条，即 P1 与 P2"
+observable_via = "实验 1 中模型给六个块的类别标签"
+
+[[expected.behaviour]]
+id = "D8-native-classes"
+assertion = "模型若原生给出 header / footer / seal / reference 四类，白名单补丁不必抄回（红利清单 D8）"
+observable_via = "实验 1 中模型对 HDR / FTR / SEAL / REF 的类别输出"
+
+[[expected.behaviour]]
+id = "LAYOUT-07-seal-preserved"
+assertion = "印章区文字原样保留，且其圆环矢量图形不被改动"
+observable_via = "输出 PDF 与输入在印章区的栅格差为 0"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "reading-order", "dual-parser-geometry", "render"]

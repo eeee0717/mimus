@@ -1,0 +1,20 @@
+\input corpus/determinism/pdftex-deterministic.tex
+\pdftrailerid{unit-geom-01-rotate-90}
+%% unit-geom-01-rotate-90 —— Corpus v1 fixture 源文件。结构化期望见 manifest.toml，先于本文件手写。
+%% 正文刻意只有两行、且相距 60bp：这批 fixture 的被观察量是页面几何，
+%% 行→段的聚合不该混进来（实测 mutool 在 /Rotate 270 下不聚合多行段落）。
+\pdfpagewidth=300bp
+\pdfpageheight=200bp
+\pdfpageattr{/Rotate 90}
+\documentclass[10pt]{article}
+\usepackage[papersize={300bp,200bp},margin=25bp]{geometry}
+\pagestyle{empty}
+\raggedright
+\hyphenpenalty=10000
+\exhyphenpenalty=10000
+\begin{document}
+\noindent Rotation must not move the text in page space.
+
+\vspace{60bp}
+\noindent\textbf{Second block,} second font weight, well below the first.
+\end{document}

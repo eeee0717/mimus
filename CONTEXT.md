@@ -1,7 +1,7 @@
 # CONTEXT
 
 > 项目共享术语与决策索引。术语随设计会话逐轮补充；难以逆转的技术选择在 `docs/adr/` 以 ADR 形式记录。
-> 事实基础：`docs/01-research.md`（2026-08-21 调研报告）+ 2026-08-21 模型/引擎事实查证（要点已并入 ADR-0002/0006）。
+> 事实基础：`docs/01-research.md`（2026-08-21 调研报告）+ 2026-08-21 模型/引擎事实查证（要点已并入 ADR-0002/0006）+ `docs/04-m0-experiment-1.md`（M0 实验 1 的模型实测结论）。
 
 ## 已定决策
 
@@ -35,11 +35,12 @@
 | 26 | 里程碑：M-1（Corpus Foundation，前置且阻塞 M0/M1）+ walking skeleton 五段 M0–M4，以语料断言收口（[docs/02-milestones.md](docs/02-milestones.md)） | — |
 | 27 | 术语细节：用户 `--glossary` 覆盖自动表；`--dump-glossary` 导出复用；`--no-auto-terms` 开关；自动表指纹进缓存键 | — |
 | 28 | 性能：V1 无硬指标；方向值=20 页论文除 LLM 外 <5 分钟（arm64 笔记本）；LLM 段落级并发默认 4、指数退避重试 3 次、重试尽降级保原文 | — |
-| 29 | crate 结构：workspace 两分——`mimus-core`（lib：IL/pass/引擎 trait/翻译层）+ `mimus`（bin：CLI/进度/配置） | — |
+| 29 | crate 结构：**生产侧**两分——`mimus-core`（lib：IL/pass/引擎 trait/翻译层）+ `mimus`（bin：CLI/进度/配置）。workspace 另含非生产成员 `corpus`（语料门禁工具），它不依赖 `mimus-core`，也不进 release archive | — |
 | 30 | Agent 集成：仓库提供一个可由 `npx skills add eeee0717/mimus` 安装的 `mimus` Agent Skill；skill 仅编排 CLI、不复制业务逻辑；MCP/daemon/vendor plugin 不进 V1 | [ADR-0008](docs/adr/0008-agent-skill.md) |
 | 31 | 加密 PDF：**V1 一律拒绝**（不论是否需要密码、不论 handler），退出码 2；不做权限位尊重、无密码参数、无 `--ignore-permissions`；检测必须用 `was_encrypted()` | [ADR-0009](docs/adr/0009-reject-encrypted-pdf.md) |
 | 32 | 非直立文本（旋转/镜像/斜切 > 20°，在视觉页框内度量）：**不翻译、原样 passthrough**；字符级检测、单元级隔离，同段其余字符照常翻译 | [ADR-0007](docs/adr/0007-ir-design.md) §5 |
 | 33 | M0 内部排期：实验 1 先行（不依赖自建确定性写出器），实验 2/3 待写出器就绪后并行；最小首批 10 份 fixture 独立验收后即启动对应实验，不等齐约 45 份。M-1 仍整体收口 | — |
+| 34 | Corpus v1 现实排版引擎钉死为 **Typst 0.15.1 / pdfTeX 1.40.29 / LuaHBTeX 1.24.0**；**XeTeX 出局**——xdvipdfmx 20260317 的随机字体子集标签过不了 SHA-256 复现门禁，且子集标签正是溯源断言的载体。唯一真源 `corpus/toolchain.toml`，门禁 `corpus doctor` / `corpus determinism` | — |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
@@ -128,19 +129,20 @@
 
 与 `docs/03-corpus-requirements.md` §6 同源，此处为索引。2026-08-21 的设计会话已收口其中三条：加密 PDF（决策 #31 / ADR-0009）、非直立文本（决策 #32）、M0 fixture 排期（决策 #33）。
 
-**仍需决策者拍板（1 条）**
+**仍需决策者拍板（0 条）**
 
-- **旧语料目录的实际删除**：`~/Downloads/babeldoc-corpus/` 当前仍在磁盘上且含 28 项，与"已被删除并正式作废"的表述不符。本轮工作全程未读取其任何几何参数或生成代码，但它留在原地存在被后续误引用的风险。
+- ~~旧语料目录的实际删除~~ → 2026-08-22 已由决策者删除 `~/Downloads/babeldoc-corpus/`，实测目录不存在。旧语料的误引用风险就此消失，Corpus v1 从零构建的前提完整成立。
 
 **已定去向，拆票执行（不需再决策）**
 
-- 确定性生成的引擎侧机制尚未实测 → M-1 工具链前置项。
-- 验收工具链缺四件（qpdf / poppler / mupdf-tools / Typst）→ M-1 工具链前置项。
-- PP-DocLayoutV3 的 25 类是否含目录类未确认 → M0 实验 1 顺带查证。
+- ~~确定性生成的引擎侧机制尚未实测~~ → 已收口（决策 #34）：三条配方实测通过，XeTeX 出局。
+- ~~验收工具链缺四件（qpdf / poppler / mupdf-tools / Typst）~~ → 已收口（决策 #34）：四件齐备并钉死版本。
+- ~~PP-DocLayoutV3 的 25 类是否含目录类未确认~~ → 已结清（M0 实验 1）：**`content` 就是目录类**，`unit-para-04-toc` 上 0.955 一个框盖住整个目录；但模型只给整块框，条目与页码的切分仍需自行实现。见 [docs/04-m0-experiment-1.md](docs/04-m0-experiment-1.md) §4 D7。
 - CJK 输入 fixture 的字体选型 → 独立 ticket（溯源手段已改为对象号 + 子集标签，不再依赖字体族差异）。
 
 **由实验给出结论，不是决策**
 
+- ~~PP-DocLayoutV3 的第 7 列语义、model order 与 D1–D12 红利~~ → 已由 M0 实验 1 结清，结论见 [docs/04-m0-experiment-1.md](docs/04-m0-experiment-1.md)，ADR-0002 已就地修订。
 - 走查与 PDFium 不一致时的仲裁规则（已知分歧：FONT-02、STREAM-02）→ 由 M0 实验 2 的结论文档确立。
 
 V2 展望项（扫描件/OCR、子进程隔离、像素 diff、宋体字族、中→英、GUI）见 `docs/02-milestones.md` 末节，随触发条件另行立项。

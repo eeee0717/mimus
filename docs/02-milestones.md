@@ -29,7 +29,7 @@
 
 | # | 实验 | 验证的风险 |
 |---|---|---|
-| 1 | PP-DocLayoutV3 ONNX 经 ort CPU 跑通；在双栏 fixture 的渲染图上验证 `[M,7]` 第 7 列是否为阅读顺序（ADR-0002 遗留） | 模型可用性 + 阅读顺序红利是否成立（决策 #14 的兜底开关） |
+| 1 | PP-DocLayoutV3 ONNX 经 ort CPU 跑通；在双栏 fixture 的渲染图上验证 `[M,7]` 第 7 列是否为阅读顺序（ADR-0002 遗留）**——2026-08-21 完成，结论见 [04-m0-experiment-1.md](04-m0-experiment-1.md)** | 模型可用性 + 阅读顺序红利是否成立（决策 #14 的兜底开关） |
 | 2 | lopdf 原始 content stream 字节 ⇄ pdfium-render text page 对齐 PoC：同一页上自写 tokenizer 的字符定位与 PDFium 结果交叉核对 | 操作符走查可行性（ADR-0006 的核心假设） |
 | 3 | 增量写回 PoC：lopdf 改写一页 content stream + 追加一个字体对象，输出 PDF 在主流阅读器中有效 | 增量改写模型（ADR-0003 §2） |
 

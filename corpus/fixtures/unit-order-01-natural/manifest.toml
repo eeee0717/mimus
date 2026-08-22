@@ -1,0 +1,123 @@
+# unit-order-01-natural —— expected manifest
+#
+# 本文件先于 unit-order-01-natural.typ 手写：块的划分、文本、绘制次序与阅读次序都是**规格**，
+# 源文件只是让 PDF 满足这份规格的实现（§2.1）。几何（三个盒子）走 §2.1 的唯一
+# 例外，由 poppler 与 mutool 一致裁定后落在 adjudicated.toml，不写在这里。
+
+schema_version = 1
+
+[identity]
+id = "unit-order-01-natural"
+name = "阅读顺序基线：自然绘制顺序"
+class = "unit"
+legality = "legal"
+cases = ["ORDER-01"]
+priority = "M0"
+variable = "content stream 为自然顺序：左栏自上而下，再右栏自上而下"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-order-01-natural.typ"
+pdf = "unit-order-01-natural.pdf"
+pdf_sha256 = "b11253bb2848d6839a795443af644dc152fe62bf04336c4eff0ab528c87b9424"
+font_provenance = "typst-embedded"
+
+# 页面尺寸来自源文件的 `#set page(width: 420pt, height: 220pt)`，是规格而非观测值。
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 420.0, 220.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 6
+columns = 2
+
+[[expected.block]]
+key = "L1"
+page = 0
+column = "left"
+draw_order = 1
+reading_order = 1
+text = "Layout preservation is the whole point of this tool. A translated page must land its text in the same columns, in the same reading order, as the source page."
+
+[[expected.block]]
+key = "L2"
+page = 0
+column = "left"
+draw_order = 2
+reading_order = 2
+text = "The model supplies the reading order. Everything downstream consumes that order rather than the order in which glyphs happen to be drawn."
+
+[[expected.block]]
+key = "L3"
+page = 0
+column = "left"
+draw_order = 3
+reading_order = 3
+text = "Where the model is silent, geometry takes over. A fallback sort by column and baseline keeps the pipeline honest when detection misses a block."
+
+[[expected.block]]
+key = "R1"
+page = 0
+column = "right"
+draw_order = 4
+reading_order = 4
+text = "Content stream order is not reading order. Engines emit footnotes before body text, and some tools interleave columns line by line."
+
+[[expected.block]]
+key = "R2"
+page = 0
+column = "right"
+draw_order = 5
+reading_order = 5
+text = "This fixture exists to make that distinction observable. Two independent parsers report the same page from two different angles."
+
+[[expected.block]]
+key = "R3"
+page = 0
+column = "right"
+draw_order = 6
+reading_order = 6
+text = "Nothing here is adjusted to match what the tools produced. The structure was written down first."
+
+[[expected.behaviour]]
+id = "ORDER-01-draw"
+assertion = "六个正文块在 content stream 中的绘制次序是 L1 L2 L3 R1 R2 R3"
+observable_via = "mutool draw -F stext 输出中 <block> 的文档顺序"
+
+[[expected.behaviour]]
+id = "ORDER-01-read"
+assertion = "人工阅读次序是 L1 L2 L3 R1 R2 R3，与绘制次序无关"
+observable_via = "poppler pdftotext -bbox-layout 版面分析后的 <block> 顺序"
+
+[[expected.behaviour]]
+id = "ORDER-01-raster"
+assertion = "与另外两份顺序变体的 150 dpi 灰度栅格逐像素一致"
+observable_via = "pdftoppm -r 150 -gray 与 mutool draw -s 5 的逐页哈希"
+
+[oracle]
+checks = [
+    "determinism",
+    "legality",
+    "page-geometry",
+    "structure",
+    "reading-order",
+    "dual-parser-geometry",
+    "render",
+]
+
+[group]
+name = "reading-order-invariance"
+raster_identical_with = ["unit-order-02-reversed", "unit-order-03-interleaved"]
+draw_order_differs_from = ["unit-order-02-reversed", "unit-order-03-interleaved"]
+
+[[adjudication]]
+date = "2026-08-21"
+issue = "首版源文件把六个块排成 3×2 网格（两栏的三个槽位逐行对齐），poppler 的版面分析随即给出行优先顺序 L1 R1 L2 R2 L3 R3，与手写的 reading_order 不符。栏间距从 20pt 加到 80pt 均无变化，可见判据不是栏间距而是行对齐。"
+resolution = "不改手写期望，改 fixture 几何：把纵向槽位改成真实双栏正文的样子（左栏 0/54/108、右栏 0/44/88，只有首行对齐），poppler 随即给出栏优先顺序。网格式对齐是表格版面而非双栏正文，本不该出现在这份 fixture 里。"

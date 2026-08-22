@@ -1,0 +1,16 @@
+%% Corpus v1 · pdfTeX 确定性开关（docs/03-corpus-requirements.md §2.6）
+%%
+%% 用法：源文件的**第一行**写
+%%     \input corpus/determinism/pdftex-deterministic.tex
+%% 紧接着写本 fixture 自己的 trailer ID（`corpus trailer-id <id>` 可生成）：
+%%     \pdftrailerid{<fixture-id>}
+%% 然后才是 \documentclass。
+%%
+%% 这三个开关都必须在 PDF 被打开之前生效，因此不能挪进 \begin{document}。
+%% 注意 \pdfvariable 是 LuaTeX 语法，pdfTeX 用的是下面这组独立原语。
+
+\pdfinfoomitdate=1        % 不写 /CreationDate 与 /ModDate
+\pdfsuppressptexinfo=-1   % 不写 PTEX.FullBanner / PTEX.FileName 等键
+\pdfomitcharset=1         % 不写 /CharSet（其内容随 TeX Live 字体表变动）
+
+\endinput

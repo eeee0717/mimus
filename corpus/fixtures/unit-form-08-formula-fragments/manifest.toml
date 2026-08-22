@@ -1,0 +1,67 @@
+# unit-form-08-formula-fragments —— expected manifest
+#
+# 本文件先于 unit-form-08-formula-fragments.typ 手写。块内字形次序不可裁定，理由见文末 [[adjudication]]；文本按阅读次序写出。
+
+schema_version = 1
+
+[identity]
+id = "unit-form-08-formula-fragments"
+name = "一行同时带上下标的公式"
+class = "unit"
+legality = "legal"
+cases = ["FORM-08"]
+priority = "M0"
+variable = "每个变量同时带上标与下标（最易被切碎的形状）"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-form-08-formula-fragments.typ"
+pdf = "unit-form-08-formula-fragments.pdf"
+pdf_sha256 = "4c878875977afa01fe4100eaac1ba833887f884cf4a435a764cb0e715d35d8aa"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 120.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "F1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "𝑥2𝑖 + 𝑦3𝑗 = 𝑧"
+
+[[expected.behaviour]]
+id = "FORM-08-one-unit"
+assertion = "整行应是一个公式单元，而不是被角标切出的若干个"
+observable_via = "实验 1 中模型给本行输出的公式框个数"
+
+[[expected.behaviour]]
+id = "FORM-08-glyphs"
+assertion = "这一行的字符恰好是 x i 2 + y j 3 = z（变量为 Unicode 数学斜体，数字为 ASCII）"
+observable_via = "glyphs 检查报出的字符多重集"
+
+[[expected.behaviour]]
+id = "D12-partial"
+assertion = "公式合并四组条件只被部分缓解，仍需自行实现（红利清单 D12）"
+observable_via = "实验 1 中模型是否把上下标与基线字符收进同一个公式框"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "glyphs", "render"]
+
+[[adjudication]]
+date = "2026-08-21"
+issue = "同一行 $x_i^2 + y_j^3 = z$，mutool draw -F stext 按纵向位置切成三行（\"𝑥2\" / \"𝑖+ 𝑦3\" / \"𝑗= 𝑧\"），poppler pdftotext -bbox-layout 的词序是 \"𝑥 2𝑖 + 𝑦 𝑗 3 = 𝑧\"。去掉空白后两者仍不同：𝑥2𝑖+𝑦3𝑗=𝑧 对 𝑥2𝑖+𝑦𝑗3=𝑧。"
+resolution = "不改 fixture：上下标同时出现正是 FORM-08 的构造要求。改为不声明 structure / reading-order / dual-parser-geometry，用 glyphs 断言字符多重集——「这一行有且只有这些字形」仍然成立，且足以挡住掉字与字体映射错误。次序分歧本身是这份 fixture 最有价值的产出：两个成熟解析器对同一行角标公式的字形次序都没有共识，说明 D12 的公式合并不能靠文本次序来验证，只能靠几何。"

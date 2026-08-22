@@ -1,2 +1,9 @@
 /target
 .DS_Store
+/.context
+
+# TeX 引擎的副产物。不属于 §2 生成合同——门禁只读 .tex / .pdf / manifest.toml，
+# 从不读这两类文件（重复生成时反而要先清掉 .aux，见 determinism.rs 的 probe）。
+# .log 里还带本机绝对路径与 format 日期，提交进来等于把生成环境固化进仓库。
+/corpus/**/*.aux
+/corpus/**/*.log
