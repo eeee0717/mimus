@@ -21,6 +21,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install PDF validation tools
+        run: sudo apt-get update && sudo apt-get install --yes qpdf poppler-utils mupdf-tools
+
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -29,3 +32,11 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --all-targets --all-features
+
+      - name: Incremental writeback PoC
+        run: cargo test --manifest-path experiments/m0-experiment-3-poc/Cargo.toml
+
+      - name: Validate PoC with independent PDF tools
+        run: |
+          cargo run --manifest-path experiments/m0-experiment-3-poc/Cargo.toml
+          python3 experiments/m0-experiment-3-poc/verify_outputs.py

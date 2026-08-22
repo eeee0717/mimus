@@ -1,0 +1,50 @@
+schema_version = 1
+
+[identity]
+id = "mal-parse-09-outlines-cycle"
+name = "Outline /Next self-cycle"
+class = "mal"
+legality = "malformed"
+cases = ["PARSE-11"]
+priority = "M0"
+variable = "A legal sibling /Next 11 0 R reference is changed by one byte to self-reference 10 0 R"
+
+[source]
+method = "byte-mutation"
+pdf = "mal-parse-09-outlines-cycle.pdf"
+pdf_sha256 = "c40323553be0a9e5503a4e2872da19aeee8a1743b04c416361a10ff9bb61f107"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[lineage]
+parent = "unit-parse-11-outline-siblings"
+
+[[lineage.mutations]]
+byte_offset = 3389
+original_byte = 49
+replacement_byte = 48
+description = "change the legal sibling /Next 11 0 R into a self-cycle /Next 10 0 R"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+declared_failure = "outline cycle"
+block = []
+
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+
+[[expected.behaviour]]
+id = "PARSE-11-outlines-cycle"
+assertion = "A corrupt outline graph is rejected rather than rebuilt into a document with lost bookmarks"
+observable_via = "semantic outline walker rejects the /Next self-cycle"
+
+[oracle]
+checks = ["legality", "structure"]

@@ -277,12 +277,22 @@ fn verify_one(
         bail!("[{}] PDF 不存在：{}", manifest.id(), pdf.display());
     }
 
-    let frames: Vec<PageFrame> = manifest
+    let media_frames: Vec<PageFrame> = manifest
+        .page
+        .iter()
+        .map(|p| PageFrame::new(p.media_box, p.rotate))
+        .collect::<Result<_>>()
+        .with_context(|| format!("[{}] 页面框无效", manifest.id()))?;
+    // MuPDF reports text quads relative to the effective viewing box, while
+    // Poppler and pdftoppm report page dimensions/coordinates relative to the
+    // MediaBox. Keep those parser-specific origins explicit so both signals
+    // are converted into the same page-space contract.
+    let mutool_frames: Vec<PageFrame> = manifest
         .page
         .iter()
         .map(|p| PageFrame::new(p.effective_box(), p.rotate))
         .collect::<Result<_>>()
-        .with_context(|| format!("[{}] 页面框无效", manifest.id()))?;
+        .with_context(|| format!("[{}] MuPDF 页面框无效", manifest.id()))?;
 
     outcomes.push(check_pins(manifest)?);
 
@@ -297,8 +307,24 @@ fn verify_one(
     if manifest.requires(Check::Legality) {
         outcomes.push(check_legality(manifest, &pdf)?);
     }
+    // A malformed fixture's contract is the declared parser failure itself.
+    // Independent text/render parsers cannot provide a meaningful structure
+    // result for a deliberately broken object graph, so run the declared
+    // structure gate against qpdf's diagnostic before returning.
+    if manifest.identity.legality == Legality::Malformed && manifest.requires(Check::Legality) {
+        if manifest.requires(Check::Structure) {
+            outcomes.push(check_malformed_structure(manifest, &pdf)?);
+        }
+        return Ok(Report {
+            fixture: manifest.id().to_string(),
+            outcomes,
+            draw_order: Vec::new(),
+            raster: Vec::new(),
+            geometry: Vec::new(),
+        });
+    }
     if manifest.requires(Check::PageGeometry) {
-        outcomes.extend(check_page_geometry(manifest, &pdf, &frames)?);
+        outcomes.extend(check_page_geometry(manifest, &pdf, &media_frames)?);
     }
     let qpdf_document =
         if manifest.requires(Check::PdfBytes) || manifest.requires(Check::PdfStructure) {
@@ -321,23 +347,35 @@ fn verify_one(
     }
 
     // 结构、几何裁定与渲染共用同一批解析结果，一次算好。
-    let mutool_pages = mupdf::blocks(&pdf, &frames)?;
-    let poppler_pages = poppler::blocks(&pdf, &frames)?;
+    let mutool_pages = mupdf::blocks(&pdf, &mutool_frames)?;
+    let poppler_pages = poppler::blocks(&pdf, &media_frames)?;
+    // A singular Form CTM is intentionally non-locatable for MuPDF. Poppler
+    // may still extract that Form's text, so structure/glyph contracts compare
+    // only declared page-level blocks for the XOBJ-08 fixture.
+    let poppler_contract_pages = filter_nonlocatable_xobject_text(manifest, &poppler_pages);
 
     if manifest.requires(Check::Structure) {
-        outcomes.extend(check_structure(manifest, &mutool_pages, &poppler_pages));
+        outcomes.extend(check_structure(
+            manifest,
+            &mutool_pages,
+            &poppler_contract_pages,
+        ));
     }
     if manifest.requires(Check::Glyphs) {
-        outcomes.extend(check_glyphs(manifest, &mutool_pages, &poppler_pages));
+        outcomes.extend(check_glyphs(
+            manifest,
+            &mutool_pages,
+            &poppler_contract_pages,
+        ));
     }
     if manifest.requires(Check::ReadingOrder) {
-        outcomes.push(check_reading_order(manifest, &poppler_pages));
+        outcomes.push(check_reading_order(manifest, &poppler_contract_pages));
     }
     if manifest.requires(Check::HandWrittenGeometry) {
         outcomes.extend(check_hand_written_geometry(
             manifest,
             &pdf,
-            &frames,
+            &mutool_frames,
             &mutool_pages,
             &poppler_pages,
         )?);
@@ -350,7 +388,11 @@ fn verify_one(
     };
 
     if manifest.requires(Check::Render) && manifest.requires(Check::PageGeometry) {
-        outcomes.push(check_raster_orientation(&frames, &raster));
+        outcomes.push(check_raster_orientation(
+            &media_frames,
+            &manifest.page,
+            &raster,
+        ));
     }
 
     // 双解析器几何裁定与参考栅格共用一份 adjudicated.toml：两者都是**测出来的**
@@ -384,6 +426,38 @@ fn verify_one(
         draw_order,
         raster,
         geometry,
+    })
+}
+
+fn check_malformed_structure(manifest: &Manifest, pdf: &Path) -> Result<Outcome> {
+    const CHECK: &str = "structure";
+    const CLAUSE: &str = "§2.1/§2.9";
+    let declared = manifest
+        .expected
+        .declared_failure
+        .as_deref()
+        .context("malformed fixture missing expected.declared_failure")?;
+    let result = qpdf::check(pdf)?;
+    let report = result.report.to_ascii_lowercase();
+    let matches = match declared {
+        "outline cycle" => report.contains("loop detected"),
+        other => report.contains(&other.to_ascii_lowercase()),
+    };
+    Ok(if matches {
+        Outcome::ok(
+            CHECK,
+            CLAUSE,
+            format!("结构门禁观察到声明的失败：{declared:?}"),
+        )
+    } else {
+        Outcome::fail(
+            CHECK,
+            CLAUSE,
+            format!(
+                "结构门禁未观察到声明的失败 {declared:?}：{}",
+                indent(&result.report)
+            ),
+        )
     })
 }
 
@@ -565,6 +639,30 @@ fn check_legality(manifest: &Manifest, pdf: &Path) -> Result<Outcome> {
     const CHECK: &str = "legality";
     const CLAUSE: &str = "§2.8";
 
+    // PARSE-11 is a semantic outline failure. qpdf reports it as a warning
+    // (and exits non-zero) rather than as a syntax error, so match the explicit
+    // loop diagnostic instead of requiring a generic `--check` failure string.
+    if manifest.identity.legality == Legality::Malformed
+        && manifest.expected.declared_failure.as_deref() == Some("outline cycle")
+    {
+        let declared = manifest
+            .expected
+            .declared_failure
+            .as_deref()
+            .context("outline-cycle fixture missing declared_failure")?;
+        let result = qpdf::check(pdf)?;
+        let report = result.report.to_ascii_lowercase();
+        return Ok(if !result.passed && report.contains("loop detected") {
+            Outcome::ok(CHECK, CLAUSE, format!("以声明的方式失败：{declared:?}"))
+        } else {
+            Outcome::fail(
+                CHECK,
+                CLAUSE,
+                format!("outline cycle 未被 qpdf 以声明方式拒绝：{}", result.report),
+            )
+        });
+    }
+
     let result = qpdf::check(pdf)?;
     match manifest.identity.legality {
         Legality::Legal => Ok(if result.passed {
@@ -649,6 +747,7 @@ fn check_pdf_bytes(manifest: &Manifest, pdf: &Path, document: &qpdf::Document) -
         &bytes,
         &contract.object_numbers,
         &xref_offsets,
+        contract.xref_kind == crate::manifest::XrefKind::Table,
     ));
     match contract.xref_kind {
         crate::manifest::XrefKind::Table => {
@@ -658,11 +757,20 @@ fn check_pdf_bytes(manifest: &Manifest, pdf: &Path, document: &qpdf::Document) -
                 problems.push("缺少 classic xref/trailer".to_string());
             }
         }
+        crate::manifest::XrefKind::Stream => {
+            if find_bytes(&bytes, b"/Type /XRef").is_none() {
+                problems.push("缺少 /Type /XRef stream".to_string());
+            }
+        }
     }
     if document.trailer_reference("/Root")? != contract.root_object {
         problems.push(format!("trailer /Root 不是 {} 0 R", contract.root_object));
     }
-    let expected_size = u64::try_from(contract.object_numbers.len() + 1)?;
+    let expected_size = u64::from(
+        contract
+            .xref_size
+            .unwrap_or_else(|| contract.object_numbers.len() as u32 + 1),
+    );
     if document.trailer()?.get("/Size").and_then(Value::as_u64) != Some(expected_size) {
         problems.push(format!("trailer /Size 不是 {expected_size}"));
     }
@@ -697,10 +805,12 @@ fn check_pdf_bytes(manifest: &Manifest, pdf: &Path, document: &qpdf::Document) -
     }
 
     for reference in &manifest.expected.reference {
-        match document.reference(reference.from_object, &reference.path) {
-            Ok(actual) if actual == reference.to_object => {}
-            Ok(actual) => problems.push(format!(
-                "{}:{} -> {} 0 R，期望 {} 0 R",
+        let expected_generation = reference.to_generation.unwrap_or(0);
+        match document.reference_with_generation(reference.from_object, &reference.path) {
+            Ok((actual, generation))
+                if actual == reference.to_object && generation == expected_generation => {}
+            Ok((actual, generation)) => problems.push(format!(
+                "{}:{} -> {} {generation} R，期望 {} {expected_generation} R",
                 reference.from_object,
                 reference.path.join("/"),
                 actual,
@@ -735,7 +845,23 @@ fn check_pdf_bytes(manifest: &Manifest, pdf: &Path, document: &qpdf::Document) -
                 "font object {object} /BaseFont 不是 {expected_name}"
             ));
         }
-        match document.reference(object, &["/FontDescriptor".to_string()]) {
+        // Type0 fonts carry the descriptor on their first CIDFont descendant;
+        // simple Type1/TrueType fonts carry it directly.
+        let descriptor_reference =
+            match document.reference(object, &["/FontDescriptor".to_string()]) {
+                Ok(actual) => Ok(actual),
+                Err(direct_error) => {
+                    let descendants =
+                        document.optional_references(object, &["/DescendantFonts".to_string()])?;
+                    match descendants.first().copied() {
+                        Some(descendant) => {
+                            document.reference(descendant, &["/FontDescriptor".to_string()])
+                        }
+                        None => Err(direct_error),
+                    }
+                }
+            };
+        match descriptor_reference {
             Ok(actual) if actual == descriptor => {}
             Ok(actual) => problems.push(format!(
                 "font object {object} /FontDescriptor 是 {actual} 0 R，期望 {descriptor} 0 R"
@@ -1338,7 +1464,8 @@ fn destination_matches(
 fn reference_number(value: &Value) -> Option<u32> {
     let mut parts = value.as_str()?.split_whitespace();
     let number = parts.next()?.parse().ok()?;
-    (parts.next() == Some("0") && parts.next() == Some("R") && parts.next().is_none())
+    let generation = parts.next()?;
+    (generation.parse::<u16>().is_ok() && parts.next() == Some("R") && parts.next().is_none())
         .then_some(number)
 }
 
@@ -1373,20 +1500,29 @@ fn object_plan_problems(
     bytes: &[u8],
     object_numbers: &[u32],
     xref_offsets: &BTreeMap<u32, usize>,
+    require_every_object_uncompressed: bool,
 ) -> Vec<String> {
     let mut problems = Vec::new();
     let mut positions = Vec::new();
     for object in object_numbers {
-        let marker = format!("{object} 0 obj\n");
         let Some(position) = xref_offsets.get(object).copied() else {
-            problems.push(format!("xref 中找不到 uncompressed object {object}"));
+            if require_every_object_uncompressed {
+                problems.push(format!("xref 中找不到 uncompressed object {object}"));
+            }
             continue;
         };
         positions.push(position);
-        let end = position.checked_add(marker.len());
-        if end.and_then(|end| bytes.get(position..end)) != Some(marker.as_bytes()) {
+        let object_prefix = format!("{object} ");
+        let valid_header = bytes.get(position..).is_some_and(|tail| {
+            tail.starts_with(object_prefix.as_bytes())
+                && tail
+                    .windows(b" obj\n".len())
+                    .position(|window| window == b" obj\n")
+                    .is_some_and(|end| end < 32)
+        });
+        if !valid_header {
             problems.push(format!(
-                "xref object {object} offset {position} 不指向精确对象头 {marker:?}"
+                "xref object {object} offset {position} 不指向精确对象头"
             ));
         }
     }
@@ -1460,16 +1596,20 @@ fn check_page_geometry(
         Outcome::fail(CHECK, CLAUSE, problems.join("；"))
     }];
 
-    // 第二个解析器：poppler 独立报出有效框的**尺寸**。它不覆盖 /Rotate——
+    // 第二个解析器：poppler 独立报出 MediaBox 的**尺寸**。它不覆盖 /Rotate——
     // 见 `PageFrame::box_size` 的实测记录：`-bbox-layout` 的 <page width height>
-    // 不应用 /Rotate，而同一份输出里的坐标应用了。/Rotate 的正确性改由
-    // group/geom-equal 断言（五个取值换算回页面空间后必须逐块相同），那是比
-    // 一对宽高更强的判据。
+    // 不应用 /Rotate，而同一份输出里的坐标应用了。这里严格比较这一已知量；
+    // 观看空间中 /Rotate 的宽高交换由下方的 raster-orientation 单独断言。
     let poppler_pages = poppler::blocks(pdf, frames)?;
     let mut size_problems = Vec::new();
-    for (frame, page) in frames.iter().zip(&poppler_pages) {
+    for ((frame, expected_page), page) in frames.iter().zip(&manifest.page).zip(&poppler_pages) {
         let (w, h) = frame.box_size();
-        if !close(w, page.viewer_size.0, tol) || !close(h, page.viewer_size.1, tol) {
+        let media_w = expected_page.media_box[2] - expected_page.media_box[0];
+        let media_h = expected_page.media_box[3] - expected_page.media_box[1];
+        // Poppler's <page width height> is defined by MediaBox even when a
+        // CropBox is present (and does not apply /Rotate). Keep that measured
+        // behaviour explicit rather than rejecting a valid non-zero CropBox.
+        if !close(media_w, page.viewer_size.0, tol) || !close(media_h, page.viewer_size.1, tol) {
             size_problems.push(format!(
                 "第 {} 页有效框尺寸：manifest 推得 {w}×{h}，poppler 报 {}×{}",
                 page.index, page.viewer_size.0, page.viewer_size.1
@@ -1494,7 +1634,11 @@ fn check_page_geometry(
 /// 这是 `/Rotate` 唯一一条**单份 fixture 内部**可判的证据。解析器侧判不了：
 /// poppler 的 `<page width height>` 不应用 /Rotate（见 `PageFrame::box_size`）。
 /// 渲染器侧则毫无歧义——`/Rotate 90` 的 300×200 页面出的就是竖图。
-fn check_raster_orientation(frames: &[PageFrame], raster: &[PageRaster]) -> Outcome {
+fn check_raster_orientation(
+    frames: &[PageFrame],
+    expected_pages: &[crate::manifest::Page],
+    raster: &[PageRaster],
+) -> Outcome {
     const CHECK: &str = "raster-orientation";
     const CLAUSE: &str = "§2.3";
 
@@ -1503,7 +1647,8 @@ fn check_raster_orientation(frames: &[PageFrame], raster: &[PageRaster]) -> Outc
     const SLACK: i64 = 1;
 
     let mut problems = Vec::new();
-    for (i, (frame, page)) in frames.iter().zip(raster).enumerate() {
+    for (i, ((frame, _expected), page)) in frames.iter().zip(expected_pages).zip(raster).enumerate()
+    {
         let (w, h) = frame.viewer_size();
         let px = |pt: f64| (pt * f64::from(render::DPI) / 72.0).round() as i64;
         let (ew, eh) = (px(w), px(h));
@@ -1625,6 +1770,32 @@ fn glyph_counts(texts: &[String]) -> BTreeMap<char, usize> {
         *counts.entry(ch).or_insert(0) += 1;
     }
     counts
+}
+
+fn filter_nonlocatable_xobject_text(manifest: &Manifest, pages: &[ParsedPage]) -> Vec<ParsedPage> {
+    if !manifest
+        .identity
+        .cases
+        .iter()
+        .any(|case_id| case_id == "XOBJ-08")
+    {
+        return pages.to_vec();
+    }
+    let declared: BTreeSet<String> = manifest
+        .expected
+        .block
+        .iter()
+        .map(|block| text::compare_key(&block.text))
+        .collect();
+    pages
+        .iter()
+        .cloned()
+        .map(|mut page| {
+            page.blocks
+                .retain(|block| declared.contains(&text::compare_key(&block.text)));
+            page
+        })
+        .collect()
 }
 
 /// poppler 的版面分析顺序与手写 `reading_order` 一致。
@@ -2466,7 +2637,7 @@ mod tests {
             .unwrap();
         let xref_offsets = BTreeMap::from([(1, real_object_1), (2, real_object_2)]);
 
-        let problems = object_plan_problems(bytes, &[1, 2], &xref_offsets);
+        let problems = object_plan_problems(bytes, &[1, 2], &xref_offsets, true);
 
         assert!(
             problems.iter().any(|problem| problem.contains("写出顺序")),
@@ -2479,7 +2650,7 @@ mod tests {
         let bytes = b"garbage before 1 0 obj\n(one)\nendobj\n";
         let xref_offsets = BTreeMap::from([(1, 0)]);
 
-        let problems = object_plan_problems(bytes, &[1], &xref_offsets);
+        let problems = object_plan_problems(bytes, &[1], &xref_offsets, true);
 
         assert!(
             problems

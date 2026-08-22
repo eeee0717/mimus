@@ -1,0 +1,73 @@
+schema_version = 1
+
+[identity]
+id = "unit-geom-05-nonzero-origin-boxes"
+name = "Non-zero MediaBox origin with CropBox"
+class = "unit"
+legality = "legal"
+cases = ["GEOM-02"]
+priority = "M0"
+variable = "MediaBox and CropBox both have non-zero origins"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-geom-05-nonzero-origin-boxes.pdf"
+pdf_sha256 = "e882ed610d1c5976cce3c8256ffd9d30731bccf9f56982d3c8e061eebbb5fd14"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [100.0, 100.0, 400.0, 300.0]
+crop_box = [120.0, 120.0, 380.0, 280.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d67656f6d2d30352d6e6f6e"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "L1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+baseline_origin = [150.0, 220.0]
+metric_box = [150.0, 217.168, 190.656, 231.136]
+visual_bbox = [151.177734, 219.830078, 189.985219, 228.90625]
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 150 220 Tm
+(MIMUS) Tj
+ET
+"""
+
+[[expected.behaviour]]
+id = "GEOM-02-preserve-boxes"
+assertion = "The output keeps the non-zero MediaBox and CropBox byte-for-byte and computes text in page space"
+observable_via = "qpdf page dictionary and independent page-space geometry"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]

@@ -1,0 +1,12 @@
+[package]
+name = "mimus-m0-experiment-3-poc"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+lopdf = "0.44.0"
+sha2 = "0.10"

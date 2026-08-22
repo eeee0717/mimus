@@ -277,6 +277,10 @@ pub struct PdfContract {
     pub version: String,
     pub header_prefix_hex: String,
     pub object_numbers: Vec<u32>,
+    /// Xref `/Size`; defaults to max object number + 1. A larger value is
+    /// allowed for an explicitly declared free/deleted slot.
+    #[serde(default)]
+    pub xref_size: Option<u32>,
     pub root_object: u32,
     pub xref_kind: XrefKind,
     pub trailer_id_hex: String,
@@ -288,6 +292,7 @@ pub struct PdfContract {
 #[serde(rename_all = "kebab-case")]
 pub enum XrefKind {
     Table,
+    Stream,
 }
 
 #[derive(Debug, Deserialize)]
@@ -304,6 +309,8 @@ pub struct ObjectReference {
     pub from_object: u32,
     pub path: Vec<String>,
     pub to_object: u32,
+    #[serde(default)]
+    pub to_generation: Option<u16>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
