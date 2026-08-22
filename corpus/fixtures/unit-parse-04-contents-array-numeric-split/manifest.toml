@@ -69,7 +69,7 @@ id = "PARSE-04-numeric-boundary"
 assertion = "A separator is inserted between streams, producing distinct operands 10 and 20 and baseline (82,140)"
 observable_via = "raw stream bytes, mutool baseline, poppler bbox, and operator trace"
 [oracle]
-checks = ["determinism","legality","page-geometry","structure","hand-written-geometry","pdf-bytes","pdf-structure","render"]
+checks = ["determinism","legality","operator-walk","page-geometry","structure","hand-written-geometry","pdf-bytes","pdf-structure","render"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "Concatenating stream bytes without whitespace would turn 10 and 20 into 1020"

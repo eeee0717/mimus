@@ -38,7 +38,7 @@ id = "XOBJ-02-mutual-cycle"
 assertion = "The walk records path [12,13,12], emits RecursiveForm once, and stops before depth 3 without panic or unbounded recursion"
 observable_via = "single-byte lineage, object-number recursion trace, bounded process exit and independent renderer"
 [oracle]
-checks = ["determinism","legality","page-geometry","render"]
+checks = ["determinism","legality","operator-walk","page-geometry","render"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "Mutual cycles can evade pointer-identity checks when the same indirect object is decoded twice"

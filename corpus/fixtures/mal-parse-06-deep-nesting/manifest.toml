@@ -39,7 +39,7 @@ id = "PARSE-08-depth-limit"
 assertion = "The tokenizer stops at nesting level 129 with NestingTooDeep(limit=128) without panic, abort, or unbounded recursion"
 observable_via = "single-byte lineage, bounded process exit, stable error payload and timeout watchdog"
 [oracle]
-checks = ["determinism","legality","page-geometry","render-diagnostic"]
+checks = ["determinism","legality","operator-walk","page-geometry","render-diagnostic"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "Recursive descent over 512 arrays can overflow the Rust stack"

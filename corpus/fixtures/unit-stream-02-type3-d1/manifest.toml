@@ -69,7 +69,7 @@ id = "STREAM-01-type3-d1"
 assertion = "d1 sets glyph advance 1000 and glyph bbox [0,0,1000,1000], yielding a 12pt square at baseline (72,120)"
 observable_via = "raw CharProc bytes, mutool trace, poppler bbox and rendered square"
 [oracle]
-checks = ["determinism","legality","page-geometry","structure","type3-geometry","pdf-bytes","pdf-structure","render"]
+checks = ["determinism","legality","operator-walk","page-geometry","structure","type3-geometry","pdf-bytes","pdf-structure","render"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "d1 is valid only in a Type3 CharProc and is not a page-content operator"

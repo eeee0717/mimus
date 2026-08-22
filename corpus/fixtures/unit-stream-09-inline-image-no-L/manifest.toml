@@ -58,7 +58,7 @@ id = "STREAM-09-no-length"
 assertion = "The 64-byte computed payload ends at the real EI even though no L key exists and compatibility-section SomeVendorOp follows; MIMUS remains extractable"
 observable_via = "raw stream hex, independent raster, warning count and following text baseline"
 [oracle]
-checks = ["determinism","legality","page-geometry","structure","hand-written-geometry","pdf-bytes","pdf-structure","render"]
+checks = ["determinism","legality","operator-walk","page-geometry","structure","hand-written-geometry","pdf-bytes","pdf-structure","render"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "Operator-whitelist sentinel heuristics reject legal computable images"

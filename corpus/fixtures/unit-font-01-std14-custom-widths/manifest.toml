@@ -63,7 +63,7 @@ id = "FONT-02-file-widths"
 assertion = "The four baselines are x=72,84,96,108 and the final text advance ends at x=120; standard Helvetica 667-unit A widths must not override /Widths"
 observable_via = "qpdf font dictionary, mutool trace, PDFium character origins and hand arithmetic"
 [oracle]
-checks = ["determinism","legality","page-geometry","structure","font-advance","pdf-bytes","pdf-structure","render"]
+checks = ["determinism","legality","operator-walk","page-geometry","structure","font-advance","pdf-bytes","pdf-structure","render"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "Built-in Standard-14 metrics conflict with explicit file /Widths"

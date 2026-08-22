@@ -39,7 +39,7 @@ id = "PARSE-04-string-boundary"
 assertion = "The page reports UnterminatedString at the end of object 9 and fails over without consuming object 10 as part of the string"
 observable_via = "single-byte lineage diff, qpdf container check, bounded operator-walk error"
 [oracle]
-checks = ["determinism","legality","page-geometry","render-diagnostic"]
+checks = ["determinism","legality","operator-walk","page-geometry","render-diagnostic"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "PDF strings cannot span Contents streams"

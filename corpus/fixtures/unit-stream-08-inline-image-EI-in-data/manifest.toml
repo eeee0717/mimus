@@ -6,12 +6,12 @@ class = "unit"
 legality = "legal"
 cases = ["STREAM-09"]
 priority = "M0"
-variable = "An unfiltered 8x8 grayscale inline image contains space-EI-space at payload byte 20"
+variable = "An unfiltered two-row 1bpp image requires per-scanline padding and its four payload bytes equal space-EI-space"
 [source]
 method = "exact-writer"
 generator = "corpus-exact-writer-v1"
 pdf = "unit-stream-08-inline-image-EI-in-data.pdf"
-pdf_sha256 = "cb2131d775e426d4ce775878224647de2cec83c35cfbfe5b1383dcc48f9ee4a6"
+pdf_sha256 = "b207a2a4d8a84ab00bf98103df99787e37ef820f12dcf51565c30aa383ecb52a"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
 [[page]]
@@ -48,18 +48,18 @@ visual_bbox = [73.177734,119.830078,111.985219,128.90625]
 [[expected.content_stream]]
 object = 9
 compressed = false
-bytes_hex = "710a4249202f572038202f482038202f4250432038202f4353202f472049440a606060606060606060606060606060606060606020454920606060606060606060606060606060606060606060606060606060606060606060606060606060600a45490a510a42540a2f46312031322054660a312030203020312037322031323020546d0a284d494d55532920546a0a45540a"
+bytes_hex = "710a4249202f572039202f482032202f4250432031202f4353202f472049440a204549200a45490a510a42540a2f46312031322054660a312030203020312037322031323020546d0a284d494d55532920546a0a45540a"
 [[expected.reference]]
 from_object = 3
 path = ["/Contents"]
 to_object = 9
 [[expected.behaviour]]
 id = "STREAM-09-false-EI"
-assertion = "W*H*BPC*components/8 selects exactly 64 payload bytes, including the false EI sequence; the real EI is followed by Q and MIMUS"
+assertion = "ceil(W*BPC*components/8) per scanline times H selects exactly four payload bytes, including the false EI sequence; the real EI is followed by Q and MIMUS"
 observable_via = "raw stream hex, independent raster hash, operator count and following text baseline"
 [oracle]
-checks = ["determinism","legality","page-geometry","structure","hand-written-geometry","pdf-bytes","pdf-structure","render"]
+checks = ["determinism","legality","operator-walk","page-geometry","structure","hand-written-geometry","pdf-bytes","pdf-structure","render"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "Scanning for whitespace-delimited EI truncates valid image data"
-resolution = "For unfiltered images with computable dimensions, exact payload length outranks sentinel scanning"
+resolution = "For unfiltered images with computable dimensions, per-scanline padded payload length outranks sentinel scanning"

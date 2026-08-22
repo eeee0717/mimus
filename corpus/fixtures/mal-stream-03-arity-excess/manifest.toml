@@ -38,7 +38,7 @@ id = "STREAM-02-excess"
 assertion = "cm consumes its last six operands, leaves the prefix operand only until the next operator boundary, and emits one Arity warning"
 observable_via = "single-byte lineage, explicit operand-stack trace, PDF specification and PDFium cross-check"
 [oracle]
-checks = ["determinism","legality","page-geometry","render"]
+checks = ["determinism","legality","operator-walk","page-geometry","render"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "pdfminer carries excess operands across operator boundaries"

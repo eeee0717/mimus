@@ -64,7 +64,7 @@ id = "STREAM-01-bx-ex"
 assertion = "SomeVendorOp is skipped without a warning inside BX/EX and the following text remains at (72,120)"
 observable_via = "raw operator bytes, mutool trace, poppler bbox, and PoC warning count"
 [oracle]
-checks = ["determinism","legality","page-geometry","structure","hand-written-geometry","pdf-bytes","pdf-structure","render"]
+checks = ["determinism","legality","operator-walk","page-geometry","structure","hand-written-geometry","pdf-bytes","pdf-structure","render"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "Unknown operators are only explicitly ignorable in compatibility sections"

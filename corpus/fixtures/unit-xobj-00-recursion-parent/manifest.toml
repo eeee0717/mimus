@@ -72,7 +72,7 @@ id = "XOBJ-switchboard-parent"
 assertion = "Only safe Form X0 is reachable; each malformed child changes the single digit in /X0 Do"
 observable_via = "qpdf object graph, exact one-byte diff and independent renderers"
 [oracle]
-checks = ["determinism","legality","page-geometry","structure","hand-written-geometry","pdf-bytes","pdf-structure","render"]
+checks = ["determinism","legality","operator-walk","page-geometry","structure","hand-written-geometry","pdf-bytes","pdf-structure","render"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "Recursive Form fixtures must differ from a legal parent by one byte"

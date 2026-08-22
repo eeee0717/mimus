@@ -39,7 +39,7 @@ id = "STREAM-04-underflow"
 assertion = "Each excess Q emits an underflow warning, leaves base CTM unchanged, and later text remains at (72,120)"
 observable_via = "single-byte lineage and per-operator CTM trace"
 [oracle]
-checks = ["determinism","legality","page-geometry","render-diagnostic"]
+checks = ["determinism","legality","operator-walk","page-geometry","render-diagnostic"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "Ignoring Q underflow silently hides corrupted state"

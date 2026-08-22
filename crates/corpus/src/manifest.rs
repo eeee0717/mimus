@@ -248,6 +248,10 @@ pub struct Expected {
     /// 容器本身合法，错误由实验 2 的隔离走查器断言。
     #[serde(default)]
     pub declared_failure: Option<String>,
+    /// Stable diagnostics that the disposable M0 operator walker must emit.
+    /// The set is exact: undeclared recovery fallout fails verification.
+    #[serde(default)]
+    pub operator_walk_diagnostics: Vec<String>,
     /// Independent renderer diagnostic required for a malformed fixture that
     /// cannot produce a reference raster by design.
     #[serde(default)]
@@ -469,6 +473,9 @@ pub enum Check {
     /// Verify Identity-H CIDToGIDMap identity against the pinned embedded
     /// TrueType cmap, while treating extractor Unicode as differential data.
     EmbeddedCmap,
+    /// Run the disposable M0 experiment walker and compare its public JSON
+    /// report with the hand-written manifest, including the exact diagnostics.
+    OperatorWalk,
     /// Exact header/object/xref/trailer/content-stream bytes.
     PdfBytes,
     /// Rich outline/action/annotation/form/OCG/name-tree object graph.
@@ -580,9 +587,10 @@ impl Manifest {
             !self.expected.block.is_empty()
                 && !self.requires(Check::Structure)
                 && !self.requires(Check::Glyphs)
-                && !self.requires(Check::EmbeddedCmap),
+                && !self.requires(Check::EmbeddedCmap)
+                && !self.requires(Check::OperatorWalk),
             "§2.1",
-            "手写的 block.text 无人核对——oracle.checks 必须含 structure 或 glyphs 之一",
+            "手写的 block.text 无人核对——oracle.checks 必须含 structure、glyphs、embedded-cmap 或 operator-walk 之一",
         )?;
 
         Ok(())
@@ -890,7 +898,41 @@ impl Manifest {
             !malformed && self.expected.declared_failure.is_some(),
             "§2.8",
             "合法 fixture 不应声明 declared_failure",
-        )
+        )?;
+        let diagnostics = self
+            .expected
+            .operator_walk_diagnostics
+            .iter()
+            .collect::<BTreeSet<_>>();
+        fail_if(
+            diagnostics.len() != self.expected.operator_walk_diagnostics.len()
+                || diagnostics.iter().any(|id| id.is_empty()),
+            "§2.8",
+            "operator_walk_diagnostics 必须是非空且不重复的稳定 ID",
+        )?;
+        if let Some(primary) = self
+            .expected
+            .declared_failure
+            .as_deref()
+            .and_then(|failure| failure.strip_prefix("operator-walk:"))
+        {
+            fail_if(
+                !self.requires(Check::OperatorWalk),
+                "§2.8",
+                "operator-walk failure 必须启用 operator-walk oracle",
+            )?;
+            fail_if(
+                !self.expected.operator_walk_diagnostics.is_empty()
+                    && !self
+                        .expected
+                        .operator_walk_diagnostics
+                        .iter()
+                        .any(|id| id == primary),
+                "§2.8",
+                "declared_failure 的主诊断不在 operator_walk_diagnostics 中",
+            )?;
+        }
+        Ok(())
     }
 
     fn validate_exact_contract(&self) -> Result<()> {
@@ -987,6 +1029,7 @@ impl Manifest {
             "§2.5",
             "exact-writer fixture 必须手写至少一个 content stream",
         )?;
+        let allows_exact_filters = self.identity.cases.iter().any(|case| case == "PARSE-03");
         for stream in &self.expected.content_stream {
             fail_if(
                 !pdf.object_numbers.contains(&stream.object),
@@ -997,6 +1040,11 @@ impl Manifest {
                 stream.bytes.is_empty() == stream.bytes_hex.is_none(),
                 "§2.1",
                 "content stream 必须且只能用 bytes / bytes_hex 之一手写 raw bytes",
+            )?;
+            fail_if(
+                stream.compressed && !allows_exact_filters,
+                "§2.5",
+                "exact content stream 仅 PARSE-03 filter fixture 可声明压缩/过滤",
             )?;
             fail_if(
                 stream.compressed
@@ -1335,7 +1383,10 @@ text = "world"
             "checks = [\"determinism\"]",
         );
         let err = parse(&text).unwrap_err().to_string();
-        assert!(err.contains("structure 或 glyphs"), "{err}");
+        assert!(
+            err.contains("structure、glyphs、embedded-cmap 或 operator-walk"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1375,6 +1426,24 @@ text = "world"
         let error = manifest.validate().unwrap_err().to_string();
 
         assert!(error.contains("subset tag"), "{error}");
+    }
+
+    #[test]
+    fn exact_stream_filters_are_limited_to_parse_03_fixtures() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/fixtures/unit-base-01-single-line");
+        let mut manifest = Manifest::load(&dir).unwrap();
+        let stream = &mut manifest.expected.content_stream[0];
+        stream.compressed = true;
+        stream.filters = vec!["LZWDecode".into()];
+        stream.decoded_bytes = Some(stream.bytes.clone());
+
+        let error = manifest.validate().unwrap_err().to_string();
+        assert!(error.contains("PARSE-03"), "{error}");
+
+        let parse_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/fixtures/unit-parse-03-lzw-earlychange");
+        Manifest::load(&parse_dir).unwrap();
     }
 
     #[test]

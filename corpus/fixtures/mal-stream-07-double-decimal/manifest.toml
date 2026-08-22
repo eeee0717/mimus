@@ -29,6 +29,7 @@ geometry_source = "hand-written"
 tolerance_pt = 0.001
 block = []
 declared_failure = "operator-walk:double-decimal"
+operator_walk_diagnostics = ["double-decimal", "arity-excess"]
 renderer_diagnostic = "unknown keyword: '10.5.3'"
 [expected.structure]
 pages = 1
@@ -39,7 +40,7 @@ id = "STREAM-06-double-decimal"
 assertion = "10.5.3 tokenizes deterministically as 10.5 and .3; Tc consumes .3 and the excess 10.5 is discarded with a warning"
 observable_via = "literal token sequence and operator stack trace"
 [oracle]
-checks = ["determinism","legality","page-geometry","render-diagnostic"]
+checks = ["determinism","legality","operator-walk","page-geometry","render-diagnostic"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "10.5.3 is not a valid single PDF number"

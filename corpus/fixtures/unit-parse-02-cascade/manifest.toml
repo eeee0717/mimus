@@ -65,7 +65,7 @@ id = "PARSE-03-cascade"
 assertion = "Filters are applied in array order and decode byte-for-byte to the uncompressed parent program"
 observable_via = "qpdf --filtered-stream-data, mutool trace, poppler bbox, and independent renderers"
 [oracle]
-checks = ["determinism","legality","page-geometry","structure","hand-written-geometry","pdf-bytes","pdf-structure","render"]
+checks = ["determinism","legality","operator-walk","page-geometry","structure","hand-written-geometry","pdf-bytes","pdf-structure","render"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "Filter order can be silently reversed"

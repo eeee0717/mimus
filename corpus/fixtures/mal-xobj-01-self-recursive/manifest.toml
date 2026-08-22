@@ -38,7 +38,7 @@ id = "XOBJ-02-self-cycle"
 assertion = "The walk detects object 11 re-entering itself, emits RecursiveForm(path=[11,11]), and stops before depth 2 without panic or unbounded recursion"
 observable_via = "single-byte lineage, object-number recursion trace, bounded process exit and independent renderer"
 [oracle]
-checks = ["determinism","legality","page-geometry","render"]
+checks = ["determinism","legality","operator-walk","page-geometry","render"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "Form resource names are scope-local and cannot identify recursion reliably"

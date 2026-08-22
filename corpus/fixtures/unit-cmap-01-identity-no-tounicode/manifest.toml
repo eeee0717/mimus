@@ -68,7 +68,7 @@ id = "CMAP-04-embedded-cmap"
 assertion = "CID sequence [7,6,7,11,9] maps through the embedded TrueType cmap to Unicode MIMUS despite the deliberate absence of /ToUnicode"
 observable_via = "qpdf object graph, pinned TrueType cmap/glyph order, mutool/poppler text and PDFium text page"
 [oracle]
-checks = ["determinism","legality","page-geometry","embedded-cmap","pdf-bytes","pdf-structure","render"]
+checks = ["determinism","legality","operator-walk","page-geometry","embedded-cmap","pdf-bytes","pdf-structure","render"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "Identity-H defines character-code to CID identity, not Unicode"

@@ -1,6 +1,7 @@
 use crate::WalkError;
 
 pub const MAX_NESTING: usize = 128;
+const MAX_INLINE_IMAGE_SCAN: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Token {
@@ -14,8 +15,28 @@ pub enum TokenValue {
     Name(Vec<u8>),
     String(Vec<u8>),
     Array(Vec<Token>),
-    InlineImage { payload_bytes: usize },
+    InlineImage {
+        payload_bytes: usize,
+        length_source: InlineImageLengthSource,
+    },
     Keyword(Vec<u8>),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum InlineImageLengthSource {
+    Declared,
+    Computed,
+    EiScan,
+}
+
+impl InlineImageLengthSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Declared => "declared",
+            Self::Computed => "computed",
+            Self::EiScan => "ei-scan",
+        }
+    }
 }
 
 impl Token {
@@ -32,7 +53,7 @@ impl Token {
             TokenValue::Name(value) => format!("/{}", String::from_utf8_lossy(value)),
             TokenValue::String(value) => format!("({})", String::from_utf8_lossy(value)),
             TokenValue::Array(value) => format!("[{} items]", value.len()),
-            TokenValue::InlineImage { payload_bytes } => {
+            TokenValue::InlineImage { payload_bytes, .. } => {
                 format!("inline-image[{payload_bytes} bytes]")
             }
             TokenValue::Keyword(value) => String::from_utf8_lossy(value).into_owned(),
@@ -113,6 +134,7 @@ impl Tokenizer<'_> {
         let mut bits = None;
         let mut components = None;
         let mut length = None;
+        let mut filtered = false;
         loop {
             self.skip_space_and_comments();
             let key = self.token(depth + 1)?;
@@ -125,10 +147,11 @@ impl Tokenizer<'_> {
             self.skip_space_and_comments();
             let value = self.token(depth + 1)?;
             match key.as_slice() {
-                b"W" | b"Width" => width = value.number().map(|value| value as usize),
-                b"H" | b"Height" => height = value.number().map(|value| value as usize),
-                b"BPC" | b"BitsPerComponent" => bits = value.number().map(|value| value as usize),
-                b"L" | b"Length" => length = value.number().map(|value| value as usize),
+                b"W" | b"Width" => width = nonnegative_integer(&value),
+                b"H" | b"Height" => height = nonnegative_integer(&value),
+                b"BPC" | b"BitsPerComponent" => bits = nonnegative_integer(&value),
+                b"L" | b"Length" => length = nonnegative_integer(&value),
+                b"F" | b"Filter" => filtered = true,
                 b"CS" | b"ColorSpace" => {
                     components = match value.value {
                         TokenValue::Name(name)
@@ -162,16 +185,23 @@ impl Tokenizer<'_> {
                 ));
             }
         }
-        let payload_bytes = length
-            .or_else(|| Some((width? * height? * bits? * components.unwrap_or(1)).div_ceil(8)));
-        let payload_bytes = payload_bytes.ok_or_else(|| {
-            self.error(
-                "inline-image-length",
-                "cannot derive inline image payload length",
-            )
-        })?;
-        self.position = self
-            .position
+        let payload_start = self.position;
+        let computed = (!filtered)
+            .then(|| computed_image_payload_bytes(width?, height?, bits?, components.unwrap_or(1)))
+            .flatten();
+        let (payload_bytes, length_source) = if let Some(length) = length {
+            (length, InlineImageLengthSource::Declared)
+        } else if let Some(computed) = computed {
+            (computed, InlineImageLengthSource::Computed)
+        } else {
+            let (payload_end, ei) = self.find_inline_image_end(payload_start)?;
+            self.position = ei + 2;
+            return Ok(TokenValue::InlineImage {
+                payload_bytes: payload_end - payload_start,
+                length_source: InlineImageLengthSource::EiScan,
+            });
+        };
+        self.position = payload_start
             .checked_add(payload_bytes)
             .filter(|position| *position <= self.input.len())
             .ok_or_else(|| self.error("inline-image-truncated", "payload exceeds stream"))?;
@@ -182,10 +212,43 @@ impl Tokenizer<'_> {
                 .get(self.position + 2)
                 .is_some_and(|byte| !is_delimiter(*byte))
         {
-            return Err(self.error("inline-image-end", "computed payload is not followed by EI"));
+            return Err(self.error("inline-image-end", "selected payload is not followed by EI"));
         }
         self.position += 2;
-        Ok(TokenValue::InlineImage { payload_bytes })
+        Ok(TokenValue::InlineImage {
+            payload_bytes,
+            length_source,
+        })
+    }
+
+    fn find_inline_image_end(&self, payload_start: usize) -> Result<(usize, usize), WalkError> {
+        let limit = payload_start
+            .saturating_add(MAX_INLINE_IMAGE_SCAN)
+            .min(self.input.len());
+        let mut ei = payload_start.saturating_add(1);
+        while ei + 1 < limit {
+            if &self.input[ei..ei + 2] == b"EI"
+                && self.input[ei - 1].is_ascii_whitespace()
+                && self
+                    .input
+                    .get(ei + 2)
+                    .is_none_or(|byte| is_delimiter(*byte))
+                && plausible_inline_image_continuation(self.input, ei + 2)
+            {
+                let mut payload_end = ei;
+                while payload_end > payload_start
+                    && self.input[payload_end - 1].is_ascii_whitespace()
+                {
+                    payload_end -= 1;
+                }
+                return Ok((payload_end, ei));
+            }
+            ei += 1;
+        }
+        Err(self.error(
+            "inline-image-length",
+            "cannot derive payload length or find bounded EI terminator",
+        ))
     }
 
     fn name(&mut self) -> TokenValue {
@@ -346,11 +409,61 @@ fn is_delimiter(byte: u8) -> bool {
         )
 }
 
+fn nonnegative_integer(token: &Token) -> Option<usize> {
+    let value = token.number()?;
+    if value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= usize::MAX as f64 {
+        Some(value as usize)
+    } else {
+        None
+    }
+}
+
+fn computed_image_payload_bytes(
+    width: usize,
+    height: usize,
+    bits: usize,
+    components: usize,
+) -> Option<usize> {
+    let bits_per_row = width.checked_mul(bits)?.checked_mul(components)?;
+    bits_per_row.div_ceil(8).checked_mul(height)
+}
+
+fn plausible_inline_image_continuation(input: &[u8], mut position: usize) -> bool {
+    while input
+        .get(position)
+        .is_some_and(|byte| byte.is_ascii_whitespace() || *byte == 0)
+    {
+        position += 1;
+    }
+    if position == input.len() {
+        return true;
+    }
+    let start = position;
+    while input.get(position).is_some_and(|byte| !is_delimiter(*byte)) {
+        position += 1;
+    }
+    matches!(
+        &input[start..position],
+        b"q" | b"Q" | b"BT" | b"ET" | b"BX" | b"EX" | b"cm" | b"Do"
+    )
+}
+
 fn hex_nibble(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::computed_image_payload_bytes;
+
+    #[test]
+    fn inline_image_payload_is_padded_per_scanline_and_overflow_checked() {
+        assert_eq!(computed_image_payload_bytes(9, 2, 1, 1), Some(4));
+        assert_eq!(computed_image_payload_bytes(usize::MAX, 2, 16, 4), None);
     }
 }

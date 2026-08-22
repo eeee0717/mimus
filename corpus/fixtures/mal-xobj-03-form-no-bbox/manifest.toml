@@ -38,7 +38,7 @@ id = "XOBJ-04-missing-bbox"
 assertion = "The walk emits FormMissingBBox(name=X3, object=14), skips the Do atomically, and never executes content at either the unit-matrix baseline (72,120) or transformed baseline (154,260)"
 observable_via = "single-byte lineage, raw Form dictionary, walk trace and independent renderer differential"
 [oracle]
-checks = ["determinism","legality","page-geometry","render"]
+checks = ["determinism","legality","operator-walk","page-geometry","render"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "Independent renderers may recover a missing required BBox and still apply the Form Matrix"

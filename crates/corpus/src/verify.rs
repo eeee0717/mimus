@@ -19,6 +19,7 @@ use crate::manifest::{Check, GeometrySource, Legality, Manifest, Method};
 use crate::mutation::{self, MutationSpec};
 use crate::oracle::render::PageRaster;
 use crate::oracle::{ParsedPage, mupdf, mupdf_svg, poppler, qpdf, render};
+use crate::proc;
 use crate::text;
 use crate::toolchain::Toolchain;
 
@@ -296,6 +297,9 @@ fn verify_one(
     }
     if manifest.requires(Check::Legality) {
         outcomes.push(check_legality(manifest, &pdf)?);
+    }
+    if manifest.requires(Check::OperatorWalk) {
+        outcomes.push(check_operator_walk(manifest, repo_root)?);
     }
     if manifest.requires(Check::PageGeometry) {
         outcomes.extend(check_page_geometry(manifest, &pdf, &frames)?);
@@ -679,6 +683,82 @@ fn check_legality(manifest: &Manifest, pdf: &Path) -> Result<Outcome> {
                 )
             })
         }
+    }
+}
+
+fn check_operator_walk(manifest: &Manifest, repo_root: &Path) -> Result<Outcome> {
+    const CHECK: &str = "operator-walk";
+    const CLAUSE: &str = "§2.8";
+
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let args = vec![
+        "run".to_string(),
+        "--quiet".to_string(),
+        "-p".to_string(),
+        "m0-experiment-2".to_string(),
+        "--".to_string(),
+        manifest.id().to_string(),
+        "--repo-root".to_string(),
+        repo_root.display().to_string(),
+    ];
+    let Some(output) = proc::run(&cargo, &args, repo_root, &BTreeMap::new())? else {
+        return Ok(Outcome::fail(
+            CHECK,
+            CLAUSE,
+            format!("找不到 cargo：{cargo}"),
+        ));
+    };
+    if !output.success() {
+        return Ok(Outcome::fail(
+            CHECK,
+            CLAUSE,
+            format!("走查器退出失败：\n{}", indent(&output.diagnostics())),
+        ));
+    }
+    let report: Value =
+        serde_json::from_slice(&output.stdout).context("解析 operator-walk JSON")?;
+    let comparison = &report["manifest"];
+    let mut checks = vec!["diagnostic_matches"];
+    if manifest.identity.legality == Legality::Legal || !manifest.expected.block.is_empty() {
+        checks.push("text_matches");
+    }
+    if !manifest.expected.cid_sequence.is_empty() {
+        checks.push("cid_sequence_matches");
+    }
+    let failed = checks
+        .into_iter()
+        .filter(|field| comparison[*field].as_bool() != Some(true))
+        .collect::<Vec<_>>();
+    let errors = report["errors"]
+        .as_array()
+        .context("operator-walk errors is not an array")?;
+    let legal_errors = manifest.identity.legality == Legality::Legal && !errors.is_empty();
+    let baseline_failed = comparison["expected_baseline"].is_array()
+        && comparison["baseline_delta"].as_array().is_none_or(|delta| {
+            delta.iter().any(|value| {
+                value
+                    .as_f64()
+                    .is_none_or(|value| value.abs() > manifest.expected.tolerance_pt)
+            })
+        });
+
+    if failed.is_empty() && !legal_errors && !baseline_failed {
+        let diagnostics = comparison["observed_diagnostics"]
+            .as_array()
+            .context("operator-walk observed_diagnostics is not an array")?;
+        Ok(Outcome::ok(
+            CHECK,
+            CLAUSE,
+            format!("走查 JSON 与 manifest 一致；诊断 {diagnostics:?}"),
+        ))
+    } else {
+        Ok(Outcome::fail(
+            CHECK,
+            CLAUSE,
+            format!(
+                "走查 JSON 不符合 manifest：failed={failed:?}, legal_errors={legal_errors}, baseline_failed={baseline_failed}; report={comparison}"
+            ),
+        ))
     }
 }
 
@@ -2064,7 +2144,7 @@ fn check_type3_geometry(manifest: &Manifest, mutool_pages: &[ParsedPage]) -> Vec
             "mutool Type3 trace baseline",
         ),
         geometry_outcome(
-            "geometry/type3-d1-bbox",
+            "geometry/type3-painted-bbox",
             tolerance,
             bbox_problems,
             "mutool painted CharProc bbox",

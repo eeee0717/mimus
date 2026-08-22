@@ -38,7 +38,7 @@ id = "STREAM-02-short"
 assertion = "The incomplete cm is skipped, CTM stays identity, later text remains at (72,120), and one Arity warning is emitted"
 observable_via = "single-byte lineage, CTM trace, mutool trace and PDFium text coordinates"
 [oracle]
-checks = ["determinism","legality","page-geometry","render"]
+checks = ["determinism","legality","operator-walk","page-geometry","render"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "An incomplete cm must not partially mutate CTM"

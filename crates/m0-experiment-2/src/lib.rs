@@ -1,5 +1,6 @@
 mod tokenizer;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -38,6 +39,8 @@ pub struct OperatorTrace {
     pub ctm_before: Matrix,
     pub ctm_after: Matrix,
     pub text_matrix: Matrix,
+    pub inline_image_payload_bytes: Option<usize>,
+    pub inline_image_length_source: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,6 +51,13 @@ pub struct GlyphTrace {
     pub baseline: [f64; 2],
     pub text_matrix: Matrix,
     pub ctm: Matrix,
+    pub type3_metrics: Option<Type3MetricsTrace>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Type3MetricsTrace {
+    pub width: [f64; 2],
+    pub bbox: Option<[f64; 4]>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,6 +78,8 @@ pub struct ManifestComparison {
     pub observed_cids: Vec<u16>,
     pub cid_sequence_matches: bool,
     pub declared_diagnostic: Option<String>,
+    pub expected_diagnostics: Vec<String>,
+    pub observed_diagnostics: Vec<String>,
     pub diagnostic_matches: bool,
 }
 
@@ -149,6 +161,8 @@ struct Expected {
     #[serde(default)]
     cid_sequence: Vec<u16>,
     declared_failure: Option<String>,
+    #[serde(default)]
+    operator_walk_diagnostics: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -197,6 +211,9 @@ struct Walker<'a> {
     warnings: Vec<WalkError>,
     errors: Vec<WalkError>,
     active_forms: Vec<ObjectId>,
+    compatibility_depth: usize,
+    in_type3_charproc: bool,
+    type3_metrics: Option<Type3MetricsTrace>,
 }
 
 pub fn run_fixture(
@@ -234,6 +251,9 @@ pub fn run_fixture(
         warnings: Vec::new(),
         errors: Vec::new(),
         active_forms: Vec::new(),
+        compatibility_depth: 0,
+        in_type3_charproc: false,
+        type3_metrics: None,
     };
     let mut streams = Vec::new();
 
@@ -314,13 +334,23 @@ pub fn run_fixture(
         .as_deref()
         .and_then(|failure| failure.strip_prefix("operator-walk:"))
         .map(str::to_owned);
-    let diagnostic_matches = declared_diagnostic.as_ref().is_none_or(|expected| {
-        walker
-            .warnings
+    let expected_diagnostics = if manifest.expected.operator_walk_diagnostics.is_empty() {
+        declared_diagnostic.iter().cloned().collect::<BTreeSet<_>>()
+    } else {
+        manifest
+            .expected
+            .operator_walk_diagnostics
             .iter()
-            .chain(&walker.errors)
-            .any(|diagnostic| &diagnostic.id == expected)
-    });
+            .cloned()
+            .collect()
+    };
+    let observed_diagnostics = walker
+        .warnings
+        .iter()
+        .chain(&walker.errors)
+        .map(|diagnostic| diagnostic.id.clone())
+        .collect::<BTreeSet<_>>();
+    let diagnostic_matches = expected_diagnostics == observed_diagnostics;
 
     Ok(FixtureReport {
         fixture_id: fixture_id.to_string(),
@@ -341,6 +371,8 @@ pub fn run_fixture(
             expected_cids: manifest.expected.cid_sequence,
             observed_cids,
             declared_diagnostic,
+            expected_diagnostics: expected_diagnostics.into_iter().collect(),
+            observed_diagnostics: observed_diagnostics.into_iter().collect(),
             diagnostic_matches,
         },
         pdfium,
@@ -350,9 +382,19 @@ pub fn run_fixture(
 impl Walker<'_> {
     fn walk(&mut self, tokens: Vec<Token>) {
         for token in tokens {
-            if let TokenValue::InlineImage { .. } = token.value {
+            if let TokenValue::InlineImage {
+                payload_bytes,
+                length_source,
+            } = token.value
+            {
                 let operands = std::mem::take(&mut self.operands);
                 let matrix = self.state.ctm;
+                if length_source.as_str() == "ei-scan" {
+                    self.warn(
+                        "inline-image-ei-scan",
+                        "payload length required bounded EI terminator scanning",
+                    );
+                }
                 self.operators.push(OperatorTrace {
                     operator: "BI..EI".into(),
                     raw_hex: hex(&token.raw),
@@ -360,6 +402,8 @@ impl Walker<'_> {
                     ctm_before: matrix,
                     ctm_after: matrix,
                     text_matrix: self.state.text_matrix,
+                    inline_image_payload_bytes: Some(payload_bytes),
+                    inline_image_length_source: Some(length_source.as_str().into()),
                 });
             } else if let TokenValue::Keyword(operator) = &token.value {
                 if let Some((first, second)) = split_double_decimal(operator) {
@@ -403,6 +447,8 @@ impl Walker<'_> {
                         ctm_before: before,
                         ctm_after: self.state.ctm,
                         text_matrix: self.state.text_matrix,
+                        inline_image_payload_bytes: None,
+                        inline_image_length_source: None,
                     });
                     continue;
                 }
@@ -416,6 +462,8 @@ impl Walker<'_> {
                     ctm_before: before,
                     ctm_after: self.state.ctm,
                     text_matrix: self.state.text_matrix,
+                    inline_image_payload_bytes: None,
+                    inline_image_length_source: None,
                 });
             } else {
                 self.operands.push(token);
@@ -425,6 +473,14 @@ impl Walker<'_> {
 
     fn apply_operator(&mut self, operator: &[u8], operands: &[Token]) {
         match operator {
+            b"BX" => self.compatibility_depth += 1,
+            b"EX" => {
+                if self.compatibility_depth == 0 {
+                    self.warn("compatibility-underflow", "EX has no matching BX");
+                } else {
+                    self.compatibility_depth -= 1;
+                }
+            }
             b"q" => self.stack.push(self.state.clone()),
             b"Q" => {
                 if let Some(state) = self.stack.pop() {
@@ -512,18 +568,49 @@ impl Walker<'_> {
                     self.warn("arity-short", "Do requires one name");
                 }
             }
+            b"d0" | b"d1" if !self.in_type3_charproc => self.warn(
+                "type3-metrics-context",
+                "d0/d1 appears outside a Type3 CharProc",
+            ),
+            b"d0" => {
+                if let Some(values) = self.numeric_tail(operator, operands, 2) {
+                    self.type3_metrics = Some(Type3MetricsTrace {
+                        width: [values[0], values[1]],
+                        bbox: None,
+                    });
+                }
+            }
+            b"d1" => {
+                if let Some(values) = self.numeric_tail(operator, operands, 6) {
+                    self.type3_metrics = Some(Type3MetricsTrace {
+                        width: [values[0], values[1]],
+                        bbox: Some([values[2], values[3], values[4], values[5]]),
+                    });
+                }
+            }
             b"ET" => {}
-            _ => {}
+            _ if is_known_operator(operator) => {}
+            _ if self.compatibility_depth > 0 => {}
+            _ => self.warn(
+                "unknown-operator",
+                &format!(
+                    "{} appears outside BX/EX",
+                    String::from_utf8_lossy(operator)
+                ),
+            ),
         }
     }
 
     fn show_text(&mut self, bytes: &[u8]) {
+        let mut type3_metrics = BTreeMap::new();
         for byte in bytes
             .iter()
             .copied()
             .collect::<std::collections::BTreeSet<_>>()
         {
-            self.walk_type3_charproc(byte);
+            if let Some(metrics) = self.walk_type3_charproc(byte) {
+                type3_metrics.insert(u16::from(byte), metrics);
+            }
         }
         let Ok(glyphs) =
             decode_glyphs(self.document, &self.resources, &self.state.font_name, bytes)
@@ -535,6 +622,7 @@ impl Walker<'_> {
             return;
         };
         for glyph in glyphs {
+            let metrics = type3_metrics.get(&glyph.cid).cloned();
             let text_point = self.state.text_matrix.transform([0.0, self.state.rise]);
             let baseline = self.state.ctm.transform(text_point);
             self.glyphs.push(GlyphTrace {
@@ -544,21 +632,24 @@ impl Walker<'_> {
                 baseline,
                 text_matrix: self.state.text_matrix,
                 ctm: self.state.ctm,
+                type3_metrics: metrics.clone(),
             });
             let word_spacing = if glyph.cid == u16::from(b' ') {
                 self.state.word_spacing
             } else {
                 0.0
             };
-            let advance = (glyph.width * self.state.font_size / 1000.0
-                + self.state.char_spacing
-                + word_spacing)
-                * self.state.horizontal_scale;
+            let width = metrics
+                .as_ref()
+                .map_or(glyph.width, |metrics| metrics.width[0]);
+            let advance =
+                (width * self.state.font_size / 1000.0 + self.state.char_spacing + word_spacing)
+                    * self.state.horizontal_scale;
             self.state.text_matrix = self.state.text_matrix.translated(advance, 0.0);
         }
     }
 
-    fn walk_type3_charproc(&mut self, code: u8) {
+    fn walk_type3_charproc(&mut self, code: u8) -> Option<Type3MetricsTrace> {
         let resolved = (|| -> Result<Option<(ObjectId, lopdf::Stream, Dictionary)>> {
             let fonts = self
                 .resources
@@ -609,21 +700,25 @@ impl Walker<'_> {
             Ok(Some((id, stream, resources)))
         })();
         let Ok(Some((id, stream, resources))) = resolved else {
-            return;
+            return None;
         };
         let Ok(decoded) = stream.decompressed_content_with_limit(MAX_DECODED_STREAM_BYTES) else {
-            return;
+            return None;
         };
         let Ok(tokens) = tokenize(&decoded, id.0) else {
-            return;
+            return None;
         };
-        let saved_state = self.state.clone();
-        let saved_resources = std::mem::replace(&mut self.resources, resources);
-        let saved_stack_len = self.stack.len();
-        self.walk(tokens);
-        self.stack.truncate(saved_stack_len);
-        self.resources = saved_resources;
-        self.state = saved_state;
+        self.scoped_execution(
+            resources,
+            |walker| {
+                walker.in_type3_charproc = true;
+                walker.type3_metrics = None;
+            },
+            |walker| {
+                walker.walk(tokens);
+                walker.type3_metrics.clone()
+            },
+        )
     }
 
     fn execute_form(&mut self, name: &[u8]) {
@@ -728,16 +823,59 @@ impl Walker<'_> {
             }
         };
 
+        self.active_forms.push(id);
+        self.scoped_execution(
+            resources,
+            |walker| walker.state.ctm = walker.state.ctm.compose(matrix),
+            |walker| walker.walk(tokens),
+        );
+        self.active_forms.pop();
+    }
+
+    fn scoped_execution<R>(
+        &mut self,
+        resources: Dictionary,
+        configure: impl FnOnce(&mut Self),
+        execute: impl FnOnce(&mut Self) -> R,
+    ) -> R {
         let saved_state = self.state.clone();
         let saved_resources = std::mem::replace(&mut self.resources, resources);
-        let saved_stack_len = self.stack.len();
-        self.state.ctm = self.state.ctm.compose(matrix);
-        self.active_forms.push(id);
-        self.walk(tokens);
-        self.active_forms.pop();
-        self.stack.truncate(saved_stack_len);
+        let saved_stack = std::mem::take(&mut self.stack);
+        let saved_operands = std::mem::take(&mut self.operands);
+        let saved_compatibility_depth = std::mem::take(&mut self.compatibility_depth);
+        let saved_in_type3_charproc = std::mem::take(&mut self.in_type3_charproc);
+        let saved_type3_metrics = self.type3_metrics.take();
+
+        configure(self);
+        let result = execute(self);
+
+        if !self.stack.is_empty() {
+            self.warn(
+                "scoped-graphics-stack-unbalanced",
+                &format!("discarding {} child graphics states", self.stack.len()),
+            );
+        }
+        if !self.operands.is_empty() {
+            self.warn(
+                "scoped-operands-discarded",
+                &format!("discarding {} child operands", self.operands.len()),
+            );
+        }
+        if self.compatibility_depth != 0 {
+            self.warn(
+                "scoped-compatibility-unbalanced",
+                &format!("discarding child BX/EX depth {}", self.compatibility_depth),
+            );
+        }
+
+        self.type3_metrics = saved_type3_metrics;
+        self.in_type3_charproc = saved_in_type3_charproc;
+        self.compatibility_depth = saved_compatibility_depth;
+        self.operands = saved_operands;
+        self.stack = saved_stack;
         self.resources = saved_resources;
         self.state = saved_state;
+        result
     }
 
     fn numeric_tail(
@@ -819,6 +957,7 @@ fn decode_glyphs(
             .and_then(Object::as_i64)
             .unwrap_or(0);
         let widths = dictionary.get(b"Widths").and_then(Object::as_array).ok();
+        let base_font = dictionary.get(b"BaseFont").and_then(Object::as_name).ok();
         return Ok(bytes
             .iter()
             .map(|byte| {
@@ -831,6 +970,7 @@ fn decode_glyphs(
                             .and_then(|index| values.get(index))
                     })
                     .and_then(object_number)
+                    .or_else(|| standard14_width(base_font?, *byte))
                     .unwrap_or(0.0);
                 DecodedGlyph {
                     cid,
@@ -886,6 +1026,18 @@ fn decode_glyphs(
             }
         })
         .collect())
+}
+
+fn standard14_width(base_font: &[u8], byte: u8) -> Option<f64> {
+    match base_font {
+        b"Courier" | b"Courier-Bold" | b"Courier-Oblique" | b"Courier-BoldOblique" => Some(600.0),
+        b"Helvetica" => match byte {
+            b'I' => Some(278.0),
+            b'H' => Some(722.0),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn cid_width(dictionary: &Dictionary, cid: u16) -> f64 {
@@ -954,6 +1106,62 @@ fn object_number(object: &Object) -> Option<f64> {
         Object::Real(value) => Some(f64::from(*value)),
         _ => None,
     }
+}
+
+fn is_known_operator(operator: &[u8]) -> bool {
+    matches!(
+        operator,
+        b"w" | b"J"
+            | b"j"
+            | b"M"
+            | b"d"
+            | b"ri"
+            | b"i"
+            | b"gs"
+            | b"m"
+            | b"l"
+            | b"c"
+            | b"v"
+            | b"y"
+            | b"h"
+            | b"re"
+            | b"S"
+            | b"s"
+            | b"f"
+            | b"F"
+            | b"f*"
+            | b"B"
+            | b"B*"
+            | b"b"
+            | b"b*"
+            | b"n"
+            | b"W"
+            | b"W*"
+            | b"TL"
+            | b"Tr"
+            | b"T*"
+            | b"TJ"
+            | b"'"
+            | b"\""
+            | b"CS"
+            | b"cs"
+            | b"SC"
+            | b"SCN"
+            | b"sc"
+            | b"scn"
+            | b"G"
+            | b"g"
+            | b"RG"
+            | b"rg"
+            | b"K"
+            | b"k"
+            | b"sh"
+            | b"MP"
+            | b"DP"
+            | b"BMC"
+            | b"BDC"
+            | b"EMC"
+    )
 }
 
 fn split_glued_operator(token: &[u8]) -> Option<(f64, &'static [u8])> {

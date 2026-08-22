@@ -39,7 +39,7 @@ id = "STREAM-06-glued"
 assertion = "12Tf tokenizes as 12,Tf and 120Td as 120,Td, producing MIMUS at baseline (100,120)"
 observable_via = "literal token sequence, mutool trace and PDFium text coordinates"
 [oracle]
-checks = ["determinism","legality","page-geometry","render-diagnostic"]
+checks = ["determinism","legality","operator-walk","page-geometry","render-diagnostic"]
 [[adjudication]]
 date = "2026-08-22"
 issue = "Acrobat accepts missing delimiters between numbers and known operators"
