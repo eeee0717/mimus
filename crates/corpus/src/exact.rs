@@ -246,7 +246,7 @@ fn shared_resources(repo_root: &Path) -> Result<Vec<u8>> {
     pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 5 0 R /Contents 11 0 R >>")?;
     pdf.object(b"<< /Font << /F1 6 0 R >> >>")?;
     pdf.object(font_dictionary_with_descriptor(9, 7).as_bytes())?;
-    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 8 0 R >>")?;
     pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
     pdf.stream(b"/Type /CMap", to_unicode())?;
     pdf.stream(b"", b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n")?;
@@ -862,6 +862,14 @@ mod tests {
         let mixed = mixed_to_unicode();
         assert!(contains(mixed, b"<8140> <004D>"));
         assert!(contains(mixed, b"5 beginbfchar"));
+    }
+
+    #[test]
+    fn shared_resources_font_descriptor_references_the_embedded_font_stream() {
+        let bytes = generate("unit-write-02-shared-resources", &repo_root()).unwrap();
+
+        assert!(contains(&bytes, b"/FontFile2 8 0 R"));
+        assert!(contains(&bytes, b"8 0 obj\n<< /Length "));
     }
 
     #[test]

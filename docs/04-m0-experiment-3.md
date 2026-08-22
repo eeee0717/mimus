@@ -33,7 +33,7 @@ PoC crate 位于 [`experiments/m0-experiment-3-poc`](../experiments/m0-experimen
 | Fixture | Case | SHA-256 |
 |---|---|---|
 | `unit-write-01-bookmarks-rich` | WRITE-06 | `1e38b1cbc1c450e14e7b2be0f467a541f0295fe6d73bb05336ca70ac2e13d726` |
-| `unit-write-02-shared-resources` | WRITE-04 | `9746381d2af8b44a7f5d9579a2d6745b952eba25f4a149a7cecbaa0ea14ced27` |
+| `unit-write-02-shared-resources` | WRITE-04 | `d772b7e7eec883aa8a3fd80d06fd7e4532876c2a621b6aa0dbd4a6fa09faa16f` |
 | `unit-write-03-resources-gen-nonzero` | WRITE-04 | `6b4dfce2bc5eea7587c20f158270e113858715359f1d8482fd6c17a19fc6e0d2` |
 | `unit-write-04-xobj-in-objstm` | XOBJ-10 | `b0b3d9400fe9ae7e898cc2426b19a53287b0037aaa469265923ed2bc0b7c4278` |
 | `unit-write-05-indirect-resources-objstm` | WRITE-01/02 | `43eebfe5d90dc0a3a61144e43b26e5b5e88ac29f57f9b70c74615b85fa655cd2` |
@@ -73,36 +73,36 @@ PoC crate 位于 [`experiments/m0-experiment-3-poc`](../experiments/m0-experimen
 
 ### 对象、xref 与引用差异
 
-增量段新增对象 19、20、21，并新增 xref/trailer 链接到上一段；原始对象 1–18 的字节与对象值未改变。唯一业务引用变化是目标页对象 3 的 `/Resources` 从 `4 0 R` 改为 `19 0 R`，`/Contents` 改为 `21 0 R`；对象 4、书签 8–11、注释 12–14、OCG 15、命名目标 16、ToUnicode 17 与原页面结构引用保持不变。页面 `MediaBox`、`CropBox`、`Rotate` 逐项相等。ObjStm companion 把原 Form 12 复制并修改为非压缩对象 14；generation companion 保留原 `4 7 R`；共享资源 companion 只改第一页，第二页继续引用 `5 0 R`。
+增量段新增对象 19、20、21，并新增 xref/trailer 链接到上一段；原始对象 1–18 的字节与对象值未改变。唯一业务引用变化是目标页对象 3 的 `/Resources` 从 `4 0 R` 改为 `19 0 R`，`/Contents` 改为 `21 0 R`；对象 4、书签 8–11、注释 12–14、OCG 15、命名目标 16、ToUnicode 17 与原页面结构引用保持不变。页面 `MediaBox`、`CropBox`、`Rotate` 逐项相等。
+
+ObjStm companion 保留活动 Contents 9 及其中的 `/X1 Do`，依次追加页面 Resources 14、Helvetica 15、从 ObjStm 解出的 Form Resources 16 和非压缩 Form 17；新 Form 通过 `/F2` 绘制 `FORM COW`，Poppler 与 MuPDF 均同时提取到 `FORM COW` 和保留的 `MIMUS`。GEOM companion 在保留非零 MediaBox/CropBox 的同时按页面空间 `(150,220)` 写入 `POC`，两个文本引擎均可提取且两套渲染器的像素检查均确认页面非空白。generation companion 保留原 `4 7 R`；shared companion 只改第一页，第二页继续引用 `5 0 R`。shared fixture 的 descriptor 7 明确引用字体流 8，MuPDF 不再回退系统字体。
 
 ### 独立工具验收
 
-输出文件为 `.context/m0-lab/poc/incremental-output.pdf`。执行：
+输出文件位于 `.context/m0-lab/poc/`。独立验收脚本只使用 Python 标准库、qpdf、Poppler 与 MuPDF，不调用 lopdf；它比较输入前缀、qpdf JSON 对象图、活动 Contents/Form 引用、generation/free slot、共享资源、提取文本、MuPDF 字体诊断和两套渲染器的像素。执行：
 
 ```sh
-qpdf --check .context/m0-lab/poc/incremental-output.pdf
-pdftotext .context/m0-lab/poc/incremental-output.pdf -
-pdfinfo .context/m0-lab/poc/incremental-output.pdf
-mutool draw -F stext .context/m0-lab/poc/incremental-output.pdf
-mutool draw -o .context/m0-lab/poc/render-%d.png -r 150 .context/m0-lab/poc/incremental-output.pdf
+~/.cargo/bin/cargo run --manifest-path experiments/m0-experiment-3-poc/Cargo.toml
+python3 experiments/m0-experiment-3-poc/verify_outputs.py
 ```
 
-结果：qpdf 结构检查通过；Poppler 提取文本为 `POC`；`pdfinfo` 报告 1 页、`300 x 200 pt`、PDF 1.7；MuPDF 输出一页 stext，页面空间坐标与 Poppler 一致，150 dpi 渲染得到有效的 `625 x 417` PNG（默认 72 dpi 时为 `300 x 200`）。原输入的富结构对象仍可由 lopdf 重新加载并逐对象比较。
+结果：主输出与全部 companion 均通过 qpdf 结构检查；主输出文本为 `POC`，XOBJ 输出为 `FORM COW` + `MIMUS`，GEOM 输出为可见的 `POC`，shared 输出第二页仍为 `MIMUSC`。qpdf JSON 独立确认原富结构对象不变、新对象引用链有效、Form 仍被活动 Contents 执行、generation 7 保留、free object 10 未复用；Poppler 与 MuPDF 均确认上述文本，且两者对 XOBJ/GEOM 的栅格都不是空白页。
 
 ### 失败原子性
 
-PoC 分别注入三类失败，并在每次失败前写入 `known-good` 哨兵文件：
+PoC 分别注入三类失败。每次先把真实输入 PDF 写到即将传给 `incremental_rewrite` 的实际输出目标，再经同一完整写回/发布入口注入失败：
 
-- 资源复制：在 `add_object` 前注入 `injected resource copy failure`；目标文件不变；
-- 字体追加：在字体 marker 的 `add_object` 前注入 `injected font append failure`；目标文件不变；
-- 保存发布：先写入已存在的 `existing-output.pdf` 临时目标，保存完成后注入失败。
+- 资源复制：`failure-resource.pdf` 在 COW Resources 的 `add_object` 前失败；
+- 字体追加：`failure-font.pdf` 在字体 marker 的 `add_object` 前失败；
+- 保存发布：`failure-save.pdf` 完成临时文件写入后、原子 rename 前失败。
 
-保存路径先写同目录临时文件，注入失败时主动删除临时文件；`existing-output.pdf` 的 SHA-256 保持不变，因此保存失败不会覆盖既有产物，也不会留下半译输出。资源复制与字体追加共用同一保存事务，若任一步失败则不会发布最终路径。
+三个实际目标均保持与输入 PDF 逐字节相同，并继续通过 qpdf；保存失败主动删除同目录临时文件。因此资源复制、字体追加和保存失败都不会覆盖既有产物或留下半译输出。
 
 ## 可重放命令
 
 ```sh
 ~/.cargo/bin/cargo run --manifest-path experiments/m0-experiment-3-poc/Cargo.toml
+python3 experiments/m0-experiment-3-poc/verify_outputs.py
 ~/.cargo/bin/cargo test --manifest-path experiments/m0-experiment-3-poc/Cargo.toml
 ~/.cargo/bin/cargo fmt --all -- --check
 ~/.cargo/bin/cargo clippy --workspace --all-targets --all-features -- -D warnings

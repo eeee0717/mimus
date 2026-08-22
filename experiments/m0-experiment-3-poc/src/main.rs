@@ -30,7 +30,13 @@ fn repo_root() -> Result<PathBuf> {
 fn run(input: &Path, output: &Path) -> Result<String> {
     let work = output.parent().context("output has no parent")?;
     let root = repo_root()?;
-    let primary = incremental_rewrite(input, output, 0, false)?;
+    let primary = incremental_rewrite(
+        input,
+        output,
+        0,
+        RewriteScenario::ReplaceText { x: 72, y: 120 },
+        None,
+    )?;
     let before = &primary.before;
     let document = &primary.document;
     let output_bytes = &primary.output_bytes;
@@ -40,8 +46,14 @@ fn run(input: &Path, output: &Path) -> Result<String> {
         output_bytes.starts_with(before),
         "output is not input + append"
     );
-    ensure!(primary.font.0 > max_id, "new object number reused an input object");
-    ensure!(primary.resources.0 > max_id, "COW resource was not appended");
+    ensure!(
+        primary.font.0 > max_id,
+        "new object number reused an input object"
+    );
+    ensure!(
+        primary.resources.0 > max_id,
+        "COW resource was not appended"
+    );
     ensure!(primary.content.0 > max_id, "content object is not appended");
     ensure!(primary.font.0 != 10 && primary.resources.0 != 10 && primary.content.0 != 10);
     ensure!(
@@ -109,40 +121,12 @@ fn run(input: &Path, output: &Path) -> Result<String> {
         );
     }
 
-    // Failure injection: resource copying and font appending fail before a
-    // destination is published, leaving an existing destination untouched.
-    let resource_failure = work_sentinel(output, "resource-failure")?;
-    let font_failure = work_sentinel(output, "font-failure")?;
-    let resource_document = Document::load(input)?;
-    let mut resource_incremental =
-        IncrementalDocument::create_from(before.clone(), resource_document);
-    let resource_error = copy_resources(&mut resource_incremental, Object::Null, true)
-        .expect_err("injected resource copy failure");
-    ensure!(fs::read(&resource_failure)? == b"known-good");
-    let font_document = Document::load(input)?;
-    let mut font_incremental = IncrementalDocument::create_from(before.clone(), font_document);
-    let font_error =
-        append_font_marker(&mut font_incremental, true).expect_err("injected font append failure");
-    ensure!(fs::read(&font_failure)? == b"known-good");
-
-    // Failure injection: an unwritable destination must not replace an
-    // existing file, and the temporary output must be cleaned up.
-    let mut failed_incremental =
-        IncrementalDocument::create_from(before.clone(), document.clone());
-    let failed_target = work.join("existing-output.pdf");
-    fs::write(&failed_target, b"known-good")?;
-    let before_failed = sha256(&fs::read(&failed_target)?);
-    let failure = save_incremental(&mut failed_incremental, &failed_target, true)
-        .expect_err("injected save failure should fail");
-    ensure!(sha256(&fs::read(&failed_target)?) == before_failed);
-    let temp = work.join(format!(".{}.tmp", std::process::id()));
-    ensure!(!temp.exists(), "failed save left a temporary file");
-    let failure_text = format!("{failure:#}");
+    let failure_report = verify_failure_atomicity(input, work)?;
 
     let companion_report = verify_companion_inputs(&root, work)?;
 
     Ok(format!(
-        "input_sha256={}\noutput_sha256={output_sha}\ninput_len={} output_len={} appended_bytes={} max_input_object={} new_resources={} new_content={} new_font={} resource_failure={resource_error} font_failure={font_error} save_failure={failure_text}\n{companion_report}",
+        "input_sha256={}\noutput_sha256={output_sha}\ninput_len={} output_len={} appended_bytes={} max_input_object={} new_resources={} new_content={} new_font={} {failure_report}\n{companion_report}",
         sha256(before),
         before.len(),
         output_bytes.len(),
@@ -168,11 +152,25 @@ struct RewriteResult {
     max_id: u32,
 }
 
+#[derive(Clone, Copy)]
+enum RewriteScenario {
+    ReplaceText { x: i64, y: i64 },
+    RewriteForm,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FailurePoint {
+    ResourceCopy,
+    FontAppend,
+    Save,
+}
+
 fn incremental_rewrite(
     input: &Path,
     output: &Path,
     page_index: usize,
-    mutate_form: bool,
+    scenario: RewriteScenario,
+    failure: Option<FailurePoint>,
 ) -> Result<RewriteResult> {
     let before = fs::read(input)?;
     let document = Document::load(input).context("load input with lopdf")?;
@@ -201,7 +199,13 @@ fn incremental_rewrite(
     incremental.opt_clone_object_to_new_document(page)?;
 
     let mut resources_object = document.get_object(original_resources)?.clone();
-    let form = if mutate_form {
+    let resources = copy_resources(
+        &mut incremental,
+        resources_object.clone(),
+        failure == Some(FailurePoint::ResourceCopy),
+    )?;
+    let font = append_font_marker(&mut incremental, failure == Some(FailurePoint::FontAppend))?;
+    let form = if matches!(scenario, RewriteScenario::RewriteForm) {
         let form_ref = resources_object
             .as_dict()?
             .get(b"XObject")?
@@ -209,18 +213,33 @@ fn incremental_rewrite(
             .get(b"X1")?
             .as_reference()?;
         let mut form_object = document.get_object(form_ref)?.clone();
+        let form_resources_ref = form_object
+            .as_stream()?
+            .dict
+            .get(b"Resources")?
+            .as_reference()?;
+        let form_resources = incremental
+            .new_document
+            .add_object(document.get_object(form_resources_ref)?.clone());
+        incremental
+            .new_document
+            .get_object_mut(form_resources)?
+            .as_dict_mut()?
+            .get_mut(b"Font")?
+            .as_dict_mut()?
+            .set("F2", font);
         let stream = form_object.as_stream_mut()?;
-        let mut content = stream.content.clone();
-        let marker = b"(FORM)";
-        let marker_offset = content
-            .windows(marker.len())
-            .position(|window| window == marker)
-            .context("ObjStm Form marker missing")?;
-        content.splice(
-            marker_offset..marker_offset + marker.len(),
-            b"(FORM COW)".iter().copied(),
+        stream.dict.set("Resources", form_resources);
+        stream.dict.set(
+            "BBox",
+            vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(72),
+                Object::Integer(16),
+            ],
         );
-        stream.set_plain_content(content);
+        stream.set_plain_content(b"BT\n/F2 12 Tf\n1 0 0 1 0 3 Tm\n(FORM COW) Tj\nET\n".to_vec());
         let new_form = incremental.new_document.add_object(form_object);
         resources_object
             .as_dict_mut()?
@@ -231,31 +250,42 @@ fn incremental_rewrite(
     } else {
         None
     };
-    let resources = copy_resources(&mut incremental, resources_object, false)?;
-    let font = append_font_marker(&mut incremental, false)?;
-    incremental
-        .new_document
-        .get_object_mut(resources)?
+    resources_object
         .as_dict_mut()?
         .get_mut(b"Font")?
         .as_dict_mut()?
         .set("F2", font);
+    *incremental.new_document.get_object_mut(resources)? = resources_object;
     incremental
         .new_document
         .get_object_mut(page)?
         .as_dict_mut()?
         .set("Resources", resources);
-    let content = b"BT\n/F2 12 Tf\n1 0 0 1 72 120 Tm\n(POC) Tj\nET\n";
-    let content_id = incremental.new_document.add_object(Stream::new(
-        dictionary! { "Length" => Object::Integer(content.len() as i64) },
-        content.to_vec(),
-    ));
-    incremental
-        .new_document
-        .get_object_mut(page)?
-        .as_dict_mut()?
-        .set("Contents", content_id);
-    let output_bytes = save_incremental(&mut incremental, output, false)?;
+    let content_id = match scenario {
+        RewriteScenario::ReplaceText { x, y } => {
+            let content = format!("BT\n/F2 12 Tf\n1 0 0 1 {x} {y} Tm\n(POC) Tj\nET\n").into_bytes();
+            let content_id = incremental.new_document.add_object(Stream::new(
+                dictionary! { "Length" => Object::Integer(content.len() as i64) },
+                content,
+            ));
+            incremental
+                .new_document
+                .get_object_mut(page)?
+                .as_dict_mut()?
+                .set("Contents", content_id);
+            content_id
+        }
+        RewriteScenario::RewriteForm => document
+            .get_object(page)?
+            .as_dict()?
+            .get(b"Contents")?
+            .as_reference()?,
+    };
+    let output_bytes = save_incremental(
+        &mut incremental,
+        output,
+        failure == Some(FailurePoint::Save),
+    )?;
     let output_document = Document::load(output).context("reload incremental output")?;
     Ok(RewriteResult {
         before,
@@ -278,8 +308,18 @@ fn verify_companion_inputs(root: &Path, work: &Path) -> Result<String> {
     let objstm_bytes = fs::read(&objstm_path)?;
     ensure!(objstm_bytes.windows(13).any(|w| w == b"/Type /ObjStm"));
     let objstm_output = work.join("companion-objstm-output.pdf");
-    let objstm_result = incremental_rewrite(&objstm_path, &objstm_output, 0, true)?;
-    ensure!(objstm_result.output_bytes.starts_with(&objstm_result.before));
+    let objstm_result = incremental_rewrite(
+        &objstm_path,
+        &objstm_output,
+        0,
+        RewriteScenario::RewriteForm,
+        None,
+    )?;
+    ensure!(
+        objstm_result
+            .output_bytes
+            .starts_with(&objstm_result.before)
+    );
     let objstm = &objstm_result.document;
     let page = objstm
         .get_pages()
@@ -301,17 +341,32 @@ fn verify_companion_inputs(root: &Path, work: &Path) -> Result<String> {
         .as_reference()?;
     let form = objstm.get_object(xobject)?.as_stream()?;
     ensure!(form.content.windows(4).any(|w| w == b"FORM"));
-    let new_form = objstm_result.form.context("ObjStm form was not rewritten")?;
+    let new_form = objstm_result
+        .form
+        .context("ObjStm form was not rewritten")?;
     ensure!(new_form.0 > objstm_result.max_id);
-    let output_form = objstm_result.output_document.get_object(new_form)?.as_stream()?;
+    let output_form = objstm_result
+        .output_document
+        .get_object(new_form)?
+        .as_stream()?;
     ensure!(output_form.content.windows(8).any(|w| w == b"FORM COW"));
 
     let geometry_path = root.join(
         "corpus/fixtures/unit-geom-05-nonzero-origin-boxes/unit-geom-05-nonzero-origin-boxes.pdf",
     );
     let geometry_output = work.join("companion-geometry-output.pdf");
-    let geometry_result = incremental_rewrite(&geometry_path, &geometry_output, 0, false)?;
-    ensure!(geometry_result.output_bytes.starts_with(&geometry_result.before));
+    let geometry_result = incremental_rewrite(
+        &geometry_path,
+        &geometry_output,
+        0,
+        RewriteScenario::ReplaceText { x: 150, y: 220 },
+        None,
+    )?;
+    ensure!(
+        geometry_result
+            .output_bytes
+            .starts_with(&geometry_result.before)
+    );
     let geometry = &geometry_result.document;
     let geometry_page = geometry
         .get_pages()
@@ -341,8 +396,18 @@ fn verify_companion_inputs(root: &Path, work: &Path) -> Result<String> {
         "corpus/fixtures/unit-write-03-resources-gen-nonzero/unit-write-03-resources-gen-nonzero.pdf",
     );
     let generation_output = work.join("companion-generation-output.pdf");
-    let generation_result = incremental_rewrite(&generation_path, &generation_output, 0, false)?;
-    ensure!(generation_result.output_bytes.starts_with(&generation_result.before));
+    let generation_result = incremental_rewrite(
+        &generation_path,
+        &generation_output,
+        0,
+        RewriteScenario::ReplaceText { x: 72, y: 120 },
+        None,
+    )?;
+    ensure!(
+        generation_result
+            .output_bytes
+            .starts_with(&generation_result.before)
+    );
     let generation = &generation_result.document;
     ensure!(generation.objects.contains_key(&(4, 7)));
     let generation_page = generation
@@ -366,8 +431,18 @@ fn verify_companion_inputs(root: &Path, work: &Path) -> Result<String> {
         .next()
         .context("generation output has no page")?
         .1;
-    ensure!(generation_result.output_document.get_object(generation_output_page)?.as_dict()?.get(b"Resources")?.as_reference()? != (4, 7));
-    ensure!(generation_result.output_document.get_object((4, 7))? == generation.get_object((4, 7))?);
+    ensure!(
+        generation_result
+            .output_document
+            .get_object(generation_output_page)?
+            .as_dict()?
+            .get(b"Resources")?
+            .as_reference()?
+            != (4, 7)
+    );
+    ensure!(
+        generation_result.output_document.get_object((4, 7))? == generation.get_object((4, 7))?
+    );
 
     let free_path = root
         .join("corpus/fixtures/unit-write-06-free-object-slot/unit-write-06-free-object-slot.pdf");
@@ -379,15 +454,19 @@ fn verify_companion_inputs(root: &Path, work: &Path) -> Result<String> {
             .any(|w| w == b"0000000000 00000 f \n")
     );
     let free_output = work.join("companion-free-output.pdf");
-    let free_result = incremental_rewrite(&free_path, &free_output, 0, false)?;
+    let free_result = incremental_rewrite(
+        &free_path,
+        &free_output,
+        0,
+        RewriteScenario::ReplaceText { x: 72, y: 120 },
+        None,
+    )?;
     ensure!(free_result.output_bytes.starts_with(&free_result.before));
     let free = &free_result.document;
     ensure!(!object_numbers(free).contains(&10));
     ensure!(free_result.resources.0 > free_result.max_id);
     ensure!(
-        free_result.resources.0 != 10
-            && free_result.font.0 != 10
-            && free_result.content.0 != 10,
+        free_result.resources.0 != 10 && free_result.font.0 != 10 && free_result.content.0 != 10,
         "free slot reused: max={} resources={} font={} content={}",
         free_result.max_id,
         free_result.resources.0,
@@ -395,23 +474,43 @@ fn verify_companion_inputs(root: &Path, work: &Path) -> Result<String> {
         free_result.content.0
     );
 
-    let shared_path = root.join(
-        "corpus/fixtures/unit-write-02-shared-resources/unit-write-02-shared-resources.pdf",
-    );
+    let shared_path = root
+        .join("corpus/fixtures/unit-write-02-shared-resources/unit-write-02-shared-resources.pdf");
     let shared_output = work.join("companion-shared-output.pdf");
-    let shared_result = incremental_rewrite(&shared_path, &shared_output, 0, false)?;
+    let shared_result = incremental_rewrite(
+        &shared_path,
+        &shared_output,
+        0,
+        RewriteScenario::ReplaceText { x: 72, y: 120 },
+        None,
+    )?;
     let pages = shared_result.output_document.get_pages();
-    let second_page = pages.get(&2).copied().context("shared output missing page 2")?;
-    ensure!(shared_result.output_bytes.starts_with(&shared_result.before));
-    ensure!(shared_result.output_document.get_object(second_page)?.as_dict()?.get(b"Resources")?.as_reference()? == (5, 0));
-    ensure!(shared_result.output_document.get_object((5, 0))? == shared_result.document.get_object((5, 0))?);
+    let second_page = pages
+        .get(&2)
+        .copied()
+        .context("shared output missing page 2")?;
+    ensure!(
+        shared_result
+            .output_bytes
+            .starts_with(&shared_result.before)
+    );
+    ensure!(
+        shared_result
+            .output_document
+            .get_object(second_page)?
+            .as_dict()?
+            .get(b"Resources")?
+            .as_reference()?
+            == (5, 0)
+    );
+    ensure!(
+        shared_result.output_document.get_object((5, 0))?
+            == shared_result.document.get_object((5, 0))?
+    );
 
     Ok(format!(
         "companions=objstm(form={}),geometry(boxes=preserved),generation(resources=4:7->{}:0),free(max={},new={}),shared(second_resources=5:0)",
-        new_form.0,
-        generation_result.resources.0,
-        free_result.max_id,
-        free_result.resources.0,
+        new_form.0, generation_result.resources.0, free_result.max_id, free_result.resources.0,
     ))
 }
 
@@ -436,13 +535,39 @@ fn append_font_marker(
     }))
 }
 
-fn work_sentinel(output: &Path, name: &str) -> Result<PathBuf> {
-    let path = output
-        .parent()
-        .context("output has no parent")?
-        .join(format!("{name}.pdf"));
-    fs::write(&path, b"known-good")?;
-    Ok(path)
+fn verify_failure_atomicity(input: &Path, work: &Path) -> Result<String> {
+    let known_good = fs::read(input)?;
+    let cases = [
+        ("resource", FailurePoint::ResourceCopy),
+        ("font", FailurePoint::FontAppend),
+        ("save", FailurePoint::Save),
+    ];
+    let mut errors = Vec::new();
+
+    for (name, failure) in cases {
+        let target = work.join(format!("failure-{name}.pdf"));
+        fs::write(&target, &known_good)?;
+        let before = sha256(&known_good);
+        let error = match incremental_rewrite(
+            input,
+            &target,
+            0,
+            RewriteScenario::ReplaceText { x: 72, y: 120 },
+            Some(failure),
+        ) {
+            Ok(_) => return Err(anyhow!("injected {name} failure unexpectedly succeeded")),
+            Err(error) => error,
+        };
+        ensure!(
+            sha256(&fs::read(&target)?) == before,
+            "{name} failure replaced its actual destination"
+        );
+        errors.push(format!("{name}_failure={error:#}"));
+    }
+
+    let temp = work.join(format!(".{}.tmp", std::process::id()));
+    ensure!(!temp.exists(), "failed save left a temporary file");
+    Ok(errors.join(" "))
 }
 
 fn save_incremental(
