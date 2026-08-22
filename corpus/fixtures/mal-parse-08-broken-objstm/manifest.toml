@@ -1,0 +1,49 @@
+schema_version = 1
+
+[identity]
+id = "mal-parse-08-broken-objstm"
+name = "Object stream declares the wrong object count"
+class = "mal"
+legality = "malformed"
+cases = ["PARSE-11"]
+priority = "M0"
+variable = "The ObjStm /N count is changed by exactly one byte"
+
+[source]
+method = "byte-mutation"
+pdf = "mal-parse-08-broken-objstm.pdf"
+pdf_sha256 = "68de9604a241df6c99ff9d2329ab01bc5fc1f81278bd66c819e1a7d78bc9cb82"
+font_provenance = "typst-embedded"
+
+[lineage]
+parent = "unit-write-04-xobj-in-objstm"
+
+[[lineage.mutations]]
+byte_offset = 3463
+original_byte = 49
+replacement_byte = 50
+description = "change the ObjStm /N 1 declaration to /N 2 without changing stream bytes"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+declared_failure = "object stream 10"
+block = []
+
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+
+[[expected.behaviour]]
+id = "PARSE-11-broken-objstm"
+assertion = "The malformed object stream is rejected before any output can be written"
+observable_via = "qpdf --check error text and exit status"
+
+[oracle]
+checks = ["legality", "structure"]

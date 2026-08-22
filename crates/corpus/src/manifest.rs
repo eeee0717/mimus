@@ -288,6 +288,7 @@ pub struct PdfContract {
 #[serde(rename_all = "kebab-case")]
 pub enum XrefKind {
     Table,
+    Stream,
 }
 
 #[derive(Debug, Deserialize)]

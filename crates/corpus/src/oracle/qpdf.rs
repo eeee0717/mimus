@@ -242,7 +242,8 @@ fn parse_reference(value: &Value) -> Result<u32> {
         .context("empty reference")?
         .parse::<u32>()
         .context("invalid reference object number")?;
-    if parts.next() != Some("0") || parts.next() != Some("R") || parts.next().is_some() {
+    let generation = parts.next().context("reference missing generation")?;
+    if generation.parse::<u16>().is_err() || parts.next() != Some("R") || parts.next().is_some() {
         bail!("unsupported reference {text:?}");
     }
     Ok(object)
@@ -266,7 +267,8 @@ fn raw_stream_output(output: proc::Output, object: u32) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-/// Return generation-zero, uncompressed object offsets from qpdf's xref view.
+/// Return uncompressed object offsets from qpdf's xref view, including non-zero
+/// generations so the corpus can exercise generation-preserving references.
 pub fn xref_offsets(pdf: &Path) -> Result<BTreeMap<u32, usize>> {
     let args = vec!["--show-xref".to_string(), pdf.display().to_string()];
     let output =
@@ -289,13 +291,9 @@ fn parse_xref_offsets(report: &str) -> Result<BTreeMap<u32, usize>> {
         let object = object
             .parse::<u32>()
             .with_context(|| format!("qpdf xref 对象号无效：{object:?}"))?;
-        let generation = generation
+        let _generation = generation
             .parse::<u32>()
             .with_context(|| format!("qpdf xref generation 无效：{generation:?}"))?;
-        if generation != 0 {
-            continue;
-        }
-
         let entry = entry.trim();
         let Some(offset) = entry.strip_prefix("uncompressed; offset = ") else {
             if entry.starts_with("compressed;") {

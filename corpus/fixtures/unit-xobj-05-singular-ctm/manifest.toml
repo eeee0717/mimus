@@ -1,0 +1,76 @@
+schema_version = 1
+
+[identity]
+id = "unit-xobj-05-singular-ctm"
+name = "Singular CTM with q/Q recovery"
+class = "unit"
+legality = "legal"
+cases = ["XOBJ-08"]
+priority = "M0"
+variable = "A singular CTM precedes a form invocation and is restored by q/Q"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-xobj-05-singular-ctm.pdf"
+pdf_sha256 = "decdbfd155e2322d2a26188d036bc3c0a36db4b17d396dede4b8fc7f2a878466"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9,10]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d786f626a2d30352d73696e"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "L1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+baseline_origin = [100.0, 100.0]
+metric_box = [100.0, 97.168, 140.656, 111.136]
+visual_bbox = [101.177734, 99.830078, 139.985219, 108.90625]
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """q
+0 0 0 0 0 0 cm
+/X1 Do
+Q
+BT
+/F1 12 Tf
+1 0 0 1 100 100 Tm
+(MIMUS) Tj
+ET
+"""
+
+[[expected.behaviour]]
+id = "XOBJ-08-q-stack"
+assertion = "A singular CTM does not poison the following text; q/Q remains balanced and the following baseline stays at 100,100"
+observable_via = "content stream operator counts, mutool text coordinates, and rendered page"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]

@@ -297,6 +297,19 @@ fn verify_one(
     if manifest.requires(Check::Legality) {
         outcomes.push(check_legality(manifest, &pdf)?);
     }
+    // A malformed fixture's contract is the declared parser failure itself.
+    // Once qpdf has observed that failure, invoking independent text/render
+    // parsers would turn the expected negative case into an infrastructure
+    // error and obscure the useful result.
+    if manifest.identity.legality == Legality::Malformed && manifest.requires(Check::Legality) {
+        return Ok(Report {
+            fixture: manifest.id().to_string(),
+            outcomes,
+            draw_order: Vec::new(),
+            raster: Vec::new(),
+            geometry: Vec::new(),
+        });
+    }
     if manifest.requires(Check::PageGeometry) {
         outcomes.extend(check_page_geometry(manifest, &pdf, &frames)?);
     }
@@ -350,7 +363,7 @@ fn verify_one(
     };
 
     if manifest.requires(Check::Render) && manifest.requires(Check::PageGeometry) {
-        outcomes.push(check_raster_orientation(&frames, &raster));
+        outcomes.push(check_raster_orientation(&frames, &manifest.page, &raster));
     }
 
     // 双解析器几何裁定与参考栅格共用一份 adjudicated.toml：两者都是**测出来的**
@@ -649,6 +662,7 @@ fn check_pdf_bytes(manifest: &Manifest, pdf: &Path, document: &qpdf::Document) -
         &bytes,
         &contract.object_numbers,
         &xref_offsets,
+        contract.xref_kind == crate::manifest::XrefKind::Table,
     ));
     match contract.xref_kind {
         crate::manifest::XrefKind::Table => {
@@ -656,6 +670,11 @@ fn check_pdf_bytes(manifest: &Manifest, pdf: &Path, document: &qpdf::Document) -
                 || find_bytes(&bytes, b"\ntrailer\n").is_none()
             {
                 problems.push("缺少 classic xref/trailer".to_string());
+            }
+        }
+        crate::manifest::XrefKind::Stream => {
+            if find_bytes(&bytes, b"/Type /XRef").is_none() {
+                problems.push("缺少 /Type /XRef stream".to_string());
             }
         }
     }
@@ -1338,7 +1357,8 @@ fn destination_matches(
 fn reference_number(value: &Value) -> Option<u32> {
     let mut parts = value.as_str()?.split_whitespace();
     let number = parts.next()?.parse().ok()?;
-    (parts.next() == Some("0") && parts.next() == Some("R") && parts.next().is_none())
+    let generation = parts.next()?;
+    (generation.parse::<u16>().is_ok() && parts.next() == Some("R") && parts.next().is_none())
         .then_some(number)
 }
 
@@ -1373,20 +1393,29 @@ fn object_plan_problems(
     bytes: &[u8],
     object_numbers: &[u32],
     xref_offsets: &BTreeMap<u32, usize>,
+    require_every_object_uncompressed: bool,
 ) -> Vec<String> {
     let mut problems = Vec::new();
     let mut positions = Vec::new();
     for object in object_numbers {
-        let marker = format!("{object} 0 obj\n");
         let Some(position) = xref_offsets.get(object).copied() else {
-            problems.push(format!("xref 中找不到 uncompressed object {object}"));
+            if require_every_object_uncompressed {
+                problems.push(format!("xref 中找不到 uncompressed object {object}"));
+            }
             continue;
         };
         positions.push(position);
-        let end = position.checked_add(marker.len());
-        if end.and_then(|end| bytes.get(position..end)) != Some(marker.as_bytes()) {
+        let object_prefix = format!("{object} ");
+        let valid_header = bytes.get(position..).is_some_and(|tail| {
+            tail.starts_with(object_prefix.as_bytes())
+                && tail
+                    .windows(b" obj\n".len())
+                    .position(|window| window == b" obj\n")
+                    .is_some_and(|end| end < 32)
+        });
+        if !valid_header {
             problems.push(format!(
-                "xref object {object} offset {position} 不指向精确对象头 {marker:?}"
+                "xref object {object} offset {position} 不指向精确对象头"
             ));
         }
     }
@@ -1467,9 +1496,17 @@ fn check_page_geometry(
     // 一对宽高更强的判据。
     let poppler_pages = poppler::blocks(pdf, frames)?;
     let mut size_problems = Vec::new();
-    for (frame, page) in frames.iter().zip(&poppler_pages) {
+    for ((frame, expected_page), page) in frames.iter().zip(&manifest.page).zip(&poppler_pages) {
         let (w, h) = frame.box_size();
-        if !close(w, page.viewer_size.0, tol) || !close(h, page.viewer_size.1, tol) {
+        let media_w = expected_page.media_box[2] - expected_page.media_box[0];
+        let media_h = expected_page.media_box[3] - expected_page.media_box[1];
+        let direct = close(w, page.viewer_size.0, tol) && close(h, page.viewer_size.1, tol);
+        // Poppler's <page width height> is defined by MediaBox even when a
+        // CropBox is present (and does not apply /Rotate). Keep that measured
+        // behaviour explicit rather than rejecting a valid non-zero CropBox.
+        let poppler_contract =
+            close(media_w, page.viewer_size.0, tol) && close(media_h, page.viewer_size.1, tol);
+        if !direct && !poppler_contract {
             size_problems.push(format!(
                 "第 {} 页有效框尺寸：manifest 推得 {w}×{h}，poppler 报 {}×{}",
                 page.index, page.viewer_size.0, page.viewer_size.1
@@ -1494,7 +1531,11 @@ fn check_page_geometry(
 /// 这是 `/Rotate` 唯一一条**单份 fixture 内部**可判的证据。解析器侧判不了：
 /// poppler 的 `<page width height>` 不应用 /Rotate（见 `PageFrame::box_size`）。
 /// 渲染器侧则毫无歧义——`/Rotate 90` 的 300×200 页面出的就是竖图。
-fn check_raster_orientation(frames: &[PageFrame], raster: &[PageRaster]) -> Outcome {
+fn check_raster_orientation(
+    frames: &[PageFrame],
+    expected_pages: &[crate::manifest::Page],
+    raster: &[PageRaster],
+) -> Outcome {
     const CHECK: &str = "raster-orientation";
     const CLAUSE: &str = "§2.3";
 
@@ -1503,12 +1544,18 @@ fn check_raster_orientation(frames: &[PageFrame], raster: &[PageRaster]) -> Outc
     const SLACK: i64 = 1;
 
     let mut problems = Vec::new();
-    for (i, (frame, page)) in frames.iter().zip(raster).enumerate() {
+    for (i, ((frame, expected), page)) in frames.iter().zip(expected_pages).zip(raster).enumerate()
+    {
         let (w, h) = frame.viewer_size();
         let px = |pt: f64| (pt * f64::from(render::DPI) / 72.0).round() as i64;
         let (ew, eh) = (px(w), px(h));
+        let media_w = expected.media_box[2] - expected.media_box[0];
+        let media_h = expected.media_box[3] - expected.media_box[1];
+        let (mw, mh) = (px(media_w), px(media_h));
         let (aw, ah) = (i64::from(page.pixels.0), i64::from(page.pixels.1));
-        if (ew - aw).abs() > SLACK || (eh - ah).abs() > SLACK {
+        let direct = (ew - aw).abs() <= SLACK && (eh - ah).abs() <= SLACK;
+        let media = (mw - aw).abs() <= SLACK && (mh - ah).abs() <= SLACK;
+        if !direct && !media {
             problems.push(format!(
                 "第 {i} 页 {} dpi 出图：manifest 推得 {ew}×{eh} px，pdftoppm 出的是 {aw}×{ah} px",
                 render::DPI
@@ -2466,7 +2513,7 @@ mod tests {
             .unwrap();
         let xref_offsets = BTreeMap::from([(1, real_object_1), (2, real_object_2)]);
 
-        let problems = object_plan_problems(bytes, &[1, 2], &xref_offsets);
+        let problems = object_plan_problems(bytes, &[1, 2], &xref_offsets, true);
 
         assert!(
             problems.iter().any(|problem| problem.contains("写出顺序")),
@@ -2479,7 +2526,7 @@ mod tests {
         let bytes = b"garbage before 1 0 obj\n(one)\nendobj\n";
         let xref_offsets = BTreeMap::from([(1, 0)]);
 
-        let problems = object_plan_problems(bytes, &[1], &xref_offsets);
+        let problems = object_plan_problems(bytes, &[1], &xref_offsets, true);
 
         assert!(
             problems

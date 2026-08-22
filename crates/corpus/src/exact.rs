@@ -19,6 +19,16 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
     match fixture_id {
         "unit-base-01-single-line" => single_line(repo_root),
         "unit-base-03-structured" => structured(repo_root),
+        "unit-write-01-bookmarks-rich" => {
+            structured_variant(repo_root, "unit-write-01-bookmarks-rich")
+        }
+        "unit-write-02-shared-resources" => shared_resources(repo_root),
+        "unit-write-03-resources-gen-nonzero" => shared_resources_generation(repo_root),
+        "unit-geom-05-nonzero-origin-boxes" => nonzero_origin_boxes(repo_root),
+        "unit-cmap-02-mixed-codespace" => mixed_codespace(repo_root),
+        "unit-xobj-05-singular-ctm" => singular_ctm(repo_root),
+        "unit-write-04-xobj-in-objstm" => xobject_in_object_stream(repo_root),
+        "unit-write-05-indirect-resources-objstm" => resources_in_object_stream(repo_root),
         _ => bail!("exact fixture `{fixture_id}` is not implemented"),
     }
 }
@@ -145,6 +155,207 @@ fn structured(repo_root: &Path) -> Result<Vec<u8>> {
     pdf.finish(1)
 }
 
+fn structured_variant(repo_root: &Path, fixture_id: &str) -> Result<Vec<u8>> {
+    let mut bytes = structured(repo_root)?;
+    let original = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n";
+    ensure!(
+        bytes.starts_with(original),
+        "structured baseline header changed"
+    );
+    // The rich graph is deliberately byte-identical after the fixture-specific
+    // trailer ID; this keeps the writer contract auditable while giving the
+    // experiment its own named baseline.
+    let old_id = hash::trailer_id_hex("unit-base-03-structured");
+    let new_id = hash::trailer_id_hex(fixture_id);
+    let old = format!("/ID [<{old_id}> <{old_id}>]");
+    let new = format!("/ID [<{new_id}> <{new_id}>]");
+    let old = old.as_bytes();
+    let position = bytes
+        .windows(old.len())
+        .position(|window| window == old)
+        .context("structured baseline trailer ID missing")?;
+    bytes.splice(position..position + old.len(), new.into_bytes());
+    Ok(bytes)
+}
+
+fn simple_font_page(
+    repo_root: &Path,
+    fixture_id: &str,
+    media_box: [i32; 4],
+    crop_box: Option<[i32; 4]>,
+    resources_reference: &str,
+    content: &[u8],
+    generation: u16,
+) -> Result<Vec<u8>> {
+    simple_font_page_cmap(
+        repo_root,
+        fixture_id,
+        media_box,
+        crop_box,
+        resources_reference,
+        content,
+        generation,
+        to_unicode(),
+    )
+}
+
+fn simple_font_page_cmap(
+    repo_root: &Path,
+    fixture_id: &str,
+    media_box: [i32; 4],
+    crop_box: Option<[i32; 4]>,
+    resources_reference: &str,
+    content: &[u8],
+    generation: u16,
+    cmap: &[u8],
+) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new(fixture_id);
+    pdf.object(format!("<< /Type /Catalog /Pages 2 0 R >>").as_bytes())?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    let crop = crop_box.map_or(String::new(), |b| {
+        format!(" /CropBox [{} {} {} {}]", b[0], b[1], b[2], b[3])
+    });
+    pdf.object(
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [{} {} {} {}]{crop} /Resources {resources_reference} /Contents 9 0 R >>",
+            media_box[0], media_box[1], media_box[2], media_box[3]
+        )
+        .as_bytes(),
+    )?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    pdf.object_with_generation(font_dictionary(8).as_bytes(), generation)?;
+    pdf.object(
+        b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>",
+    )?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", cmap)?;
+    pdf.stream(b"", content)?;
+    pdf.finish(1)
+}
+
+fn shared_resources(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-write-02-shared-resources");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 5 0 R /Contents 10 0 R >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 5 0 R /Contents 11 0 R >>")?;
+    pdf.object(b"<< /Font << /F1 6 0 R >> >>")?;
+    pdf.object(font_dictionary_with_descriptor(9, 7).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 8 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", to_unicode())?;
+    pdf.stream(b"", b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n")?;
+    pdf.stream(b"", b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUSC) Tj\nET\n")?;
+    pdf.finish(1)
+}
+
+fn shared_resources_generation(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-write-03-resources-gen-nonzero");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 7 R /Contents 9 0 R >>",
+    )?;
+    pdf.object_with_generation(b"<< /Font << /F1 5 0 R >> >>", 7)?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 8 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", to_unicode())?;
+    pdf.stream(b"", b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n")?;
+    pdf.finish(1)
+}
+
+fn nonzero_origin_boxes(repo_root: &Path) -> Result<Vec<u8>> {
+    simple_font_page(
+        repo_root,
+        "unit-geom-05-nonzero-origin-boxes",
+        [100, 100, 400, 300],
+        Some([120, 120, 380, 280]),
+        "4 0 R",
+        b"BT\n/F1 12 Tf\n1 0 0 1 150 220 Tm\n(MIMUS) Tj\nET\n",
+        0,
+    )
+}
+
+fn mixed_codespace(repo_root: &Path) -> Result<Vec<u8>> {
+    simple_font_page_cmap(
+        repo_root,
+        "unit-cmap-02-mixed-codespace",
+        [0, 0, 300, 200],
+        None,
+        "4 0 R",
+        b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n",
+        0,
+        mixed_to_unicode(),
+    )
+}
+
+fn singular_ctm(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-xobj-05-singular-ctm");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 9 0 R >>",
+    )?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> /XObject << /X1 10 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", to_unicode())?;
+    pdf.stream(
+        b"",
+        b"q\n0 0 0 0 0 0 cm\n/X1 Do\nQ\nBT\n/F1 12 Tf\n1 0 0 1 100 100 Tm\n(MIMUS) Tj\nET\n",
+    )?;
+    pdf.stream(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 10 10]",
+        b"q\n0 0 0 0 0 0 cm\nQ\n",
+    )?;
+    pdf.finish(1)
+}
+
+fn xobject_in_object_stream(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-write-04-xobj-in-objstm");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 9 0 R >>",
+    )?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> /XObject << /X1 11 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", to_unicode())?;
+    pdf.stream(
+        b"",
+        b"q\n/X1 Do\nQ\nBT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n",
+    )?;
+    pdf.finish_with_object_stream(
+        1,
+        11,
+        b"<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << >> >>\nstream\nq\nQ\nendstream",
+    )
+}
+
+fn resources_in_object_stream(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-write-05-indirect-resources-objstm");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 11 0 R /Contents 9 0 R >>")?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", to_unicode())?;
+    pdf.stream(b"", b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n")?;
+    pdf.finish_with_object_stream(1, 11, b"<< /Font << /F1 5 0 R >> >>")
+}
+
 const FONT_SHA256: &str = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735";
 
 fn pinned_font(repo_root: &Path) -> Result<Vec<u8>> {
@@ -160,6 +371,10 @@ fn pinned_font(repo_root: &Path) -> Result<Vec<u8>> {
 }
 
 fn font_dictionary(to_unicode_object: u32) -> String {
+    font_dictionary_with_descriptor(to_unicode_object, 6)
+}
+
+fn font_dictionary_with_descriptor(to_unicode_object: u32, descriptor_object: u32) -> String {
     // /Widths covers character codes 32 through 85. Only the nine glyphs in
     // the pinned subset have non-zero widths; values are hmtx * 1000 / 2048,
     // rounded to the nearest integer as required by this fixture contract.
@@ -174,7 +389,7 @@ fn font_dictionary(to_unicode_object: u32) -> String {
         .join(" ");
     format!(
         "<< /Type /Font /Subtype /TrueType /BaseFont /MIMUSI+DejaVuSans \
-         /FirstChar 32 /LastChar 85 /Widths [{widths}] /FontDescriptor 6 0 R \
+         /FirstChar 32 /LastChar 85 /Widths [{widths}] /FontDescriptor {descriptor_object} 0 R \
          /Encoding /WinAnsiEncoding /ToUnicode {to_unicode_object} 0 R >>"
     )
 }
@@ -206,12 +421,41 @@ end\n\
 end\n"
 }
 
+fn mixed_to_unicode() -> &'static [u8] {
+    b"/CIDInit /ProcSet findresource begin\n\
+12 dict begin\n\
+begincmap\n\
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+/CMapName /MimusMixed-UCS def\n\
+/CMapType 2 def\n\
+2 begincodespacerange\n\
+<00> <FF>\n\
+<0000> <FFFF>\n\
+endcodespacerange\n\
+9 beginbfchar\n\
+<20> <0020>\n\
+<43> <0043>\n\
+<45> <0045>\n\
+<49> <0049>\n\
+<4D> <004D>\n\
+<52> <0052>\n\
+<53> <0053>\n\
+<54> <0054>\n\
+<55> <0055>\n\
+endbfchar\n\
+endcmap\n\
+CMapName currentdict /CMap defineresource pop\n\
+end\n\
+end\n"
+}
+
 /// Minimal sequential indirect-object writer. Object numbers are assigned in
 /// call order; callers cannot insert, reorder, or reuse a number accidentally.
 struct RawPdf {
     fixture_id: String,
     bytes: Vec<u8>,
     offsets: Vec<usize>,
+    generations: Vec<u16>,
 }
 
 impl RawPdf {
@@ -220,15 +464,21 @@ impl RawPdf {
             fixture_id: fixture_id.to_string(),
             bytes: b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec(),
             offsets: Vec::new(),
+            generations: Vec::new(),
         }
     }
 
     fn object(&mut self, body: &[u8]) -> Result<u32> {
+        self.object_with_generation(body, 0)
+    }
+
+    fn object_with_generation(&mut self, body: &[u8], generation: u16) -> Result<u32> {
         ensure!(!body.is_empty(), "indirect object body must not be empty");
         let number = u32::try_from(self.offsets.len() + 1).context("too many PDF objects")?;
         self.offsets.push(self.bytes.len());
+        self.generations.push(generation);
         self.bytes
-            .extend_from_slice(format!("{number} 0 obj\n").as_bytes());
+            .extend_from_slice(format!("{number} {generation} obj\n").as_bytes());
         self.bytes.extend_from_slice(body);
         if !body.ends_with(b"\n") {
             self.bytes.push(b'\n');
@@ -262,13 +512,13 @@ impl RawPdf {
         let size = self.offsets.len() + 1;
         self.bytes
             .extend_from_slice(format!("xref\n0 {size}\n0000000000 65535 f \n").as_bytes());
-        for offset in &self.offsets {
+        for (offset, generation) in self.offsets.iter().zip(&self.generations) {
             ensure!(
                 *offset <= 9_999_999_999,
                 "PDF offset exceeds classic xref width"
             );
             self.bytes
-                .extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+                .extend_from_slice(format!("{offset:010} {generation:05} n \n").as_bytes());
         }
 
         let id = hash::trailer_id_hex(&self.fixture_id);
@@ -279,6 +529,70 @@ impl RawPdf {
             )
             .as_bytes(),
         );
+        Ok(self.bytes)
+    }
+
+    /// Finish with one compressed object and an xref stream. The object stream
+    /// is intentionally tiny so independent tools can inspect it without any
+    /// producer-specific assumptions.
+    fn finish_with_object_stream(
+        mut self,
+        root_object: u32,
+        compressed_object: u32,
+        compressed_body: &[u8],
+    ) -> Result<Vec<u8>> {
+        ensure!(compressed_object == self.offsets.len() as u32 + 2);
+        let object_stream = self.offsets.len() as u32 + 1;
+        let header = format!("{compressed_object} 0 ");
+        let first = header.len();
+        let mut stream = header.into_bytes();
+        stream.extend_from_slice(compressed_body);
+        let object_stream_number = u32::try_from(self.offsets.len() + 1)?;
+        ensure!(object_stream_number == object_stream);
+        self.offsets.push(self.bytes.len());
+        self.generations.push(0);
+        self.bytes
+            .extend_from_slice(format!("{object_stream} 0 obj\n").as_bytes());
+        self.bytes.extend_from_slice(
+            format!(
+                "<< /Type /ObjStm /N 1 /First {first} /Length {} >>\nstream\n",
+                stream.len()
+            )
+            .as_bytes(),
+        );
+        self.bytes.extend_from_slice(&stream);
+        self.bytes.extend_from_slice(b"\nendstream\nendobj\n");
+
+        let xref_object = object_stream + 2;
+        let size = xref_object + 1;
+        let xref_offset = self.bytes.len();
+        let mut entries = Vec::with_capacity(size as usize * 7);
+        entries.extend_from_slice(&[0, 0, 0, 0, 0, 0xff, 0xff]);
+        for object in 1..=object_stream {
+            let offset = self.offsets[(object - 1) as usize] as u32;
+            entries.push(1);
+            entries.extend_from_slice(&offset.to_be_bytes());
+            let generation = self.generations[(object - 1) as usize];
+            entries.extend_from_slice(&generation.to_be_bytes());
+        }
+        entries.push(2);
+        entries.extend_from_slice(&object_stream.to_be_bytes());
+        entries.extend_from_slice(&[0, 0]);
+        entries.push(1);
+        entries.extend_from_slice(&(xref_offset as u32).to_be_bytes());
+        entries.extend_from_slice(&[0, 0]);
+        let id = hash::trailer_id_hex(&self.fixture_id);
+        self.bytes.extend_from_slice(
+            format!(
+                "{xref_object} 0 obj\n<< /Type /XRef /Size {size} /W [1 4 2] /Root {root_object} 0 R /ID [<{id}> <{id}>] /Length {} >>\nstream\n",
+                entries.len()
+            )
+            .as_bytes(),
+        );
+        self.bytes.extend_from_slice(&entries);
+        self.bytes.extend_from_slice(b"\nendstream\nendobj\n");
+        self.bytes
+            .extend_from_slice(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
         Ok(self.bytes)
     }
 }

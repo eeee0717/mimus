@@ -1,0 +1,287 @@
+# unit-write-01-bookmarks-rich -- expected manifest
+#
+# This specification predates the exact writer. The object graph below fixes
+# every reference that experiment 3 needs to prove survives incremental write.
+
+schema_version = 1
+
+[identity]
+id = "unit-write-01-bookmarks-rich"
+name = "Exact structured PDF baseline"
+class = "unit"
+legality = "legal"
+cases = ["WRITE-06"]
+priority = "M0"
+variable = "One legal page carrying a fixed rich document structure around exact body text"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-write-01-bookmarks-rich.pdf"
+pdf_sha256 = "625417a93f2764b1937983cb5f647ca3369190487ed25a8507115ba9a3974d42"
+font_provenance = "vendored"
+fonts = [
+    { file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" },
+]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d77726974652d30312d626f"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+bookmarks = 3
+bookmark_depth = 3
+annotations = 3
+form_fields = 1
+optional_content_groups = 1
+named_destinations = 1
+uri_actions = 2
+
+[[expected.block]]
+key = "L1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS STRUCTURE"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.168, 188.964, 131.136]
+visual_bbox = [73.177734, 119.830078, 188.194453, 128.90625]
+
+[[expected.content_stream]]
+object = 18
+compressed = false
+bytes = """/OC /Layer BDC
+BT
+/F1 12 Tf
+1 0 0 1 72 120 Tm
+(MIMUS STRUCTURE) Tj
+ET
+EMC
+"""
+
+[[expected.bookmark]]
+object = 9
+parent_object = 8
+level = 1
+title = "Exact destination"
+count = -2
+color = [0.0, 0.4, 0.8]
+style_flags = 2
+target = "xyz"
+page_object = 3
+xyz = [72.0, 120.0, 1.0]
+
+[[expected.bookmark]]
+object = 10
+parent_object = 9
+level = 2
+title = "Named destination"
+count = 1
+style_flags = 0
+target = "named"
+name = "body"
+
+[[expected.bookmark]]
+object = 11
+parent_object = 10
+level = 3
+title = "URI action"
+style_flags = 0
+target = "uri"
+uri = "https://example.com/mimus/bookmark"
+
+[[expected.annotation]]
+object = 12
+subtype = "link"
+rect = [72.0, 90.0, 190.0, 106.0]
+uri = "https://example.com/mimus"
+
+[[expected.annotation]]
+object = 13
+subtype = "text"
+rect = [205.0, 112.0, 225.0, 132.0]
+contents = "MIMUS note"
+
+[[expected.annotation]]
+object = 14
+subtype = "widget"
+rect = [72.0, 60.0, 190.0, 78.0]
+field_name = "sample"
+
+[[expected.named_destination]]
+name = "body"
+page_object = 3
+xyz = [72.0, 120.0, 1.0]
+
+[[expected.optional_content_group]]
+object = 15
+name = "MIMUS Layer"
+resource_name = "Layer"
+initially_visible = true
+
+[[expected.reference]]
+from_object = 1
+path = ["/Pages"]
+to_object = 2
+
+[[expected.reference]]
+from_object = 1
+path = ["/Outlines"]
+to_object = 8
+
+[[expected.reference]]
+from_object = 1
+path = ["/Names", "/Dests"]
+to_object = 16
+
+[[expected.reference]]
+from_object = 1
+path = ["/AcroForm", "/DR"]
+to_object = 4
+
+[[expected.reference]]
+from_object = 1
+path = ["/AcroForm", "/Fields", "0"]
+to_object = 14
+
+[[expected.reference]]
+from_object = 1
+path = ["/OCProperties", "/OCGs", "0"]
+to_object = 15
+
+[[expected.reference]]
+from_object = 2
+path = ["/Kids", "0"]
+to_object = 3
+
+[[expected.reference]]
+from_object = 3
+path = ["/Resources"]
+to_object = 4
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 18
+
+[[expected.reference]]
+from_object = 3
+path = ["/Annots", "0"]
+to_object = 12
+
+[[expected.reference]]
+from_object = 3
+path = ["/Annots", "1"]
+to_object = 13
+
+[[expected.reference]]
+from_object = 3
+path = ["/Annots", "2"]
+to_object = 14
+
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 5
+
+[[expected.reference]]
+from_object = 4
+path = ["/Properties", "/Layer"]
+to_object = 15
+
+[[expected.reference]]
+from_object = 5
+path = ["/FontDescriptor"]
+to_object = 6
+
+[[expected.reference]]
+from_object = 5
+path = ["/ToUnicode"]
+to_object = 17
+
+[[expected.reference]]
+from_object = 6
+path = ["/FontFile2"]
+to_object = 7
+
+[[expected.reference]]
+from_object = 8
+path = ["/First"]
+to_object = 9
+
+[[expected.reference]]
+from_object = 8
+path = ["/Last"]
+to_object = 9
+
+[[expected.reference]]
+from_object = 9
+path = ["/First"]
+to_object = 10
+
+[[expected.reference]]
+from_object = 10
+path = ["/First"]
+to_object = 11
+
+[[expected.reference]]
+from_object = 14
+path = ["/P"]
+to_object = 3
+
+[[expected.reference]]
+from_object = 16
+path = ["/Names", "1", "0"]
+to_object = 3
+
+[[expected.behaviour]]
+id = "BASE-03-bookmarks"
+assertion = "Three nested bookmarks retain an exact XYZ destination, a named destination, a URI action, color, bold style, and collapsed top-level state"
+observable_via = "qpdf outline summary and fixed outline object dictionaries 8 through 11"
+
+[[expected.behaviour]]
+id = "BASE-03-document-structure"
+assertion = "The page retains three annotations, one text form field, one visible OCG, and the body named destination"
+observable_via = "qpdf page, AcroForm, name-tree, and OCProperties object graph"
+
+[[expected.behaviour]]
+id = "BASE-03-shared-resources"
+assertion = "Page object 3 and the catalog AcroForm default resources both reference resource object 4"
+observable_via = "qpdf JSON references 3:/Resources and 1:/AcroForm:/DR"
+
+[oracle]
+checks = [
+    "determinism",
+    "legality",
+    "page-geometry",
+    "structure",
+    "hand-written-geometry",
+    "pdf-bytes",
+    "pdf-structure",
+    "render",
+]
+
+[[adjudication]]
+date = "2026-08-22"
+issue = "MuPDF stext character quads use horizontal advance bounds, not outline ink bounds"
+resolution = "Keep the hand-derived visual bbox unchanged and validate it from MuPDF SVG glyph paths with exact Bezier extrema; whitespace and annotation artwork are excluded"
