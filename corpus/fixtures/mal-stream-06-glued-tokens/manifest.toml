@@ -1,0 +1,46 @@
+schema_version = 1
+[identity]
+id = "mal-stream-06-glued-tokens"
+name = "Numbers glued to text operators"
+class = "mal"
+legality = "malformed"
+cases = ["STREAM-06"]
+priority = "M0"
+variable = "The page Contents reference selects 12Tf and 120Td without separators"
+[source]
+method = "byte-mutation"
+pdf = "mal-stream-06-glued-tokens.pdf"
+pdf_sha256 = "4e2b7b0c14690bd3261266281551b3053c0fa2abd5b12ec22b792637da2915d3"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+[lineage]
+parent = "unit-stream-00-malformed-parent"
+[[lineage.mutations]]
+byte_offset = 210
+original_byte = 48
+replacement_byte = 52
+description = "change /Contents 10 0 R to 14 0 R, selecting the glued-token candidate"
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "operator-walk:glued-token-recovery"
+renderer_diagnostic = "unknown keyword: '12Tf'"
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+[[expected.behaviour]]
+id = "STREAM-06-glued"
+assertion = "12Tf tokenizes as 12,Tf and 120Td as 120,Td, producing MIMUS at baseline (100,120)"
+observable_via = "literal token sequence, mutool trace and PDFium text coordinates"
+[oracle]
+checks = ["determinism","legality","operator-walk","page-geometry","render-diagnostic"]
+[[adjudication]]
+date = "2026-08-22"
+issue = "Acrobat accepts missing delimiters between numbers and known operators"
+resolution = "Recover by longest known operator suffix and record one glued-token warning per split"

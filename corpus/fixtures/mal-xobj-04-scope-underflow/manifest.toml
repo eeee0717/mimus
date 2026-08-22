@@ -1,0 +1,53 @@
+schema_version = 1
+[identity]
+id = "mal-xobj-04-scope-underflow"
+name = "Inner Form Q cannot pop caller state"
+class = "mal"
+legality = "malformed"
+cases = ["STREAM-04","XOBJ-07"]
+priority = "M0"
+variable = "The opening q in a balanced child Form is changed to Q"
+[source]
+method = "byte-mutation"
+pdf = "mal-xobj-04-scope-underflow.pdf"
+pdf_sha256 = "73e8a378888362b889da7157d25932d7b38d8cadeb0df9ef1983602aecfa4fce"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+[lineage]
+parent = "unit-xobj-05-scope-parent"
+[[lineage.mutations]]
+byte_offset = 3408
+original_byte = 113
+replacement_byte = 81
+description = "change the child Form opening q to Q so it attempts to pop caller graphics state"
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+declared_failure = "operator-walk:graphics-stack-underflow"
+operator_walk_diagnostics = ["graphics-stack-underflow"]
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+[[expected.block]]
+key = "AFTER"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+baseline_origin = [72.0,120.0]
+metric_box = [72.0,117.168,112.656,131.136]
+visual_bbox = [73.177734,119.830078,111.985219,128.90625]
+[[expected.behaviour]]
+id = "XOBJ-scope-underflow"
+assertion = "Inner Q reports underflow without consuming caller q; caller Q restores CTM and MIMUS remains at (72,120)"
+observable_via = "single-byte lineage, exact diagnostics and following glyph baseline"
+[oracle]
+checks = ["determinism","legality","operator-walk","page-geometry","structure","hand-written-geometry","render"]
+

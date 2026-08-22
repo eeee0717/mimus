@@ -34,6 +34,7 @@ rotate = 0
 geometry_source = "hand-written"
 tolerance_pt = 0.001
 declared_failure = "object stream 10"
+renderer_diagnostic = "corrupt object stream (10 0 R)"
 block = []
 
 [expected.structure]
@@ -44,7 +45,7 @@ columns = 1
 [[expected.behaviour]]
 id = "PARSE-11-broken-objstm"
 assertion = "The malformed object stream is rejected before any output can be written"
-observable_via = "qpdf --check error text and exit status"
+observable_via = "qpdf --check error text and exit status plus MuPDF's object-stream diagnostic"
 
 [oracle]
-checks = ["legality", "structure"]
+checks = ["legality", "structure", "render-diagnostic"]

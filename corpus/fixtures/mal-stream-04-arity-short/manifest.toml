@@ -1,0 +1,45 @@
+schema_version = 1
+[identity]
+id = "mal-stream-04-arity-short"
+name = "Missing cm operand"
+class = "mal"
+legality = "malformed"
+cases = ["STREAM-02"]
+priority = "M0"
+variable = "The page Contents reference selects a cm operation with five operands"
+[source]
+method = "byte-mutation"
+pdf = "mal-stream-04-arity-short.pdf"
+pdf_sha256 = "430f11ef130317c1dfd5b5df8758cb9527c9ce55709471236ae26f9e9d8e2c5a"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+[lineage]
+parent = "unit-stream-00-malformed-parent"
+[[lineage.mutations]]
+byte_offset = 210
+original_byte = 48
+replacement_byte = 50
+description = "change /Contents 10 0 R to 12 0 R, selecting the five-operand cm candidate"
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "operator-walk:arity-short"
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+[[expected.behaviour]]
+id = "STREAM-02-short"
+assertion = "The incomplete cm is skipped, CTM stays identity, later text remains at (72,120), and one Arity warning is emitted"
+observable_via = "single-byte lineage, CTM trace, mutool trace and PDFium text coordinates"
+[oracle]
+checks = ["determinism","legality","operator-walk","page-geometry","render"]
+[[adjudication]]
+date = "2026-08-22"
+issue = "An incomplete cm must not partially mutate CTM"
+resolution = "Skip the operator atomically and continue the page with base CTM"

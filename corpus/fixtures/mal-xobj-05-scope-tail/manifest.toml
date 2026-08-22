@@ -1,0 +1,52 @@
+schema_version = 1
+[identity]
+id = "mal-xobj-05-scope-tail"
+name = "Inner Form stack and operand tail isolation"
+class = "mal"
+legality = "malformed"
+cases = ["STREAM-02","STREAM-04","XOBJ-07"]
+priority = "M0"
+variable = "The closing Q in a balanced child Form is changed to numeric operand 1"
+[source]
+method = "byte-mutation"
+pdf = "mal-xobj-05-scope-tail.pdf"
+pdf_sha256 = "2eae4c1d591cb35b05e558cb214f1134f3abcf57f7ada81b3a087c6b6a2782f7"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+[lineage]
+parent = "unit-xobj-05-scope-parent"
+[[lineage.mutations]]
+byte_offset = 3410
+original_byte = 81
+replacement_byte = 49
+description = "change the child Form closing Q to operand 1, leaving one q and one trailing operand in child scope"
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+declared_failure = "operator-walk:scoped-graphics-stack-unbalanced"
+operator_walk_diagnostics = ["scoped-graphics-stack-unbalanced", "scoped-operands-discarded"]
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+[[expected.block]]
+key = "AFTER"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+baseline_origin = [72.0,120.0]
+metric_box = [72.0,117.168,112.656,131.136]
+visual_bbox = [73.177734,119.830078,111.985219,128.90625]
+[[expected.behaviour]]
+id = "XOBJ-scope-tail"
+assertion = "A child-scope q and trailing operand are diagnosed then discarded; neither reaches the caller cm/Q or following text"
+observable_via = "single-byte lineage, exact diagnostics, operator operands and following glyph baseline"
+[oracle]
+checks = ["determinism","legality","operator-walk","page-geometry","structure","hand-written-geometry","render"]

@@ -1,0 +1,69 @@
+schema_version = 1
+[identity]
+id = "unit-stream-09-inline-image-no-L"
+name = "Inline image without Length before unknown operator"
+class = "unit"
+legality = "legal"
+cases = ["STREAM-09"]
+priority = "M0"
+variable = "A computable inline image has no L key and is followed by an operator outside the scan whitelist"
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-stream-09-inline-image-no-L.pdf"
+pdf_sha256 = "50f0a00d7da8e80bb9d48f81eb80e16c9cb7673cb39d1dcf6c246f182525df7b"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d73747265616d2d30392d69"
+info_dictionary = false
+metadata_streams = 0
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+[[expected.block]]
+key = "L1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+baseline_origin = [72.0,120.0]
+metric_box = [72.0,117.168,112.656,131.136]
+visual_bbox = [73.177734,119.830078,111.985219,128.90625]
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes_hex = "710a42580a4249202f572038202f482038202f4250432038202f4353202f472049440a606060606060606060606060606060606060606020454920606060606060606060606060606060606060606060606060606060606060606060606060606060600a45490a3120536f6d6556656e646f724f700a45580a510a42540a2f46312031322054660a312030203020312037322031323020546d0a284d494d55532920546a0a45540a"
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 9
+[[expected.behaviour]]
+id = "STREAM-09-no-length"
+assertion = "The 64-byte computed payload ends at the real EI even though no L key exists and compatibility-section SomeVendorOp follows; MIMUS remains extractable"
+observable_via = "raw stream hex, independent raster, warning count and following text baseline"
+[oracle]
+checks = ["determinism","legality","operator-walk","page-geometry","structure","hand-written-geometry","pdf-bytes","pdf-structure","render"]
+[[adjudication]]
+date = "2026-08-22"
+issue = "Operator-whitelist sentinel heuristics reject legal computable images"
+resolution = "Use dimensions first; only filtered or otherwise uncomputable images fall back to guarded EI scanning"
+[[adjudication]]
+date = "2026-08-22"
+issue = "The first draft placed SomeVendorOp outside BX/EX and was not a legal PDF content program"
+resolution = "Move BX before BI and EX after SomeVendorOp; the unknown operator still immediately follows EI while the fixture becomes spec-legal"

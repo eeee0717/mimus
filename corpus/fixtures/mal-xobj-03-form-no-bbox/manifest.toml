@@ -1,0 +1,45 @@
+schema_version = 1
+[identity]
+id = "mal-xobj-03-form-no-bbox"
+name = "Form XObject missing BBox"
+class = "mal"
+legality = "malformed"
+cases = ["XOBJ-04"]
+priority = "M0"
+variable = "The page selects Form X3, which has Matrix [2 0 0 2 10 20] but no required BBox"
+[source]
+method = "byte-mutation"
+pdf = "mal-xobj-03-form-no-bbox.pdf"
+pdf_sha256 = "8c8254b5fab2fb4d51e62008a282858e9bf1a5c4647c7b9d68c02ce4c92b9d5c"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+[lineage]
+parent = "unit-xobj-00-recursion-parent"
+[[lineage.mutations]]
+byte_offset = 4256
+original_byte = 48
+replacement_byte = 51
+description = "change /X0 Do to /X3 Do, selecting the non-unit-matrix Form with no /BBox"
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "operator-walk:form-missing-bbox"
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+[[expected.behaviour]]
+id = "XOBJ-04-missing-bbox"
+assertion = "The walk emits FormMissingBBox(name=X3, object=14), skips the Do atomically, and never executes content at either the unit-matrix baseline (72,120) or transformed baseline (154,260)"
+observable_via = "single-byte lineage, raw Form dictionary, walk trace and independent renderer differential"
+[oracle]
+checks = ["determinism","legality","operator-walk","page-geometry","render"]
+[[adjudication]]
+date = "2026-08-22"
+issue = "Independent renderers may recover a missing required BBox and still apply the Form Matrix"
+resolution = "The PoC must fail this Do explicitly; renderer output is differential evidence and cannot legalize the malformed Form"

@@ -19,6 +19,7 @@ use crate::manifest::{Check, GeometrySource, Legality, Manifest, Method};
 use crate::mutation::{self, MutationSpec};
 use crate::oracle::render::PageRaster;
 use crate::oracle::{ParsedPage, mupdf, mupdf_svg, poppler, qpdf, render};
+use crate::proc;
 use crate::text;
 use crate::toolchain::Toolchain;
 
@@ -307,21 +308,18 @@ fn verify_one(
     if manifest.requires(Check::Legality) {
         outcomes.push(check_legality(manifest, &pdf)?);
     }
-    // A malformed fixture's contract is the declared parser failure itself.
-    // Independent text/render parsers cannot provide a meaningful structure
-    // result for a deliberately broken object graph, so run the declared
-    // structure gate against qpdf's diagnostic before returning.
-    if manifest.identity.legality == Legality::Malformed && manifest.requires(Check::Legality) {
-        if manifest.requires(Check::Structure) {
-            outcomes.push(check_malformed_structure(manifest, &pdf)?);
-        }
-        return Ok(Report {
-            fixture: manifest.id().to_string(),
-            outcomes,
-            draw_order: Vec::new(),
-            raster: Vec::new(),
-            geometry: Vec::new(),
-        });
+    if manifest.requires(Check::OperatorWalk) {
+        outcomes.push(check_operator_walk(manifest, repo_root)?);
+    }
+    // A deliberately broken object graph uses qpdf's declared failure as its
+    // structure gate. Content-stream failures still run the operator walker
+    // and independent text oracles requested by their manifests.
+    let uses_parser_failure_structure = manifest.identity.legality == Legality::Malformed
+        && manifest.requires(Check::Legality)
+        && manifest.requires(Check::Structure)
+        && !manifest.requires(Check::OperatorWalk);
+    if uses_parser_failure_structure {
+        outcomes.push(check_malformed_structure(manifest, &pdf)?);
     }
     if manifest.requires(Check::PageGeometry) {
         outcomes.extend(check_page_geometry(manifest, &pdf, &media_frames)?);
@@ -346,15 +344,34 @@ fn verify_one(
         )?);
     }
 
-    // 结构、几何裁定与渲染共用同一批解析结果，一次算好。
-    let mutool_pages = mupdf::blocks(&pdf, &mutool_frames)?;
-    let poppler_pages = poppler::blocks(&pdf, &media_frames)?;
+    // 语义畸形 fixture 不应被一个未声明的文本解析器提前短路；只在对应门禁
+    // 真正需要时调用两个文本/几何 oracle。
+    let needs_text_oracles = [
+        Check::Glyphs,
+        Check::ReadingOrder,
+        Check::DualParserGeometry,
+        Check::HandWrittenGeometry,
+        Check::Type3Geometry,
+        Check::FontAdvance,
+        Check::EmbeddedCmap,
+    ]
+    .into_iter()
+    .any(|check| manifest.requires(check))
+        || (manifest.requires(Check::Structure) && !uses_parser_failure_structure);
+    let (mutool_pages, poppler_pages) = if needs_text_oracles {
+        (
+            mupdf::blocks(&pdf, &mutool_frames)?,
+            poppler::blocks(&pdf, &media_frames)?,
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
     // A singular Form CTM is intentionally non-locatable for MuPDF. Poppler
     // may still extract that Form's text, so structure/glyph contracts compare
     // only declared page-level blocks for the XOBJ-08 fixture.
     let poppler_contract_pages = filter_nonlocatable_xobject_text(manifest, &poppler_pages);
 
-    if manifest.requires(Check::Structure) {
+    if manifest.requires(Check::Structure) && !uses_parser_failure_structure {
         outcomes.extend(check_structure(
             manifest,
             &mutool_pages,
@@ -379,6 +396,39 @@ fn verify_one(
             &mutool_pages,
             &poppler_pages,
         )?);
+    }
+    if manifest.requires(Check::Type3Geometry) {
+        outcomes.extend(check_type3_geometry(manifest, &mutool_pages));
+    }
+    if manifest.requires(Check::FontAdvance) {
+        outcomes.extend(check_font_advance(manifest, &mutool_pages));
+    }
+    if manifest.requires(Check::EmbeddedCmap) {
+        outcomes.extend(check_embedded_cmap(manifest, &mutool_pages)?);
+    }
+    if manifest.requires(Check::RenderDiagnostic) {
+        let expected = manifest
+            .expected
+            .renderer_diagnostic
+            .as_deref()
+            .context("render-diagnostic check missing expected.renderer_diagnostic")?;
+        let diagnostic = render::diagnostic(&pdf)?;
+        outcomes.push(if diagnostic.contains(expected) {
+            Outcome::ok(
+                "render-diagnostic",
+                "§2.8",
+                format!("mutool trace 以声明的方式诊断：{expected:?}"),
+            )
+        } else {
+            Outcome::fail(
+                "render-diagnostic",
+                "§2.8",
+                format!(
+                    "声明 {expected:?}，mutool 实际输出：\n{}",
+                    indent(&diagnostic)
+                ),
+            )
+        });
     }
 
     let raster = if manifest.requires(Check::Render) {
@@ -683,6 +733,28 @@ fn check_legality(manifest: &Manifest, pdf: &Path) -> Result<Outcome> {
                 .declared_failure
                 .as_deref()
                 .context("畸形 fixture 缺少 declared_failure")?;
+            if let Some(error_id) = declared.strip_prefix("operator-walk:") {
+                let container_loaded =
+                    result.passed || result.report.contains("operation succeeded with warnings");
+                return Ok(if container_loaded && !error_id.is_empty() {
+                    Outcome::ok(
+                        CHECK,
+                        CLAUSE,
+                        format!("qpdf 完成容器检查；走查器应报告 {error_id}"),
+                    )
+                } else if error_id.is_empty() {
+                    Outcome::fail(CHECK, CLAUSE, "operator-walk failure ID 为空")
+                } else {
+                    Outcome::fail(
+                        CHECK,
+                        CLAUSE,
+                        format!(
+                            "content 语义 fixture 的容器不合法：\n{}",
+                            indent(&result.report)
+                        ),
+                    )
+                });
+            }
             if result.passed {
                 return Ok(Outcome::fail(
                     CHECK,
@@ -703,6 +775,82 @@ fn check_legality(manifest: &Manifest, pdf: &Path) -> Result<Outcome> {
                 )
             })
         }
+    }
+}
+
+fn check_operator_walk(manifest: &Manifest, repo_root: &Path) -> Result<Outcome> {
+    const CHECK: &str = "operator-walk";
+    const CLAUSE: &str = "§2.8";
+
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let args = vec![
+        "run".to_string(),
+        "--quiet".to_string(),
+        "-p".to_string(),
+        "m0-experiment-2".to_string(),
+        "--".to_string(),
+        manifest.id().to_string(),
+        "--repo-root".to_string(),
+        repo_root.display().to_string(),
+    ];
+    let Some(output) = proc::run(&cargo, &args, repo_root, &BTreeMap::new())? else {
+        return Ok(Outcome::fail(
+            CHECK,
+            CLAUSE,
+            format!("找不到 cargo：{cargo}"),
+        ));
+    };
+    if !output.success() {
+        return Ok(Outcome::fail(
+            CHECK,
+            CLAUSE,
+            format!("走查器退出失败：\n{}", indent(&output.diagnostics())),
+        ));
+    }
+    let report: Value =
+        serde_json::from_slice(&output.stdout).context("解析 operator-walk JSON")?;
+    let comparison = &report["manifest"];
+    let mut checks = vec!["diagnostic_matches"];
+    if manifest.identity.legality == Legality::Legal || !manifest.expected.block.is_empty() {
+        checks.push("text_matches");
+    }
+    if !manifest.expected.cid_sequence.is_empty() {
+        checks.push("cid_sequence_matches");
+    }
+    let failed = checks
+        .into_iter()
+        .filter(|field| comparison[*field].as_bool() != Some(true))
+        .collect::<Vec<_>>();
+    let errors = report["errors"]
+        .as_array()
+        .context("operator-walk errors is not an array")?;
+    let legal_errors = manifest.identity.legality == Legality::Legal && !errors.is_empty();
+    let baseline_failed = comparison["expected_baseline"].is_array()
+        && comparison["baseline_delta"].as_array().is_none_or(|delta| {
+            delta.iter().any(|value| {
+                value
+                    .as_f64()
+                    .is_none_or(|value| value.abs() > manifest.expected.tolerance_pt)
+            })
+        });
+
+    if failed.is_empty() && !legal_errors && !baseline_failed {
+        let diagnostics = comparison["observed_diagnostics"]
+            .as_array()
+            .context("operator-walk observed_diagnostics is not an array")?;
+        Ok(Outcome::ok(
+            CHECK,
+            CLAUSE,
+            format!("走查 JSON 与 manifest 一致；诊断 {diagnostics:?}"),
+        ))
+    } else {
+        Ok(Outcome::fail(
+            CHECK,
+            CLAUSE,
+            format!(
+                "走查 JSON 不符合 manifest：failed={failed:?}, legal_errors={legal_errors}, baseline_failed={baseline_failed}; report={comparison}"
+            ),
+        ))
     }
 }
 
@@ -891,13 +1039,54 @@ fn check_pdf_bytes(manifest: &Manifest, pdf: &Path, document: &qpdf::Document) -
             ));
         }
         let actual = qpdf::raw_stream(pdf, stream.object)?;
-        if actual != stream.bytes.as_bytes() {
+        let expected_raw = if let Some(hex) = &stream.bytes_hex {
+            decode_hex(hex)?
+        } else {
+            stream.bytes.as_bytes().to_vec()
+        };
+        if actual != expected_raw {
             problems.push(format!(
-                "content object {} 字节不符：manifest {:?}，qpdf raw {:?}",
+                "content object {} raw 字节不符：manifest {} bytes，qpdf {} bytes",
                 stream.object,
-                stream.bytes,
-                String::from_utf8_lossy(&actual)
+                expected_raw.len(),
+                actual.len()
             ));
+        }
+        if stream.compressed {
+            let expected_decoded = if let Some(hex) = &stream.decoded_bytes_hex {
+                decode_hex(hex)?
+            } else {
+                stream
+                    .decoded_bytes
+                    .as_deref()
+                    .context("filtered stream missing decoded bytes")?
+                    .as_bytes()
+                    .to_vec()
+            };
+            let decoded = qpdf::filtered_stream(pdf, stream.object)?;
+            if decoded != expected_decoded {
+                problems.push(format!(
+                    "content object {} decoded 字节不符：manifest {} bytes，qpdf {} bytes",
+                    stream.object,
+                    expected_decoded.len(),
+                    decoded.len()
+                ));
+            }
+            let observed = match dictionary.get("/Filter") {
+                Some(Value::String(name)) => vec![name.trim_start_matches('/').to_string()],
+                Some(Value::Array(values)) => values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|name| name.trim_start_matches('/').to_string())
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if observed != stream.filters {
+                problems.push(format!(
+                    "content object {} filters：manifest {:?}，qpdf {:?}",
+                    stream.object, stream.filters, observed
+                ));
+            }
         }
     }
 
@@ -2074,6 +2263,214 @@ fn check_hand_written_geometry(
             visual_tolerance,
             visual_problems,
             "mutool SVG glyph outlines",
+        ),
+    ])
+}
+
+fn check_type3_geometry(manifest: &Manifest, mutool_pages: &[ParsedPage]) -> Vec<Outcome> {
+    let observed = flatten_blocks(mutool_pages);
+    let tolerance = manifest.expected.tolerance_pt;
+    let mut baseline_problems = Vec::new();
+    let mut bbox_problems = Vec::new();
+    for block in &manifest.expected.block {
+        let key = text::compare_key(&block.text);
+        let Ok(actual) = pick(&observed, &key) else {
+            baseline_problems.push(format!("block {} missing from mutool trace", block.key));
+            continue;
+        };
+        let expected_baseline = block.baseline_origin.expect("validated baseline");
+        let expected_bbox = block.visual_bbox.expect("validated visual bbox");
+        let Some(actual_baseline) = actual.baseline_origin else {
+            baseline_problems.push(format!("block {} has no mutool baseline", block.key));
+            continue;
+        };
+        if !close(actual_baseline.x, expected_baseline[0], tolerance)
+            || !close(actual_baseline.y, expected_baseline[1], tolerance)
+        {
+            baseline_problems.push(format!(
+                "{} expected {:?}, mutool {:?}",
+                block.key, expected_baseline, actual_baseline
+            ));
+        }
+        if !arrays_close(&actual.rect.to_array(), &expected_bbox, tolerance) {
+            bbox_problems.push(format!(
+                "{} expected {:?}, mutool {:?}",
+                block.key,
+                expected_bbox,
+                actual.rect.to_array()
+            ));
+        }
+    }
+    vec![
+        geometry_outcome(
+            "geometry/type3-baseline",
+            tolerance,
+            baseline_problems,
+            "mutool Type3 trace baseline",
+        ),
+        geometry_outcome(
+            "geometry/type3-painted-bbox",
+            tolerance,
+            bbox_problems,
+            "mutool painted CharProc bbox",
+        ),
+    ]
+}
+
+fn check_font_advance(manifest: &Manifest, mutool_pages: &[ParsedPage]) -> Vec<Outcome> {
+    let observed = flatten_blocks(mutool_pages);
+    let tolerance = manifest.expected.tolerance_pt;
+    let mut baseline_problems = Vec::new();
+    let mut advance_problems = Vec::new();
+    for block in &manifest.expected.block {
+        let key = text::compare_key(&block.text);
+        let Ok(actual) = pick(&observed, &key) else {
+            baseline_problems.push(format!("block {} missing from mutool trace", block.key));
+            continue;
+        };
+        let expected_baseline = block.baseline_origin.expect("validated baseline");
+        let expected_metric = block.metric_box.expect("validated metric box");
+        let Some(actual_baseline) = actual.baseline_origin else {
+            baseline_problems.push(format!("block {} has no mutool baseline", block.key));
+            continue;
+        };
+        if !close(actual_baseline.x, expected_baseline[0], tolerance)
+            || !close(actual_baseline.y, expected_baseline[1], tolerance)
+        {
+            baseline_problems.push(format!(
+                "{} expected {:?}, mutool {:?}",
+                block.key, expected_baseline, actual_baseline
+            ));
+        }
+        if !close(actual.rect.x0, expected_metric[0], tolerance)
+            || !close(actual.rect.x1, expected_metric[2], tolerance)
+        {
+            advance_problems.push(format!(
+                "{} expected x [{},{}], mutool [{},{}]",
+                block.key, expected_metric[0], expected_metric[2], actual.rect.x0, actual.rect.x1
+            ));
+        }
+    }
+    vec![
+        geometry_outcome(
+            "geometry/font-baseline",
+            tolerance,
+            baseline_problems,
+            "mutool text baseline",
+        ),
+        geometry_outcome(
+            "geometry/font-advance",
+            tolerance,
+            advance_problems,
+            "mutool horizontal advance",
+        ),
+    ]
+}
+
+fn check_embedded_cmap(manifest: &Manifest, mutool_pages: &[ParsedPage]) -> Result<Vec<Outcome>> {
+    let font = manifest
+        .source
+        .fonts
+        .first()
+        .context("embedded-cmap check missing pinned font")?;
+    let font_bytes = std::fs::read(manifest.dir.join(&font.file))?;
+    let face = ttf_parser::Face::parse(&font_bytes, 0).context("parse pinned TrueType font")?;
+    let expected_text = manifest
+        .expected
+        .block
+        .first()
+        .context("embedded-cmap check missing expected block")?;
+    let mapped: Vec<u16> = expected_text
+        .text
+        .chars()
+        .map(|character| {
+            face.glyph_index(character)
+                .map(|glyph| glyph.0)
+                .with_context(|| format!("pinned font has no glyph for {character:?}"))
+        })
+        .collect::<Result<_>>()?;
+    let cmap_outcome = if mapped == manifest.expected.cid_sequence {
+        Outcome::ok(
+            "embedded-cmap",
+            "§2.8/CMAP-04",
+            format!("pinned TTF maps {:?} to {:?}", expected_text.text, mapped),
+        )
+    } else {
+        Outcome::fail(
+            "embedded-cmap",
+            "§2.8/CMAP-04",
+            format!(
+                "manifest CID sequence {:?}, pinned TTF glyph IDs {:?}",
+                manifest.expected.cid_sequence, mapped
+            ),
+        )
+    };
+
+    let observed = flatten_blocks(mutool_pages);
+    let mut geometry_problems = Vec::new();
+    if observed.len() != 1 {
+        geometry_problems.push(format!(
+            "mutool reported {} blocks, expected 1",
+            observed.len()
+        ));
+    } else {
+        let actual = &observed[0];
+        let expected_baseline = expected_text.baseline_origin.expect("validated baseline");
+        let expected_metric = expected_text.metric_box.expect("validated metric box");
+        let expected_visual = expected_text.visual_bbox.expect("validated visual bbox");
+        if actual.text.chars().count() != manifest.expected.cid_sequence.len() {
+            geometry_problems.push(format!(
+                "mutool reported {} glyphs, expected {}",
+                actual.text.chars().count(),
+                manifest.expected.cid_sequence.len()
+            ));
+        }
+        if actual.baseline_origin.is_none_or(|point| {
+            !close(
+                point.x,
+                expected_baseline[0],
+                manifest.expected.tolerance_pt,
+            ) || !close(
+                point.y,
+                expected_baseline[1],
+                manifest.expected.tolerance_pt,
+            )
+        }) || !close(
+            actual.rect.x0,
+            expected_metric[0],
+            manifest.expected.tolerance_pt,
+        ) || !close(
+            actual.rect.x1,
+            expected_metric[2],
+            manifest.expected.tolerance_pt,
+        ) || !close(
+            actual.rect.y0,
+            expected_visual[1],
+            manifest.expected.visual_tolerance_pt.unwrap_or(0.01),
+        ) || !close(
+            actual.rect.y1,
+            expected_visual[3],
+            manifest.expected.visual_tolerance_pt.unwrap_or(0.01),
+        ) {
+            geometry_problems.push(format!(
+                "expected baseline {:?}/metric-x [{},{}]/ink-y [{},{}], mutool {:?}/{:?}",
+                expected_baseline,
+                expected_metric[0],
+                expected_metric[2],
+                expected_visual[1],
+                expected_visual[3],
+                actual.baseline_origin,
+                actual.rect.to_array()
+            ));
+        }
+    }
+    Ok(vec![
+        cmap_outcome,
+        geometry_outcome(
+            "geometry/cid-glyphs",
+            manifest.expected.visual_tolerance_pt.unwrap_or(0.01),
+            geometry_problems,
+            "mutool glyph count/baseline/ink bbox",
         ),
     ])
 }

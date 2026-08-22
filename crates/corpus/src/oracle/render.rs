@@ -52,6 +52,21 @@ pub fn rasterize(pdf: &Path, work_dir: &Path, pages: usize) -> Result<Vec<PageRa
         .collect())
 }
 
+pub fn diagnostic(pdf: &Path) -> Result<String> {
+    let args = vec![
+        "draw".to_string(),
+        "-F".to_string(),
+        "trace".to_string(),
+        "-o".to_string(),
+        "/dev/null".to_string(),
+        pdf.display().to_string(),
+        "1".to_string(),
+    ];
+    let output =
+        proc::run("mutool", &args, Path::new("."), &BTreeMap::new())?.context("mutool 未安装")?;
+    output.combined_text()
+}
+
 fn poppler_pages(pdf: &Path, work_dir: &Path, pages: usize) -> Result<Vec<(String, (u32, u32))>> {
     std::fs::create_dir_all(work_dir)
         .with_context(|| format!("创建渲染目录 {} 失败", work_dir.display()))?;

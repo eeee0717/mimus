@@ -8,6 +8,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail, ensure};
+use flate2::Compression;
+use flate2::write::ZlibEncoder;
 
 use crate::hash;
 
@@ -19,6 +21,45 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
     match fixture_id {
         "unit-base-01-single-line" => single_line(repo_root),
         "unit-base-03-structured" => structured(repo_root),
+        "unit-parse-01-ascii85" => filtered_text(fixture_id, repo_root, FilterRecipe::Ascii85),
+        "unit-parse-02-cascade" => filtered_text(fixture_id, repo_root, FilterRecipe::Ascii85Flate),
+        "unit-parse-03-lzw-earlychange" => {
+            filtered_text(fixture_id, repo_root, FilterRecipe::LzwEarlyChange0)
+        }
+        "unit-parse-03-lzw-earlychange-1" => {
+            filtered_text(fixture_id, repo_root, FilterRecipe::LzwEarlyChange1)
+        }
+        "unit-parse-04-contents-array-numeric-split" => contents_array_numeric_split(repo_root),
+        "unit-parse-05-contents-array-string-parent" => contents_array_string_parent(repo_root),
+        "unit-parse-07-inherited-page-resources" => inherited_page_resources(repo_root),
+        "unit-stream-00-malformed-parent" => malformed_stream_parent(repo_root),
+        "unit-stream-01-bx-ex-unknown-op" => basic_text(
+            fixture_id,
+            repo_root,
+            b"BX /Foo 1 2 3 SomeVendorOp EX\nBT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n",
+        ),
+        "unit-stream-02-type3-d1" => type3_d1(repo_root),
+        "unit-stream-04-type3-d0" => type3_d0(repo_root),
+        "unit-stream-03-unknown-op-outside-bx" => basic_text(
+            fixture_id,
+            repo_root,
+            b"BX\nSomeVendorOp\nEX\nBT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n",
+        ),
+        "unit-stream-08-inline-image-EI-in-data" => inline_image(fixture_id, repo_root, false),
+        "unit-stream-09-inline-image-no-L" => inline_image(fixture_id, repo_root, true),
+        "unit-stream-10-inline-image-length" => basic_text(
+            fixture_id,
+            repo_root,
+            b"q\nBI /W 8 /H 1 /BPC 8 /CS /G /L 8 ID\nABCDEFGH\nEI\nQ\nBT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n",
+        ),
+        "unit-stream-11-inline-image-filtered-fallback" => {
+            inline_image_filtered_fallback(repo_root)
+        }
+        "unit-font-01-std14-custom-widths" => std14_custom_widths(repo_root),
+        "unit-cmap-01-identity-no-tounicode" => identity_cid_no_tounicode(repo_root),
+        "unit-xobj-00-recursion-parent" => xobject_recursion_parent(repo_root),
+        "unit-xobj-04-inherited-resources" => inherited_form_resources(repo_root),
+        "unit-xobj-05-scope-parent" => xobject_scope_parent(repo_root),
         "unit-write-01-bookmarks-rich" => {
             structured_variant(repo_root, "unit-write-01-bookmarks-rich")
         }
@@ -32,6 +73,463 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
         "unit-parse-11-outline-siblings" => outline_siblings(repo_root),
         "unit-write-06-free-object-slot" => free_object_slot(repo_root),
         _ => bail!("exact fixture `{fixture_id}` is not implemented"),
+    }
+}
+
+const STANDARD_CONTENT: &[u8] = b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n";
+
+enum FilterRecipe {
+    Ascii85,
+    Ascii85Flate,
+    LzwEarlyChange0,
+    LzwEarlyChange1,
+}
+
+fn filtered_text(fixture_id: &str, repo_root: &Path, recipe: FilterRecipe) -> Result<Vec<u8>> {
+    let (dictionary, encoded) = match recipe {
+        FilterRecipe::Ascii85 => (
+            "/Filter /ASCII85Decode".to_string(),
+            ascii85(STANDARD_CONTENT),
+        ),
+        FilterRecipe::Ascii85Flate => {
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+            encoder.write_all(STANDARD_CONTENT)?;
+            let compressed = encoder.finish()?;
+            (
+                "/Filter [/ASCII85Decode /FlateDecode]".to_string(),
+                ascii85(&compressed),
+            )
+        }
+        FilterRecipe::LzwEarlyChange0 => (
+            "/Filter /LZWDecode /DecodeParms << /EarlyChange 0 >>".to_string(),
+            lzw_encode(&lzw_transition_content(), 0),
+        ),
+        FilterRecipe::LzwEarlyChange1 => (
+            "/Filter /LZWDecode /DecodeParms << /EarlyChange 1 >>".to_string(),
+            lzw_encode(&lzw_transition_content(), 1),
+        ),
+    };
+    basic_pdf(fixture_id, repo_root, "9 0 R", &[(dictionary, encoded)])
+}
+
+fn basic_text(fixture_id: &str, repo_root: &Path, content: &[u8]) -> Result<Vec<u8>> {
+    basic_pdf(
+        fixture_id,
+        repo_root,
+        "9 0 R",
+        &[(String::new(), content.to_vec())],
+    )
+}
+
+fn basic_pdf(
+    fixture_id: &str,
+    repo_root: &Path,
+    contents: &str,
+    streams: &[(String, Vec<u8>)],
+) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new(fixture_id);
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents {contents} >>"
+        )
+        .as_bytes(),
+    )?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(
+        b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>",
+    )?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    for (dictionary, data) in streams {
+        pdf.stream(dictionary.as_bytes(), data)?;
+    }
+    pdf.finish(1)
+}
+
+fn contents_array_numeric_split(repo_root: &Path) -> Result<Vec<u8>> {
+    basic_pdf(
+        "unit-parse-04-contents-array-numeric-split",
+        repo_root,
+        "[9 0 R 10 0 R]",
+        &[
+            (String::new(), b"q 1 0 0 1 10".to_vec()),
+            (
+                String::new(),
+                b" 20 cm\nBT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET\nQ\n".to_vec(),
+            ),
+        ],
+    )
+}
+
+fn contents_array_string_parent(repo_root: &Path) -> Result<Vec<u8>> {
+    basic_pdf(
+        "unit-parse-05-contents-array-string-parent",
+        repo_root,
+        "[9 0 R 10 0 R]",
+        &[
+            (
+                String::new(),
+                b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) ".to_vec(),
+            ),
+            (String::new(), b"(MIMUS) Tj ET\n".to_vec()),
+        ],
+    )
+}
+
+fn inherited_page_resources(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-parse-07-inherited-page-resources");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 /Resources 4 0 R >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 9 0 R >>")?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(
+        b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>",
+    )?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.stream(b"", STANDARD_CONTENT)?;
+    pdf.finish(1)
+}
+
+fn malformed_stream_parent(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-stream-00-malformed-parent");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 10 0 R >>")?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.object(b"<< /MimusFixturePadding true >>")?;
+    pdf.stream(b"", STANDARD_CONTENT)?;
+    pdf.stream(
+        b"",
+        b"q 1 2 3 4 5 6 7 cm BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET Q\n",
+    )?;
+    pdf.stream(
+        b"",
+        b"q 1 0 0 1 100 cm BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET Q\n",
+    )?;
+    pdf.stream(b"", b"Q Q BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET\n")?;
+    pdf.stream(b"", b"BT /F1 12Tf 100 120Td (MIMUS) Tj ET\n")?;
+    pdf.stream(
+        b"",
+        b"BT /F1 12 Tf 1 0 0 1 72 120 Tm 10.5.3 Tc (MIMUS) Tj ET\n",
+    )?;
+    let mut nested = b"BT /F1 12 Tf 1 0 0 1 72 120 Tm ".to_vec();
+    nested.extend(std::iter::repeat_n(b'[', 512));
+    nested.extend_from_slice(b"(MIMUS)");
+    nested.extend(std::iter::repeat_n(b']', 512));
+    nested.extend_from_slice(b" TJ ET\n");
+    pdf.stream(b"", &nested)?;
+    pdf.finish(1)
+}
+
+fn type3_d1(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-stream-02-type3-d1");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 11 0 R >>")?;
+    pdf.object(b"<< /Font << /F1 5 0 R /FT3 9 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.object(b"<< /Type /Font /Subtype /Type3 /Name /FT3 /FontBBox [0 0 1000 1000] /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /M 10 0 R >> /Encoding << /Type /Encoding /Differences [77 /M] >> /FirstChar 77 /LastChar 77 /Widths [1000] /Resources << >> >>")?;
+    pdf.stream(b"", b"1000 0 0 0 1000 1000 d1\n0 0 1000 1000 re f\n")?;
+    pdf.stream(b"", b"BT /FT3 12 Tf 1 0 0 1 72 120 Tm (M) Tj ET\n")?;
+    pdf.finish(1)
+}
+
+fn type3_d0(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-stream-04-type3-d0");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 11 0 R >>")?;
+    pdf.object(b"<< /Font << /F1 5 0 R /FT3 9 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.object(b"<< /Type /Font /Subtype /Type3 /Name /FT3 /FontBBox [0 0 1000 1000] /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /M 10 0 R >> /Encoding << /Type /Encoding /Differences [77 /M] >> /FirstChar 77 /LastChar 77 /Widths [1000] /Resources << >> >>")?;
+    pdf.stream(b"", b"1000 0 d0\n0 0 1000 1000 re f\n")?;
+    pdf.stream(b"", b"BT /FT3 12 Tf 1 0 0 1 72 120 Tm (M) Tj ET\n")?;
+    pdf.finish(1)
+}
+
+fn inline_image(fixture_id: &str, repo_root: &Path, unknown_after: bool) -> Result<Vec<u8>> {
+    let mut content = if unknown_after {
+        b"q\nBX\nBI /W 8 /H 8 /BPC 8 /CS /G ID\n".to_vec()
+    } else {
+        b"q\nBI /W 9 /H 2 /BPC 1 /CS /G ID\n".to_vec()
+    };
+    if unknown_after {
+        let mut pixels = [96u8; 64];
+        pixels[20..24].copy_from_slice(b" EI ");
+        content.extend_from_slice(&pixels);
+        content.extend_from_slice(b"\nEI\n1 SomeVendorOp\nEX\nQ\n");
+    } else {
+        content.extend_from_slice(b" EI ");
+        content.extend_from_slice(b"\nEI\nQ\n");
+    }
+    content.extend_from_slice(STANDARD_CONTENT);
+    basic_text(fixture_id, repo_root, &content)
+}
+
+fn inline_image_filtered_fallback(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-stream-11-inline-image-filtered-fallback");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 9 0 R >>",
+    )?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> /Shading << /S1 << /ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 300 200] /Function << /FunctionType 2 /Domain [0 1] /C0 [0.95] /C1 [0.85] /N 1 >> /Extend [true true] >> >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.stream(
+        b"",
+        b"q\nBI /W 8 /H 1 /BPC 8 /CS /G /F /AHx ID\n6060606060606060>\nEI\n/S1 sh\nQ\nBT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n",
+    )?;
+    pdf.finish(1)
+}
+
+fn std14_custom_widths(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-font-01-std14-custom-widths");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 10 0 R >>")?;
+    pdf.object(b"<< /Font << /F0 5 0 R /F1 9 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.object(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding /FirstChar 65 /LastChar 90 /Widths [1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000] >>")?;
+    pdf.stream(b"", b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (AAAA) Tj ET\n")?;
+    pdf.finish(1)
+}
+
+fn identity_cid_no_tounicode(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-cmap-01-identity-no-tounicode");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 11 0 R >>")?;
+    pdf.object(b"<< /Font << /F0 5 0 R /F1 9 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.object(b"<< /Type /Font /Subtype /Type0 /BaseFont /MIMUSI+DejaVuSans /Encoding /Identity-H /DescendantFonts [10 0 R] >>")?;
+    pdf.object(b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /MIMUSI+DejaVuSans /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 6 0 R /W [6 [295 863 0 635 0 732]] /CIDToGIDMap /Identity >>")?;
+    pdf.stream(
+        b"",
+        b"BT /F1 12 Tf 1 0 0 1 72 120 Tm <000700060007000B0009> Tj ET\n",
+    )?;
+    pdf.finish(1)
+}
+
+fn xobject_recursion_parent(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-xobj-00-recursion-parent");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 15 0 R >>")?;
+    pdf.object(
+        b"<< /Font << /F1 5 0 R >> /XObject << /X0 10 0 R /X1 11 0 R /X2 12 0 R /X3 14 0 R >> >>",
+    )?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.object(b"<< /MimusFixturePadding true >>")?;
+    pdf.stream(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 300 200] /Resources << /Font << /F1 5 0 R >> >>",
+        STANDARD_CONTENT,
+    )?;
+    pdf.stream(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << /XObject << /X1 11 0 R >> >>",
+        b"/X1 Do\n",
+    )?;
+    pdf.stream(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << /XObject << /B 13 0 R >> >>",
+        b"/B Do\n",
+    )?;
+    pdf.stream(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << /XObject << /A 12 0 R >> >>",
+        b"/A Do\n",
+    )?;
+    pdf.stream(
+        b"/Type /XObject /Subtype /Form /Matrix [2 0 0 2 10 20] /Resources << /Font << /F1 5 0 R >> >>",
+        STANDARD_CONTENT,
+    )?;
+    pdf.stream(b"", b"q /X0 Do Q\n")?;
+    pdf.finish(1)
+}
+
+fn inherited_form_resources(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-xobj-04-inherited-resources");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 12 0 R >>")?;
+    pdf.object(b"<< /Font << /F1 9 0 R >> /XObject << /Outer 10 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.object(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")?;
+    pdf.stream(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 300 200] /Matrix [1 0 0 1 20 30] /Resources << /Font << /F1 13 0 R >> /XObject << /Inner 11 0 R >> >>",
+        b"q 1 0 0 1 3 4 cm /Inner Do Q\n",
+    )?;
+    pdf.stream(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 300 200] /Matrix [1 0 0 1 5 7]",
+        b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (III) Tj ET\n",
+    )?;
+    pdf.stream(
+        b"",
+        b"q 1 0 0 1 10 15 cm /Outer Do Q\nBT /F1 12 Tf 1 0 0 1 72 80 Tm (IIIH) Tj ET\n",
+    )?;
+    pdf.object(b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>")?;
+    pdf.finish(1)
+}
+
+fn xobject_scope_parent(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-xobj-05-scope-parent");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 10 0 R >>")?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> /XObject << /X0 9 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.stream(b"/Type /XObject /Subtype /Form /BBox [0 0 10 10]", b"q Q\n")?;
+    pdf.stream(
+        b"",
+        b"q 1 0 0 1 50 0 cm /X0 Do Q\nBT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET\n",
+    )?;
+    pdf.finish(1)
+}
+
+fn ascii85(bytes: &[u8]) -> Vec<u8> {
+    let mut output = Vec::new();
+    for chunk in bytes.chunks(4) {
+        let mut padded = [0u8; 4];
+        padded[..chunk.len()].copy_from_slice(chunk);
+        let value = u32::from_be_bytes(padded);
+        if chunk.len() == 4 && value == 0 {
+            output.push(b'z');
+            continue;
+        }
+        let mut digits = [0u8; 5];
+        let mut value = value;
+        for digit in digits.iter_mut().rev() {
+            *digit = (value % 85) as u8 + b'!';
+            value /= 85;
+        }
+        output.extend_from_slice(&digits[..chunk.len() + 1]);
+    }
+    output.extend_from_slice(b"~>");
+    output
+}
+
+fn lzw_transition_content() -> Vec<u8> {
+    let mut output = Vec::with_capacity(440);
+    output.push(b'%');
+    let mut state = 0x6d69_6d75u32;
+    for _ in 0..384 {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        output.push(33 + ((state >> 16) % 94) as u8);
+    }
+    output.push(b'\n');
+    output.extend_from_slice(STANDARD_CONTENT);
+    output
+}
+
+fn lzw_encode(bytes: &[u8], early_change: u16) -> Vec<u8> {
+    use std::collections::BTreeMap;
+
+    let mut dictionary: BTreeMap<Vec<u8>, u16> =
+        (0u16..=255).map(|byte| (vec![byte as u8], byte)).collect();
+    let mut next_code = 258u16;
+    let mut writer = VariableWidthWriter::default();
+    let mut width = 9u8;
+    let mut pending_width_increase = false;
+    writer.write(256, width);
+    let Some((&first, rest)) = bytes.split_first() else {
+        writer.write(257, width);
+        return writer.finish();
+    };
+    let mut current = vec![first];
+    for &byte in rest {
+        let mut extended = current.clone();
+        extended.push(byte);
+        if dictionary.contains_key(&extended) {
+            current = extended;
+        } else {
+            writer.write(dictionary[&current], width);
+            if pending_width_increase {
+                width += 1;
+                pending_width_increase = false;
+            }
+            if next_code < 4096 {
+                dictionary.insert(extended, next_code);
+                if width < 12 && next_code + early_change == (1u16 << width) - 1 {
+                    pending_width_increase = true;
+                }
+                next_code += 1;
+            }
+            current.clear();
+            current.push(byte);
+        }
+    }
+    writer.write(dictionary[&current], width);
+    if pending_width_increase {
+        width += 1;
+    }
+    writer.write(257, width);
+    writer.finish()
+}
+
+#[derive(Default)]
+struct VariableWidthWriter {
+    output: Vec<u8>,
+    buffer: u32,
+    bits: u8,
+}
+
+impl VariableWidthWriter {
+    fn write(&mut self, code: u16, width: u8) {
+        self.buffer = (self.buffer << width) | u32::from(code);
+        self.bits += width;
+        while self.bits >= 8 {
+            self.bits -= 8;
+            self.output.push((self.buffer >> self.bits) as u8);
+            self.buffer &= (1u32 << self.bits).wrapping_sub(1);
+        }
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        if self.bits > 0 {
+            self.output.push((self.buffer << (8 - self.bits)) as u8);
+        }
+        self.output
     }
 }
 
@@ -462,6 +960,36 @@ fn font_dictionary_without_widths(to_unicode_object: u32) -> String {
          /FirstChar 32 /LastChar 85 /FontDescriptor 6 0 R \
          /Encoding /WinAnsiEncoding /ToUnicode {to_unicode_object} 0 R >>"
     )
+}
+
+// Experiment 2's admitted byte contracts include the extra characters used by
+// its Form and tokenizer fixtures. Keep that CMap separate from experiment 3's
+// intentionally minimal MIMUS-only writeback baseline.
+fn operator_walk_to_unicode() -> &'static [u8] {
+    b"/CIDInit /ProcSet findresource begin\n\
+12 dict begin\n\
+begincmap\n\
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+/CMapName /MimusExact-UCS def\n\
+/CMapType 2 def\n\
+1 begincodespacerange\n\
+<00> <FF>\n\
+endcodespacerange\n\
+9 beginbfchar\n\
+<20> <0020>\n\
+<43> <0043>\n\
+<45> <0045>\n\
+<49> <0049>\n\
+<4D> <004D>\n\
+<52> <0052>\n\
+<53> <0053>\n\
+<54> <0054>\n\
+<55> <0055>\n\
+endbfchar\n\
+endcmap\n\
+CMapName currentdict /CMap defineresource pop\n\
+end\n\
+end\n"
 }
 
 fn to_unicode() -> &'static [u8] {

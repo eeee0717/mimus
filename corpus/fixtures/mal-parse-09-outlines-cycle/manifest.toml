@@ -44,7 +44,7 @@ columns = 1
 [[expected.behaviour]]
 id = "PARSE-11-outlines-cycle"
 assertion = "A corrupt outline graph is rejected rather than rebuilt into a document with lost bookmarks"
-observable_via = "semantic outline walker rejects the /Next self-cycle"
+observable_via = "semantic outline walker rejects the /Next self-cycle and independent renderers terminate"
 
 [oracle]
-checks = ["legality", "structure"]
+checks = ["legality", "structure", "render"]

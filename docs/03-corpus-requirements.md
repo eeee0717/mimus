@@ -125,7 +125,7 @@ fixture 分两类：
 **禁止事项**：
 
 - **不得使用 mimus 生产侧的 lopdf 或 PDFium 生成测试输入**。用被测组件生成被测输入是循环论证——lopdf 写错的结构，语料会原样接受。
-- 精确 fixture 的 content stream **不压缩**（不使用 `/FlateDecode`）：可读、可 diff、便于字节级变异，且消除 zlib 实现差异。现实排版 fixture 允许压缩（其产物特征本身是被测对象）。
+- 精确 fixture 的 content stream 默认**不压缩、不使用 filter**：可读、可 diff、便于字节级变异，且消除编码器实现差异。唯一例外是 `cases` 含 `PARSE-03` 的 filter 专项 fixture；它必须同时手写 raw encoded bytes、filter/DecodeParms 与 decoded bytes，且门禁逐字节核对三者。现实排版 fixture 允许压缩（其产物特征本身是被测对象）。
 
 #### Corpus 自有精确 writer（M0）
 

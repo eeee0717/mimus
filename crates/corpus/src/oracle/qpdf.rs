@@ -268,6 +268,23 @@ pub fn raw_stream(pdf: &Path, object: u32) -> Result<Vec<u8>> {
     raw_stream_output(output, object)
 }
 
+pub fn filtered_stream(pdf: &Path, object: u32) -> Result<Vec<u8>> {
+    let args = vec![
+        format!("--show-object={object}"),
+        "--filtered-stream-data".to_string(),
+        pdf.display().to_string(),
+    ];
+    let output =
+        proc::run("qpdf", &args, Path::new("."), &BTreeMap::new())?.context("qpdf 未安装")?;
+    if !output.success() {
+        bail!(
+            "qpdf filtered stream {object} 失败：{}",
+            output.diagnostics()
+        );
+    }
+    Ok(output.stdout)
+}
+
 fn raw_stream_output(output: proc::Output, object: u32) -> Result<Vec<u8>> {
     if !output.success() {
         bail!("qpdf raw stream {object} 失败：{}", output.diagnostics());

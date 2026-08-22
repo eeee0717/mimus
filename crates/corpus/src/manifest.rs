@@ -228,6 +228,10 @@ pub struct Expected {
     pub pdf: Option<PdfContract>,
     #[serde(default)]
     pub content_stream: Vec<ContentStream>,
+    /// Expected CID/glyph sequence for an Identity-H fixture whose Unicode
+    /// mapping comes from the embedded font cmap rather than ToUnicode.
+    #[serde(default)]
+    pub cid_sequence: Vec<u16>,
     #[serde(default)]
     pub reference: Vec<ObjectReference>,
     #[serde(default)]
@@ -239,12 +243,19 @@ pub struct Expected {
     #[serde(default)]
     pub optional_content_group: Vec<OptionalContentGroup>,
     pub behaviour: Vec<Behaviour>,
-    /// 畸形 fixture 必填：`qpdf --check` 的输出里必须出现的子串。
-    ///
-    /// §2.8 步骤 2：畸形 fixture 必须以 manifest **声明的方式**失败——失败方式
-    /// 不符也是失败，说明变异没打中目标。
+    /// 畸形 fixture 必填。结构畸形写 qpdf 输出中必须出现的子串；content
+    /// 语义畸形写 `operator-walk:<stable-error-id>`，此时 qpdf 必须确认 PDF
+    /// 容器本身合法，错误由实验 2 的隔离走查器断言。
     #[serde(default)]
     pub declared_failure: Option<String>,
+    /// Stable diagnostics that the disposable M0 operator walker must emit.
+    /// The set is exact: undeclared recovery fallout fails verification.
+    #[serde(default)]
+    pub operator_walk_diagnostics: Vec<String>,
+    /// Independent renderer diagnostic required for a malformed fixture that
+    /// cannot produce a reference raster by design.
+    #[serde(default)]
+    pub renderer_diagnostic: Option<String>,
 }
 
 /// 结构化期望——**先于生成写死**，生成结果不符即为失败（§2.1 例外条款）。
@@ -300,7 +311,16 @@ pub enum XrefKind {
 pub struct ContentStream {
     pub object: u32,
     pub compressed: bool,
+    #[serde(default)]
     pub bytes: String,
+    #[serde(default)]
+    pub bytes_hex: Option<String>,
+    #[serde(default)]
+    pub decoded_bytes: Option<String>,
+    #[serde(default)]
+    pub decoded_bytes_hex: Option<String>,
+    #[serde(default)]
+    pub filters: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -450,12 +470,28 @@ pub enum Check {
     DualParserGeometry,
     /// §2.2: compare all three hand-written geometry quantities independently.
     HandWrittenGeometry,
+    /// Type3 d1 geometry: MuPDF independently observes baseline and the
+    /// painted CharProc bbox. Poppler's synthesized Type3 metric box is kept
+    /// as differential evidence rather than treated as the specification.
+    Type3Geometry,
+    /// Standard-14 width arbitration: compare the independently observed
+    /// baseline and horizontal text advance with the file /Widths contract.
+    FontAdvance,
+    /// Verify Identity-H CIDToGIDMap identity against the pinned embedded
+    /// TrueType cmap, while treating extractor Unicode as differential data.
+    EmbeddedCmap,
+    /// Run the disposable M0 experiment walker and compare its public JSON
+    /// report with the hand-written manifest, including the exact diagnostics.
+    OperatorWalk,
     /// Exact header/object/xref/trailer/content-stream bytes.
     PdfBytes,
     /// Rich outline/action/annotation/form/OCG/name-tree object graph.
     PdfStructure,
     /// §2.8 步骤 4：独立渲染器出图并存参考栅格哈希。
     Render,
+    /// A malformed fixture is independently observed through a stable mutool
+    /// trace diagnostic instead of a successful reference raster.
+    RenderDiagnostic,
 }
 
 #[derive(Debug, Deserialize)]
@@ -552,12 +588,21 @@ impl Manifest {
             "§2.8",
             "oracle.checks 为空——没有验收手段的 fixture 不得入库",
         )?;
+        fail_if(
+            !self.requires(Check::Render) && !self.requires(Check::RenderDiagnostic),
+            "§2.8",
+            "oracle.checks 必须含 render 或 render-diagnostic——每份 fixture 都要有独立渲染器证据",
+        )?;
         // 手写的 block.text 必须被至少一种手段核对。否则那一串文本就只是注释：
         // 写错了没人知道，而它恰恰是 §2.1 里最该被守住的东西。
         fail_if(
-            !self.requires(Check::Structure) && !self.requires(Check::Glyphs),
+            !self.expected.block.is_empty()
+                && !self.requires(Check::Structure)
+                && !self.requires(Check::Glyphs)
+                && !self.requires(Check::EmbeddedCmap)
+                && !self.requires(Check::OperatorWalk),
             "§2.1",
-            "手写的 block.text 无人核对——oracle.checks 必须含 structure 或 glyphs 之一",
+            "手写的 block.text 无人核对——oracle.checks 必须含 structure、glyphs、embedded-cmap 或 operator-walk 之一",
         )?;
 
         Ok(())
@@ -865,7 +910,41 @@ impl Manifest {
             !malformed && self.expected.declared_failure.is_some(),
             "§2.8",
             "合法 fixture 不应声明 declared_failure",
-        )
+        )?;
+        let diagnostics = self
+            .expected
+            .operator_walk_diagnostics
+            .iter()
+            .collect::<BTreeSet<_>>();
+        fail_if(
+            diagnostics.len() != self.expected.operator_walk_diagnostics.len()
+                || diagnostics.iter().any(|id| id.is_empty()),
+            "§2.8",
+            "operator_walk_diagnostics 必须是非空且不重复的稳定 ID",
+        )?;
+        if let Some(primary) = self
+            .expected
+            .declared_failure
+            .as_deref()
+            .and_then(|failure| failure.strip_prefix("operator-walk:"))
+        {
+            fail_if(
+                !self.requires(Check::OperatorWalk),
+                "§2.8",
+                "operator-walk failure 必须启用 operator-walk oracle",
+            )?;
+            fail_if(
+                !self.expected.operator_walk_diagnostics.is_empty()
+                    && !self
+                        .expected
+                        .operator_walk_diagnostics
+                        .iter()
+                        .any(|id| id == primary),
+                "§2.8",
+                "declared_failure 的主诊断不在 operator_walk_diagnostics 中",
+            )?;
+        }
+        Ok(())
     }
 
     fn validate_exact_contract(&self) -> Result<()> {
@@ -873,8 +952,6 @@ impl Manifest {
             (Check::Determinism, "determinism"),
             (Check::Legality, "legality"),
             (Check::PageGeometry, "page-geometry"),
-            (Check::Structure, "structure"),
-            (Check::HandWrittenGeometry, "hand-written-geometry"),
             (Check::PdfBytes, "pdf-bytes"),
             (Check::PdfStructure, "pdf-structure"),
             (Check::Render, "render"),
@@ -885,6 +962,19 @@ impl Manifest {
                 &format!("exact-writer fixture 必须启用 {name} 门禁"),
             )?;
         }
+        fail_if(
+            !self.requires(Check::Structure) && !self.requires(Check::EmbeddedCmap),
+            "§2.8",
+            "exact-writer fixture 必须启用 structure 或 embedded-cmap 门禁",
+        )?;
+        fail_if(
+            !self.requires(Check::HandWrittenGeometry)
+                && !self.requires(Check::Type3Geometry)
+                && !self.requires(Check::FontAdvance)
+                && !self.requires(Check::EmbeddedCmap),
+            "§2.8",
+            "exact-writer fixture 必须启用 hand-written-geometry、type3-geometry、font-advance 或 embedded-cmap 门禁",
+        )?;
 
         fail_if(
             self.expected.geometry_source != GeometrySource::HandWritten,
@@ -951,17 +1041,37 @@ impl Manifest {
             "§2.5",
             "exact-writer fixture 必须手写至少一个 content stream",
         )?;
+        let allows_exact_filters = self.identity.cases.iter().any(|case| case == "PARSE-03");
         for stream in &self.expected.content_stream {
             fail_if(
                 !pdf.object_numbers.contains(&stream.object),
                 "§2.5",
                 &format!("content stream object {} 不在对象计划中", stream.object),
             )?;
-            fail_if(stream.compressed, "§2.5", "精确 content stream 禁止压缩")?;
             fail_if(
-                stream.bytes.is_empty(),
+                stream.bytes.is_empty() == stream.bytes_hex.is_none(),
                 "§2.1",
-                "手写 content stream 字节不得为空",
+                "content stream 必须且只能用 bytes / bytes_hex 之一手写 raw bytes",
+            )?;
+            fail_if(
+                stream.compressed && !allows_exact_filters,
+                "§2.5",
+                "exact content stream 仅 PARSE-03 filter fixture 可声明压缩/过滤",
+            )?;
+            fail_if(
+                stream.compressed
+                    && (stream.filters.is_empty()
+                        || (stream.decoded_bytes.is_none() == stream.decoded_bytes_hex.is_none())),
+                "§2.1/§2.5",
+                "带过滤器的精确 stream 必须声明 filters，且只能用 decoded_bytes / decoded_bytes_hex 之一声明解码结果",
+            )?;
+            fail_if(
+                !stream.compressed
+                    && (!stream.filters.is_empty()
+                        || stream.decoded_bytes.is_some()
+                        || stream.decoded_bytes_hex.is_some()),
+                "§2.5",
+                "未过滤 stream 不应声明 filters 或 decoded bytes",
             )?;
         }
         for reference in &self.expected.reference {
@@ -1177,7 +1287,7 @@ assertion = "断言"
 observable_via = "手段"
 
 [oracle]
-checks = ["determinism", "structure"]
+checks = ["determinism", "structure", "render"]
 "#;
 
     fn parse(toml_text: &str) -> Result<Manifest> {
@@ -1281,18 +1391,40 @@ text = "world"
     #[test]
     fn rejects_a_fixture_whose_hand_written_text_nothing_checks() {
         let text = BASE.replace(
-            "checks = [\"determinism\", \"structure\"]",
-            "checks = [\"determinism\"]",
+            "checks = [\"determinism\", \"structure\", \"render\"]",
+            "checks = [\"determinism\", \"render\"]",
         );
         let err = parse(&text).unwrap_err().to_string();
-        assert!(err.contains("structure 或 glyphs"), "{err}");
+        assert!(
+            err.contains("structure、glyphs、embedded-cmap 或 operator-walk"),
+            "{err}"
+        );
     }
 
     #[test]
     fn rejects_an_empty_oracle_list() {
-        let text = BASE.replace("checks = [\"determinism\", \"structure\"]", "checks = []");
+        let text = BASE.replace(
+            "checks = [\"determinism\", \"structure\", \"render\"]",
+            "checks = []",
+        );
         let err = parse(&text).unwrap_err().to_string();
         assert!(err.contains("§2.8"), "{err}");
+    }
+
+    #[test]
+    fn every_fixture_requires_an_independent_renderer_gate() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/fixtures/unit-base-02-two-column");
+        let mut manifest = Manifest::load(&dir).unwrap();
+        manifest
+            .oracle
+            .checks
+            .retain(|check| !matches!(check, Check::Render | Check::RenderDiagnostic));
+
+        let error = manifest.validate().unwrap_err().to_string();
+
+        assert!(error.contains("render 或 render-diagnostic"), "{error}");
+        assert!(error.contains("§2.8"), "{error}");
     }
 
     #[test]
@@ -1325,6 +1457,24 @@ text = "world"
         let error = manifest.validate().unwrap_err().to_string();
 
         assert!(error.contains("subset tag"), "{error}");
+    }
+
+    #[test]
+    fn exact_stream_filters_are_limited_to_parse_03_fixtures() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/fixtures/unit-base-01-single-line");
+        let mut manifest = Manifest::load(&dir).unwrap();
+        let stream = &mut manifest.expected.content_stream[0];
+        stream.compressed = true;
+        stream.filters = vec!["LZWDecode".into()];
+        stream.decoded_bytes = Some(stream.bytes.clone());
+
+        let error = manifest.validate().unwrap_err().to_string();
+        assert!(error.contains("PARSE-03"), "{error}");
+
+        let parse_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/fixtures/unit-parse-03-lzw-earlychange");
+        Manifest::load(&parse_dir).unwrap();
     }
 
     #[test]

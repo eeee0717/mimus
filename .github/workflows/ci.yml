@@ -24,6 +24,16 @@ jobs:
       - name: Install PDF validation tools
         run: sudo apt-get update && sudo apt-get install --yes qpdf poppler-utils mupdf-tools
 
+      - name: Install pinned PDFium
+        env:
+          PDFIUM_ARCHIVE_SHA256: be513e8021a5bf8eb2116e00d78c3bacb82c5a02b3785156ae14fe5e33084385
+        run: |
+          curl --fail --location --output pdfium.tgz \
+            https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8009/pdfium-linux-x64.tgz
+          echo "$PDFIUM_ARCHIVE_SHA256  pdfium.tgz" | sha256sum --check
+          mkdir pdfium
+          tar -xzf pdfium.tgz -C pdfium
+
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -31,6 +41,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Test
+        env:
+          MIMUS_PDFIUM_LIBRARY: ${{ github.workspace }}/pdfium/lib/libpdfium.so
         run: cargo test --workspace --all-targets --all-features
 
       - name: Incremental writeback PoC

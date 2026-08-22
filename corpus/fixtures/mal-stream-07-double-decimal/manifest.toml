@@ -1,0 +1,47 @@
+schema_version = 1
+[identity]
+id = "mal-stream-07-double-decimal"
+name = "Double decimal numeric token"
+class = "mal"
+legality = "malformed"
+cases = ["STREAM-06"]
+priority = "M0"
+variable = "The page Contents reference selects 10.5.3 as a numeric sequence"
+[source]
+method = "byte-mutation"
+pdf = "mal-stream-07-double-decimal.pdf"
+pdf_sha256 = "96f4efaf6ade92db0ed9e04aac19670303ed75ee153a44799e84b392112c036f"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+[lineage]
+parent = "unit-stream-00-malformed-parent"
+[[lineage.mutations]]
+byte_offset = 210
+original_byte = 48
+replacement_byte = 53
+description = "change /Contents 10 0 R to 15 0 R, selecting the double-decimal candidate"
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "operator-walk:double-decimal"
+operator_walk_diagnostics = ["double-decimal", "arity-excess"]
+renderer_diagnostic = "unknown keyword: '10.5.3'"
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+[[expected.behaviour]]
+id = "STREAM-06-double-decimal"
+assertion = "10.5.3 tokenizes deterministically as 10.5 and .3; Tc consumes .3 and the excess 10.5 is discarded with a warning"
+observable_via = "literal token sequence and operator stack trace"
+[oracle]
+checks = ["determinism","legality","operator-walk","page-geometry","render-diagnostic"]
+[[adjudication]]
+date = "2026-08-22"
+issue = "10.5.3 is not a valid single PDF number"
+resolution = "Use the deterministic split 10.5 + .3; never parse it with a permissive host float parser"
