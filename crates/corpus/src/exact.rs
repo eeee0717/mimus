@@ -31,6 +31,7 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
         }
         "unit-parse-04-contents-array-numeric-split" => contents_array_numeric_split(repo_root),
         "unit-parse-05-contents-array-string-parent" => contents_array_string_parent(repo_root),
+        "unit-parse-07-inherited-page-resources" => inherited_page_resources(repo_root),
         "unit-stream-00-malformed-parent" => malformed_stream_parent(repo_root),
         "unit-stream-01-bx-ex-unknown-op" => basic_text(
             fixture_id,
@@ -51,11 +52,9 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
             repo_root,
             b"q\nBI /W 8 /H 1 /BPC 8 /CS /G /L 8 ID\nABCDEFGH\nEI\nQ\nBT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n",
         ),
-        "unit-stream-11-inline-image-filtered-fallback" => basic_text(
-            fixture_id,
-            repo_root,
-            b"q\nBI /W 8 /H 1 /BPC 8 /CS /G /F /AHx ID\n6060606060606060>\nEI\nQ\nBT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n",
-        ),
+        "unit-stream-11-inline-image-filtered-fallback" => {
+            inline_image_filtered_fallback(repo_root)
+        }
         "unit-font-01-std14-custom-widths" => std14_custom_widths(repo_root),
         "unit-cmap-01-identity-no-tounicode" => identity_cid_no_tounicode(repo_root),
         "unit-xobj-00-recursion-parent" => xobject_recursion_parent(repo_root),
@@ -169,6 +168,23 @@ fn contents_array_string_parent(repo_root: &Path) -> Result<Vec<u8>> {
     )
 }
 
+fn inherited_page_resources(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-parse-07-inherited-page-resources");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 /Resources 4 0 R >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 9 0 R >>")?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(
+        b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>",
+    )?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", to_unicode())?;
+    pdf.stream(b"", STANDARD_CONTENT)?;
+    pdf.finish(1)
+}
+
 fn malformed_stream_parent(repo_root: &Path) -> Result<Vec<u8>> {
     let font = pinned_font(repo_root)?;
     let mut pdf = RawPdf::new("unit-stream-00-malformed-parent");
@@ -256,6 +272,26 @@ fn inline_image(fixture_id: &str, repo_root: &Path, unknown_after: bool) -> Resu
     }
     content.extend_from_slice(STANDARD_CONTENT);
     basic_text(fixture_id, repo_root, &content)
+}
+
+fn inline_image_filtered_fallback(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-stream-11-inline-image-filtered-fallback");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 9 0 R >>",
+    )?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> /Shading << /S1 << /ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 300 200] /Function << /FunctionType 2 /Domain [0 1] /C0 [0.95] /C1 [0.85] /N 1 >> /Extend [true true] >> >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", to_unicode())?;
+    pdf.stream(
+        b"",
+        b"q\nBI /W 8 /H 1 /BPC 8 /CS /G /F /AHx ID\n6060606060606060>\nEI\n/S1 sh\nQ\nBT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n",
+    )?;
+    pdf.finish(1)
 }
 
 fn std14_custom_widths(repo_root: &Path) -> Result<Vec<u8>> {

@@ -11,7 +11,7 @@ variable = "An ASCIIHex-filtered inline image has no declared encoded length"
 method = "exact-writer"
 generator = "corpus-exact-writer-v1"
 pdf = "unit-stream-11-inline-image-filtered-fallback.pdf"
-pdf_sha256 = "11be9ad0041528b94c492f669fecd5385fff4182de05f72def24cc220edd304b"
+pdf_sha256 = "94be15575ea3dc6e3cfc808aca20233af00370ab4493cb09e8b25e2825325e70"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
 [[page]]
@@ -53,6 +53,7 @@ bytes = """q
 BI /W 8 /H 1 /BPC 8 /CS /G /F /AHx ID
 6060606060606060>
 EI
+/S1 sh
 Q
 BT
 /F1 12 Tf
@@ -65,8 +66,8 @@ from_object = 3
 path = ["/Contents"]
 to_object = 9
 [[expected.behaviour]]
-id = "STREAM-09-filtered-fallback"
-assertion = "Without an encoded length, the walker scans at most 16 MiB for a guarded EI candidate, warns once, and resumes at Q"
-observable_via = "raw stream bytes, bounded walker completion, exact warning and following text baseline"
+id = "STREAM-09-filtered-fallback-sh"
+assertion = "Without an encoded length, the walker scans at most 16 MiB for a guarded EI candidate, warns once, and resumes at the name operand followed by sh"
+observable_via = "raw stream bytes, bounded walker completion, sh operator trace, exact warning and following text baseline"
 [oracle]
 checks = ["determinism","legality","operator-walk","page-geometry","structure","hand-written-geometry","pdf-bytes","pdf-structure","render"]

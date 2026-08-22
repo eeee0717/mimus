@@ -239,7 +239,12 @@ pub fn run_fixture(
         .into_iter()
         .next()
         .context("fixture has no page")?;
-    let resources = page_resources(&document, page_id)?;
+    let page_tree_cycle = find_page_tree_cycle(&document, page_id)?;
+    let resources = if page_tree_cycle.is_some() {
+        Dictionary::new()
+    } else {
+        page_resources(&document, page_id)?
+    };
     let mut walker = Walker {
         document: &document,
         resources,
@@ -249,7 +254,14 @@ pub fn run_fixture(
         operators: Vec::new(),
         glyphs: Vec::new(),
         warnings: Vec::new(),
-        errors: Vec::new(),
+        errors: page_tree_cycle
+            .as_ref()
+            .map(|path| WalkError {
+                id: "page-tree-cycle".into(),
+                detail: format!("page tree object path {path:?}"),
+            })
+            .into_iter()
+            .collect(),
         active_forms: Vec::new(),
         compatibility_depth: 0,
         in_type3_charproc: false,
@@ -257,24 +269,26 @@ pub fn run_fixture(
     };
     let mut streams = Vec::new();
 
-    for object_id in document.get_page_contents(page_id) {
-        let stream = document
-            .get_object(object_id)
-            .and_then(Object::as_stream)
-            .with_context(|| format!("page content object {} is not a stream", object_id.0))?;
-        let decoded = stream
-            .decompressed_content_with_limit(MAX_DECODED_STREAM_BYTES)
-            .with_context(|| format!("decode content stream {}", object_id.0))?;
-        streams.push(StreamTrace {
-            object: object_id.0,
-            raw_hex: hex(&stream.content),
-            decoded_hex: hex(&decoded),
-        });
-        match tokenize(&decoded, object_id.0) {
-            Ok(tokens) => walker.walk(tokens),
-            Err(error) => {
-                walker.errors.push(error);
-                break;
+    if page_tree_cycle.is_none() {
+        for object_id in document.get_page_contents(page_id) {
+            let stream = document
+                .get_object(object_id)
+                .and_then(Object::as_stream)
+                .with_context(|| format!("page content object {} is not a stream", object_id.0))?;
+            let decoded = stream
+                .decompressed_content_with_limit(MAX_DECODED_STREAM_BYTES)
+                .with_context(|| format!("decode content stream {}", object_id.0))?;
+            streams.push(StreamTrace {
+                object: object_id.0,
+                raw_hex: hex(&stream.content),
+                decoded_hex: hex(&decoded),
+            });
+            match tokenize(&decoded, object_id.0) {
+                Ok(tokens) => walker.walk(tokens),
+                Err(error) => {
+                    walker.errors.push(error);
+                    break;
+                }
             }
         }
     }
@@ -1098,6 +1112,25 @@ fn page_resources(document: &Document, page_id: ObjectId) -> Result<Dictionary> 
             .context("page tree has no Resources")?;
     }
     bail!("page resource inheritance exceeds 128 levels")
+}
+
+fn find_page_tree_cycle(document: &Document, page_id: ObjectId) -> Result<Option<Vec<u32>>> {
+    let mut current = page_id;
+    let mut visited = BTreeSet::new();
+    let mut path = Vec::new();
+    for _ in 0..128 {
+        if !visited.insert(current) {
+            path.push(current.0);
+            return Ok(Some(path));
+        }
+        path.push(current.0);
+        let node = document.get_dictionary(current)?;
+        let Ok(parent) = node.get(b"Parent").and_then(Object::as_reference) else {
+            return Ok(None);
+        };
+        current = parent;
+    }
+    bail!("page tree inheritance exceeds 128 levels")
 }
 
 fn object_number(object: &Object) -> Option<f64> {

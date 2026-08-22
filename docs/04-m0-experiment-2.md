@@ -24,6 +24,10 @@ PoC 位于非生产 crate `crates/m0-experiment-2`，不依赖 `mimus-core`，�
   graphics state/stack、operand、resources、compatibility depth 与 Type3 context；
 - 未知 operator 的原始 bytes 保留在 JSON trace；PoC 不改写 PDF。
 
+本文结论只覆盖下列 fixture 及其定向断言，不主张 PoC 已对任意畸形 PDF 或所有递归
+输入达到生产级健壮性。截断 inline-image 字典、Type3 自递归和子进程 watchdog 留给
+生产实现按真实语料继续收口。
+
 公开复现入口一次处理一份 fixture，避免把 PDFium 的进程级 binding 状态藏进协议：
 
 ```sh
@@ -63,6 +67,8 @@ binding 加载同一 dylib 会在 `FPDFTextObj_SetFontSize` 缺 symbol，故 PoC
 | `unit-parse-04-contents-array-numeric-split` | `e5ab55e8b9f59197767306e3b9d1e6dd94afed692518e2c9b262da973f41f315` |
 | `mal-parse-05-contents-array-string-split` | `7060aebcef707fda0c97c9592af8d44cd8654d582e3cbefaf0b5086d3d979e3c` |
 | `mal-parse-06-deep-nesting` | `767b0e74f443d2900a73f68990c676c12f7fc5dabfbbebf82b50b14998f22a1a` |
+| `unit-parse-07-inherited-page-resources` | `67d218f4943c1c424d82aee3a91d58927805d7a0356e9a00133a460d633ce390` |
+| `mal-parse-07-parent-cycle` | `fff9119db74fc50a2e05d9f0703cc72134488c66ee45277c0483f5acf2608252` |
 | `unit-stream-01-bx-ex-unknown-op` | `054b8d5ee50134d620d0f722bf10321b3e942419c5abb17bb8114c2f0ba266b2` |
 | `unit-stream-02-type3-d1` | `556525e1ce22d1740e3d40521465fb04810201d1385056f6ffb01589c7b1b937` |
 | `unit-stream-03-unknown-op-outside-bx` | `71820ebfc7149d4b601bfa71601c3e0243b90966fdb49dc3cd7b0717f366f2d6` |
@@ -76,7 +82,7 @@ binding 加载同一 dylib 会在 `FPDFTextObj_SetFontSize` 缺 symbol，故 PoC
 | `unit-stream-08-inline-image-EI-in-data` | `b207a2a4d8a84ab00bf98103df99787e37ef820f12dcf51565c30aa383ecb52a` |
 | `unit-stream-09-inline-image-no-L` | `50f0a00d7da8e80bb9d48f81eb80e16c9cb7673cb39d1dcf6c246f182525df7b` |
 | `unit-stream-10-inline-image-length` | `835f04d66b7c25a3d880120c0628f32cae74a5e3d1a69abb02cecc3c304f1f67` |
-| `unit-stream-11-inline-image-filtered-fallback` | `11be9ad0041528b94c492f669fecd5385fff4182de05f72def24cc220edd304b` |
+| `unit-stream-11-inline-image-filtered-fallback` | `94be15575ea3dc6e3cfc808aca20233af00370ab4493cb09e8b25e2825325e70` |
 | `unit-font-01-std14-custom-widths` | `6bbf13245639f1c8d3b88157025af4f5ec9fb458893aa3db5535ec67545180fe` |
 | `unit-cmap-01-identity-no-tounicode` | `5eaab3099f1fbd89f7d11b771982c8a4a34da934354c9ffd83bcd8c73a0ae6ca` |
 | `unit-xobj-00-recursion-parent` | `4a0499d5156713802a7e805053b1b835d933a12a4541bcccbd91fc61b8f7f90e` |
@@ -105,6 +111,7 @@ baseline 的逐分量最大绝对差；独立列表示该 fixture 已通过 qpdf
 | `unit-parse-03-lzw-earlychange` | `MIMUS` / 同上 | `(72,120)` | `MIMUS` | `4.52e-6` | pass |
 | `unit-parse-03-lzw-earlychange-1` | `MIMUS` / 同上 | `(72,120)` | `MIMUS` | `< 0.001` | pass |
 | `unit-parse-04-contents-array-numeric-split` | `MIMUS` / 同上 | `(82,140)` | `MIMUS` | `4.52e-6` | pass |
+| `unit-parse-07-inherited-page-resources` | `MIMUS` / 同上 | `(72,120)` | `MIMUS` | `4.52e-6` | pass |
 | `unit-stream-01-bx-ex-unknown-op` | `MIMUS` / 同上 | `(72,120)` | `MIMUS` | `4.52e-6` | pass |
 | `unit-stream-02-type3-d1` | `M` / `77` | `(72,120)` | `M` | `0` | pass |
 | `unit-stream-03-unknown-op-outside-bx` | `MIMUS` / 同上 | `(72,120)` | `MIMUS` | `< 0.001` | pass |
@@ -140,10 +147,16 @@ CTM 的 `(38,56)` 可逐层还原为 page `cm(10,15)` + outer Matrix `(20,30)` +
 `cm(3,4)` + inner Matrix `(5,7)`；加 text matrix `(72,120)` 得 `(110,176)`。PDFium
 五字符 origin delta 为 `0, 2.81e-6, -3.91e-6, -1.10e-6, -4.52e-6 pt`（y 全 0）。
 
-Raw token 保留的代表性断言：Type3 CharProc 为
+Operator-boundary raw trace 的代表性断言：Type3 CharProc 为
 `1000 0 0 0 1000 1000 d1`，且 `d0/d1` 都将 width 写入 glyph metric trace；
 `SomeVendorOp` raw hex 为 `536f6d6556656e646f724f70`；两行 9px、1bpp inline image
 按每行 2 byte 补齐为 4-byte payload，其中 `20 45 49 20` 没有被误判为终止符。
+
+JSON 报告记录 operator 边界的 operands、raw bytes 与 `ctm_before/ctm_after`。定向测试
+固定了 glued-token fixture 的 5 个 operator 和 `12Tf` / `120Td` raw bytes、两个多余
+`Q` 前后的单位 CTM、嵌套 Form 的关键 CTM `(10,15) -> (30,45) -> (33,49)`，以及
+filtered inline image 后 `/S1 sh` 在 9 个 operator trace 中继续执行。这里没有声称每份
+fixture 都输出独立 token 序列，也没有声称每个 operator 的完整 CTM trace 都已门禁。
 
 ## 5. 故障注入与有界失败
 
@@ -151,6 +164,7 @@ Raw token 保留的代表性断言：Type3 CharProc 为
 |---|---|---|
 | `mal-parse-05-contents-array-string-split` | `unterminated-string` | 在 object 9 停页，不读 object 10，不产生级联错误 |
 | `mal-parse-06-deep-nesting` | `nesting-too-deep-128` | 第 129 层停止，无 panic / stack overflow |
+| `mal-parse-07-parent-cycle` | `page-tree-cycle` | object path `[3,3]`，不走查页面 content stream，进程正常返回 |
 | `mal-stream-03-arity-excess` | `arity-excess` | 尾六个数形成 CTM，baseline `(630,823)`；前缀在 operator 边界丢弃 |
 | `mal-stream-04-arity-short` | `arity-short` | `cm` 原子跳过，baseline 仍 `(72,120)` |
 | `mal-stream-05-unbalanced-Q` | `graphics-stack-underflow` x2 | base CTM 不变，baseline `(72,120)` |
@@ -163,9 +177,10 @@ Raw token 保留的代表性断言：Type3 CharProc 为
 | `mal-xobj-04-scope-underflow` | `graphics-stack-underflow` | 内层多余 `Q` 不弹出调用方状态，后续 baseline 仍为 `(72,120)` |
 | `mal-xobj-05-scope-tail` | `scoped-graphics-stack-unbalanced` + `scoped-operands-discarded` | 子 scope 尾随 stack/operand 被报告并丢弃，不泄漏到页面 |
 
-全部诊断都与 manifest 的 `operator-walk:<id>` 精确匹配；测试进程正常返回。Form
-对象 ID active-path 去环是第一道边界，深度 64 是第二道；tokenizer 嵌套 128 与 Form
-深度是两个独立限制。
+本节所列 fixture 的诊断 ID 集合都与 manifest 匹配，测试进程正常返回。比较门禁使用
+去重后的 ID 集合，不比较出现次数；表中的 `x2` 是 raw JSON 的实测记录。两份 Form
+递归 fixture 以对象 ID active-path 去环，深度 64 是第二道边界；这些证据不扩展到
+Type3 自递归或本实验未列出的任意递归输入。
 
 ## 6. 分歧裁定
 
@@ -212,7 +227,7 @@ scope 后，调用方的 graphics state/stack、operand、resources 和 compatib
 `/L` 声明长度优先；无 filter 且尺寸可计算时，按 `ceil(W * BPC * components / 8) * H`
 逐 scanline 计算；filtered 或尺寸不可计算时才做最大 16 MiB 的 guarded `EI` 扫描并报告
 `inline-image-ei-scan` warning。三条路径分别由 fixture 钉死，payload 内的 ` EI ` 不会被
-错误截断。
+错误截断；fallback fixture 还断言扫描结束后能把 `/S1 sh` 识别为合法续接并继续走查。
 
 ## 7. 全局仲裁规则
 
@@ -240,8 +255,8 @@ mise exec -- cargo run -p corpus -- verify
 
 PDFium dylib 是实验测试的强制输入：环境变量缺失或路径不存在时测试明确失败；CI 下载
 固定 archive 并校验 SHA-256 后运行全 workspace 测试，不再允许静默 skip。实验测试为
-7/7，其中 PDFium 强制交叉校验覆盖 19 份合法 fixture；Corpus v1 为 60/60 fixture 通过
-独立验收，且每份 `operator-walk:*` check 都实际执行 PoC 并精确比较诊断集合。
+8/8，其中 PDFium 强制交叉校验覆盖 20 份合法 fixture；Corpus v1 为 62/62 fixture 通过
+独立验收，且每份 `operator-walk:*` check 都实际执行 PoC 并比较去重后的诊断 ID 集合。
 
 结论为**成**：自写走查能
 在规范输入上达到 `0.001 pt` 合同，PDFium 可继续位于 ADR-0006 的 trait 边界后做

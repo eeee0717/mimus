@@ -33,6 +33,7 @@ fn every_legal_experiment_fixture_matches_its_manifest_trace() {
         "unit-parse-03-lzw-earlychange",
         "unit-parse-03-lzw-earlychange-1",
         "unit-parse-04-contents-array-numeric-split",
+        "unit-parse-07-inherited-page-resources",
         "unit-stream-01-bx-ex-unknown-op",
         "unit-stream-02-type3-d1",
         "unit-stream-03-unknown-op-outside-bx",
@@ -71,6 +72,7 @@ fn malformed_experiment_fixtures_finish_with_the_declared_diagnostic() {
             "unterminated-string",
         ),
         ("mal-parse-06-deep-nesting", "nesting-too-deep-128"),
+        ("mal-parse-07-parent-cycle", "page-tree-cycle"),
         ("mal-stream-03-arity-excess", "arity-excess"),
         ("mal-stream-04-arity-short", "arity-short"),
         ("mal-stream-05-unbalanced-Q", "graphics-stack-underflow"),
@@ -107,6 +109,11 @@ fn malformed_experiment_fixtures_finish_with_the_declared_diagnostic() {
             "{fixture}"
         );
         assert!(report.manifest.diagnostic_matches, "{fixture}");
+        if fixture == "mal-parse-07-parent-cycle" {
+            assert!(report.streams.is_empty());
+            assert!(report.operators.is_empty());
+            assert!(report.glyphs.is_empty());
+        }
         if fixture.starts_with("mal-xobj-0") && fixture.contains("scope-") {
             let delta = report.manifest.baseline_delta.expect(fixture);
             assert_abs_diff_eq!(delta[0], 0.0, epsilon = report.manifest.tolerance_pt);
@@ -133,6 +140,7 @@ fn pdfium_character_origins_cross_check_the_walk() {
         "unit-parse-03-lzw-earlychange",
         "unit-parse-03-lzw-earlychange-1",
         "unit-parse-04-contents-array-numeric-split",
+        "unit-parse-07-inherited-page-resources",
         "unit-stream-01-bx-ex-unknown-op",
         "unit-stream-02-type3-d1",
         "unit-stream-03-unknown-op-outside-bx",
@@ -300,6 +308,76 @@ fn nested_form_resources_restore_page_font_scope() {
     assert_abs_diff_eq!(report.glyphs[0].baseline[1], 176.0, epsilon = 0.001);
     assert_abs_diff_eq!(report.glyphs[3].baseline[0], 72.0, epsilon = 0.001);
     assert_abs_diff_eq!(report.glyphs[3].baseline[1], 80.0, epsilon = 0.001);
+}
+
+#[test]
+fn operator_trace_contract_covers_recovery_counts_and_key_ctms() {
+    let glued = run_fixture(&repo_root(), "mal-stream-06-glued-tokens", None).unwrap();
+    assert_eq!(glued.operators.len(), 5);
+    assert_eq!(
+        glued
+            .operators
+            .iter()
+            .map(|operator| operator.operator.as_str())
+            .collect::<Vec<_>>(),
+        ["BT", "Tf", "Td", "Tj", "ET"]
+    );
+    let tf = &glued.operators[1];
+    assert_eq!(tf.operands, ["/F1", "12"]);
+    assert_eq!(tf.raw_hex, "31325466");
+    let td = &glued.operators[2];
+    assert_eq!(td.operands, ["100", "120"]);
+    assert_eq!(td.raw_hex, "3132305464");
+
+    let unbalanced = run_fixture(&repo_root(), "mal-stream-05-unbalanced-Q", None).unwrap();
+    let restores = unbalanced
+        .operators
+        .iter()
+        .filter(|operator| operator.operator == "Q")
+        .collect::<Vec<_>>();
+    assert_eq!(restores.len(), 2);
+    for restore in restores {
+        assert_eq!(restore.ctm_before.0, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(restore.ctm_after.0, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    }
+
+    let form = run_fixture(&repo_root(), "unit-xobj-04-inherited-resources", None).unwrap();
+    let page_cm = form
+        .operators
+        .iter()
+        .find(|operator| {
+            operator.operator == "cm" && operator.operands == ["1", "0", "0", "1", "10", "15"]
+        })
+        .unwrap();
+    assert_eq!(page_cm.ctm_before.0, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    assert_eq!(page_cm.ctm_after.0, [1.0, 0.0, 0.0, 1.0, 10.0, 15.0]);
+    let nested_cm = form
+        .operators
+        .iter()
+        .find(|operator| {
+            operator.operator == "cm" && operator.operands == ["1", "0", "0", "1", "3", "4"]
+        })
+        .unwrap();
+    assert_eq!(nested_cm.ctm_before.0, [1.0, 0.0, 0.0, 1.0, 30.0, 45.0]);
+    assert_eq!(nested_cm.ctm_after.0, [1.0, 0.0, 0.0, 1.0, 33.0, 49.0]);
+
+    let inline = run_fixture(
+        &repo_root(),
+        "unit-stream-11-inline-image-filtered-fallback",
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        inline
+            .operators
+            .iter()
+            .map(|operator| operator.operator.as_str())
+            .collect::<Vec<_>>(),
+        ["q", "BI..EI", "sh", "Q", "BT", "Tf", "Tm", "Tj", "ET"]
+    );
+    let image = &inline.operators[1];
+    assert_eq!(image.inline_image_payload_bytes, Some(17));
+    assert_eq!(image.inline_image_length_source.as_deref(), Some("ei-scan"));
 }
 
 #[test]

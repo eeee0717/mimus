@@ -438,6 +438,27 @@ fn plausible_inline_image_continuation(input: &[u8], mut position: usize) -> boo
     if position == input.len() {
         return true;
     }
+    if input[position] == b'/' {
+        position += 1;
+        let name_start = position;
+        while input.get(position).is_some_and(|byte| !is_delimiter(*byte)) {
+            position += 1;
+        }
+        if position == name_start {
+            return false;
+        }
+        while input
+            .get(position)
+            .is_some_and(|byte| byte.is_ascii_whitespace() || *byte == 0)
+        {
+            position += 1;
+        }
+        let operator_start = position;
+        while input.get(position).is_some_and(|byte| !is_delimiter(*byte)) {
+            position += 1;
+        }
+        return &input[operator_start..position] == b"sh";
+    }
     let start = position;
     while input.get(position).is_some_and(|byte| !is_delimiter(*byte)) {
         position += 1;

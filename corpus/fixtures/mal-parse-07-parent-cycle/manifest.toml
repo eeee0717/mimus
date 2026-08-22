@@ -1,0 +1,51 @@
+schema_version = 1
+
+[identity]
+id = "mal-parse-07-parent-cycle"
+name = "Page parent self-cycle"
+class = "mal"
+legality = "malformed"
+cases = ["PARSE-10"]
+priority = "M0"
+variable = "The page Parent reference is changed from its Pages parent to itself"
+
+[source]
+method = "byte-mutation"
+pdf = "mal-parse-07-parent-cycle.pdf"
+pdf_sha256 = "fff9119db74fc50a2e05d9f0703cc72134488c66ee45277c0483f5acf2608252"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+
+[lineage]
+parent = "unit-parse-07-inherited-page-resources"
+
+[[lineage.mutations]]
+byte_offset = 169
+original_byte = 50
+replacement_byte = 51
+description = "change /Parent 2 0 R to /Parent 3 0 R so page object 3 points to itself"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "operator-walk:page-tree-cycle"
+operator_walk_diagnostics = ["page-tree-cycle"]
+
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+
+[[expected.behaviour]]
+id = "PARSE-10-parent-cycle"
+assertion = "The walker detects page object 3 re-entering itself through Parent and reports PageTreeCycle without walking the page contents"
+observable_via = "single-byte lineage, page-tree object IDs, stable operator-walk diagnostic and bounded process completion"
+
+[oracle]
+checks = ["determinism", "legality", "operator-walk"]
