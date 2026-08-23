@@ -1,0 +1,109 @@
+schema_version = 1
+
+[identity]
+id = "intg-scan-06-blank-middle"
+name = "Native document with a blank middle page"
+class = "integration"
+legality = "legal"
+cases = ["PARSE-09", "SCAN-03"]
+priority = "M1"
+variable = "A page without Contents is placed between two native-text pages to exercise passthrough in context"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "intg-scan-06-blank-middle.pdf"
+pdf_sha256 = "3609b589081d3b5044ec2830c7feb9440c2fb2abdcba46aaecc61c67c22d4739"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 7, descriptor_object = 8, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 1
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 2
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "696e74672d7363616e2d30362d626c61"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 3
+blocks = 2
+columns = 1
+
+[[expected.block]]
+key = "P1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.168, 112.656, 131.136]
+visual_bbox = [73.177734, 119.830078, 111.985219, 128.90625]
+
+[[expected.block]]
+key = "P3"
+page = 2
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "MIMUS"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.168, 112.656, 131.136]
+visual_bbox = [73.177734, 119.830078, 111.985219, 128.90625]
+
+[[expected.content_stream]]
+object = 11
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 120 Tm
+(MIMUS) Tj
+ET
+"""
+[[expected.content_stream]]
+object = 12
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 120 Tm
+(MIMUS) Tj
+ET
+"""
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 11
+[[expected.reference]]
+from_object = 5
+path = ["/Contents"]
+to_object = 12
+
+[[expected.behaviour]]
+id = "PARSE-09-blank-middle"
+assertion = "The middle page has no Contents, is classified blank, and is passed through while both text pages remain content"
+observable_via = "qpdf page dictionaries, exact content bytes, independent rasters, and mimus acceptance test"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]

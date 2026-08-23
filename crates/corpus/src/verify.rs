@@ -593,6 +593,7 @@ fn check_determinism(
             hash::of_bytes(&regenerate_mutation(manifest, repo_root)?),
             hash::of_bytes(&regenerate_mutation(manifest, repo_root)?),
         ],
+        Method::ToolGeneratedCommitted => [committed.clone(), committed.clone()],
         Method::RealisticTypesetting => {
             let engine_id = manifest
                 .source
@@ -645,14 +646,15 @@ fn check_determinism(
         ));
     }
 
-    Ok(Outcome::ok(
-        CHECK,
-        CLAUSE,
+    let detail = if manifest.source.method == Method::ToolGeneratedCommitted {
+        format!("一次性工具生成的入库二进制哈希匹配（{}）", &committed[..16])
+    } else {
         format!(
             "重复生成 2 次一致，且与入库 PDF 相同（{}）",
             &committed[..16]
-        ),
-    ))
+        )
+    };
+    Ok(Outcome::ok(CHECK, CLAUSE, detail))
 }
 
 fn regenerate_mutation(manifest: &Manifest, repo_root: &Path) -> Result<Vec<u8>> {
@@ -2179,11 +2181,28 @@ fn check_hand_written_geometry(
         .expected
         .visual_tolerance_pt
         .context("hand-written geometry missing visual_tolerance_pt")?;
-    let mutool = flatten_blocks(mutool_pages);
-    let poppler = flatten_blocks(poppler_pages);
-
     for block in &manifest.expected.block {
         let key = text::compare_key(&block.text);
+        let draw_occurrence = manifest
+            .expected
+            .block
+            .iter()
+            .filter(|other| {
+                other.page == block.page
+                    && other.draw_order < block.draw_order
+                    && text::compare_key(&other.text) == key
+            })
+            .count();
+        let reading_occurrence = manifest
+            .expected
+            .block
+            .iter()
+            .filter(|other| {
+                other.page == block.page
+                    && other.reading_order < block.reading_order
+                    && text::compare_key(&other.text) == key
+            })
+            .count();
         let expected_baseline = block
             .baseline_origin
             .context("hand-written block missing baseline_origin")?;
@@ -2194,7 +2213,7 @@ fn check_hand_written_geometry(
             .visual_bbox
             .context("hand-written block missing visual_bbox")?;
 
-        match pick(&mutool, &key) {
+        match pick_on_page(mutool_pages, block.page, &key, draw_occurrence) {
             Ok(observed) => match observed.baseline_origin {
                 Some(point)
                     if close(point.x, expected_baseline[0], arithmetic_tolerance)
@@ -2212,7 +2231,7 @@ fn check_hand_written_geometry(
             Err(error) => baseline_problems.push(format!("块 `{}`：{error}", block.key)),
         }
 
-        match pick(&poppler, &key) {
+        match pick_on_page(poppler_pages, block.page, &key, reading_occurrence) {
             Ok(observed)
                 if arrays_close(
                     &observed.rect.to_array(),
@@ -2228,20 +2247,22 @@ fn check_hand_written_geometry(
             Err(error) => metric_problems.push(format!("块 `{}`：{error}", block.key)),
         }
 
-        let observed_visual = outlines
-            .get(&block.key)
-            .with_context(|| format!("outline oracle missing block `{}`", block.key))?;
-        if !arrays_close(
-            &observed_visual.to_array(),
-            &expected_visual,
-            visual_tolerance,
-        ) {
-            visual_problems.push(format!(
-                "块 `{}`：manifest {:?}，mutool SVG {:?}",
-                block.key,
-                expected_visual,
-                observed_visual.to_array()
-            ));
+        if block.visible {
+            let observed_visual = outlines
+                .get(&block.key)
+                .with_context(|| format!("outline oracle missing block `{}`", block.key))?;
+            if !arrays_close(
+                &observed_visual.to_array(),
+                &expected_visual,
+                visual_tolerance,
+            ) {
+                visual_problems.push(format!(
+                    "块 `{}`：manifest {:?}，mutool SVG {:?}",
+                    block.key,
+                    expected_visual,
+                    observed_visual.to_array()
+                ));
+            }
         }
     }
 
@@ -2498,7 +2519,7 @@ fn outline_blocks(
     frames: &[PageFrame],
 ) -> Result<BTreeMap<String, Rect>> {
     let mut by_page: BTreeMap<usize, Vec<&crate::manifest::Block>> = BTreeMap::new();
-    for block in &manifest.expected.block {
+    for block in manifest.expected.block.iter().filter(|block| block.visible) {
         by_page.entry(block.page).or_default().push(block);
     }
     for blocks in by_page.values_mut() {
@@ -2651,6 +2672,29 @@ fn pick<'a>(
         return Err("有多块文本完全相同，无法配对".to_string());
     }
     Ok(first)
+}
+
+fn pick_on_page<'a>(
+    pages: &'a [ParsedPage],
+    page_index: usize,
+    key: &str,
+    occurrence: usize,
+) -> Result<&'a crate::oracle::ParsedBlock, String> {
+    let page = pages
+        .iter()
+        .find(|page| page.index == page_index)
+        .ok_or_else(|| format!("找不到第 {} 页的解析器输出", page_index + 1))?;
+    page.blocks
+        .iter()
+        .filter(|block| text::compare_key(&block.text) == key)
+        .nth(occurrence)
+        .ok_or_else(|| {
+            format!(
+                "第 {} 页找不到文本 {key:?} 的第 {} 次出现",
+                page_index + 1,
+                occurrence + 1
+            )
+        })
 }
 
 // ---------------------------------------------------------------- 跨 fixture 断言
@@ -2892,6 +2936,15 @@ pub fn build(
                     },
                 )?;
                 exact::write_bytes_atomic(&derived.bytes, &target)?
+            }
+            Method::ToolGeneratedCommitted => {
+                if !target.is_file() {
+                    bail!(
+                        "[{}] tool-generated-committed PDF 必须先由声明的 argv 一次性生成并入库",
+                        manifest.id()
+                    );
+                }
+                hash::of_file(&target)?
             }
         };
 

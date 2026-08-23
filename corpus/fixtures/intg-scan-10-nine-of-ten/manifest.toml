@@ -1,0 +1,180 @@
+schema_version = 1
+
+[identity]
+id = "intg-scan-10-nine-of-ten"
+name = "Nine image pages and one text page"
+class = "integration"
+legality = "legal"
+cases = ["SCAN-02"]
+priority = "M1"
+variable = "Nine of ten content pages are image-only, placing the document above the rejection threshold"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "intg-scan-10-nine-of-ten.pdf"
+pdf_sha256 = "0723fd3f73e896aa33b16abe40a83d65cae5f9b2e752f199d074408e674a9f93"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 14, descriptor_object = 15, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 1
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 2
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 3
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 4
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 5
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 6
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 7
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 8
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 9
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "696e74672d7363616e2d31302d6e696e"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 10
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "P10"
+page = 9
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.168, 112.656, 131.136]
+visual_bbox = [73.177734, 119.830078, 111.985219, 128.90625]
+
+[[expected.content_stream]]
+object = 19
+compressed = false
+bytes = """q
+300 0 0 200 0 0 cm
+/Im1 Do
+Q
+"""
+[[expected.content_stream]]
+object = 20
+compressed = false
+bytes = """q
+300 0 0 200 0 0 cm
+/Im1 Do
+Q
+"""
+[[expected.content_stream]]
+object = 21
+compressed = false
+bytes = """q
+300 0 0 200 0 0 cm
+/Im1 Do
+Q
+"""
+[[expected.content_stream]]
+object = 22
+compressed = false
+bytes = """q
+300 0 0 200 0 0 cm
+/Im1 Do
+Q
+"""
+[[expected.content_stream]]
+object = 23
+compressed = false
+bytes = """q
+300 0 0 200 0 0 cm
+/Im1 Do
+Q
+"""
+[[expected.content_stream]]
+object = 24
+compressed = false
+bytes = """q
+300 0 0 200 0 0 cm
+/Im1 Do
+Q
+"""
+[[expected.content_stream]]
+object = 25
+compressed = false
+bytes = """q
+300 0 0 200 0 0 cm
+/Im1 Do
+Q
+"""
+[[expected.content_stream]]
+object = 26
+compressed = false
+bytes = """q
+300 0 0 200 0 0 cm
+/Im1 Do
+Q
+"""
+[[expected.content_stream]]
+object = 27
+compressed = false
+bytes = """q
+300 0 0 200 0 0 cm
+/Im1 Do
+Q
+"""
+[[expected.content_stream]]
+object = 28
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 120 Tm
+(MIMUS) Tj
+ET
+"""
+
+[[expected.behaviour]]
+id = "SCAN-02-nine-of-ten"
+assertion = "Nine of ten content pages are scanned, so the document is rejected with counts 9/10"
+observable_via = "exact page content bytes, independent rasters, and mimus acceptance test"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]

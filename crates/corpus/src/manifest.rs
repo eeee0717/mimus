@@ -91,6 +91,8 @@ pub enum Method {
     RealisticTypesetting,
     /// 从合法父本做字节级变异。
     ByteMutation,
+    /// 由存在随机性的外部工具一次性生成并把二进制作为合同入库。
+    ToolGeneratedCommitted,
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +109,9 @@ pub struct Source {
     /// 生成源文件，相对 manifest 所在目录。
     #[serde(default)]
     pub source_file: Option<String>,
+    /// 一次性工具生成的完整 argv；不经 shell 解释，保留空参数。
+    #[serde(default)]
+    pub generation_argv: Vec<String>,
     /// 产物 PDF，相对 manifest 所在目录。
     pub pdf: String,
     pub pdf_sha256: String,
@@ -120,6 +125,8 @@ pub struct Source {
 #[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "kebab-case")]
 pub enum FontProvenance {
+    /// fixture 不包含字体，例如纯图或全空白 exact PDF。
+    None,
     /// Typst 二进制内嵌字体集合，由钉死的 Typst 版本担保。
     TypstEmbedded,
     /// TeX Live 2026 自带字体，由钉死的发行版担保。
@@ -417,6 +424,9 @@ pub struct Block {
     pub reading_order: usize,
     /// 该块的完整文本；比较前按 `text::normalize` 归一。
     pub text: String,
+    /// 是否实际着墨。`Tr 3` / `Tr 7` 文字没有可供渲染 oracle 核对的轮廓。
+    #[serde(default = "visible_by_default")]
+    pub visible: bool,
     /// 手写几何（`geometry_source = "hand-written"` 时必填）。
     #[serde(default)]
     pub baseline_origin: Option<[f64; 2]>,
@@ -424,6 +434,10 @@ pub struct Block {
     pub metric_box: Option<[f64; 4]>,
     #[serde(default)]
     pub visual_bbox: Option<[f64; 4]>,
+}
+
+fn visible_by_default() -> bool {
+    true
 }
 
 /// §2.9：断言必须独立可观察。
@@ -568,6 +582,17 @@ impl Manifest {
         self.oracle.checks.contains(&check)
     }
 
+    fn has_text_expectations(&self) -> bool {
+        !self.expected.block.is_empty()
+    }
+
+    fn is_fontless_exact_fixture(&self) -> bool {
+        self.source.method == Method::ExactWriter
+            && !self.has_text_expectations()
+            && self.source.font_provenance == FontProvenance::None
+            && self.source.fonts.is_empty()
+    }
+
     fn validate(&self) -> Result<()> {
         fail_if(
             self.schema_version != SUPPORTED_SCHEMA_VERSION,
@@ -596,7 +621,7 @@ impl Manifest {
         // 手写的 block.text 必须被至少一种手段核对。否则那一串文本就只是注释：
         // 写错了没人知道，而它恰恰是 §2.1 里最该被守住的东西。
         fail_if(
-            !self.expected.block.is_empty()
+            self.has_text_expectations()
                 && !self.requires(Check::Structure)
                 && !self.requires(Check::Glyphs)
                 && !self.requires(Check::EmbeddedCmap)
@@ -699,6 +724,11 @@ impl Manifest {
                     "§2.5",
                     "现实排版 fixture 必须声明 engine 与 source_file",
                 )?;
+                fail_if(
+                    !self.source.generation_argv.is_empty(),
+                    "§2.5",
+                    "现实排版 fixture 不应声明 generation_argv",
+                )?;
             }
             Method::ExactWriter => {
                 fail_if(
@@ -712,14 +742,20 @@ impl Manifest {
                     "精确 fixture 由内置 recipe 生成，不应声明外部 engine/source_file",
                 )?;
                 fail_if(
-                    self.source.font_provenance != FontProvenance::Vendored,
-                    "§2.6",
-                    "精确 fixture 必须嵌入钉死的字体文件（font_provenance = \"vendored\"）",
+                    !self.source.generation_argv.is_empty(),
+                    "§2.5",
+                    "精确 fixture 不应声明 generation_argv",
                 )?;
                 fail_if(
-                    self.source.fonts.is_empty(),
+                    !self.is_fontless_exact_fixture()
+                        && self.source.font_provenance != FontProvenance::Vendored,
                     "§2.6",
-                    "精确 fixture 必须逐个列出字体文件及其 SHA-256",
+                    "含文字的精确 fixture 必须嵌入钉死的字体文件",
+                )?;
+                fail_if(
+                    !self.is_fontless_exact_fixture() && self.source.fonts.is_empty(),
+                    "§2.6",
+                    "含文字的精确 fixture 必须逐个列出字体文件及其 SHA-256",
                 )?;
                 for font in &self.source.fonts {
                     fail_if(
@@ -738,6 +774,24 @@ impl Manifest {
                     "§2.5",
                     "字节变异 fixture 必须声明 [lineage]",
                 )?;
+                fail_if(
+                    !self.source.generation_argv.is_empty(),
+                    "§2.5",
+                    "字节变异 fixture 不应声明 generation_argv",
+                )?;
+            }
+            Method::ToolGeneratedCommitted => {
+                fail_if(
+                    self.source.generator.as_deref().is_none_or(str::is_empty)
+                        || self.source.generation_argv.is_empty(),
+                    "§2.5/§2.6",
+                    "工具生成入库 fixture 必须钉死 generator 与非空 generation_argv",
+                )?;
+                fail_if(
+                    self.source.engine.is_some() || self.source.source_file.is_some(),
+                    "§2.5",
+                    "工具生成入库 fixture 不应声明 engine/source_file",
+                )?;
             }
         }
 
@@ -745,6 +799,11 @@ impl Manifest {
             self.source.font_provenance == FontProvenance::Vendored && self.source.fonts.is_empty(),
             "§2.6",
             "font_provenance = \"vendored\" 却没列出任何字体文件",
+        )?;
+        fail_if(
+            self.source.font_provenance == FontProvenance::None && !self.source.fonts.is_empty(),
+            "§2.6",
+            "font_provenance = \"none\" 时不得声明字体文件",
         )?;
         fail_if(
             self.source.pdf_sha256.len() != 64,
@@ -962,19 +1021,21 @@ impl Manifest {
                 &format!("exact-writer fixture 必须启用 {name} 门禁"),
             )?;
         }
-        fail_if(
-            !self.requires(Check::Structure) && !self.requires(Check::EmbeddedCmap),
-            "§2.8",
-            "exact-writer fixture 必须启用 structure 或 embedded-cmap 门禁",
-        )?;
-        fail_if(
-            !self.requires(Check::HandWrittenGeometry)
-                && !self.requires(Check::Type3Geometry)
-                && !self.requires(Check::FontAdvance)
-                && !self.requires(Check::EmbeddedCmap),
-            "§2.8",
-            "exact-writer fixture 必须启用 hand-written-geometry、type3-geometry、font-advance 或 embedded-cmap 门禁",
-        )?;
+        if self.has_text_expectations() {
+            fail_if(
+                !self.requires(Check::Structure) && !self.requires(Check::EmbeddedCmap),
+                "§2.8",
+                "exact-writer fixture 必须启用 structure 或 embedded-cmap 门禁",
+            )?;
+            fail_if(
+                !self.requires(Check::HandWrittenGeometry)
+                    && !self.requires(Check::Type3Geometry)
+                    && !self.requires(Check::FontAdvance)
+                    && !self.requires(Check::EmbeddedCmap),
+                "§2.8",
+                "exact-writer fixture 必须启用 hand-written-geometry、type3-geometry、font-advance 或 embedded-cmap 门禁",
+            )?;
+        }
 
         fail_if(
             self.expected.geometry_source != GeometrySource::HandWritten,
@@ -1515,5 +1576,47 @@ text = "world"
                 "exact manifest accepted without {required:?}"
             );
         }
+    }
+
+    #[test]
+    fn text_bearing_scan_fixture_cannot_bypass_corroboration_gates() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/fixtures/unit-scan-04-title-page");
+
+        for required in [Check::Structure, Check::HandWrittenGeometry] {
+            let mut manifest = Manifest::load(&dir).unwrap();
+            manifest.oracle.checks.retain(|check| *check != required);
+
+            let error = manifest.validate().unwrap_err().to_string();
+            assert!(
+                error.contains("§2.8"),
+                "text-bearing scan manifest accepted without {required:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn fontless_exact_fixture_exemption_does_not_depend_on_case_prefix() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/fixtures/unit-scan-01-image-only");
+        let mut manifest = Manifest::load(&dir).unwrap();
+        manifest.identity.cases = vec!["DOC-02".to_string()];
+
+        assert!(manifest.expected.block.is_empty());
+        assert!(!manifest.requires(Check::Structure));
+        assert!(!manifest.requires(Check::HandWrittenGeometry));
+        manifest.validate().unwrap();
+    }
+
+    #[test]
+    fn invisible_text_uses_non_visual_corroboration_gates() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/fixtures/unit-scan-02-invisible-ocr");
+        let manifest = Manifest::load(&dir).unwrap();
+
+        assert!(manifest.has_text_expectations());
+        assert!(manifest.expected.block.iter().all(|block| !block.visible));
+        assert!(manifest.requires(Check::Structure));
+        assert!(manifest.requires(Check::HandWrittenGeometry));
     }
 }

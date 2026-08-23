@@ -1,0 +1,70 @@
+schema_version = 1
+
+[identity]
+id = "unit-scan-01-image-only"
+name = "Single full-page image without text"
+class = "unit"
+legality = "legal"
+cases = ["SCAN-01", "DOC-02"]
+priority = "M1"
+variable = "The only page paints one Image XObject and contains no text object"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-scan-01-image-only.pdf"
+pdf_sha256 = "bf7410da61732b30c9f825d6ae80b43832c16c573ac6c02c876e2d1ece1bfbcb"
+font_provenance = "none"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+block = []
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d7363616e2d30312d696d61"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+
+[[expected.content_stream]]
+object = 6
+compressed = false
+bytes = """q
+300 0 0 200 0 0 cm
+/Im1 Do
+Q
+"""
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 6
+
+[[expected.reference]]
+from_object = 4
+path = ["/XObject", "/Im1"]
+to_object = 5
+
+[[expected.behaviour]]
+id = "SCAN-01-image-only"
+assertion = "The page has an invoked image, zero visible text objects, and is classified as scanned"
+observable_via = "exact content bytes, qpdf object graph, independent raster, and mimus acceptance test"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "pdf-bytes", "pdf-structure", "render"]
