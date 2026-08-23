@@ -10,8 +10,8 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use mimus_core::engine::SingleLineLayoutDetector;
 use mimus_core::engine::pdfium::PdfiumEngine;
-use mimus_core::error::{MimusError, UsageReason};
-use mimus_core::event::{Event, EventKind, EventSink, Stage};
+use mimus_core::error::{IoReason, MimusError, UsageReason};
+use mimus_core::event::{DiagnosticEvent, Event, EventKind, EventSink, ResultPayload, Stage};
 use mimus_core::pass;
 use mimus_core::translate::{NoneTranslator, openai_not_implemented};
 use mimus_core::{Document, PassContext, PipelineConfig};
@@ -98,13 +98,43 @@ fn run_translate(args: TranslateArgs, sink: &CliEventSink) -> ExitCode {
         layout_detector: &layout_detector,
         translator: &translator,
         events: sink,
+        snapshots: None,
         config: PipelineConfig::default(),
     };
-    let mut document = Document::new(args.input, output);
+    let mut document = Document::for_translation(args.input, output);
     match pass::run(&mut document, &context) {
-        Ok(_) => ExitCode::SUCCESS,
-        Err(error) => ExitCode::from(error.category().code()),
+        Ok(result) => {
+            if let Err(error) = emit_diagnostics(sink, &document.diagnostics.events()) {
+                return ExitCode::from(error.category().code());
+            }
+            match sink.emit(Event::new(EventKind::Result {
+                result: ResultPayload::Translate {
+                    output: result.output,
+                },
+                pages: result.pages,
+                warnings: result.warnings,
+            })) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => ExitCode::from(error.category().code()),
+            }
+        }
+        Err(error) => {
+            let _ = emit_diagnostics(sink, &document.diagnostics.events());
+            emit_error(sink, error)
+        }
     }
+}
+
+fn emit_diagnostics(
+    sink: &CliEventSink,
+    diagnostics: &[DiagnosticEvent],
+) -> mimus_core::Result<()> {
+    for diagnostic in diagnostics {
+        sink.emit(Event::new(EventKind::Diagnostic {
+            diagnostic: diagnostic.clone(),
+        }))?;
+    }
+    Ok(())
 }
 
 fn default_output_path(input: &Path) -> Result<PathBuf, MimusError> {
@@ -124,8 +154,10 @@ fn default_output_path(input: &Path) -> Result<PathBuf, MimusError> {
 
 fn emit_error(sink: &CliEventSink, error: MimusError) -> ExitCode {
     let code = error.category().code();
-    sink.emit(Event::new(EventKind::from_error(&error)));
-    ExitCode::from(code)
+    match sink.emit(Event::new(EventKind::from_error(&error))) {
+        Ok(()) => ExitCode::from(code),
+        Err(output_error) => ExitCode::from(output_error.category().code()),
+    }
 }
 
 struct CliEventSink {
@@ -143,17 +175,15 @@ impl CliEventSink {
 }
 
 impl EventSink for CliEventSink {
-    fn emit(&self, event: Event) {
+    fn emit(&self, event: Event) -> mimus_core::Result<()> {
         let _guard = match self.output_lock.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
         if self.json {
             let mut stdout = std::io::stdout().lock();
-            if serde_json::to_writer(&mut stdout, &event).is_ok() {
-                let _ = stdout.write_all(b"\n");
-            }
-            return;
+            let line = mimus_core::event::serialize_line(&event)?;
+            return write_stdout(&mut stdout, &line);
         }
         match event.kind {
             EventKind::StageStarted { stage } => {
@@ -161,23 +191,54 @@ impl EventSink for CliEventSink {
             }
             EventKind::PageProgress {
                 stage,
-                page,
+                page_index,
                 total_pages,
             } => {
                 let _ = writeln!(
                     std::io::stderr().lock(),
-                    "{}: page {page}/{total_pages}",
-                    stage_name(stage)
+                    "{}: page {}/{total_pages}",
+                    stage_name(stage),
+                    page_index + 1
                 );
             }
             EventKind::StageFinished { .. } => {}
-            EventKind::Result { output, .. } => {
-                let _ = writeln!(std::io::stdout().lock(), "{output}");
-            }
+            EventKind::Diagnostic { diagnostic } => match diagnostic {
+                DiagnosticEvent::EngineBaselineMismatch {
+                    page_index,
+                    character_index,
+                    delta_x_pt,
+                    delta_y_pt,
+                } => {
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning[engine_baseline_mismatch]: page {} character {character_index} delta=({delta_x_pt:.6},{delta_y_pt:.6})pt",
+                        page_index + 1
+                    );
+                }
+                DiagnosticEvent::DroppedDiagnostics { count } => {
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning[dropped_diagnostics]: {count} additional diagnostics dropped"
+                    );
+                }
+            },
+            EventKind::Result { result, .. } => match result {
+                ResultPayload::Translate { output } => {
+                    write_stdout(
+                        &mut std::io::stdout().lock(),
+                        format!("{output}\n").as_bytes(),
+                    )?;
+                }
+                ResultPayload::Inspect { il } => {
+                    let bytes = mimus_core::il::canonical_json(&il)?;
+                    write_stdout(&mut std::io::stdout().lock(), &bytes)?;
+                }
+            },
             EventKind::Error {
                 reason,
                 message,
                 hint,
+                ..
             } => {
                 let mut stderr = std::io::stderr().lock();
                 let _ = writeln!(stderr, "error[{reason}]: {message}");
@@ -186,6 +247,18 @@ impl EventSink for CliEventSink {
                 }
             }
         }
+        Ok(())
+    }
+}
+
+fn write_stdout(writer: &mut impl Write, bytes: &[u8]) -> mimus_core::Result<()> {
+    match writer.write_all(bytes) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(MimusError::io(
+            IoReason::StdoutWrite,
+            format!("could not write stdout: {error}"),
+        )),
     }
 }
 

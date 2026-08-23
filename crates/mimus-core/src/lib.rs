@@ -10,10 +10,10 @@ pub mod translate;
 pub mod walk;
 pub mod write;
 
-pub use context::{Document, PassContext, PipelineConfig};
+pub use context::{Document, PassContext, PassSnapshotSink, PipelineConfig};
 pub use error::{
-    AssetReason, ErrorReason, ExitCategory, InputReason, MimusError, Result, TranslationReason,
-    UsageReason,
+    AssetReason, ErrorReason, ExitCategory, InputReason, InternalReason, IoReason, MimusError,
+    Result, TranslationReason, UsageReason,
 };
 
 /// Core version used by the CLI as its version source of truth.
