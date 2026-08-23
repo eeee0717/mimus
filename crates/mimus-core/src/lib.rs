@@ -1,15 +1,21 @@
-//! `mimus-core` — 保留版面的 PDF 翻译内核。
-//!
-//! 库边界按决策 #29 划定：IL、pass 链、引擎 trait 与翻译层住在这里，CLI、
-//! 进度与配置住在 `mimus` 二进制里。本里程碑（T01）只固化边界本身，功能
-//! 从 M1 起逐步落地。
+//! `mimus-core` - layout-preserving PDF translation primitives.
 
-/// 内核版本号，`mimus` 二进制以它作为 `--version` 的真源。
-///
-/// 版本从 workspace 统一继承，因此库与二进制不会漂移。
+pub mod context;
+pub mod engine;
+pub mod error;
+pub mod event;
+pub mod il;
+pub mod pass;
+pub mod translate;
+pub mod walk;
+pub mod write;
+
+pub use context::{Document, PassContext, PipelineConfig};
+pub use error::{ErrorReason, ExitCategory, MimusError, Result};
+
+/// Core version used by the CLI as its version source of truth.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// 返回内核版本号。
 #[must_use]
 pub fn version() -> &'static str {
     VERSION

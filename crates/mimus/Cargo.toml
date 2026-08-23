@@ -14,3 +14,8 @@ path = "src/main.rs"
 [dependencies]
 mimus-core.workspace = true
 clap.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+quick-xml.workspace = true
+tempfile.workspace = true

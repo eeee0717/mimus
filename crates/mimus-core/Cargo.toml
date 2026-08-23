@@ -8,3 +8,11 @@ rust-version.workspace = true
 description = "Layout-preserving PDF translation core: IL, pass chain, engine traits, translation layer."
 
 [dependencies]
+lopdf.workspace = true
+pdfium-render.workspace = true
+serde.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
