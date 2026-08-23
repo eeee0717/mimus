@@ -881,6 +881,11 @@ mod tests {
             .join("../../corpus/fixtures/unit-base-01-single-line/unit-base-01-single-line.pdf")
     }
 
+    fn scan_fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/fixtures/unit-scan-01-image-only/unit-scan-01-image-only.pdf")
+    }
+
     #[test]
     fn fixed_pipeline_runs_every_stage_without_owning_the_terminal_event() {
         let directory = tempfile::tempdir().unwrap();
@@ -921,6 +926,72 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(started, ORDER);
         assert!(events.iter().all(|event| !event.kind.is_terminal()));
+    }
+
+    #[test]
+    fn scanned_rejection_precedes_translation_rasterization_and_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("must-not-exist.pdf");
+        let mut document = Document::new(scan_fixture(), &output);
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+
+        let error = run(&mut document, &context).unwrap_err();
+
+        assert_eq!(
+            error.reason(),
+            crate::error::ErrorReason::Input(InputReason::ScannedPdf)
+        );
+        assert_eq!(error.scan_counts(), Some((1, 1)));
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(engine.raster_calls.load(Ordering::SeqCst), 0);
+        assert!(document.rewrites.is_empty());
+        assert!(document.write_report.is_none());
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn all_blank_document_is_an_exact_zero_rewrite_passthrough() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("blank.pdf");
+        let output = directory.path().join("blank-output.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        pdf.get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(Vec::new());
+        pdf.save(&input).unwrap();
+        let input_bytes = std::fs::read(&input).unwrap();
+        let mut document = Document::new(&input, &output);
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+
+        let result = run(&mut document, &context).unwrap();
+
+        assert_eq!(result.appended_bytes, 0);
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(engine.raster_calls.load(Ordering::SeqCst), 0);
+        assert!(document.il.pages[0].paragraphs.is_empty());
+        assert_eq!(std::fs::read(output).unwrap(), input_bytes);
     }
 
     #[test]

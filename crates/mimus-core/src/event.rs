@@ -327,6 +327,8 @@ pub fn serialize_line(event: &Event) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use crate::error::InputReason;
+
     use super::*;
 
     fn baseline(index: usize) -> Diagnostic {
@@ -367,5 +369,49 @@ mod tests {
         assert_eq!(value["id"], "engine_baseline_mismatch");
         assert_eq!(value["page_index"], 0);
         assert_eq!(value["character_index"], 0);
+    }
+
+    #[test]
+    fn scan_summary_bypasses_the_normal_diagnostic_limit_but_counts_once() {
+        let mut diagnostics = Diagnostics::default();
+        for index in 0..(MAX_DIAGNOSTICS + 7) {
+            diagnostics.push(baseline(index));
+        }
+        diagnostics.push(Diagnostic::ScanSummary {
+            scanned_page_indices: vec![1, 3],
+            scanned_pages: 2,
+            blank_pages: 4,
+            content_pages: 5,
+            total_pages: 9,
+        });
+
+        assert_eq!(diagnostics.entries().len(), MAX_DIAGNOSTICS + 1);
+        assert_eq!(diagnostics.dropped(), 7);
+        assert_eq!(diagnostics.total_count(), MAX_DIAGNOSTICS + 8);
+        assert!(diagnostics.events().iter().any(|event| matches!(
+            event,
+            DiagnosticEvent::ScanSummary {
+                scanned_page_indices,
+                scanned_pages: 2,
+                blank_pages: 4,
+                content_pages: 5,
+                total_pages: 9,
+            } if scanned_page_indices == &[1, 3]
+        )));
+    }
+
+    #[test]
+    fn only_scanned_pdf_errors_serialize_scan_counts() {
+        let scanned = MimusError::input(InputReason::ScannedPdf, "scanned").with_scan_counts(4, 5);
+        let scanned = serde_json::to_value(Event::new(EventKind::from_error(&scanned))).unwrap();
+        assert_eq!(scanned["scanned_pages"], 4);
+        assert_eq!(scanned["total_pages"], 5);
+
+        let unsupported =
+            MimusError::input(InputReason::UnsupportedPdf, "unsupported").with_scan_counts(4, 5);
+        let unsupported =
+            serde_json::to_value(Event::new(EventKind::from_error(&unsupported))).unwrap();
+        assert!(unsupported.get("scanned_pages").is_none());
+        assert!(unsupported.get("total_pages").is_none());
     }
 }

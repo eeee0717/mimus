@@ -429,3 +429,215 @@ fn text_array_nonempty(values: &[Object]) -> Option<bool> {
     }
     Some(nonempty)
 }
+
+#[cfg(test)]
+mod tests {
+    use lopdf::{Object, Stream, dictionary};
+
+    use super::*;
+
+    fn page_with_content(
+        document: &mut Document,
+        content: &[u8],
+        resources: Dictionary,
+    ) -> ObjectId {
+        let content_id = document.add_object(Stream::new(Dictionary::new(), content.to_vec()));
+        let resources_id = document.add_object(resources);
+        document.add_object(dictionary! {
+            "Type" => "Page",
+            "Contents" => content_id,
+            "Resources" => resources_id,
+        })
+    }
+
+    fn image(document: &mut Document) -> ObjectId {
+        document.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 1,
+                "Height" => 1,
+                "ColorSpace" => "DeviceRGB",
+                "BitsPerComponent" => 8,
+            },
+            vec![0, 0, 0],
+        ))
+    }
+
+    fn form(document: &mut Document, content: &[u8], resources: Dictionary) -> ObjectId {
+        document.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 1.into(), 1.into()],
+                "Resources" => resources,
+            },
+            content.to_vec(),
+        ))
+    }
+
+    #[test]
+    fn rendering_modes_three_and_seven_are_the_only_invisible_modes() {
+        for mode in 0..=7 {
+            let mut document = Document::with_version("1.7");
+            let content = format!("BT {mode} Tr (x) Tj ET");
+            let page = page_with_content(&mut document, content.as_bytes(), Dictionary::new());
+
+            let evidence = prescan_page(&document, page);
+
+            assert!(evidence.complete, "Tr {mode}");
+            assert_eq!(
+                evidence.visible_text_shows,
+                usize::from(!matches!(mode, 3 | 7))
+            );
+            assert_eq!(
+                evidence.invisible_text_shows,
+                usize::from(matches!(mode, 3 | 7))
+            );
+            assert_eq!(evidence.classify(), PageClass::Content);
+        }
+    }
+
+    #[test]
+    fn graphics_state_save_and_restore_restores_the_rendering_mode() {
+        let mut document = Document::with_version("1.7");
+        let page = page_with_content(
+            &mut document,
+            b"BT 3 Tr ET q BT 0 Tr (visible) Tj ET Q BT (hidden) Tj ET",
+            Dictionary::new(),
+        );
+
+        let evidence = prescan_page(&document, page);
+
+        assert_eq!(
+            evidence,
+            PageEvidence {
+                visible_text_shows: 1,
+                invisible_text_shows: 1,
+                has_image: false,
+                complete: true,
+            }
+        );
+    }
+
+    #[test]
+    fn inline_images_are_scanned_page_evidence() {
+        let mut document = Document::with_version("1.7");
+        let page = page_with_content(
+            &mut document,
+            b"BI /W 1 /H 1 /CS /RGB /BPC 8 ID \x00\x00\x00 EI",
+            Dictionary::new(),
+        );
+
+        let evidence = prescan_page(&document, page);
+
+        assert!(evidence.complete);
+        assert!(evidence.has_image);
+        assert_eq!(evidence.classify(), PageClass::Scanned);
+    }
+
+    #[test]
+    fn nested_forms_use_their_own_resource_scope_to_find_images() {
+        let mut document = Document::with_version("1.7");
+        let image = image(&mut document);
+        let inner = form(
+            &mut document,
+            b"/Im Do",
+            dictionary! { "XObject" => dictionary! { "Im" => image } },
+        );
+        let outer = form(
+            &mut document,
+            b"/Inner Do",
+            dictionary! { "XObject" => dictionary! { "Inner" => inner } },
+        );
+        let page = page_with_content(
+            &mut document,
+            b"/Outer Do",
+            dictionary! { "XObject" => dictionary! { "Outer" => outer } },
+        );
+
+        let evidence = prescan_page(&document, page);
+
+        assert!(evidence.complete);
+        assert!(evidence.has_image);
+        assert_eq!(evidence.classify(), PageClass::Scanned);
+    }
+
+    #[test]
+    fn form_cycles_and_depth_overflow_degrade_to_content() {
+        let mut cyclic = Document::with_version("1.7");
+        let a = cyclic.new_object_id();
+        let b = cyclic.new_object_id();
+        cyclic.objects.insert(
+            a,
+            Object::Stream(Stream::new(
+                dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 1.into(), 1.into()],
+                    "Resources" => dictionary! { "XObject" => dictionary! { "B" => b } },
+                },
+                b"/B Do".to_vec(),
+            )),
+        );
+        cyclic.objects.insert(
+            b,
+            Object::Stream(Stream::new(
+                dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 1.into(), 1.into()],
+                    "Resources" => dictionary! { "XObject" => dictionary! { "A" => a } },
+                },
+                b"/A Do".to_vec(),
+            )),
+        );
+        let page = page_with_content(
+            &mut cyclic,
+            b"/A Do",
+            dictionary! { "XObject" => dictionary! { "A" => a } },
+        );
+        let evidence = prescan_page(&cyclic, page);
+        assert!(!evidence.complete);
+        assert_eq!(evidence.classify(), PageClass::Content);
+
+        let mut deep = Document::with_version("1.7");
+        let mut next = image(&mut deep);
+        for _ in 0..=MAX_FORM_DEPTH {
+            next = form(
+                &mut deep,
+                b"/Next Do",
+                dictionary! { "XObject" => dictionary! { "Next" => next } },
+            );
+        }
+        let page = page_with_content(
+            &mut deep,
+            b"/Next Do",
+            dictionary! { "XObject" => dictionary! { "Next" => next } },
+        );
+        let evidence = prescan_page(&deep, page);
+        assert!(!evidence.complete);
+        assert_eq!(evidence.classify(), PageClass::Content);
+    }
+
+    #[test]
+    fn malformed_or_incomplete_evidence_never_becomes_blank_or_scanned() {
+        let mut malformed_text = Document::with_version("1.7");
+        let page = page_with_content(&mut malformed_text, b"BT 42 Tj ET", Dictionary::new());
+        let evidence = prescan_page(&malformed_text, page);
+        assert!(!evidence.complete);
+        assert_eq!(evidence.classify(), PageClass::Content);
+
+        let mut unbalanced = Document::with_version("1.7");
+        let image = image(&mut unbalanced);
+        let page = page_with_content(
+            &mut unbalanced,
+            b"q /Im Do",
+            dictionary! { "XObject" => dictionary! { "Im" => image } },
+        );
+        let evidence = prescan_page(&unbalanced, page);
+        assert!(evidence.has_image);
+        assert!(!evidence.complete);
+        assert_eq!(evidence.classify(), PageClass::Content);
+    }
+}
