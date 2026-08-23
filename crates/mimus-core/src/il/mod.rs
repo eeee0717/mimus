@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::error::{InternalReason, MimusError, Result};
+
 // ADR-0007: 这是 IL 快照版本，不是 event.rs 的 CLI 机器协议版本。
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -16,6 +18,22 @@ impl Default for Document {
             pages: Vec::new(),
         }
     }
+}
+
+#[must_use]
+pub fn snapshot(document: &Document) -> Document {
+    document.clone()
+}
+
+pub fn canonical_json(document: &Document) -> Result<Vec<u8>> {
+    let mut output = serde_json::to_vec_pretty(document).map_err(|error| {
+        MimusError::internal(
+            InternalReason::InvariantViolation,
+            format!("could not serialize canonical IL: {error}"),
+        )
+    })?;
+    output.push(b'\n');
+    Ok(output)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -151,8 +169,10 @@ mod tests {
                 }],
             }],
         };
-        let value = serde_json::to_value(document).unwrap();
+        let value = serde_json::to_value(&document).unwrap();
         assert_eq!(value["schema_version"], SCHEMA_VERSION);
         assert_eq!(value["pages"][0]["paragraphs"][0]["text"]["kind"], "chars");
+        let canonical = canonical_json(&document).unwrap();
+        assert!(canonical.ends_with(b"\n"));
     }
 }

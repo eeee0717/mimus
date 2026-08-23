@@ -1,0 +1,219 @@
+---
+source: crates/mimus/tests/cli.rs
+expression: "String::from_utf8(human.stdout.clone()).unwrap()"
+---
+{
+  "schema_version": 1,
+  "pages": [
+    {
+      "index": 0,
+      "geometry": {
+        "width": 300.0,
+        "height": 200.0,
+        "rotate_degrees": 0
+      },
+      "paragraphs": [
+        {
+          "reading_order": 0,
+          "bounds": {
+            "left": 73.1760025024414,
+            "bottom": 119.84400177001953,
+            "right": 111.98400115966797,
+            "top": 128.9040069580078
+          },
+          "text": {
+            "kind": "chars",
+            "chars": [
+              {
+                "unicode": "M",
+                "code": 77,
+                "font": {
+                  "resource_name": "F1",
+                  "object_number": 5,
+                  "generation": 0
+                },
+                "font_size": 12.0,
+                "baseline_origin": {
+                  "x": 72.0,
+                  "y": 120.0
+                },
+                "box": {
+                  "left": 72.0,
+                  "bottom": 117.168,
+                  "right": 82.356,
+                  "top": 131.136
+                },
+                "visual_bbox": {
+                  "left": 73.1760025024414,
+                  "bottom": 120.0,
+                  "right": 81.18000030517578,
+                  "top": 128.7480010986328
+                },
+                "text_transform": {
+                  "kind": "upright"
+                },
+                "passthrough": {
+                  "content_object": 9,
+                  "byte_start": 31,
+                  "byte_end": 38,
+                  "encoded": [
+                    77
+                  ]
+                }
+              },
+              {
+                "unicode": "I",
+                "code": 73,
+                "font": {
+                  "resource_name": "F1",
+                  "object_number": 5,
+                  "generation": 0
+                },
+                "font_size": 12.0,
+                "baseline_origin": {
+                  "x": 82.356,
+                  "y": 120.0
+                },
+                "box": {
+                  "left": 82.356,
+                  "bottom": 117.168,
+                  "right": 85.896,
+                  "top": 131.136
+                },
+                "visual_bbox": {
+                  "left": 83.53199768066406,
+                  "bottom": 120.0,
+                  "right": 84.72000122070312,
+                  "top": 128.7480010986328
+                },
+                "text_transform": {
+                  "kind": "upright"
+                },
+                "passthrough": {
+                  "content_object": 9,
+                  "byte_start": 31,
+                  "byte_end": 38,
+                  "encoded": [
+                    73
+                  ]
+                }
+              },
+              {
+                "unicode": "M",
+                "code": 77,
+                "font": {
+                  "resource_name": "F1",
+                  "object_number": 5,
+                  "generation": 0
+                },
+                "font_size": 12.0,
+                "baseline_origin": {
+                  "x": 85.896,
+                  "y": 120.0
+                },
+                "box": {
+                  "left": 85.896,
+                  "bottom": 117.168,
+                  "right": 96.252,
+                  "top": 131.136
+                },
+                "visual_bbox": {
+                  "left": 87.0719985961914,
+                  "bottom": 120.0,
+                  "right": 95.07600402832031,
+                  "top": 128.7480010986328
+                },
+                "text_transform": {
+                  "kind": "upright"
+                },
+                "passthrough": {
+                  "content_object": 9,
+                  "byte_start": 31,
+                  "byte_end": 38,
+                  "encoded": [
+                    77
+                  ]
+                }
+              },
+              {
+                "unicode": "U",
+                "code": 85,
+                "font": {
+                  "resource_name": "F1",
+                  "object_number": 5,
+                  "generation": 0
+                },
+                "font_size": 12.0,
+                "baseline_origin": {
+                  "x": 96.252,
+                  "y": 120.0
+                },
+                "box": {
+                  "left": 96.252,
+                  "bottom": 117.168,
+                  "right": 105.036,
+                  "top": 131.136
+                },
+                "visual_bbox": {
+                  "left": 97.2959976196289,
+                  "bottom": 119.84400177001953,
+                  "right": 103.99199676513672,
+                  "top": 128.7480010986328
+                },
+                "text_transform": {
+                  "kind": "upright"
+                },
+                "passthrough": {
+                  "content_object": 9,
+                  "byte_start": 31,
+                  "byte_end": 38,
+                  "encoded": [
+                    85
+                  ]
+                }
+              },
+              {
+                "unicode": "S",
+                "code": 83,
+                "font": {
+                  "resource_name": "F1",
+                  "object_number": 5,
+                  "generation": 0
+                },
+                "font_size": 12.0,
+                "baseline_origin": {
+                  "x": 105.036,
+                  "y": 120.0
+                },
+                "box": {
+                  "left": 105.036,
+                  "bottom": 117.168,
+                  "right": 112.656,
+                  "top": 131.136
+                },
+                "visual_bbox": {
+                  "left": 105.8280029296875,
+                  "bottom": 119.84400177001953,
+                  "right": 111.98400115966797,
+                  "top": 128.9040069580078
+                },
+                "text_transform": {
+                  "kind": "upright"
+                },
+                "passthrough": {
+                  "content_object": 9,
+                  "byte_start": 31,
+                  "byte_end": 38,
+                  "encoded": [
+                    83
+                  ]
+                }
+              }
+            ]
+          },
+          "translated_text": null
+        }
+      ]
+    }
+  ]
+}

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use lopdf::{Dictionary, Document, IncrementalDocument, Object, ObjectId, Stream};
 
-use crate::error::{InputReason, MimusError, Result};
+use crate::error::{InternalReason, IoReason, MimusError, Result};
 use crate::il::FontRef;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,8 +44,8 @@ pub(crate) fn build_incremental(
 
     for rewrite in rewrites {
         let page_id = pages.get(rewrite.page_index).copied().ok_or_else(|| {
-            MimusError::input(
-                InputReason::OutputWrite,
+            MimusError::internal(
+                InternalReason::OutputBuild,
                 format!(
                     "output rewrite references missing page {}",
                     rewrite.page_index
@@ -54,13 +54,13 @@ pub(crate) fn build_incremental(
         })?;
         incremental
             .opt_clone_object_to_new_document(page_id)
-            .map_err(output_error)?;
+            .map_err(output_build_error)?;
         let content_id = incremental
             .new_document
             .add_object(Stream::new(Dictionary::new(), rewrite.content.clone()));
         if content_id.0 <= object_ceiling {
-            return Err(MimusError::input(
-                InputReason::OutputWrite,
+            return Err(MimusError::internal(
+                InternalReason::OutputBuild,
                 format!(
                     "incremental object {} did not exceed input ceiling {object_ceiling}",
                     content_id.0
@@ -71,18 +71,20 @@ pub(crate) fn build_incremental(
             .new_document
             .get_object_mut(page_id)
             .and_then(Object::as_dict_mut)
-            .map_err(output_error)?
+            .map_err(output_build_error)?
             .set("Contents", content_id);
         content_objects.push(content_id);
     }
 
     let mut output = Vec::new();
-    incremental.save_to(&mut output).map_err(output_error)?;
+    incremental
+        .save_to(&mut output)
+        .map_err(output_build_error)?;
     // CONTEXT #36: 完整输入必须是增量输出的字节前缀。该不变量必须在原子发布前
     // 验证，否则失败时已经覆盖目标文件，错误返回也无法挽回半成品。
     if !output.starts_with(original_bytes) {
-        return Err(MimusError::input(
-            InputReason::OutputWrite,
+        return Err(MimusError::internal(
+            InternalReason::OutputBuild,
             "incremental output does not preserve the complete input byte prefix",
         ));
     }
@@ -96,7 +98,9 @@ pub(crate) fn build_incremental(
 }
 
 pub(crate) fn publish(output: &Path, bytes: &[u8]) -> Result<()> {
-    atomic_publish(output, |file| file.write_all(bytes).map_err(output_error))
+    atomic_publish(output, |file| {
+        file.write_all(bytes).map_err(output_write_error)
+    })
 }
 
 fn atomic_publish(output: &Path, write_output: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
@@ -105,8 +109,8 @@ fn atomic_publish(output: &Path, write_output: impl FnOnce(&mut File) -> Result<
         .filter(|value| !value.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     if !parent.is_dir() {
-        return Err(MimusError::input(
-            InputReason::OutputWrite,
+        return Err(MimusError::io(
+            IoReason::OutputWrite,
             format!("output directory does not exist: {}", parent.display()),
         ));
     }
@@ -115,17 +119,20 @@ fn atomic_publish(output: &Path, write_output: impl FnOnce(&mut File) -> Result<
         .suffix(".pdf.tmp")
         .tempfile_in(parent)
         .map_err(|error| {
-            MimusError::input(
-                InputReason::OutputWrite,
+            MimusError::io(
+                IoReason::OutputWrite,
                 format!("could not create an output temporary file: {error}"),
             )
         })?;
     write_output(temporary.as_file_mut())?;
-    temporary.as_file_mut().flush().map_err(output_error)?;
-    temporary.as_file().sync_all().map_err(output_error)?;
+    temporary
+        .as_file_mut()
+        .flush()
+        .map_err(output_write_error)?;
+    temporary.as_file().sync_all().map_err(output_write_error)?;
     temporary.persist(output).map_err(|error| {
-        MimusError::input(
-            InputReason::AtomicPublish,
+        MimusError::io(
+            IoReason::AtomicPublish,
             format!(
                 "could not atomically publish {}: {}",
                 output.display(),
@@ -136,9 +143,16 @@ fn atomic_publish(output: &Path, write_output: impl FnOnce(&mut File) -> Result<
     Ok(())
 }
 
-fn output_error(error: impl std::fmt::Display) -> MimusError {
-    MimusError::input(
-        InputReason::OutputWrite,
+fn output_build_error(error: impl std::fmt::Display) -> MimusError {
+    MimusError::internal(
+        InternalReason::OutputBuild,
+        format!("could not build output PDF: {error}"),
+    )
+}
+
+fn output_write_error(error: impl std::fmt::Display) -> MimusError {
+    MimusError::io(
+        IoReason::OutputWrite,
         format!("could not write output PDF: {error}"),
     )
 }
@@ -204,10 +218,7 @@ mod tests {
         std::fs::write(&output, b"existing").unwrap();
         let result = atomic_publish(&output, |file| {
             file.write_all(b"partial").unwrap();
-            Err(MimusError::input(
-                InputReason::OutputWrite,
-                "injected failure",
-            ))
+            Err(MimusError::io(IoReason::OutputWrite, "injected failure"))
         });
         assert!(result.is_err());
         assert_eq!(std::fs::read(output).unwrap(), b"existing");

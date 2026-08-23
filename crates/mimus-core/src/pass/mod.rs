@@ -4,8 +4,8 @@ use lopdf::Document as LopdfDocument;
 
 use crate::context::{Document, ExtractedPage, PassContext};
 use crate::engine::{PageCharSnapshot, RgbaImage};
-use crate::error::{InputReason, MimusError, Result};
-use crate::event::{Diagnostic, DiagnosticId, Diagnostics, Event, EventKind, Stage};
+use crate::error::{InputReason, InternalReason, IoReason, MimusError, Result};
+use crate::event::{Diagnostic, Diagnostics, Event, EventKind, Stage};
 use crate::il::{
     self, Char, PageGeometry, Paragraph, PassthroughRef, Rect, TextCarrier, TextTransform,
 };
@@ -40,6 +40,8 @@ pub const PIPELINE: [(Stage, Pass); 10] = [
     (Stage::Write, write),
 ];
 
+pub const INSPECT_STAGE_COUNT: usize = 4;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranslationResult {
     pub output: String,
@@ -48,46 +50,70 @@ pub struct TranslationResult {
     pub appended_bytes: usize,
 }
 
-pub fn run(document: &mut Document, context: &PassContext<'_>) -> Result<TranslationResult> {
-    let result = run_inner(document, context);
-    match &result {
-        Ok(result) => context.events.emit(Event::new(EventKind::Result {
-            output: result.output.clone(),
-            pages: result.pages,
-            warnings: result.warnings,
-        })),
-        Err(error) => context
-            .events
-            .emit(Event::new(EventKind::from_error(error))),
-    }
-    result
+#[derive(Debug, Clone, PartialEq)]
+pub struct InspectionResult {
+    pub il: il::Document,
+    pub pages: usize,
+    pub warnings: usize,
 }
 
-fn run_inner(document: &mut Document, context: &PassContext<'_>) -> Result<TranslationResult> {
-    for (stage, pass) in PIPELINE {
-        context
-            .events
-            .emit(Event::new(EventKind::StageStarted { stage }));
-        pass(document, context)?;
-        context
-            .events
-            .emit(Event::new(EventKind::StageFinished { stage }));
-    }
+pub fn run(document: &mut Document, context: &PassContext<'_>) -> Result<TranslationResult> {
+    run_stages(document, context, &PIPELINE)?;
+    let output = document.output_path().ok_or_else(|| {
+        MimusError::internal(
+            InternalReason::InvariantViolation,
+            "translation document has no output path",
+        )
+    })?;
     let write_report = document.write_report.as_ref().ok_or_else(|| {
-        MimusError::input(InputReason::OutputWrite, "write pass produced no report")
+        MimusError::internal(
+            InternalReason::InvariantViolation,
+            "write pass produced no report",
+        )
     })?;
     Ok(TranslationResult {
-        output: document.output_path().to_string_lossy().into_owned(),
+        output: output.to_string_lossy().into_owned(),
         pages: document.il.pages.len(),
         warnings: document.diagnostics.total_count(),
         appended_bytes: write_report.appended_bytes,
     })
 }
 
+pub fn inspect(document: &mut Document, context: &PassContext<'_>) -> Result<InspectionResult> {
+    run_stages(document, context, &PIPELINE[..INSPECT_STAGE_COUNT])?;
+    let il = il::snapshot(&document.il);
+    Ok(InspectionResult {
+        pages: il.pages.len(),
+        warnings: document.diagnostics.total_count(),
+        il,
+    })
+}
+
+fn run_stages(
+    document: &mut Document,
+    context: &PassContext<'_>,
+    stages: &[(Stage, Pass)],
+) -> Result<()> {
+    for (pass_index, &(stage, pass)) in stages.iter().enumerate() {
+        context
+            .events
+            .emit(Event::new(EventKind::StageStarted { stage }))?;
+        pass(document, context)?;
+        if let Some(snapshots) = context.snapshots {
+            let snapshot = il::snapshot(&document.il);
+            snapshots.write_snapshot(pass_index, stage, &snapshot)?;
+        }
+        context
+            .events
+            .emit(Event::new(EventKind::StageFinished { stage }))?;
+    }
+    Ok(())
+}
+
 pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     let bytes = std::fs::read(document.input_path()).map_err(|error| {
-        MimusError::input(
-            InputReason::InputRead,
+        MimusError::io(
+            IoReason::InputRead,
             format!(
                 "could not read {}: {error}",
                 document.input_path().display()
@@ -157,9 +183,9 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
         });
         context.events.emit(Event::new(EventKind::PageProgress {
             stage: Stage::Parse,
-            page: index + 1,
+            page_index: index,
             total_pages: engine_pages,
-        }));
+        }))?;
     }
     document.original_bytes = bytes;
     document.pdf = Some(pdf);
@@ -196,9 +222,9 @@ pub fn layout(document: &mut Document, context: &PassContext<'_>) -> Result<()> 
         page.input_raster = Some(raster);
         context.events.emit(Event::new(EventKind::PageProgress {
             stage: Stage::Layout,
-            page: page.index + 1,
+            page_index: page.index,
             total_pages,
-        }));
+        }))?;
     }
     Ok(())
 }
@@ -348,13 +374,21 @@ pub fn font_embed(document: &mut Document, _context: &PassContext<'_>) -> Result
 }
 
 pub fn write(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
-    let pdf = document
-        .pdf
-        .as_ref()
-        .ok_or_else(|| MimusError::input(InputReason::OutputWrite, "Parse did not retain a PDF"))?;
+    let pdf = document.pdf.as_ref().ok_or_else(|| {
+        MimusError::internal(
+            InternalReason::InvariantViolation,
+            "Parse did not retain a PDF",
+        )
+    })?;
+    let output_path = document.output_path().ok_or_else(|| {
+        MimusError::internal(
+            InternalReason::InvariantViolation,
+            "Write received a document with no output path",
+        )
+    })?;
     let (candidate, report) = build_incremental(&document.original_bytes, pdf, &document.rewrites)?;
     validate_output_roundtrip(document, context, &candidate)?;
-    publish(document.output_path(), &candidate)?;
+    publish(output_path, &candidate)?;
     document.write_report = Some(report);
     Ok(())
 }
@@ -417,8 +451,8 @@ fn validate_output_roundtrip(
             ))
         })?;
         let input_raster = expected.input_raster.as_ref().ok_or_else(|| {
-            MimusError::input(
-                InputReason::OutputWrite,
+            MimusError::internal(
+                InternalReason::InvariantViolation,
                 "Layout did not retain its input raster",
             )
         })?;
@@ -511,7 +545,7 @@ fn finite_close(expected: f64, actual: f64, tolerance: f64) -> bool {
 }
 
 fn output_mismatch(message: impl Into<String>) -> MimusError {
-    MimusError::input(InputReason::OutputMismatch, message)
+    MimusError::internal(InternalReason::OutputMismatch, message)
 }
 
 fn validate_character_alignment(
@@ -564,13 +598,11 @@ fn validate_character_alignment(
         if delta_x > tolerance || delta_y > tolerance {
             // CONTEXT #35: PDFium 是交叉证据而非事实层；有限的 baseline 分歧记为
             // 稳定 diagnostic，最终候选仍必须通过 Write 前的字符与像素往返验证。
-            diagnostics.push(Diagnostic {
-                id: DiagnosticId::EngineBaselineMismatch,
-                detail: format!(
-                    "page {} character {} delta=({delta_x:.6},{delta_y:.6})pt",
-                    page_index + 1,
-                    index
-                ),
+            diagnostics.push(Diagnostic::EngineBaselineMismatch {
+                page_index,
+                character_index: index,
+                delta_x_pt: delta_x,
+                delta_y_pt: delta_y,
             });
         }
     }
@@ -626,10 +658,12 @@ fn pdf_literal(value: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::engine::{
-        PageCharSnapshot, PdfInspector, Rasterizer, RgbaImage, SingleLineLayoutDetector,
+        LayoutDetector, LayoutRegion, PageCharSnapshot, PdfInspector, Rasterizer, RgbaImage,
+        SingleLineLayoutDetector,
     };
     use crate::event::{EventKind, RecordingEventSink};
     use crate::il::{PageGeometry, Point, Rect};
@@ -740,13 +774,55 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingSnapshotSink {
+        snapshots: Mutex<Vec<(usize, Stage, il::Document)>>,
+    }
+
+    impl RecordingSnapshotSink {
+        fn snapshots(&self) -> Vec<(usize, Stage, il::Document)> {
+            self.snapshots.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::PassSnapshotSink for RecordingSnapshotSink {
+        fn write_snapshot(
+            &self,
+            pass_index: usize,
+            stage: Stage,
+            snapshot: &il::Document,
+        ) -> Result<()> {
+            self.snapshots
+                .lock()
+                .unwrap()
+                .push((pass_index, stage, snapshot.clone()));
+            Ok(())
+        }
+    }
+
+    struct FailingLayoutDetector;
+
+    impl LayoutDetector for FailingLayoutDetector {
+        fn detect(
+            &self,
+            _geometry: PageGeometry,
+            _raster: &RgbaImage,
+            _characters: &[PageCharSnapshot],
+        ) -> Result<Vec<LayoutRegion>> {
+            Err(MimusError::input(
+                InputReason::UnsupportedPdf,
+                "injected layout failure",
+            ))
+        }
+    }
+
     fn fixture() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus/fixtures/unit-base-01-single-line/unit-base-01-single-line.pdf")
     }
 
     #[test]
-    fn fixed_pipeline_runs_every_seam_and_emits_one_terminal_event() {
+    fn fixed_pipeline_runs_every_stage_without_owning_the_terminal_event() {
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("roundtrip.pdf");
         let mut document = Document::new(fixture(), &output);
@@ -758,6 +834,7 @@ mod tests {
             layout_detector: &SingleLineLayoutDetector,
             translator: &translator,
             events: &events,
+            snapshots: None,
             config: crate::context::PipelineConfig::default(),
         };
         let result = run(&mut document, &context).unwrap();
@@ -783,17 +860,118 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(started, ORDER);
+        assert!(events.iter().all(|event| !event.kind.is_terminal()));
+    }
+
+    #[test]
+    fn inspect_stops_after_paragraph_find_without_translation_or_write_state() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let snapshots = RecordingSnapshotSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: Some(&snapshots),
+            config: crate::context::PipelineConfig::default(),
+        };
+
+        let result = inspect(&mut document, &context).unwrap();
+
+        assert_eq!(result.pages, 1);
+        assert_eq!(result.warnings, 0);
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(engine.raster_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(document.output_path(), None);
+        assert!(document.rewrites.is_empty());
+        assert!(document.write_report.is_none());
+        assert!(document.il.pages[0].paragraphs[0].translated_text.is_none());
+
+        let events = events.events();
+        let started = events
+            .iter()
+            .filter_map(|event| match event.kind {
+                EventKind::StageStarted { stage } => Some(stage),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let finished = events
+            .iter()
+            .filter_map(|event| match event.kind {
+                EventKind::StageFinished { stage } => Some(stage),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(started, ORDER[..INSPECT_STAGE_COUNT]);
+        assert_eq!(finished, ORDER[..INSPECT_STAGE_COUNT]);
+        assert!(events.iter().all(|event| !event.kind.is_terminal()));
+
+        let snapshots = snapshots.snapshots();
         assert_eq!(
-            events
+            snapshots
                 .iter()
-                .filter(|event| event.kind.is_terminal())
-                .count(),
-            1
+                .map(|(index, stage, _)| (*index, *stage))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, Stage::Parse),
+                (1, Stage::ScanDetect),
+                (2, Stage::Layout),
+                (3, Stage::ParagraphFind),
+            ]
         );
-        assert!(matches!(
-            events.last().unwrap().kind,
-            EventKind::Result { .. }
-        ));
+        assert_eq!(snapshots.last().unwrap().2, result.il);
+    }
+
+    #[test]
+    fn failed_pass_keeps_only_completed_snapshot_prefix_and_has_no_finished_event() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let snapshots = RecordingSnapshotSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &FailingLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: Some(&snapshots),
+            config: crate::context::PipelineConfig::default(),
+        };
+
+        let error = inspect(&mut document, &context).unwrap_err();
+        assert_eq!(
+            error.reason(),
+            crate::error::ErrorReason::Input(InputReason::UnsupportedPdf)
+        );
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            snapshots
+                .snapshots()
+                .iter()
+                .map(|(index, stage, _)| (*index, *stage))
+                .collect::<Vec<_>>(),
+            vec![(0, Stage::Parse), (1, Stage::ScanDetect)]
+        );
+        let events = events.events();
+        assert!(events.iter().any(|event| {
+            matches!(
+                event.kind,
+                EventKind::StageStarted {
+                    stage: Stage::Layout
+                }
+            )
+        }));
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event.kind,
+                EventKind::StageFinished {
+                    stage: Stage::Layout
+                }
+            )
+        }));
     }
 
     #[test]
@@ -808,6 +986,7 @@ mod tests {
             layout_detector: &SingleLineLayoutDetector,
             translator: &NonIdentityTranslator,
             events: &events,
+            snapshots: None,
             config: crate::context::PipelineConfig::default(),
         };
 
@@ -843,13 +1022,14 @@ mod tests {
             layout_detector: &SingleLineLayoutDetector,
             translator: &translator,
             events: &events,
+            snapshots: None,
             config: crate::context::PipelineConfig::default(),
         };
 
         let error = run(&mut document, &context).unwrap_err();
         assert_eq!(
             error.reason(),
-            crate::error::ErrorReason::Input(InputReason::OutputMismatch)
+            crate::error::ErrorReason::Internal(InternalReason::OutputMismatch)
         );
         assert_eq!(std::fs::read(&output).unwrap(), b"existing");
         assert_eq!(
@@ -870,7 +1050,7 @@ mod tests {
         let error = validate_output_characters(0, &expected, &actual, 0.001).unwrap_err();
         assert_eq!(
             error.reason(),
-            crate::error::ErrorReason::Input(InputReason::OutputMismatch)
+            crate::error::ErrorReason::Internal(InternalReason::OutputMismatch)
         );
     }
 
@@ -881,14 +1061,23 @@ mod tests {
         let walked = walk_page(&pdf, page_id).unwrap();
         let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap();
         engine[0].baseline_origin.x += 0.01;
+        engine[0].baseline_origin.y -= 0.02;
         let mut diagnostics = Diagnostics::default();
 
         validate_character_alignment(0, &walked, &engine, 0.001, &mut diagnostics).unwrap();
         assert_eq!(diagnostics.entries().len(), 1);
-        assert_eq!(
-            diagnostics.entries()[0].id,
-            DiagnosticId::EngineBaselineMismatch
-        );
+        let Diagnostic::EngineBaselineMismatch {
+            page_index,
+            character_index,
+            delta_x_pt,
+            delta_y_pt,
+        } = diagnostics.entries()[0];
+        assert_eq!(page_index, 0);
+        assert_eq!(character_index, 0);
+        assert!((delta_x_pt - 0.01).abs() < 1e-12);
+        assert!((delta_y_pt - 0.02).abs() < 1e-12);
+        assert!(delta_x_pt >= 0.0);
+        assert!(delta_y_pt >= 0.0);
 
         engine[0].baseline_origin.x = f64::NAN;
         assert!(
@@ -906,6 +1095,7 @@ mod tests {
             layout_detector: &SingleLineLayoutDetector,
             translator: &translator,
             events: &events,
+            snapshots: None,
             config: crate::context::PipelineConfig::default(),
         };
         let mut document = Document::new(fixture(), "unused.pdf");

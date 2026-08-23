@@ -12,6 +12,8 @@ pub enum ExitCategory {
     Input,
     Asset,
     Translation,
+    Io,
+    Internal,
 }
 
 impl ExitCategory {
@@ -22,6 +24,8 @@ impl ExitCategory {
             Self::Input => 2,
             Self::Asset => 3,
             Self::Translation => 4,
+            Self::Io => 5,
+            Self::Internal => 6,
         }
     }
 }
@@ -64,16 +68,12 @@ reason_enum!(UsageReason {
 });
 
 reason_enum!(InputReason {
-    InputRead => "input_read",
     PdfParse => "pdf_parse",
     EncryptedPdf => "encrypted_pdf",
     ScannedPdf => "scanned_pdf",
     UnsupportedPdf => "unsupported_pdf",
     OperatorWalk => "operator_walk",
     EngineMismatch => "engine_mismatch",
-    OutputMismatch => "output_mismatch",
-    OutputWrite => "output_write",
-    AtomicPublish => "atomic_publish",
 });
 
 reason_enum!(AssetReason {
@@ -85,12 +85,29 @@ reason_enum!(TranslationReason {
     TranslationFailed => "translation_failed",
 });
 
+reason_enum!(IoReason {
+    InputRead => "input_read",
+    OutputWrite => "output_write",
+    AtomicPublish => "atomic_publish",
+    DebugWrite => "debug_write",
+    StdoutWrite => "stdout_write",
+});
+
+reason_enum!(InternalReason {
+    OutputBuild => "output_build",
+    OutputMismatch => "output_mismatch",
+    EventSerialization => "event_serialization",
+    InvariantViolation => "invariant_violation",
+});
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorReason {
     Usage(UsageReason),
     Input(InputReason),
     Asset(AssetReason),
     Translation(TranslationReason),
+    Io(IoReason),
+    Internal(InternalReason),
 }
 
 impl ErrorReason {
@@ -101,6 +118,8 @@ impl ErrorReason {
             Self::Input(reason) => reason.as_str(),
             Self::Asset(reason) => reason.as_str(),
             Self::Translation(reason) => reason.as_str(),
+            Self::Io(reason) => reason.as_str(),
+            Self::Internal(reason) => reason.as_str(),
         }
     }
 }
@@ -146,6 +165,18 @@ pub enum MimusError {
         message: String,
         hint: Option<String>,
     },
+    #[error("{message}")]
+    Io {
+        reason: IoReason,
+        message: String,
+        hint: Option<String>,
+    },
+    #[error("{message}")]
+    Internal {
+        reason: InternalReason,
+        message: String,
+        hint: Option<String>,
+    },
 }
 
 impl MimusError {
@@ -186,12 +217,32 @@ impl MimusError {
     }
 
     #[must_use]
+    pub fn io(reason: IoReason, message: impl Into<String>) -> Self {
+        Self::Io {
+            reason,
+            message: message.into(),
+            hint: None,
+        }
+    }
+
+    #[must_use]
+    pub fn internal(reason: InternalReason, message: impl Into<String>) -> Self {
+        Self::Internal {
+            reason,
+            message: message.into(),
+            hint: None,
+        }
+    }
+
+    #[must_use]
     pub fn with_hint(mut self, value: impl Into<String>) -> Self {
         match &mut self {
             Self::Usage { hint, .. }
             | Self::Input { hint, .. }
             | Self::Asset { hint, .. }
-            | Self::Translation { hint, .. } => *hint = Some(value.into()),
+            | Self::Translation { hint, .. }
+            | Self::Io { hint, .. }
+            | Self::Internal { hint, .. } => *hint = Some(value.into()),
         }
         self
     }
@@ -203,6 +254,8 @@ impl MimusError {
             Self::Input { .. } => ExitCategory::Input,
             Self::Asset { .. } => ExitCategory::Asset,
             Self::Translation { .. } => ExitCategory::Translation,
+            Self::Io { .. } => ExitCategory::Io,
+            Self::Internal { .. } => ExitCategory::Internal,
         }
     }
 
@@ -213,6 +266,8 @@ impl MimusError {
             Self::Input { reason, .. } => ErrorReason::Input(*reason),
             Self::Asset { reason, .. } => ErrorReason::Asset(*reason),
             Self::Translation { reason, .. } => ErrorReason::Translation(*reason),
+            Self::Io { reason, .. } => ErrorReason::Io(*reason),
+            Self::Internal { reason, .. } => ErrorReason::Internal(*reason),
         }
     }
 
@@ -222,13 +277,17 @@ impl MimusError {
             Self::Usage { hint, .. }
             | Self::Input { hint, .. }
             | Self::Asset { hint, .. }
-            | Self::Translation { hint, .. } => hint.as_deref(),
+            | Self::Translation { hint, .. }
+            | Self::Io { hint, .. }
+            | Self::Internal { hint, .. } => hint.as_deref(),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -237,6 +296,8 @@ mod tests {
         assert_eq!(ExitCategory::Input.code(), 2);
         assert_eq!(ExitCategory::Asset.code(), 3);
         assert_eq!(ExitCategory::Translation.code(), 4);
+        assert_eq!(ExitCategory::Io.code(), 5);
+        assert_eq!(ExitCategory::Internal.code(), 6);
     }
 
     #[test]
@@ -257,5 +318,121 @@ mod tests {
             serde_json::to_string(&error.reason()).unwrap(),
             "\"backend_not_implemented\""
         );
+    }
+
+    #[test]
+    fn every_public_reason_has_one_category_wire_value_and_exit_code() {
+        let cases = [
+            (
+                MimusError::usage(UsageReason::InvalidArguments, "test"),
+                ExitCategory::Usage,
+                "invalid_arguments",
+            ),
+            (
+                MimusError::input(InputReason::PdfParse, "test"),
+                ExitCategory::Input,
+                "pdf_parse",
+            ),
+            (
+                MimusError::input(InputReason::EncryptedPdf, "test"),
+                ExitCategory::Input,
+                "encrypted_pdf",
+            ),
+            (
+                MimusError::input(InputReason::ScannedPdf, "test"),
+                ExitCategory::Input,
+                "scanned_pdf",
+            ),
+            (
+                MimusError::input(InputReason::UnsupportedPdf, "test"),
+                ExitCategory::Input,
+                "unsupported_pdf",
+            ),
+            (
+                MimusError::input(InputReason::OperatorWalk, "test"),
+                ExitCategory::Input,
+                "operator_walk",
+            ),
+            (
+                MimusError::input(InputReason::EngineMismatch, "test"),
+                ExitCategory::Input,
+                "engine_mismatch",
+            ),
+            (
+                MimusError::asset(AssetReason::PdfiumUnavailable, "test"),
+                ExitCategory::Asset,
+                "pdfium_unavailable",
+            ),
+            (
+                MimusError::translation(TranslationReason::BackendNotImplemented, "test"),
+                ExitCategory::Translation,
+                "backend_not_implemented",
+            ),
+            (
+                MimusError::translation(TranslationReason::TranslationFailed, "test"),
+                ExitCategory::Translation,
+                "translation_failed",
+            ),
+            (
+                MimusError::io(IoReason::InputRead, "test"),
+                ExitCategory::Io,
+                "input_read",
+            ),
+            (
+                MimusError::io(IoReason::OutputWrite, "test"),
+                ExitCategory::Io,
+                "output_write",
+            ),
+            (
+                MimusError::io(IoReason::AtomicPublish, "test"),
+                ExitCategory::Io,
+                "atomic_publish",
+            ),
+            (
+                MimusError::io(IoReason::DebugWrite, "test"),
+                ExitCategory::Io,
+                "debug_write",
+            ),
+            (
+                MimusError::io(IoReason::StdoutWrite, "test"),
+                ExitCategory::Io,
+                "stdout_write",
+            ),
+            (
+                MimusError::internal(InternalReason::OutputBuild, "test"),
+                ExitCategory::Internal,
+                "output_build",
+            ),
+            (
+                MimusError::internal(InternalReason::OutputMismatch, "test"),
+                ExitCategory::Internal,
+                "output_mismatch",
+            ),
+            (
+                MimusError::internal(InternalReason::EventSerialization, "test"),
+                ExitCategory::Internal,
+                "event_serialization",
+            ),
+            (
+                MimusError::internal(InternalReason::InvariantViolation, "test"),
+                ExitCategory::Internal,
+                "invariant_violation",
+            ),
+        ];
+        let mut wire_values = BTreeSet::new();
+
+        for (error, category, wire) in &cases {
+            assert_eq!(error.category(), *category, "reason {wire}");
+            assert_eq!(error.category().code(), category.code(), "reason {wire}");
+            assert_eq!(error.reason().as_str(), *wire);
+            assert_eq!(
+                serde_json::to_value(error.reason()).unwrap(),
+                serde_json::Value::String((*wire).to_owned())
+            );
+            assert!(wire_values.insert(*wire), "duplicate reason {wire}");
+        }
+
+        assert_eq!(cases.len(), 19, "new reasons must be added to this matrix");
+        assert_eq!(wire_values.len(), cases.len());
     }
 }

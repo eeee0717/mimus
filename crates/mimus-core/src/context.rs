@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use lopdf::Document as LopdfDocument;
 
 use crate::engine::{LayoutDetector, LayoutRegion, PageCharSnapshot, PdfEngine, RgbaImage};
-use crate::event::{Diagnostics, EventSink};
+use crate::error::Result;
+use crate::event::{Diagnostics, EventSink, Stage};
 use crate::il;
 use crate::translate::Translator;
 use crate::walk::WalkedChar;
@@ -27,12 +28,22 @@ pub struct PassContext<'a> {
     pub layout_detector: &'a dyn LayoutDetector,
     pub translator: &'a dyn Translator,
     pub events: &'a dyn EventSink,
+    pub snapshots: Option<&'a dyn PassSnapshotSink>,
     pub config: PipelineConfig,
+}
+
+pub trait PassSnapshotSink: Send + Sync {
+    fn write_snapshot(
+        &self,
+        pass_index: usize,
+        stage: Stage,
+        snapshot: &il::Document,
+    ) -> Result<()>;
 }
 
 pub struct Document {
     input_path: PathBuf,
-    output_path: PathBuf,
+    output_path: Option<PathBuf>,
     pub original_bytes: Vec<u8>,
     pub pdf: Option<LopdfDocument>,
     pub il: il::Document,
@@ -45,9 +56,32 @@ pub struct Document {
 impl Document {
     #[must_use]
     pub fn new(input_path: impl Into<PathBuf>, output_path: impl Into<PathBuf>) -> Self {
+        Self::for_translation(input_path, output_path)
+    }
+
+    #[must_use]
+    pub fn for_translation(
+        input_path: impl Into<PathBuf>,
+        output_path: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             input_path: input_path.into(),
-            output_path: output_path.into(),
+            output_path: Some(output_path.into()),
+            original_bytes: Vec::new(),
+            pdf: None,
+            il: il::Document::default(),
+            diagnostics: Diagnostics::default(),
+            extracted_pages: Vec::new(),
+            rewrites: Vec::new(),
+            write_report: None,
+        }
+    }
+
+    #[must_use]
+    pub fn for_inspection(input_path: impl Into<PathBuf>) -> Self {
+        Self {
+            input_path: input_path.into(),
+            output_path: None,
             original_bytes: Vec::new(),
             pdf: None,
             il: il::Document::default(),
@@ -64,8 +98,8 @@ impl Document {
     }
 
     #[must_use]
-    pub fn output_path(&self) -> &Path {
-        &self.output_path
+    pub fn output_path(&self) -> Option<&Path> {
+        self.output_path.as_deref()
     }
 }
 

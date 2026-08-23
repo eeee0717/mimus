@@ -1,26 +1,31 @@
 //! `mimus` - the CLI boundary defined by ADR-0001.
 
-use std::ffi::OsString;
+mod debug;
+mod protocol;
+
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Mutex;
 
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use debug::DebugArtifacts;
 use mimus_core::engine::SingleLineLayoutDetector;
 use mimus_core::engine::pdfium::PdfiumEngine;
-use mimus_core::error::{MimusError, UsageReason};
-use mimus_core::event::{Event, EventKind, EventSink, Stage};
+use mimus_core::error::{ErrorReason, InternalReason, IoReason, MimusError, Result, UsageReason};
+use mimus_core::event::ResultPayload;
 use mimus_core::pass;
 use mimus_core::translate::{NoneTranslator, openai_not_implemented};
-use mimus_core::{Document, PassContext, PipelineConfig};
+use mimus_core::{Document, PassContext, PassSnapshotSink, PipelineConfig};
+use protocol::ProtocolSession;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "mimus",
     version = mimus_core::VERSION,
-    about = "Layout-preserving PDF translation CLI"
+    about = "Layout-preserving PDF translation CLI",
+    color = clap::ColorChoice::Never
 )]
 struct Cli {
     #[arg(long, global = true, help = "Emit versioned NDJSON events")]
@@ -33,6 +38,8 @@ struct Cli {
 enum Command {
     /// Translate a native PDF while preserving its layout.
     Translate(TranslateArgs),
+    /// Inspect the IL produced by the read-only pipeline prefix.
+    Inspect(InspectArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -45,6 +52,18 @@ struct TranslateArgs {
     /// Translation backend. M1 implements only the offline none backend.
     #[arg(long, value_enum, default_value_t = Backend::Openai)]
     backend: Backend,
+    /// New directory for per-pass IL snapshots and diagnostics.
+    #[arg(long, value_name = "NEW_DIR")]
+    debug: Option<PathBuf>,
+}
+
+#[derive(Debug, clap::Args)]
+struct InspectArgs {
+    /// Input native PDF.
+    input: PathBuf,
+    /// New directory for per-pass IL snapshots and diagnostics.
+    #[arg(long, value_name = "NEW_DIR")]
+    debug: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -53,43 +72,72 @@ enum Backend {
     None,
 }
 
+#[derive(Debug)]
+struct CommandOutcome {
+    result: ResultPayload,
+    pages: usize,
+    warnings: usize,
+}
+
 fn main() -> ExitCode {
-    let cli = match Cli::try_parse() {
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    let json_requested = requests_json(&arguments);
+    let cli = match Cli::try_parse_from(&arguments) {
         Ok(value) => value,
         Err(error) => {
-            let success = matches!(
+            if matches!(
                 error.kind(),
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
-            );
+            ) {
+                let _ = error.print();
+                return ExitCode::SUCCESS;
+            }
+            if json_requested {
+                return ProtocolSession::stdout(true).finish_error(MimusError::usage(
+                    UsageReason::InvalidArguments,
+                    error.to_string(),
+                ));
+            }
             let _ = error.print();
-            return ExitCode::from(if success { 0 } else { 1 });
+            return ExitCode::from(1);
         }
     };
+
     let Some(command) = cli.command else {
-        let mut stdout = std::io::stdout().lock();
-        let _ = write!(stdout, "{}", Cli::command().render_long_help());
-        return ExitCode::SUCCESS;
+        if cli.json {
+            return ProtocolSession::stdout(true).finish_error(MimusError::usage(
+                UsageReason::InvalidArguments,
+                "a subcommand is required",
+            ));
+        }
+        return write_bare_help();
     };
-    let sink = CliEventSink::new(cli.json);
+
+    let session = ProtocolSession::stdout(cli.json);
     match command {
-        Command::Translate(args) => run_translate(args, &sink),
+        Command::Translate(args) => run_translate(args, &session),
+        Command::Inspect(args) => run_inspect(args, &session),
     }
 }
 
-fn run_translate(args: TranslateArgs, sink: &CliEventSink) -> ExitCode {
+fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
     let output = match args.output {
         Some(value) => value,
         None => match default_output_path(&args.input) {
             Ok(value) => value,
-            Err(error) => return emit_error(sink, error),
+            Err(error) => return session.finish_error(error),
         },
     };
     if matches!(args.backend, Backend::Openai) {
-        return emit_error(sink, openai_not_implemented());
+        return session.finish_error(openai_not_implemented());
     }
     let engine = match PdfiumEngine::from_environment() {
         Ok(value) => value,
-        Err(error) => return emit_error(sink, error),
+        Err(error) => return session.finish_error(error),
+    };
+    let debug = match create_debug(args.debug) {
+        Ok(value) => value,
+        Err(error) => return session.finish_error(error),
     };
     let translator = NoneTranslator;
     let layout_detector = SingleLineLayoutDetector;
@@ -97,17 +145,119 @@ fn run_translate(args: TranslateArgs, sink: &CliEventSink) -> ExitCode {
         engine: &engine,
         layout_detector: &layout_detector,
         translator: &translator,
-        events: sink,
+        events: session,
+        snapshots: debug.as_ref().map(|value| value as &dyn PassSnapshotSink),
         config: PipelineConfig::default(),
     };
-    let mut document = Document::new(args.input, output);
-    match pass::run(&mut document, &context) {
-        Ok(_) => ExitCode::SUCCESS,
-        Err(error) => ExitCode::from(error.category().code()),
+    let mut document = Document::for_translation(args.input, output);
+    let outcome = pass::run(&mut document, &context).map(|result| CommandOutcome {
+        result: ResultPayload::Translate {
+            output: result.output,
+        },
+        pages: result.pages,
+        warnings: result.warnings,
+    });
+    finish_command(session, debug.as_ref(), &document, outcome)
+}
+
+fn run_inspect(args: InspectArgs, session: &ProtocolSession) -> ExitCode {
+    let engine = match PdfiumEngine::from_environment() {
+        Ok(value) => value,
+        Err(error) => return session.finish_error(error),
+    };
+    let debug = match create_debug(args.debug) {
+        Ok(value) => value,
+        Err(error) => return session.finish_error(error),
+    };
+    let translator = NoneTranslator;
+    let layout_detector = SingleLineLayoutDetector;
+    let context = PassContext {
+        engine: &engine,
+        layout_detector: &layout_detector,
+        translator: &translator,
+        events: session,
+        snapshots: debug.as_ref().map(|value| value as &dyn PassSnapshotSink),
+        config: PipelineConfig::default(),
+    };
+    let mut document = Document::for_inspection(args.input);
+    let outcome = pass::inspect(&mut document, &context).map(|result| CommandOutcome {
+        result: ResultPayload::Inspect { il: result.il },
+        pages: result.pages,
+        warnings: result.warnings,
+    });
+    finish_command(session, debug.as_ref(), &document, outcome)
+}
+
+fn finish_command(
+    session: &ProtocolSession,
+    debug: Option<&DebugArtifacts>,
+    document: &Document,
+    outcome: Result<CommandOutcome>,
+) -> ExitCode {
+    if let Err(error) = &outcome {
+        if is_protocol_failure(error) {
+            return session.finish_error(outcome.unwrap_err());
+        }
+    }
+
+    let diagnostics = document.diagnostics.events();
+    if let Some(debug) = debug {
+        if let Err(error) = debug.write_diagnostics(&diagnostics) {
+            return session.finish_error(error);
+        }
+    }
+    if let Err(error) = session.emit_diagnostics(&diagnostics) {
+        return session.finish_error(error);
+    }
+
+    match outcome {
+        Ok(outcome) => session.finish_result(outcome.result, outcome.pages, outcome.warnings),
+        Err(error) => session.finish_error(error),
     }
 }
 
-fn default_output_path(input: &Path) -> Result<PathBuf, MimusError> {
+fn create_debug(path: Option<PathBuf>) -> Result<Option<DebugArtifacts>> {
+    path.map(DebugArtifacts::create).transpose()
+}
+
+fn is_protocol_failure(error: &MimusError) -> bool {
+    matches!(
+        error.reason(),
+        ErrorReason::Io(IoReason::StdoutWrite)
+            | ErrorReason::Internal(InternalReason::EventSerialization)
+    )
+}
+
+fn requests_json(arguments: &[OsString]) -> bool {
+    arguments
+        .iter()
+        .skip(1)
+        .take_while(|argument| argument.as_os_str() != OsStr::new("--"))
+        .any(|argument| argument.as_os_str() == OsStr::new("--json"))
+}
+
+fn write_bare_help() -> ExitCode {
+    let help = Cli::command().render_long_help().to_string();
+    match std::io::stdout().lock().write_all(help.as_bytes()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(error) => {
+            let error = MimusError::io(
+                IoReason::StdoutWrite,
+                format!("could not write stdout: {error}"),
+            );
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "error[{}]: {}",
+                error.reason(),
+                error
+            );
+            ExitCode::from(error.category().code())
+        }
+    }
+}
+
+fn default_output_path(input: &Path) -> Result<PathBuf> {
     let stem = input
         .file_stem()
         .filter(|value| !value.is_empty())
@@ -122,88 +272,6 @@ fn default_output_path(input: &Path) -> Result<PathBuf, MimusError> {
     Ok(input.with_file_name(filename))
 }
 
-fn emit_error(sink: &CliEventSink, error: MimusError) -> ExitCode {
-    let code = error.category().code();
-    sink.emit(Event::new(EventKind::from_error(&error)));
-    ExitCode::from(code)
-}
-
-struct CliEventSink {
-    json: bool,
-    output_lock: Mutex<()>,
-}
-
-impl CliEventSink {
-    const fn new(json: bool) -> Self {
-        Self {
-            json,
-            output_lock: Mutex::new(()),
-        }
-    }
-}
-
-impl EventSink for CliEventSink {
-    fn emit(&self, event: Event) {
-        let _guard = match self.output_lock.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if self.json {
-            let mut stdout = std::io::stdout().lock();
-            if serde_json::to_writer(&mut stdout, &event).is_ok() {
-                let _ = stdout.write_all(b"\n");
-            }
-            return;
-        }
-        match event.kind {
-            EventKind::StageStarted { stage } => {
-                let _ = writeln!(std::io::stderr().lock(), "{}...", stage_name(stage));
-            }
-            EventKind::PageProgress {
-                stage,
-                page,
-                total_pages,
-            } => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "{}: page {page}/{total_pages}",
-                    stage_name(stage)
-                );
-            }
-            EventKind::StageFinished { .. } => {}
-            EventKind::Result { output, .. } => {
-                let _ = writeln!(std::io::stdout().lock(), "{output}");
-            }
-            EventKind::Error {
-                reason,
-                message,
-                hint,
-            } => {
-                let mut stderr = std::io::stderr().lock();
-                let _ = writeln!(stderr, "error[{reason}]: {message}");
-                if let Some(hint) = hint {
-                    let _ = writeln!(stderr, "hint: {hint}");
-                }
-            }
-        }
-    }
-}
-
-const fn stage_name(stage: Stage) -> &'static str {
-    match stage {
-        Stage::Parse => "parse",
-        Stage::ScanDetect => "scan detect",
-        Stage::Layout => "layout",
-        Stage::ParagraphFind => "paragraph find",
-        Stage::StylesAndFormulas => "styles and formulas",
-        Stage::ExtractTerms => "extract terms",
-        Stage::Translate => "translate",
-        Stage::Typeset => "typeset",
-        Stage::FontEmbed => "font embed",
-        Stage::Write => "write",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +282,26 @@ mod tests {
             default_output_path(Path::new("reports/paper.pdf")).unwrap(),
             PathBuf::from("reports/paper.zh.pdf")
         );
+    }
+
+    #[test]
+    fn json_flag_detection_stops_at_the_argument_separator() {
+        assert!(requests_json(&[
+            OsString::from("mimus"),
+            OsString::from("inspect"),
+            OsString::from("--json"),
+        ]));
+        assert!(!requests_json(&[
+            OsString::from("mimus"),
+            OsString::from("inspect"),
+            OsString::from("--"),
+            OsString::from("--json"),
+        ]));
+    }
+
+    #[test]
+    fn production_event_serializer_is_the_core_serializer() {
+        let _serializer: fn(&mimus_core::event::Event) -> Result<Vec<u8>> =
+            mimus_core::event::serialize_line;
     }
 }
