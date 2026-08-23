@@ -1,13 +1,13 @@
 # 里程碑设计（V1）
 
 > 切法：walking skeleton——先打通极窄端到端，逐里程碑加宽。每个里程碑以**语料上可验证的断言**收口，不以"模块写完"收口。
-> 决策依据见 `CONTEXT.md` 与 `docs/adr/`；日期 2026-08-21。
+> 决策依据见 `CONTEXT.md` 与 `docs/adr/`；制定于 2026-08-21，状态更新于 2026-08-23。
 >
 > 资产说明：M0–M3 开发期模型/字体经"自备路径"逃生门手动放置；自动下载机制到 M4 才建。
 >
-> 语料说明：早期 23 份合成语料已因坐标偏移与视觉质量问题**作废**，其几何参数、生成代码与文件编号一律不得参考。Corpus v1 从零构建，由 **M-1** 前置交付需求与合同；此后每份 fixture 按 `docs/03-corpus-requirements.md` §2.8 独立验收后方可入库。**M-1 阻塞 M0 与 M1**。
+> 语料说明：早期 23 份合成语料已因坐标偏移与视觉质量问题**作废**，其几何参数、生成代码与文件编号一律不得参考。Corpus v1 已从零建立；每份 fixture 仍须按 `docs/03-corpus-requirements.md` §2.8 独立验收后方可入库。M-1 与 M0 的阻塞已解除。
 
-## M-1 · Corpus Foundation（前置，不交付功能）
+## M-1 · Corpus Foundation（已完成，前置，不交付功能）
 
 语料是后续每个里程碑的收口手段，因此先于 M0。本里程碑只产出需求、合同与清单，不产出未经验证的 PDF。
 
@@ -23,26 +23,32 @@
 3. 首批 M0/M1 fixture 清单确定；
 4. **尚未生成任何未经独立验证的 PDF**——不存在游离在合同与验收之外的语料文件。
 
-## M0 · 风险探测（不交付功能）
+**状态（2026-08-23）**：四条收口断言均满足。工具链、确定性 writer、manifest schema 和独立验收门禁已落地；M0 fixture 随后均经门禁入库，没有改变 M-1 本身“不接收未经验证 PDF”的边界。
+
+## M0 · 风险探测（已完成，不交付功能）
 
 三个实验对应三大技术风险，任何一个翻车都在最便宜的时刻翻。每个实验产出一页结论（成 / 败 / 替代方案），失败即触发对应 ADR 复议。
 
 | # | 实验 | 验证的风险 |
 |---|---|---|
-| 1 | PP-DocLayoutV3 ONNX 经 ort CPU 跑通；在双栏 fixture 的渲染图上验证 `[M,7]` 第 7 列是否为阅读顺序（ADR-0002 遗留）**——2026-08-21 完成，结论见 [04-m0-experiment-1.md](04-m0-experiment-1.md)** | 模型可用性 + 阅读顺序红利是否成立（决策 #14 的兜底开关） |
-| 2 | lopdf 原始 content stream 字节 ⇄ pdfium-render text page 对齐 PoC：同一页上自写 tokenizer 的字符定位与 PDFium 结果交叉核对 | 操作符走查可行性（ADR-0006 的核心假设） |
-| 3 | 增量写回 PoC：lopdf 改写一页 content stream + 追加一个字体对象，输出 PDF 在主流阅读器中有效 | 增量改写模型（ADR-0003 §2） |
+| 1 | **成**：PP-DocLayoutV3 ONNX 经 ort CPU 跑通；第 7 列与模型边界已实测。见 [04-m0-experiment-1.md](04-m0-experiment-1.md) | 模型可用性 + 阅读顺序红利是否成立（决策 #14 的兜底开关） |
+| 2 | **成**：lopdf 原始 content stream 字节 ⇄ pdfium-render text page 对齐；仲裁规则已确立。见 [04-m0-experiment-2.md](04-m0-experiment-2.md) | 操作符走查可行性（ADR-0006 的核心假设） |
+| 3 | **成**：增量追加、对象图守恒、copy-on-write 与失败原子性已验证。见 [04-m0-experiment-3.md](04-m0-experiment-3.md) | 增量改写模型（ADR-0003 §2） |
 
-**内部排期**（决策 #33）：不等齐 M0 的约 45 份 fixture，按实验切分，每组最小 fixture 通过 `docs/03-corpus-requirements.md` §2.8 验收后即启动对应实验。顺序由依赖链决定：
+**执行记录**（决策 #33）：M0 没有等齐全部 fixture，而是按实验切分，每组最小 fixture 通过 `docs/03-corpus-requirements.md` §2.8 验收后即启动对应实验：
 
 - **实验 1 先行**——它的 fixture 全部由现实排版引擎产出（走 §2.1 的双解析器裁定例外），**不依赖自建的确定性 PDF writer**，依赖链最短；顺带把 ADR-0002 遗留的阅读顺序验证提到最前，而后者决定 midend 要写多少代码。硬前置是补装 poppler 与 mupdf-tools。
-- **实验 2、3 待 writer 就绪后并行**——它们要精确 fixture 与字节级畸形变异，必须等自建 writer 可用。
+- **实验 2、3 在 writer 就绪后并行**——它们需要精确 fixture 与字节级畸形变异，因此先完成自建 writer。
 
-前置工作项：实现确定性 PDF writer 与验收脚本；最小首批 10 份 fixture 的清单见 §4.2。
+前置工作项中的确定性 PDF writer、验收脚本和最小首批 fixture 均已完成；截至收口，共 74 份 M0 fixture 入库。
 
-**收口断言**：三份实验结论文档齐备，无未决风险遗留；实验 2 的结论文档必须包含"走查与 PDFium 不一致时以谁为准"的明确规则（`docs/03-corpus-requirements.md` §6.3）。
+**收口断言（已满足）**：三份实验结论文档齐备，无未决风险遗留；实验 2 已给出“PDF 规范 + hand-written manifest + 独立推导”为事实层、PDFium 为交叉证据的统一仲裁规则。
 
-## M1 · 最小端到端
+补充资格实验 [05-pdfium-backend-qualification.md](05-pdfium-backend-qualification.md) 的结论为 **B：firecrawl-pdfium 补齐 T1/F1/O1 后采用**。这不阻塞 M1：生产侧继续使用 pdfium-render，待上游能力进入固定 revision 并重跑资格矩阵后再决定替换。
+
+## M1 · 最小端到端（当前）
+
+当前入口为 GitHub Issue #14：先设计支撑单行原生 PDF 以 `none` 后端完成“解析 → 排版 → 字体嵌入 → 增量写回”的最小接口与所有权边界，再实现这条 walking skeleton；不提前设计 M2–M4 的完整模块表面。
 
 - workspace 拆分（`mimus-core` + `mimus`）；IL 定义（ADR-0007）+ serde JSON 序列化。
 - 固定 pass 链贯通：Parse → ScanDetect(拒绝) → Layout → ParagraphFind → Typeset → FontEmbed → Write（StylesAndFormulas/ExtractTerms/Translate 留桩）。

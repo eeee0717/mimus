@@ -1,6 +1,6 @@
 # ADR-0006 · PDF 引擎组合：lopdf + PDFium（trait 边界）+ 自写操作符走查
 
-- 状态：已接受（2026-08-21）
+- 状态：已接受（2026-08-21）；M0 实验验证通过（2026-08-23）
 - 决策层级：难逆（V1 最重的架构决策，解析层全部建立其上）
 
 ## 背景
@@ -18,9 +18,25 @@
 
 这是 BabelDOC 架构（自写解释器跑在 MuPDF 之上）的 Rust 镜像，MuPDF（AGPL）换成 PDFium（BSD）。
 
+## 实验验证
+
+M0 实验 2 在规范输入上证明了“lopdf 原始字节 + 自写走查 + PDFium 交叉校验”可行：合法比较 fixture 的字符序列与 baseline 满足 `0.001 pt` 合同，PDFium origin 最大绝对差为 `4.52e-6 pt`；畸形输入均有界终止。分歧统一按以下顺序裁定：
+
+1. PDF 规范 + hand-written manifest + 与生成器独立的结构、字体、几何推导是事实层；
+2. 至少一个独立 parser/renderer trace 验证推导确实落在输入 PDF 上；
+3. PDFium 是交叉证据而非唯一 oracle；不一致时记录 engine differential，不反向修改 manifest；
+4. 规范允许多种恢复时选择不扩散、可报告、可有界停止的路径，无法可靠恢复则按既定粒度降级。
+
+M0 实验 3 同时验证了 lopdf 增量路径：输入完整字节可作为输出前缀，新对象只追加，共享资源可 copy-on-write，未修改对象与文档结构保持不变，失败可在原子发布前收住。
+
+2026-08-23 的 wrapper 资格实验对比 pdfium-render 0.9.1 与 firecrawl-pdfium `1a4c91d`：三档 PDFium 上 Corpus `222/222`、20 份 arXiv `60/60` 对拍一致，69,600 个长跑 job 无失败或 hash 漂移，单线程回退 `4.82%–6.55%`。但 firecrawl-pdfium 尚未暴露 mimus 必需的 T1 字符诊断、F1 字体 owned snapshot 与 O1 对象来源映射，因此结论为 **B：补齐上游后采用**。这些能力进入固定 revision 并重跑资格矩阵前，当前实现继续使用 pdfium-render；本 ADR 不变。
+
+证据见 [M0 实验 2](../04-m0-experiment-2.md)、[M0 实验 3](../04-m0-experiment-3.md) 与 [PDFium wrapper 资格报告](../05-pdfium-backend-qualification.md)。
+
 ## 后果
 
 - passthrough 保住：保真度上限不被 PDFium 建模完整度锁死。
 - 自写走查是 V1 最大单体工作量（报告估 ~6k 行），但字体度量的"最容易写错的部分"不在其中。
 - 接受 V1 的 PDFium abort 风险（代价 = 重跑一次命令），崩溃语料驱动修复。
 - release archive 含 libpdfium 动态库 + BSD 许可声明。
+- wrapper 不是架构承诺，但替换后端必须先满足 trait 所需能力并通过固定版本的资格矩阵；行为对拍一致本身不足以触发切换。

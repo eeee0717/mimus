@@ -1,7 +1,7 @@
 # CONTEXT
 
 > 项目共享术语与决策索引。术语随设计会话逐轮补充；难以逆转的技术选择在 `docs/adr/` 以 ADR 形式记录。
-> 事实基础：`docs/01-research.md`（2026-08-21 调研报告）+ 2026-08-21 模型/引擎事实查证（要点已并入 ADR-0002/0006）+ `docs/04-m0-experiment-1.md`（M0 实验 1 的模型实测结论）。
+> 事实基础：`docs/01-research.md`（2026-08-21 调研报告）+ 2026-08-21 模型/引擎事实查证（要点已并入 ADR-0002/0006）+ `docs/04-m0-experiment-1.md`、`docs/04-m0-experiment-2.md`、`docs/04-m0-experiment-3.md`（M0 三项实验结论）+ `docs/05-pdfium-backend-qualification.md`（PDFium Rust wrapper 资格验证）。
 
 ## 已定决策
 
@@ -12,7 +12,7 @@
 | 3 | V1 仅原生 PDF 路径（扫描件报错拒绝）；OCR 后置 V2，IR/架构预留 | [ADR-0003](docs/adr/0003-v1-native-pdf-path.md) |
 | 4 | 许可：MIT 单许可 | [ADR-0004](docs/adr/0004-mit-license.md) |
 | 5 | 分发：单 archive 解压即用；模型/字体资产运行时下载 + 自备逃生门 + 镜像可配 | [ADR-0005](docs/adr/0005-distribution.md) |
-| 6 | 引擎组合：lopdf（对象树/增量写回/原始字节）+ pdfium-render（度量/光栅化，trait 边界后）+ 自写操作符走查 | [ADR-0006](docs/adr/0006-engine-combination.md) |
+| 6 | 引擎组合：lopdf（对象树/增量写回/原始字节）+ pdfium-render（当前度量/光栅化后端，trait 边界后）+ 自写操作符走查。firecrawl-pdfium 仅在补齐 T1/F1/O1 并重新资格验证后才可替换 | [ADR-0006](docs/adr/0006-engine-combination.md) |
 | 7 | IR：单字符粒度 + 双盒 + Rust enum + serde JSON 快照（schema_version） | [ADR-0007](docs/adr/0007-ir-design.md) |
 | 8 | 目标用户：开源发布，面向"读外文 PDF 的中文研究者"；验收场景=作者本人日常翻译 arXiv 论文 | — |
 | 9 | 语种：输入语言解耦（取决于文本提取），验收只对英→中；排版仅调优简体中文输出 | — |
@@ -20,7 +20,7 @@
 | 11 | 保真范围：书签不翻译、链接热区不调整、表单/OCG 原样透传；断言书签数/注释数不变 | — |
 | 12 | 流水线：固定顺序 pass 链（`fn(&mut Document)`，无 pass 框架）；pass 内按页 rayon 并行；`--debug` 逐 pass 落盘 IL | — |
 | 13 | 阶段草案：Parse → ScanDetect(拒绝) → Layout → ParagraphFind → StylesAndFormulas → ExtractTerms → Translate → Typeset → FontEmbed → Write | — |
-| 14 | 阅读顺序：以 V3 模型输出为准 + 几何排序兜底；`[M,7]` 第 7 列语义验证是里程碑 0 实验项 | — |
+| 14 | 阅读顺序：以 V3 模型输出为准 + 几何排序兜底；实测 `[M,7]` 第 7 列是 RT-DETR query id，同时可作页内阅读顺序键；同 query 多类别先取最高分，排序键为 `(page_index, col7)` | [ADR-0002](docs/adr/0002-pp-doclayoutv3.md) |
 | 15 | 翻译政策表（见下）；表体默认不翻留 `--translate-table` 实验开关 | — |
 | 16 | 错误恢复：三层降级（段→页→文档，宁保原文不出坏译文）+ 结束汇总 + `--strict`；畸形 PDF fail-fast、修复函数语料驱动；退出码 0/1/2/3/4 分类 | — |
 | 17 | V1 单进程；PDFium 崩溃（abort）接受，子进程隔离推 V2 | — |
@@ -30,17 +30,20 @@
 | 21 | 翻译缓存：V1 即做，redb，键含(原文,模型,目标语,prompt 版本,术语指纹)；`--no-cache` | — |
 | 22 | 推理纯 CPU（ort CPU EP）；GPU/NPU EP 不进 V1 | — |
 | 23 | 质量回归四件套：全语料 IL 快照 + 占位符守恒 + 零 panic + 几何断言；**CI 绿才能合并**；渲染像素 diff 待渲染路径稳定后加 | — |
-| 24 | 语料：**Corpus v1 待从零构建**（旧 23 份合成语料已因坐标偏移/视觉质量问题作废，不得参考）。需求矩阵与生成合同见 [docs/03-corpus-requirements.md](docs/03-corpus-requirements.md)，工作纳入里程碑 M-1；真实语料不进 repo、发布前人工 checklist | — |
+| 24 | 语料：**Corpus v1 已从零建立，当前 74 份 M0 fixture 已按合同独立验收入库**；后续 M1/M3 fixture 继续按 pass 逐批落地。旧 23 份合成语料永久作废、不得参考；真实语料不进 repo、发布前人工 checklist | — |
 | 25 | CLI：子命令结构（`translate` / `assets pull` / `inspect`）；配置三层 flags > env > `~/.config/mimus/config.toml`；API key 不走明文 flag；两级人类可读进度；V1 `--json` 输出带版本的 NDJSON 机器协议；细粒度 flags 随功能里程碑落地 | [ADR-0008](docs/adr/0008-agent-skill.md) |
-| 26 | 里程碑：M-1（Corpus Foundation，前置且阻塞 M0/M1）+ walking skeleton 五段 M0–M4，以语料断言收口（[docs/02-milestones.md](docs/02-milestones.md)） | — |
+| 26 | 里程碑：M-1 与 M0 已于 2026-08-23 收口，三项核心风险实验均为“成”；当前进入 M1，从 #14 的最窄 walking skeleton 开始，仍以语料断言而非模块完成度收口 | [docs/02-milestones.md](docs/02-milestones.md) |
 | 27 | 术语细节：用户 `--glossary` 覆盖自动表；`--dump-glossary` 导出复用；`--no-auto-terms` 开关；自动表指纹进缓存键 | — |
 | 28 | 性能：V1 无硬指标；方向值=20 页论文除 LLM 外 <5 分钟（arm64 笔记本）；LLM 段落级并发默认 4、指数退避重试 3 次、重试尽降级保原文 | — |
 | 29 | crate 结构：**生产侧**两分——`mimus-core`（lib：IL/pass/引擎 trait/翻译层）+ `mimus`（bin：CLI/进度/配置）。workspace 另含非生产成员 `corpus`（语料门禁工具），它不依赖 `mimus-core`，也不进 release archive | — |
 | 30 | Agent 集成：仓库提供一个可由 `npx skills add eeee0717/mimus` 安装的 `mimus` Agent Skill；skill 仅编排 CLI、不复制业务逻辑；MCP/daemon/vendor plugin 不进 V1 | [ADR-0008](docs/adr/0008-agent-skill.md) |
 | 31 | 加密 PDF：**V1 一律拒绝**（不论是否需要密码、不论 handler），退出码 2；不做权限位尊重、无密码参数、无 `--ignore-permissions`；检测必须用 `was_encrypted()` | [ADR-0009](docs/adr/0009-reject-encrypted-pdf.md) |
 | 32 | 非直立文本（旋转/镜像/斜切 > 20°，在视觉页框内度量）：**不翻译、原样 passthrough**；字符级检测、单元级隔离，同段其余字符照常翻译 | [ADR-0007](docs/adr/0007-ir-design.md) §5 |
-| 33 | M0 内部排期：实验 1 先行（不依赖自建确定性写出器），实验 2/3 待写出器就绪后并行；最小首批 10 份 fixture 独立验收后即启动对应实验，不等齐约 45 份。M-1 仍整体收口 | — |
+| 33 | M0 内部执行方式（历史）：实验 1 先行（不依赖自建确定性写出器），实验 2/3 在写出器就绪后并行；最小首批 10 份 fixture 独立验收后即启动对应实验，没有等待原计划约 45 份全部齐备。该排期不改变 M-1 的整体收口边界 | — |
 | 34 | Corpus v1 现实排版引擎钉死为 **Typst 0.15.1 / pdfTeX 1.40.29 / LuaHBTeX 1.24.0**；**XeTeX 出局**——xdvipdfmx 20260317 的随机字体子集标签过不了 SHA-256 复现门禁，且子集标签正是溯源断言的载体。唯一真源 `corpus/toolchain.toml`，门禁 `corpus doctor` / `corpus determinism` | — |
+| 35 | 走查仲裁：PDF 规范 + hand-written manifest + 独立结构/字体/几何推导是事实层；独立 parser/renderer trace 验证落地；PDFium 只作交叉证据。恢复存在歧义时选择有界、可报告、不扩散，不能可靠恢复则降级 | [ADR-0006](docs/adr/0006-engine-combination.md) |
+| 36 | 增量写回路线已验证：输入完整字节作为前缀、对象号只追加、共享资源 copy-on-write、未修改结构守恒、同目录临时文件原子发布；生产 writer 仍须在 `mimus-core` 内实现并复用这些回归断言 | [ADR-0003](docs/adr/0003-v1-native-pdf-path.md)、[ADR-0006](docs/adr/0006-engine-combination.md) |
+| 37 | firecrawl-pdfium 资格结论为 **B：补齐上游后采用**。现有文本/渲染行为、稳定性和性能合格，但 T1 字符诊断、F1 字体快照、O1 对象来源映射尚未暴露；完成并复跑资格矩阵前不得改生产依赖 | [docs/05-pdfium-backend-qualification.md](docs/05-pdfium-backend-qualification.md) |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
@@ -65,7 +68,7 @@
 
 - **操作符走查（operator walk）**：在 lopdf 提供的原始 content stream 字节上自写 tokenizer + 图形状态机 + CTM 栈 + 文本定位，字符坐标自算；度量委托 PDFium，text page 做交叉校验（ADR-0006）。
 - **passthrough**：不理解的操作符原样存字节、输出时透传，IL 只覆盖"要修改的部分"。依赖自写走查（PDFium API 拿不到原始字节）。
-- **PdfInspector / Rasterizer trait**：字符度量与光栅化的能力边界，V1 由 PDFium 实现，后端可整体替换。
+- **PdfInspector / Rasterizer trait**：字符度量与光栅化的能力边界。当前 V1 后端为 pdfium-render；firecrawl-pdfium 只有在 T1/F1/O1 上游能力补齐并重新通过 `docs/05-pdfium-backend-qualification.md` 的矩阵后才可替换。
 
 ### 中间表示
 
@@ -108,7 +111,7 @@
 
 ### 测试
 
-- **Corpus v1**：从零构建的合成语料，入 repo `corpus/`。首批 M0 fixture 已按生成合同独立验收入库；早期 23 份合成语料仍已作废（坐标偏移与视觉质量问题），其几何参数与生成代码不得参考。
+- **Corpus v1**：从零构建的合成语料，入 repo `corpus/`。截至 2026-08-23，共 74 份 M0 fixture 已按生成合同独立验收入库；M1/M3 语料随 pass 逐批扩展。早期 23 份合成语料永久作废（坐标偏移与视觉质量问题），其几何参数与生成代码不得参考。
 - **失效模式（failure mode）/ case**：从 BabelDOC 主链路逆向出的、可由 PDF 输入触发的一类错误。带稳定 case ID，是 Corpus v1 需求矩阵的行。
 - **fixture**：语料中的一份 PDF + 其 manifest。分 **unit**（单变量，与 case 近 1:1）、**mal**（畸形，由合法父本做单变量字节级变异）、**intg**（显式多变量，仅端到端冒烟，严格受限）三类。
 - **生成合同（generation contract）**：fixture 入库前必须满足的约束集合（坐标系、三种盒子、变换规则、单变量、确定性 SHA-256、独立验收等），见 `docs/03-corpus-requirements.md` §2。
@@ -138,11 +141,13 @@
 - ~~确定性生成的引擎侧机制尚未实测~~ → 已收口（决策 #34）：三条配方实测通过，XeTeX 出局。
 - ~~验收工具链缺四件（qpdf / poppler / mupdf-tools / Typst）~~ → 已收口（决策 #34）：四件齐备并钉死版本。
 - ~~PP-DocLayoutV3 的 25 类是否含目录类未确认~~ → 已结清（M0 实验 1）：**`content` 就是目录类**，`unit-para-04-toc` 上 0.955 一个框盖住整个目录；但模型只给整块框，条目与页码的切分仍需自行实现。见 [docs/04-m0-experiment-1.md](docs/04-m0-experiment-1.md) §4 D7。
-- CJK 输入 fixture 的字体选型 → 独立 ticket（溯源手段已改为对象号 + 子集标签，不再依赖字体族差异）。
+- CJK 输入 fixture 的字体选型 → M1 #19 执行（溯源手段已改为对象号 + 子集标签，不再依赖字体族差异）。
 
 **由实验给出结论，不是决策**
 
 - ~~PP-DocLayoutV3 的第 7 列语义、model order 与 D1–D12 红利~~ → 已由 M0 实验 1 结清，结论见 [docs/04-m0-experiment-1.md](docs/04-m0-experiment-1.md)，ADR-0002 已就地修订。
-- 走查与 PDFium 不一致时的仲裁规则（已知分歧：FONT-02、STREAM-02）→ 由 M0 实验 2 的结论文档确立。
+- ~~走查与 PDFium 不一致时的仲裁规则~~ → 已由 M0 实验 2 结清为决策 #35；FONT-02、CMAP-04、STREAM-02、Type3 与 inline image 均按同一规则裁定。见 [docs/04-m0-experiment-2.md](docs/04-m0-experiment-2.md) §7。
+
+M-1 与 M0 已收口，无遗留架构风险阻塞 M1。当前实现入口是 #14：以 `none` 后端往返单行原生 PDF；架构设计只覆盖支撑该 walking skeleton 所需的接口与边界。
 
 V2 展望项（扫描件/OCR、子进程隔离、像素 diff、宋体字族、中→英、GUI）见 `docs/02-milestones.md` 末节，随触发条件另行立项。
