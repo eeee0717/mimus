@@ -1,0 +1,105 @@
+schema_version = 1
+
+[identity]
+id = "intg-scan-12-image-with-blank-backs"
+name = "One image page and nine blank backs"
+class = "integration"
+legality = "legal"
+cases = ["SCAN-02", "DOC-02"]
+priority = "M1"
+variable = "Nine no-Contents blank pages accompany one image-only page to pin the content-page denominator"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "intg-scan-12-image-with-blank-backs.pdf"
+pdf_sha256 = "50c323803618fea65df225dc22f8717f9035e01eeb042e4f25871e8f33e30fb2"
+font_provenance = "none"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 1
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 2
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 3
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 4
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 5
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 6
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 7
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 8
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[[page]]
+index = 9
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+block = []
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "696e74672d7363616e2d31322d696d61"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 10
+blocks = 0
+columns = 1
+
+[[expected.content_stream]]
+object = 15
+compressed = false
+bytes = """q
+300 0 0 200 0 0 cm
+/Im1 Do
+Q
+"""
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 15
+[[expected.reference]]
+from_object = 13
+path = ["/XObject", "/Im1"]
+to_object = 14
+
+[[expected.behaviour]]
+id = "SCAN-02-blank-denominator"
+assertion = "Only one content page exists and it is scanned, so nine blank backs do not dilute the 100 percent rejection ratio"
+observable_via = "absence of Contents on pages 2 through 10, independent rasters, and mimus acceptance test"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "pdf-bytes", "pdf-structure", "render"]

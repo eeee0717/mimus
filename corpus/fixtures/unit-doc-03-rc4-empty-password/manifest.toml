@@ -1,0 +1,42 @@
+schema_version = 1
+
+[identity]
+id = "unit-doc-03-rc4-empty-password"
+name = "RC4-40 encrypted PDF with empty user password"
+class = "unit"
+legality = "legal"
+cases = ["DOC-03"]
+priority = "M1"
+variable = "The exact single-line parent is encrypted with RC4-40 and an empty user password"
+
+[source]
+method = "tool-generated-committed"
+generator = "qpdf-12.4.0"
+generation_argv = ["qpdf", "--allow-weak-crypto", "--encrypt", "", "mimus-owner", "40", "--", "corpus/fixtures/unit-base-01-single-line/unit-base-01-single-line.pdf", "corpus/fixtures/unit-doc-03-rc4-empty-password/unit-doc-03-rc4-empty-password.pdf"]
+pdf = "unit-doc-03-rc4-empty-password.pdf"
+pdf_sha256 = "f30a7e66a27f94e1731fd0b851fe0f65725b06f3c03b5f71c4b53c7074d7a430"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+
+[[expected.behaviour]]
+id = "DOC-03-rc4-empty-password"
+assertion = "The file remains observably encrypted even though opening with the empty user password succeeds"
+observable_via = "qpdf encryption metadata, independent raster, and the was_encrypted versus is_encrypted regression test"
+
+[oracle]
+checks = ["determinism", "render"]

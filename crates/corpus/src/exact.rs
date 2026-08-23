@@ -72,8 +72,225 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
         "unit-write-05-indirect-resources-objstm" => resources_in_object_stream(repo_root),
         "unit-parse-11-outline-siblings" => outline_siblings(repo_root),
         "unit-write-06-free-object-slot" => free_object_slot(repo_root),
+        "unit-scan-01-image-only" => scan_document(fixture_id, repo_root, &[ScanPage::Image]),
+        "unit-scan-02-invisible-ocr" => {
+            scan_document(fixture_id, repo_root, &[ScanPage::ImageInvisibleText])
+        }
+        "unit-scan-03-visible-image-text" => {
+            scan_document(fixture_id, repo_root, &[ScanPage::ImageVisibleText])
+        }
+        "unit-scan-04-title-page" => {
+            scan_document(fixture_id, repo_root, &[ScanPage::Title])
+        }
+        "unit-scan-05-hidden-watermark" => {
+            scan_document(fixture_id, repo_root, &[ScanPage::TextWatermark])
+        }
+        "intg-scan-06-blank-middle" => scan_document(
+            fixture_id,
+            repo_root,
+            &[ScanPage::Text, ScanPage::Blank, ScanPage::Text],
+        ),
+        "intg-scan-07-image-middle" => scan_document(
+            fixture_id,
+            repo_root,
+            &[ScanPage::Text, ScanPage::Image, ScanPage::Text],
+        ),
+        "intg-scan-08-text-first" => scan_document(
+            fixture_id,
+            repo_root,
+            &[
+                ScanPage::Text,
+                ScanPage::Image,
+                ScanPage::Image,
+                ScanPage::Image,
+            ],
+        ),
+        "intg-scan-09-text-last" => scan_document(
+            fixture_id,
+            repo_root,
+            &[
+                ScanPage::Image,
+                ScanPage::Image,
+                ScanPage::Image,
+                ScanPage::Text,
+            ],
+        ),
+        "intg-scan-10-nine-of-ten" => {
+            let mut pages = vec![ScanPage::Image; 9];
+            pages.push(ScanPage::Text);
+            scan_document(fixture_id, repo_root, &pages)
+        }
+        "intg-scan-11-four-of-five" => {
+            let mut pages = vec![ScanPage::Image; 4];
+            pages.push(ScanPage::Text);
+            scan_document(fixture_id, repo_root, &pages)
+        }
+        "intg-scan-12-image-with-blank-backs" => {
+            let mut pages = vec![ScanPage::Image];
+            pages.extend(std::iter::repeat_n(ScanPage::Blank, 9));
+            scan_document(fixture_id, repo_root, &pages)
+        }
         _ => bail!("exact fixture `{fixture_id}` is not implemented"),
     }
+}
+
+#[derive(Clone, Copy)]
+enum ScanPage {
+    Blank,
+    Image,
+    Text,
+    Title,
+    ImageInvisibleText,
+    ImageVisibleText,
+    TextWatermark,
+}
+
+impl ScanPage {
+    fn uses_font(self) -> bool {
+        matches!(
+            self,
+            Self::Text
+                | Self::Title
+                | Self::ImageInvisibleText
+                | Self::ImageVisibleText
+                | Self::TextWatermark
+        )
+    }
+
+    fn uses_image(self) -> bool {
+        matches!(
+            self,
+            Self::Image | Self::ImageInvisibleText | Self::ImageVisibleText
+        )
+    }
+
+    fn content(self) -> Option<&'static [u8]> {
+        match self {
+            Self::Blank => None,
+            Self::Image => Some(b"q\n300 0 0 200 0 0 cm\n/Im1 Do\nQ\n"),
+            Self::Text => Some(STANDARD_CONTENT),
+            Self::Title => {
+                Some(b"BT\n/F1 24 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n")
+            }
+            Self::ImageInvisibleText => Some(
+                b"q\n300 0 0 200 0 0 cm\n/Im1 Do\nQ\nBT\n/F1 12 Tf\n3 Tr\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n",
+            ),
+            Self::ImageVisibleText => Some(
+                b"q\n300 0 0 200 0 0 cm\n/Im1 Do\nQ\nBT\n/F1 12 Tf\n0 Tr\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n",
+            ),
+            Self::TextWatermark => Some(
+                b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\nBT\n/F1 6 Tf\n3 Tr\n1 0 0 1 72 60 Tm\n(MIMUS) Tj\nET\n",
+            ),
+        }
+    }
+}
+
+fn scan_document(fixture_id: &str, repo_root: &Path, pages: &[ScanPage]) -> Result<Vec<u8>> {
+    ensure!(
+        !pages.is_empty(),
+        "scan fixture must have at least one page"
+    );
+    let uses_font = pages.iter().copied().any(ScanPage::uses_font);
+    let uses_image = pages.iter().copied().any(ScanPage::uses_image);
+    let page_count = u32::try_from(pages.len())?;
+    let resources_object = page_count + 3;
+    let mut next_object = resources_object + 1;
+    let font_objects = uses_font.then(|| {
+        let objects = [
+            next_object,
+            next_object + 1,
+            next_object + 2,
+            next_object + 3,
+        ];
+        next_object += 4;
+        objects
+    });
+    let image_object = uses_image.then(|| {
+        let object = next_object;
+        next_object += 1;
+        object
+    });
+    let content_objects: Vec<Option<u32>> = pages
+        .iter()
+        .map(|page| {
+            page.content().map(|_| {
+                let object = next_object;
+                next_object += 1;
+                object
+            })
+        })
+        .collect();
+
+    let mut pdf = RawPdf::new(fixture_id);
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    let kids = (0..page_count)
+        .map(|index| format!("{} 0 R", index + 3))
+        .collect::<Vec<_>>()
+        .join(" ");
+    pdf.object(format!("<< /Type /Pages /Kids [{kids}] /Count {page_count} >>").as_bytes())?;
+    for (index, content_object) in content_objects.iter().enumerate() {
+        let contents =
+            content_object.map_or(String::new(), |object| format!(" /Contents {object} 0 R"));
+        let object = pdf.object(
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources {resources_object} 0 R{contents} >>"
+            )
+            .as_bytes(),
+        )?;
+        ensure!(object == u32::try_from(index)? + 3);
+    }
+
+    let mut resources = String::from("<<");
+    if let Some([font, ..]) = font_objects {
+        resources.push_str(&format!(" /Font << /F1 {font} 0 R >>"));
+    }
+    if let Some(image) = image_object {
+        resources.push_str(&format!(" /XObject << /Im1 {image} 0 R >>"));
+    }
+    resources.push_str(" >>");
+    ensure!(pdf.object(resources.as_bytes())? == resources_object);
+
+    if let Some(
+        [
+            font_object,
+            descriptor_object,
+            font_stream_object,
+            cmap_object,
+        ],
+    ) = font_objects
+    {
+        let font = pinned_font(repo_root)?;
+        ensure!(
+            pdf.object(font_dictionary_with_descriptor(cmap_object, descriptor_object).as_bytes())?
+                == font_object
+        );
+        ensure!(pdf.object(
+            format!(
+                "<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 {font_stream_object} 0 R >>"
+            )
+            .as_bytes(),
+        )? == descriptor_object);
+        ensure!(
+            pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)? == font_stream_object
+        );
+        ensure!(pdf.stream(b"/Type /CMap", operator_walk_to_unicode())? == cmap_object);
+    }
+    if let Some(image) = image_object {
+        let pixels = [
+            0x21, 0x54, 0x88, 0xf2, 0xc1, 0x4e, 0xe8, 0x55, 0x55, 0xf4, 0xf1, 0xde,
+        ];
+        ensure!(pdf.stream(
+            b"/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8",
+            &pixels,
+        )? == image);
+    }
+    for (page, object) in pages.iter().zip(content_objects) {
+        if let (Some(content), Some(expected_object)) = (page.content(), object) {
+            ensure!(pdf.stream(b"", content)? == expected_object);
+        }
+    }
+    ensure!(u32::try_from(pdf.offsets.len())? + 1 == next_object);
+    pdf.finish(1)
 }
 
 const STANDARD_CONTENT: &[u8] = b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n";
@@ -1398,6 +1615,32 @@ mod tests {
 
         assert!(contains(&bytes, b"/FontFile2 8 0 R"));
         assert!(contains(&bytes, b"8 0 obj\n<< /Length "));
+    }
+
+    #[test]
+    fn scan_recipes_support_fontless_images_and_deterministic_multi_page_order() {
+        let image = generate("unit-scan-01-image-only", &repo_root()).unwrap();
+        assert!(contains(&image, b"/Subtype /Image"));
+        assert!(contains(&image, b"/Im1 Do"));
+        assert!(!contains(&image, b"/Type /Font"));
+
+        let first = generate("intg-scan-08-text-first", &repo_root()).unwrap();
+        let second = generate("intg-scan-08-text-first", &repo_root()).unwrap();
+        assert_eq!(first, second);
+        assert!(contains(&first, b"/Count 4"));
+        assert!(contains(&first, b"/Kids [3 0 R 4 0 R 5 0 R 6 0 R]"));
+    }
+
+    #[test]
+    fn blank_scan_pages_omit_contents_instead_of_using_empty_streams() {
+        let bytes = generate("intg-scan-12-image-with-blank-backs", &repo_root()).unwrap();
+        assert_eq!(
+            bytes
+                .windows(b"/Contents".len())
+                .filter(|window| *window == b"/Contents")
+                .count(),
+            1
+        );
     }
 
     #[test]
