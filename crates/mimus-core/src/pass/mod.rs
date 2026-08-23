@@ -658,12 +658,14 @@ fn pdf_literal(value: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::engine::{
-        PageCharSnapshot, PdfInspector, Rasterizer, RgbaImage, SingleLineLayoutDetector,
+        LayoutDetector, LayoutRegion, PageCharSnapshot, PdfInspector, Rasterizer, RgbaImage,
+        SingleLineLayoutDetector,
     };
-    use crate::event::{DiagnosticId, EventKind, RecordingEventSink};
+    use crate::event::{EventKind, RecordingEventSink};
     use crate::il::{PageGeometry, Point, Rect};
     use crate::translate::Translator;
 
@@ -772,6 +774,48 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingSnapshotSink {
+        snapshots: Mutex<Vec<(usize, Stage, il::Document)>>,
+    }
+
+    impl RecordingSnapshotSink {
+        fn snapshots(&self) -> Vec<(usize, Stage, il::Document)> {
+            self.snapshots.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::PassSnapshotSink for RecordingSnapshotSink {
+        fn write_snapshot(
+            &self,
+            pass_index: usize,
+            stage: Stage,
+            snapshot: &il::Document,
+        ) -> Result<()> {
+            self.snapshots
+                .lock()
+                .unwrap()
+                .push((pass_index, stage, snapshot.clone()));
+            Ok(())
+        }
+    }
+
+    struct FailingLayoutDetector;
+
+    impl LayoutDetector for FailingLayoutDetector {
+        fn detect(
+            &self,
+            _geometry: PageGeometry,
+            _raster: &RgbaImage,
+            _characters: &[PageCharSnapshot],
+        ) -> Result<Vec<LayoutRegion>> {
+            Err(MimusError::input(
+                InputReason::UnsupportedPdf,
+                "injected layout failure",
+            ))
+        }
+    }
+
     fn fixture() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus/fixtures/unit-base-01-single-line/unit-base-01-single-line.pdf")
@@ -817,6 +861,117 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(started, ORDER);
         assert!(events.iter().all(|event| !event.kind.is_terminal()));
+    }
+
+    #[test]
+    fn inspect_stops_after_paragraph_find_without_translation_or_write_state() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let snapshots = RecordingSnapshotSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: Some(&snapshots),
+            config: crate::context::PipelineConfig::default(),
+        };
+
+        let result = inspect(&mut document, &context).unwrap();
+
+        assert_eq!(result.pages, 1);
+        assert_eq!(result.warnings, 0);
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(engine.raster_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(document.output_path(), None);
+        assert!(document.rewrites.is_empty());
+        assert!(document.write_report.is_none());
+        assert!(document.il.pages[0].paragraphs[0].translated_text.is_none());
+
+        let events = events.events();
+        let started = events
+            .iter()
+            .filter_map(|event| match event.kind {
+                EventKind::StageStarted { stage } => Some(stage),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let finished = events
+            .iter()
+            .filter_map(|event| match event.kind {
+                EventKind::StageFinished { stage } => Some(stage),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(started, ORDER[..INSPECT_STAGE_COUNT]);
+        assert_eq!(finished, ORDER[..INSPECT_STAGE_COUNT]);
+        assert!(events.iter().all(|event| !event.kind.is_terminal()));
+
+        let snapshots = snapshots.snapshots();
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|(index, stage, _)| (*index, *stage))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, Stage::Parse),
+                (1, Stage::ScanDetect),
+                (2, Stage::Layout),
+                (3, Stage::ParagraphFind),
+            ]
+        );
+        assert_eq!(snapshots.last().unwrap().2, result.il);
+    }
+
+    #[test]
+    fn failed_pass_keeps_only_completed_snapshot_prefix_and_has_no_finished_event() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let snapshots = RecordingSnapshotSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &FailingLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: Some(&snapshots),
+            config: crate::context::PipelineConfig::default(),
+        };
+
+        let error = inspect(&mut document, &context).unwrap_err();
+        assert_eq!(
+            error.reason(),
+            crate::error::ErrorReason::Input(InputReason::UnsupportedPdf)
+        );
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            snapshots
+                .snapshots()
+                .iter()
+                .map(|(index, stage, _)| (*index, *stage))
+                .collect::<Vec<_>>(),
+            vec![(0, Stage::Parse), (1, Stage::ScanDetect)]
+        );
+        let events = events.events();
+        assert!(events.iter().any(|event| {
+            matches!(
+                event.kind,
+                EventKind::StageStarted {
+                    stage: Stage::Layout
+                }
+            )
+        }));
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event.kind,
+                EventKind::StageFinished {
+                    stage: Stage::Layout
+                }
+            )
+        }));
     }
 
     #[test]
@@ -906,14 +1061,23 @@ mod tests {
         let walked = walk_page(&pdf, page_id).unwrap();
         let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap();
         engine[0].baseline_origin.x += 0.01;
+        engine[0].baseline_origin.y -= 0.02;
         let mut diagnostics = Diagnostics::default();
 
         validate_character_alignment(0, &walked, &engine, 0.001, &mut diagnostics).unwrap();
         assert_eq!(diagnostics.entries().len(), 1);
-        assert_eq!(
-            diagnostics.entries()[0].id(),
-            DiagnosticId::EngineBaselineMismatch
-        );
+        let Diagnostic::EngineBaselineMismatch {
+            page_index,
+            character_index,
+            delta_x_pt,
+            delta_y_pt,
+        } = diagnostics.entries()[0];
+        assert_eq!(page_index, 0);
+        assert_eq!(character_index, 0);
+        assert!((delta_x_pt - 0.01).abs() < 1e-12);
+        assert!((delta_y_pt - 0.02).abs() < 1e-12);
+        assert!(delta_x_pt >= 0.0);
+        assert!(delta_y_pt >= 0.0);
 
         engine[0].baseline_origin.x = f64::NAN;
         assert!(

@@ -191,8 +191,15 @@ impl<W: Write + Send> EventSink for ProtocolSession<W> {
 }
 
 fn write_bytes<W: Write>(state: &mut SessionState<W>, bytes: &[u8]) -> Result<()> {
-    match state.writer.write_all(bytes) {
-        Ok(()) => Ok(()),
+    match state.writer.write(bytes) {
+        Ok(written) if written == bytes.len() => Ok(()),
+        Ok(written) => {
+            state.output = OutputState::Poisoned;
+            Err(stdout_write_error(format!(
+                "stdout wrote {written} of {} bytes",
+                bytes.len()
+            )))
+        }
         Err(error) if error.kind() == ErrorKind::BrokenPipe => {
             state.output = OutputState::ClosedByEpipe;
             Ok(())
@@ -254,5 +261,209 @@ const fn human_stage_name(stage: Stage) -> &'static str {
         Stage::Typeset => "typeset",
         Stage::FontEmbed => "font embed",
         Stage::Write => "write",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::io;
+    use std::sync::Arc;
+
+    use mimus_core::error::{InputReason, InternalReason};
+
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    enum WriteStep {
+        All,
+        Bytes(usize),
+        Fail(ErrorKind),
+    }
+
+    #[derive(Clone)]
+    struct ScriptedWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        steps: Arc<Mutex<VecDeque<WriteStep>>>,
+    }
+
+    impl ScriptedWriter {
+        fn new(steps: impl IntoIterator<Item = WriteStep>) -> (Self, Arc<Mutex<Vec<u8>>>) {
+            let bytes = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    bytes: Arc::clone(&bytes),
+                    steps: Arc::new(Mutex::new(steps.into_iter().collect())),
+                },
+                bytes,
+            )
+        }
+    }
+
+    impl Write for ScriptedWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            match self
+                .steps
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(WriteStep::All)
+            {
+                WriteStep::All => {
+                    self.bytes.lock().unwrap().extend_from_slice(buffer);
+                    Ok(buffer.len())
+                }
+                WriteStep::Bytes(count) => {
+                    let count = count.min(buffer.len());
+                    self.bytes
+                        .lock()
+                        .unwrap()
+                        .extend_from_slice(&buffer[..count]);
+                    Ok(count)
+                }
+                WriteStep::Fail(kind) => Err(io::Error::new(kind, "injected stdout failure")),
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn started() -> Event {
+        Event::new(EventKind::StageStarted {
+            stage: Stage::Parse,
+        })
+    }
+
+    fn result() -> ResultPayload {
+        ResultPayload::Translate {
+            output: "paper.zh.pdf".to_owned(),
+        }
+    }
+
+    fn input_error() -> MimusError {
+        MimusError::input(InputReason::UnsupportedPdf, "unsupported input")
+    }
+
+    fn bytes(value: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
+        value.lock().unwrap().clone()
+    }
+
+    fn failing_serializer(_event: &Event) -> Result<Vec<u8>> {
+        Err(MimusError::internal(
+            InternalReason::EventSerialization,
+            "injected serialization failure",
+        ))
+    }
+
+    #[test]
+    fn epipe_closes_stdout_but_preserves_the_business_exit_code() {
+        let (writer, output) = ScriptedWriter::new([WriteStep::Fail(ErrorKind::BrokenPipe)]);
+        let session = ProtocolSession::with_writer(writer, true, serialize_line);
+
+        session.emit(started()).unwrap();
+        assert_eq!(session.output_state(), OutputState::ClosedByEpipe);
+        assert_eq!(session.finish_error(input_error()), ExitCode::from(2));
+        assert!(bytes(&output).is_empty());
+
+        let (writer, _) = ScriptedWriter::new([WriteStep::Fail(ErrorKind::BrokenPipe)]);
+        let session = ProtocolSession::with_writer(writer, true, serialize_line);
+        session.emit(started()).unwrap();
+        assert_eq!(session.finish_result(result(), 1, 0), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn zero_byte_write_poisons_stdout_and_prevents_all_later_writes() {
+        let (writer, output) = ScriptedWriter::new([WriteStep::Bytes(0)]);
+        let session = ProtocolSession::with_writer(writer, true, serialize_line);
+
+        let error = session.emit(started()).unwrap_err();
+        assert_eq!(error.reason(), ErrorReason::Io(IoReason::StdoutWrite));
+        assert_eq!(session.output_state(), OutputState::Poisoned);
+        assert!(bytes(&output).is_empty());
+        assert!(session.emit(started()).is_err());
+        assert_eq!(session.finish_error(input_error()), ExitCode::from(5));
+        assert!(bytes(&output).is_empty());
+    }
+
+    #[test]
+    fn partial_json_write_poisons_stdout_without_appending_another_event() {
+        let line = serialize_line(&started()).unwrap();
+        let split = line.len() / 2;
+        let (writer, output) = ScriptedWriter::new([WriteStep::Bytes(split), WriteStep::All]);
+        let session = ProtocolSession::with_writer(writer, true, serialize_line);
+
+        assert!(session.emit(started()).is_err());
+        assert_eq!(bytes(&output), line[..split]);
+        assert!(session.emit(started()).is_err());
+        assert_eq!(bytes(&output), line[..split]);
+    }
+
+    #[test]
+    fn newline_write_failure_leaves_one_unterminated_line_and_no_followup() {
+        let line = serialize_line(&started()).unwrap();
+        let (writer, output) =
+            ScriptedWriter::new([WriteStep::Bytes(line.len() - 1), WriteStep::All]);
+        let session = ProtocolSession::with_writer(writer, true, serialize_line);
+
+        assert!(session.emit(started()).is_err());
+        assert_eq!(bytes(&output), line[..line.len() - 1]);
+        assert!(!bytes(&output).ends_with(b"\n"));
+        assert_eq!(session.finish_error(input_error()), ExitCode::from(5));
+        assert_eq!(bytes(&output), line[..line.len() - 1]);
+    }
+
+    #[test]
+    fn terminal_write_failure_returns_io_and_never_appends_after_poison() {
+        let started_line = serialize_line(&started()).unwrap();
+        let (writer, output) =
+            ScriptedWriter::new([WriteStep::All, WriteStep::Fail(ErrorKind::Other)]);
+        let session = ProtocolSession::with_writer(writer, true, serialize_line);
+
+        session.emit(started()).unwrap();
+        assert_eq!(session.finish_result(result(), 1, 0), ExitCode::from(5));
+        assert_eq!(bytes(&output), started_line);
+        assert!(session.emit(started()).is_err());
+        assert_eq!(bytes(&output), started_line);
+    }
+
+    #[test]
+    fn serialization_failure_uses_fixed_terminal_without_the_general_serializer() {
+        let (writer, output) = ScriptedWriter::new([WriteStep::All]);
+        let session = ProtocolSession::with_writer(writer, true, failing_serializer);
+
+        let error = session.emit(started()).unwrap_err();
+        assert_eq!(
+            error.reason(),
+            ErrorReason::Internal(InternalReason::EventSerialization)
+        );
+        assert_eq!(bytes(&output), MINIMAL_SERIALIZATION_ERROR_LINE);
+        assert_eq!(session.output_state(), OutputState::Terminal);
+        assert_eq!(session.finish_error(error), ExitCode::from(6));
+        assert_eq!(bytes(&output), MINIMAL_SERIALIZATION_ERROR_LINE);
+    }
+
+    #[test]
+    fn serialization_exit_code_stays_internal_when_the_fixed_terminal_cannot_write() {
+        let (writer, output) = ScriptedWriter::new([WriteStep::Fail(ErrorKind::Other)]);
+        let session = ProtocolSession::with_writer(writer, true, failing_serializer);
+
+        let error = session.emit(started()).unwrap_err();
+        assert_eq!(session.output_state(), OutputState::Poisoned);
+        assert_eq!(session.finish_error(error), ExitCode::from(6));
+        assert!(bytes(&output).is_empty());
+    }
+
+    #[test]
+    fn terminal_state_suppresses_all_later_events() {
+        let (writer, output) = ScriptedWriter::new([WriteStep::All]);
+        let session = ProtocolSession::with_writer(writer, true, serialize_line);
+
+        assert_eq!(session.finish_result(result(), 1, 0), ExitCode::SUCCESS);
+        let terminal = bytes(&output);
+        session.emit(started()).unwrap();
+        assert_eq!(bytes(&output), terminal);
+        assert_eq!(session.output_state(), OutputState::Terminal);
     }
 }

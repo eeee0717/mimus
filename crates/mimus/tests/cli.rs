@@ -56,6 +56,66 @@ fn run_none_with_output_flag(
     command.arg(input).output().unwrap()
 }
 
+fn run_inspect(input: &Path, json: bool, debug: Option<&Path>) -> Output {
+    let mut command = Command::new(BIN);
+    command.env(PDFIUM_ENV, pdfium_library());
+    if json {
+        command.arg("--json");
+    }
+    command.arg("inspect");
+    if let Some(debug) = debug {
+        command.arg("--debug").arg(debug);
+    }
+    command.arg(input).output().unwrap()
+}
+
+fn run_none_with_debug(input: &Path, output: &Path, debug: &Path, json: bool) -> Output {
+    let mut command = Command::new(BIN);
+    command.env(PDFIUM_ENV, pdfium_library());
+    if json {
+        command.arg("--json");
+    }
+    command
+        .args(["translate", "--backend", "none", "--output"])
+        .arg(output)
+        .arg("--debug")
+        .arg(debug)
+        .arg(input)
+        .output()
+        .unwrap()
+}
+
+fn parse_events(output: &[u8]) -> Vec<serde_json::Value> {
+    String::from_utf8(output.to_vec())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect()
+}
+
+fn assert_one_terminal_last(events: &[serde_json::Value], expected: &str) {
+    assert!(!events.is_empty());
+    assert!(events.iter().all(|event| event["schema_version"] == 2));
+    let terminal_indices = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            matches!(event["event"].as_str(), Some("result" | "error")).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_indices, vec![events.len() - 1]);
+    assert_eq!(events.last().unwrap()["event"], expected);
+}
+
+fn directory_names(directory: &Path) -> Vec<String> {
+    let mut names = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
 fn write_program_pdf(directory: &Path, name: &str, program: &[u8]) -> PathBuf {
     let path = directory.join(name);
     let mut document = lopdf::Document::load(fixture()).unwrap();
@@ -86,6 +146,7 @@ fn help_and_bare_invocation_succeed() {
     assert!(help.status.success());
     let help = String::from_utf8(help.stdout).unwrap();
     assert!(help.contains("translate"));
+    assert!(help.contains("inspect"));
     assert!(help.contains("--json"));
 
     let bare = Command::new(BIN).output().unwrap();
@@ -97,6 +158,34 @@ fn help_and_bare_invocation_succeed() {
 fn usage_errors_use_exit_code_one() {
     let output = Command::new(BIN).arg("not-a-command").output().unwrap();
     assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn json_usage_errors_are_one_terminal_event_and_metadata_stays_clap_text() {
+    for arguments in [
+        vec!["--json", "not-a-command"],
+        vec!["--json", "inspect"],
+        vec!["--json"],
+    ] {
+        let output = Command::new(BIN).args(arguments).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stderr.is_empty());
+        let events = parse_events(&output.stdout);
+        assert_eq!(events.len(), 1);
+        assert_one_terminal_last(&events, "error");
+        assert_eq!(events[0]["schema_version"], 2);
+        assert_eq!(events[0]["category"], "usage");
+        assert_eq!(events[0]["reason"], "invalid_arguments");
+        assert!(events[0]["message"].is_string());
+        assert!(events[0]["hint"].is_null());
+    }
+
+    for flag in ["--help", "--version"] {
+        let output = Command::new(BIN).args(["--json", flag]).output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert!(!output.stdout.starts_with(b"{"));
+    }
 }
 
 #[test]
@@ -152,20 +241,175 @@ fn explicit_output_and_json_emit_one_versioned_terminal_event() {
     );
     assert!(translated.is_file());
     assert!(output.stderr.is_empty());
-    let events = String::from_utf8(output.stdout)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-        .collect::<Vec<_>>();
+    let events = parse_events(&output.stdout);
     assert!(!events.is_empty());
-    assert!(events.iter().all(|event| event["schema_version"] == 1));
-    let terminal = events
+    assert!(events.iter().all(|event| event["schema_version"] == 2));
+    assert_one_terminal_last(&events, "result");
+    assert_eq!(
+        events.last().unwrap()["output"],
+        translated.to_str().unwrap()
+    );
+    assert!(events.last().unwrap().get("il").is_none());
+    assert!(events.iter().any(|event| {
+        event["event"] == "page_progress" && event["page_index"] == 0 && event.get("page").is_none()
+    }));
+}
+
+#[test]
+fn human_and_json_inspect_share_canonical_il_and_stop_at_the_read_only_prefix() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("paper.pdf");
+    let debug = directory.path().join("inspect-debug");
+    std::fs::copy(fixture(), &input).unwrap();
+
+    let human = run_inspect(&input, false, Some(&debug));
+    assert!(
+        human.status.success(),
+        "human inspect failed: {}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    assert!(!directory.path().join("paper.zh.pdf").exists());
+    assert_eq!(
+        human.stdout,
+        std::fs::read(debug.join("03-paragraph_find.il.json")).unwrap()
+    );
+    insta::assert_snapshot!(
+        "unit_base_01_human_inspect_il",
+        String::from_utf8(human.stdout.clone()).unwrap()
+    );
+    let human_il: serde_json::Value = serde_json::from_slice(&human.stdout).unwrap();
+    assert_eq!(human_il["schema_version"], 1);
+    let stderr = String::from_utf8(human.stderr).unwrap();
+    assert!(stderr.contains("parse: page 1/1"));
+    assert!(!stderr.contains("translate..."));
+    assert!(!stderr.contains("write..."));
+
+    let json = run_inspect(&input, true, None);
+    assert!(json.status.success());
+    assert!(json.stderr.is_empty());
+    let events = parse_events(&json.stdout);
+    assert!(events.iter().all(|event| event["schema_version"] == 2));
+    assert_one_terminal_last(&events, "result");
+    let started = events
         .iter()
-        .filter(|event| matches!(event["event"].as_str(), Some("result" | "error")))
+        .filter(|event| event["event"] == "stage_started")
+        .map(|event| event["stage"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(terminal.len(), 1);
-    assert_eq!(terminal[0]["event"], "result");
-    assert_eq!(terminal[0]["output"], translated.to_str().unwrap());
+    assert_eq!(
+        started,
+        vec!["parse", "scan_detect", "layout", "paragraph_find"]
+    );
+    let terminal = events.last().unwrap();
+    assert_eq!(terminal["il"], human_il);
+    assert_eq!(terminal["il"]["schema_version"], 1);
+    assert_eq!(terminal["pages"], 1);
+    assert_eq!(terminal["warnings"], 0);
+    assert!(terminal.get("output").is_none());
+}
+
+#[test]
+fn debug_outputs_have_exact_stage_sets_and_no_temporary_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let inspect_debug = directory.path().join("inspect-debug");
+    let inspect = run_inspect(&fixture(), false, Some(&inspect_debug));
+    assert!(inspect.status.success());
+    assert_eq!(
+        directory_names(&inspect_debug),
+        vec![
+            "00-parse.il.json",
+            "01-scan_detect.il.json",
+            "02-layout.il.json",
+            "03-paragraph_find.il.json",
+            "diagnostics.ndjson",
+        ]
+    );
+    assert_eq!(
+        std::fs::read(inspect_debug.join("diagnostics.ndjson")).unwrap(),
+        b""
+    );
+
+    let translate_debug = directory.path().join("translate-debug");
+    let translated = directory.path().join("translated.pdf");
+    let translate = run_none_with_debug(&fixture(), &translated, &translate_debug, false);
+    assert!(
+        translate.status.success(),
+        "debug translation failed: {}",
+        String::from_utf8_lossy(&translate.stderr)
+    );
+    assert_eq!(
+        directory_names(&translate_debug),
+        vec![
+            "00-parse.il.json",
+            "01-scan_detect.il.json",
+            "02-layout.il.json",
+            "03-paragraph_find.il.json",
+            "04-styles_and_formulas.il.json",
+            "05-extract_terms.il.json",
+            "06-translate.il.json",
+            "07-typeset.il.json",
+            "08-font_embed.il.json",
+            "09-write.il.json",
+            "diagnostics.ndjson",
+        ]
+    );
+}
+
+#[test]
+fn failed_pass_keeps_debug_prefix_and_finishes_json_with_one_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = write_program_pdf(directory.path(), "empty.pdf", b"");
+    let debug = directory.path().join("debug");
+
+    let output = run_inspect(&input, true, Some(&debug));
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    let events = parse_events(&output.stdout);
+    assert_one_terminal_last(&events, "error");
+    assert_eq!(events.last().unwrap()["category"], "input");
+    assert_eq!(events.last().unwrap()["reason"], "scanned_pdf");
+    assert_eq!(
+        directory_names(&debug),
+        vec!["00-parse.il.json", "diagnostics.ndjson"]
+    );
+    assert_eq!(
+        std::fs::read(debug.join("diagnostics.ndjson")).unwrap(),
+        b""
+    );
+}
+
+#[test]
+fn debug_directory_is_new_and_input_output_io_errors_are_typed() {
+    let directory = tempfile::tempdir().unwrap();
+    let debug = directory.path().join("debug");
+    std::fs::create_dir(&debug).unwrap();
+    std::fs::write(debug.join("sentinel"), b"keep").unwrap();
+    let existing = run_inspect(&fixture(), true, Some(&debug));
+    assert_eq!(existing.status.code(), Some(5));
+    assert!(existing.stderr.is_empty());
+    let events = parse_events(&existing.stdout);
+    assert_one_terminal_last(&events, "error");
+    assert_eq!(events[0]["category"], "io");
+    assert_eq!(events[0]["reason"], "debug_write");
+    assert_eq!(directory_names(&debug), vec!["sentinel"]);
+
+    let missing = directory.path().join("missing.pdf");
+    let input_error = run_inspect(&missing, true, None);
+    assert_eq!(input_error.status.code(), Some(5));
+    assert!(input_error.stderr.is_empty());
+    let events = parse_events(&input_error.stdout);
+    assert_one_terminal_last(&events, "error");
+    assert_eq!(events.last().unwrap()["category"], "io");
+    assert_eq!(events.last().unwrap()["reason"], "input_read");
+
+    let output = directory.path().join("missing-parent/output.pdf");
+    let output_error = run_none(&fixture(), Some(&output), true);
+    assert_eq!(output_error.status.code(), Some(5));
+    assert!(output_error.stderr.is_empty());
+    let events = parse_events(&output_error.stdout);
+    assert_one_terminal_last(&events, "error");
+    assert_eq!(events.last().unwrap()["category"], "io");
+    assert_eq!(events.last().unwrap()["reason"], "output_write");
 }
 
 #[test]
@@ -268,7 +512,7 @@ fn a_closed_stdout_pipe_does_not_turn_success_into_a_panic() {
     let translated = directory.path().join("broken-pipe.pdf");
     let mut child = Command::new(BIN)
         .env(PDFIUM_ENV, pdfium_library())
-        .args(["translate", "--backend", "none", "--output"])
+        .args(["--json", "translate", "--backend", "none", "--output"])
         .arg(&translated)
         .arg(fixture())
         .stdout(Stdio::piped())

@@ -286,6 +286,8 @@ impl MimusError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -316,5 +318,121 @@ mod tests {
             serde_json::to_string(&error.reason()).unwrap(),
             "\"backend_not_implemented\""
         );
+    }
+
+    #[test]
+    fn every_public_reason_has_one_category_wire_value_and_exit_code() {
+        let cases = [
+            (
+                MimusError::usage(UsageReason::InvalidArguments, "test"),
+                ExitCategory::Usage,
+                "invalid_arguments",
+            ),
+            (
+                MimusError::input(InputReason::PdfParse, "test"),
+                ExitCategory::Input,
+                "pdf_parse",
+            ),
+            (
+                MimusError::input(InputReason::EncryptedPdf, "test"),
+                ExitCategory::Input,
+                "encrypted_pdf",
+            ),
+            (
+                MimusError::input(InputReason::ScannedPdf, "test"),
+                ExitCategory::Input,
+                "scanned_pdf",
+            ),
+            (
+                MimusError::input(InputReason::UnsupportedPdf, "test"),
+                ExitCategory::Input,
+                "unsupported_pdf",
+            ),
+            (
+                MimusError::input(InputReason::OperatorWalk, "test"),
+                ExitCategory::Input,
+                "operator_walk",
+            ),
+            (
+                MimusError::input(InputReason::EngineMismatch, "test"),
+                ExitCategory::Input,
+                "engine_mismatch",
+            ),
+            (
+                MimusError::asset(AssetReason::PdfiumUnavailable, "test"),
+                ExitCategory::Asset,
+                "pdfium_unavailable",
+            ),
+            (
+                MimusError::translation(TranslationReason::BackendNotImplemented, "test"),
+                ExitCategory::Translation,
+                "backend_not_implemented",
+            ),
+            (
+                MimusError::translation(TranslationReason::TranslationFailed, "test"),
+                ExitCategory::Translation,
+                "translation_failed",
+            ),
+            (
+                MimusError::io(IoReason::InputRead, "test"),
+                ExitCategory::Io,
+                "input_read",
+            ),
+            (
+                MimusError::io(IoReason::OutputWrite, "test"),
+                ExitCategory::Io,
+                "output_write",
+            ),
+            (
+                MimusError::io(IoReason::AtomicPublish, "test"),
+                ExitCategory::Io,
+                "atomic_publish",
+            ),
+            (
+                MimusError::io(IoReason::DebugWrite, "test"),
+                ExitCategory::Io,
+                "debug_write",
+            ),
+            (
+                MimusError::io(IoReason::StdoutWrite, "test"),
+                ExitCategory::Io,
+                "stdout_write",
+            ),
+            (
+                MimusError::internal(InternalReason::OutputBuild, "test"),
+                ExitCategory::Internal,
+                "output_build",
+            ),
+            (
+                MimusError::internal(InternalReason::OutputMismatch, "test"),
+                ExitCategory::Internal,
+                "output_mismatch",
+            ),
+            (
+                MimusError::internal(InternalReason::EventSerialization, "test"),
+                ExitCategory::Internal,
+                "event_serialization",
+            ),
+            (
+                MimusError::internal(InternalReason::InvariantViolation, "test"),
+                ExitCategory::Internal,
+                "invariant_violation",
+            ),
+        ];
+        let mut wire_values = BTreeSet::new();
+
+        for (error, category, wire) in &cases {
+            assert_eq!(error.category(), *category, "reason {wire}");
+            assert_eq!(error.category().code(), category.code(), "reason {wire}");
+            assert_eq!(error.reason().as_str(), *wire);
+            assert_eq!(
+                serde_json::to_value(error.reason()).unwrap(),
+                serde_json::Value::String((*wire).to_owned())
+            );
+            assert!(wire_values.insert(*wire), "duplicate reason {wire}");
+        }
+
+        assert_eq!(cases.len(), 19, "new reasons must be added to this matrix");
+        assert_eq!(wire_values.len(), cases.len());
     }
 }

@@ -7,6 +7,7 @@ use mimus_core::error::{IoReason, MimusError, Result};
 use mimus_core::event::{DiagnosticEvent, Event, EventKind, Stage, serialize_line};
 use mimus_core::il;
 
+#[derive(Debug)]
 pub(crate) struct DebugArtifacts {
     directory: PathBuf,
 }
@@ -73,4 +74,107 @@ fn write_debug_file(file: &mut File, contents: &[u8]) -> Result<()> {
 
 fn debug_write_error(message: impl Into<String>) -> MimusError {
     MimusError::io(IoReason::DebugWrite, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use mimus_core::error::ErrorReason;
+
+    use super::*;
+
+    fn filenames(directory: &std::path::Path) -> Vec<String> {
+        let mut names = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .into_string()
+                    .expect("debug filenames are UTF-8")
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn create_rejects_an_existing_directory_without_modifying_it() {
+        let parent = tempfile::tempdir().unwrap();
+        let directory = parent.path().join("debug");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("sentinel"), b"keep").unwrap();
+
+        let error = DebugArtifacts::create(directory.clone()).unwrap_err();
+
+        assert_eq!(error.reason(), ErrorReason::Io(IoReason::DebugWrite));
+        assert_eq!(std::fs::read(directory.join("sentinel")).unwrap(), b"keep");
+        assert_eq!(filenames(&directory), vec!["sentinel"]);
+    }
+
+    #[test]
+    fn snapshots_use_stage_names_canonical_bytes_and_leave_no_temporary_files() {
+        let parent = tempfile::tempdir().unwrap();
+        let directory = parent.path().join("debug");
+        let debug = DebugArtifacts::create(directory.clone()).unwrap();
+        let snapshot = il::Document::default();
+
+        debug
+            .write_snapshot(3, Stage::ParagraphFind, &snapshot)
+            .unwrap();
+
+        let path = directory.join("03-paragraph_find.il.json");
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            il::canonical_json(&snapshot).unwrap()
+        );
+        assert_eq!(filenames(&directory), vec!["03-paragraph_find.il.json"]);
+    }
+
+    #[test]
+    fn diagnostics_file_uses_the_shared_v2_event_serializer() {
+        let parent = tempfile::tempdir().unwrap();
+        let directory = parent.path().join("debug");
+        let debug = DebugArtifacts::create(directory.clone()).unwrap();
+        let diagnostics = vec![
+            DiagnosticEvent::EngineBaselineMismatch {
+                page_index: 0,
+                character_index: 2,
+                delta_x_pt: 0.01,
+                delta_y_pt: 0.02,
+            },
+            DiagnosticEvent::DroppedDiagnostics { count: 7 },
+        ];
+
+        debug.write_diagnostics(&diagnostics).unwrap();
+
+        let expected = diagnostics
+            .iter()
+            .flat_map(|diagnostic| {
+                serialize_line(&Event::new(EventKind::Diagnostic {
+                    diagnostic: diagnostic.clone(),
+                }))
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            std::fs::read(directory.join("diagnostics.ndjson")).unwrap(),
+            expected
+        );
+        assert_eq!(filenames(&directory), vec!["diagnostics.ndjson"]);
+    }
+
+    #[test]
+    fn empty_diagnostics_still_creates_an_empty_file() {
+        let parent = tempfile::tempdir().unwrap();
+        let directory = parent.path().join("debug");
+        let debug = DebugArtifacts::create(directory.clone()).unwrap();
+
+        debug.write_diagnostics(&[]).unwrap();
+
+        assert_eq!(
+            std::fs::read(directory.join("diagnostics.ndjson")).unwrap(),
+            b""
+        );
+        assert_eq!(filenames(&directory), vec!["diagnostics.ndjson"]);
+    }
 }
