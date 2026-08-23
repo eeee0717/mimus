@@ -18,7 +18,7 @@
 | 9 | 语种：输入语言解耦（取决于文本提取），验收只对英→中；排版仅调优简体中文输出 | — |
 | 10 | 输出模式：默认仅译文；`--bilingual` 原/译交替页（修书签/内链页目标映射）；并排不做 | — |
 | 11 | 保真范围：书签不翻译、链接热区不调整、表单/OCG 原样透传；断言书签数/注释数不变 | — |
-| 12 | 流水线：固定顺序 pass 链（`fn(&mut Document)`，无 pass 框架）；pass 内按页 rayon 并行；`--debug` 逐 pass 落盘 IL | — |
+| 12 | 流水线：固定顺序 pass 链（`fn(&mut Document, &PassContext)`——`Document` 只装数据：原始字节/lopdf 文档/IL/诊断；`PassContext` 装引擎实例/配置/事件钩子；无 pass 框架）；pass 内按页 rayon 并行；`--debug` 逐 pass 落盘 IL | — |
 | 13 | 阶段草案：Parse → ScanDetect(拒绝) → Layout → ParagraphFind → StylesAndFormulas → ExtractTerms → Translate → Typeset → FontEmbed → Write | — |
 | 14 | 阅读顺序：以 V3 模型输出为准 + 几何排序兜底；实测 `[M,7]` 第 7 列是 RT-DETR query id，同时可作页内阅读顺序键；同 query 多类别先取最高分，排序键为 `(page_index, col7)` | [ADR-0002](docs/adr/0002-pp-doclayoutv3.md) |
 | 15 | 翻译政策表（见下）；表体默认不翻留 `--translate-table` 实验开关 | — |
@@ -44,6 +44,7 @@
 | 35 | 走查仲裁：PDF 规范 + hand-written manifest + 独立结构/字体/几何推导是事实层；独立 parser/renderer trace 验证落地；PDFium 只作交叉证据。恢复存在歧义时选择有界、可报告、不扩散，不能可靠恢复则降级 | [ADR-0006](docs/adr/0006-engine-combination.md) |
 | 36 | 增量写回路线已验证：输入完整字节作为前缀、对象号只追加、共享资源 copy-on-write、未修改结构守恒、同目录临时文件原子发布；生产 writer 仍须在 `mimus-core` 内实现并复用这些回归断言 | [ADR-0003](docs/adr/0003-v1-native-pdf-path.md)、[ADR-0006](docs/adr/0006-engine-combination.md) |
 | 37 | firecrawl-pdfium 资格结论为 **B：补齐上游后采用**。现有文本/渲染行为、稳定性和性能合格，但 T1 字符诊断、F1 字体快照、O1 对象来源映射尚未暴露；完成并复跑资格矩阵前不得改生产依赖 | [docs/05-pdfium-backend-qualification.md](docs/05-pdfium-backend-qualification.md) |
+| 38 | 引擎 trait 表面按 **owned snapshot** 设计：快照类型由 `mimus-core` 自定义，`pdfium-render` 只出现在 `engine/` 实现模块，pass 代码不得引用后端类型；替换后端（如 firecrawl-pdfium）= 重实现 trait + 复跑资格矩阵，pass 代码零改动 | [ADR-0010](docs/adr/0010-engine-owned-snapshot.md) |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
@@ -127,6 +128,8 @@
 ### 工程
 
 - **churn 系数**：BabelDOC 写了约 2.25 倍代码才收敛的经验值。
+- **双 schema_version**：CLI 机器协议（NDJSON 事件流）与 IL 序列化各带独立的 `schema_version`——消费者与演进节奏不同，互不耦合。
+- **PoC 冻结**：`m0-experiment-2` crate 是 M0 实验 2 的 PoC，冻结为 corpus `operator-walk:*` 门禁的执行体；生产操作符走查在 `mimus-core` 内另行实现，以实验 2 报告与同批 fixture 为回归基准，不复用 PoC 代码。
 
 ## 待决清单
 
