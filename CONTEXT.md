@@ -22,7 +22,7 @@
 | 13 | 阶段草案：Parse → ScanDetect(拒绝) → Layout → ParagraphFind → StylesAndFormulas → ExtractTerms → Translate → Typeset → FontEmbed → Write | — |
 | 14 | 阅读顺序：以 V3 模型输出为准 + 几何排序兜底；实测 `[M,7]` 第 7 列是 RT-DETR query id，同时可作页内阅读顺序键；同 query 多类别先取最高分，排序键为 `(page_index, col7)` | [ADR-0002](docs/adr/0002-pp-doclayoutv3.md) |
 | 15 | 翻译政策表（见下）；表体默认不翻留 `--translate-table` 实验开关 | — |
-| 16 | 错误恢复：三层降级（段→页→文档，宁保原文不出坏译文）+ 结束汇总 + `--strict`；畸形 PDF fail-fast、修复函数语料驱动；退出码 0/1/2/3/4 分类 | — |
+| 16 | 错误恢复：三层降级（段→页→文档，宁保原文不出坏译文）+ 结束汇总 + `--strict`；畸形 PDF fail-fast、修复函数语料驱动；退出码 0/1/2/3/4/5/6 分类（Usage/Input/Asset/Translation/Io/Internal） | [ADR-0011](docs/adr/0011-cli-machine-protocol.md) |
 | 17 | V1 单进程；PDFium 崩溃（abort）接受，子进程隔离推 V2 | — |
 | 18 | 字体：Noto Sans SC（Regular+Bold）单族走资产机制；subsetter 子集化；`--font` 覆盖；italic 映射正常字重 | — |
 | 19 | 术语：**保留自动术语提取**（独立 pass，LLM）+ `--glossary` 用户术语表 | — |
@@ -31,7 +31,7 @@
 | 22 | 推理纯 CPU（ort CPU EP）；GPU/NPU EP 不进 V1 | — |
 | 23 | 质量回归四件套：全语料 IL 快照 + 占位符守恒 + 零 panic + 几何断言；**CI 绿才能合并**；渲染像素 diff 待渲染路径稳定后加 | — |
 | 24 | 语料：**Corpus v1 已从零建立，当前 74 份 M0 fixture 已按合同独立验收入库**；后续 M1/M3 fixture 继续按 pass 逐批落地。旧 23 份合成语料永久作废、不得参考；真实语料不进 repo、发布前人工 checklist | — |
-| 25 | CLI：子命令结构（`translate` / `assets pull` / `inspect`）；配置三层 flags > env > `~/.config/mimus/config.toml`；API key 不走明文 flag；两级人类可读进度；V1 `--json` 输出带版本的 NDJSON 机器协议；细粒度 flags 随功能里程碑落地 | [ADR-0008](docs/adr/0008-agent-skill.md) |
+| 25 | CLI：子命令结构（`translate` / `assets pull` / `inspect`）；配置三层 flags > env > `~/.config/mimus/config.toml`；API key 不走明文 flag；两级人类可读进度；V1 `--json` 输出版本化 NDJSON，当前公开协议为 v2；细粒度 flags 随功能里程碑落地 | [ADR-0008](docs/adr/0008-agent-skill.md)、[ADR-0011](docs/adr/0011-cli-machine-protocol.md) |
 | 26 | 里程碑：M-1 与 M0 已于 2026-08-23 收口，三项核心风险实验均为“成”；当前进入 M1，从 #14 的最窄 walking skeleton 开始，仍以语料断言而非模块完成度收口 | [docs/02-milestones.md](docs/02-milestones.md) |
 | 27 | 术语细节：用户 `--glossary` 覆盖自动表；`--dump-glossary` 导出复用；`--no-auto-terms` 开关；自动表指纹进缓存键 | — |
 | 28 | 性能：V1 无硬指标；方向值=20 页论文除 LLM 外 <5 分钟（arm64 笔记本）；LLM 段落级并发默认 4、指数退避重试 3 次、重试尽降级保原文 | — |
@@ -45,6 +45,7 @@
 | 36 | 增量写回路线已验证：输入完整字节作为前缀、对象号只追加、共享资源 copy-on-write、未修改结构守恒、同目录临时文件原子发布；生产 writer 仍须在 `mimus-core` 内实现并复用这些回归断言 | [ADR-0003](docs/adr/0003-v1-native-pdf-path.md)、[ADR-0006](docs/adr/0006-engine-combination.md) |
 | 37 | firecrawl-pdfium 资格结论为 **B：补齐上游后采用**。现有文本/渲染行为、稳定性和性能合格，但 T1 字符诊断、F1 字体快照、O1 对象来源映射尚未暴露；完成并复跑资格矩阵前不得改生产依赖 | [docs/05-pdfium-backend-qualification.md](docs/05-pdfium-backend-qualification.md) |
 | 38 | 引擎 trait 表面按 **owned snapshot** 设计：快照类型由 `mimus-core` 自定义，`pdfium-render` 只出现在 `engine/` 实现模块，pass 代码不得引用后端类型；替换后端（如 firecrawl-pdfium）= 重实现 trait + 复跑资格矩阵，pass 代码零改动 | [ADR-0010](docs/adr/0010-engine-owned-snapshot.md) |
+| 39 | CLI 机器协议 v2：`inspect` 只读至 ParagraphFind；typed diagnostic 与结构化进度走 stdout NDJSON，人类 renderer 走 stderr；正常可写流以恰一个 result/error 终结；EPIPE、部分写、Io/Internal 退出码和逐 pass debug 合同统一收口 | [ADR-0011](docs/adr/0011-cli-machine-protocol.md) |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
@@ -107,7 +108,7 @@
 
 - **Agent Skill**：仓库内的 `skills/mimus/` 指令包；用户通过 `npx skills add eeee0717/mimus` 安装，使支持 skill 的 agent 能调用 `translate`、`inspect`、`assets pull`。它是 CLI 的薄编排层，不含业务实现。
 - **Skill 安装边界**：`npx skills add` 只安装指令包，不安装 `mimus` 二进制、模型或字体；skill 需检查 CLI 是否存在及版本是否兼容，资产仍由 CLI 管理。
-- **机器调用协议**：所有子命令的 `--json` 模式；stdout 仅输出带 `schema_version` 的 NDJSON 事件流，并以单个 result/error 事件终结。无 spinner、颜色或交互提示；分类退出码仍是第一层结果信号。
+- **机器调用协议**：所有子命令的 `--json` 模式；当前 CLI schema 为 v2。结构化进度、typed diagnostic 和结果都走 stdout NDJSON；正常可写流以单个 result/error 事件终结。无 spinner、颜色或交互提示；人类可读 renderer 走 stderr，分类退出码仍是第一层结果信号（ADR-0011）。
 - **行为真源**：人、脚本和 agent 都通过同一个 CLI 执行；skill 不复制参数语义、翻译策略或错误恢复逻辑。
 
 ### 测试
@@ -128,7 +129,7 @@
 ### 工程
 
 - **churn 系数**：BabelDOC 写了约 2.25 倍代码才收敛的经验值。
-- **双 schema_version**：CLI 机器协议（NDJSON 事件流）与 IL 序列化各带独立的 `schema_version`——消费者与演进节奏不同，互不耦合。
+- **双 schema_version**：CLI 机器协议（当前 v2）与 IL 序列化（当前 v1）各带独立的 `schema_version`——消费者与演进节奏不同，互不耦合；IL 升版不要求 CLI 同步升版。
 - **PoC 冻结**：`m0-experiment-2` crate 是 M0 实验 2 的 PoC，冻结为 corpus `operator-walk:*` 门禁的执行体；生产操作符走查在 `mimus-core` 内另行实现，以实验 2 报告与同批 fixture 为回归基准，不复用 PoC 代码。
 
 ## 待决清单
