@@ -9,6 +9,7 @@ use crate::event::{Diagnostic, Diagnostics, Event, EventKind, Stage};
 use crate::il::{
     self, Char, PageGeometry, Paragraph, PassthroughRef, Rect, TextCarrier, TextTransform,
 };
+use crate::scan::{PageClass, prescan_page};
 use crate::walk::walk_page;
 use crate::write::{PageRewrite, build_incremental, publish};
 
@@ -133,9 +134,9 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
             ));
         }
     };
-    // ADR-0009: lopdf 会用空密码透明解密并移除 /Encrypt；is_encrypted() 此时为
-    // false，只有 was_encrypted() 能阻止这类文档被静默放行。
-    if pdf.was_encrypted() {
+    // ADR-0009: 空密码文件会被 lopdf 透明解密，只能由 was_encrypted() 识别；
+    // 非空密码文件则可能保持 /Encrypt 后成功返回，只能由 is_encrypted() 识别。
+    if pdf.was_encrypted() || pdf.is_encrypted() {
         return Err(encrypted_pdf_error());
     }
     let lopdf_pages = pdf.get_pages().into_values().collect::<Vec<_>>();
@@ -152,32 +153,15 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     let mut extracted_pages = Vec::with_capacity(engine_pages);
     for (index, page_id) in lopdf_pages.into_iter().enumerate() {
         let geometry = context.engine.page_geometry(&bytes, index)?;
-        // CONTEXT #32 要求在视觉页框内判定朝向。#14 尚未实现这层坐标变换，
-        // 因此先 fail-closed，避免把 /Rotate 90 的整页文字误判后静默重排。
-        if geometry.rotate_degrees != 0 {
-            return Err(MimusError::input(
-                InputReason::UnsupportedPdf,
-                format!(
-                    "M1 does not yet support page /Rotate {}; page {} was not written",
-                    geometry.rotate_degrees,
-                    index + 1
-                ),
-            ));
-        }
-        let walked_characters = walk_page(&pdf, page_id)?;
-        let engine_characters = context.engine.page_characters(&bytes, index)?;
-        validate_character_alignment(
-            index,
-            &walked_characters,
-            &engine_characters,
-            context.config.baseline_tolerance_pt,
-            &mut document.diagnostics,
-        )?;
+        let evidence = prescan_page(&pdf, page_id);
         extracted_pages.push(ExtractedPage {
             index,
+            page_id,
             geometry,
-            walked_characters,
-            engine_characters,
+            evidence,
+            class: None,
+            walked_characters: Vec::new(),
+            engine_characters: Vec::new(),
             layout_regions: Vec::new(),
             input_raster: None,
         });
@@ -193,17 +177,72 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     Ok(())
 }
 
-pub fn scan_detect(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
-    let characters = document
-        .extracted_pages
-        .iter()
-        .map(|page| page.walked_characters.len())
-        .sum::<usize>();
-    if characters == 0 {
+pub fn scan_detect(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
+    let total_pages = document.extracted_pages.len();
+    let mut scanned_page_indices = Vec::new();
+    let mut blank_pages = 0usize;
+    for page in &mut document.extracted_pages {
+        let class = page.evidence.classify();
+        page.class = Some(class);
+        match class {
+            PageClass::Blank => blank_pages += 1,
+            PageClass::Scanned => scanned_page_indices.push(page.index),
+            PageClass::Content => {}
+        }
+    }
+    let scanned_pages = scanned_page_indices.len();
+    let content_pages = total_pages - blank_pages;
+    if scanned_pages > 0 {
+        document.diagnostics.push(Diagnostic::ScanSummary {
+            scanned_page_indices,
+            scanned_pages,
+            blank_pages,
+            content_pages,
+            total_pages,
+        });
+    }
+    if content_pages > 0 && scanned_pages * 5 >= content_pages * 4 {
         return Err(MimusError::input(
             InputReason::ScannedPdf,
-            "the PDF has no native text; scanned PDFs are not supported in V1",
-        ));
+            format!("{scanned_pages} of {content_pages} content pages are scanned"),
+        )
+        .with_hint("V1 does not support OCR for scanned PDFs")
+        .with_scan_counts(scanned_pages, total_pages));
+    }
+
+    let pdf = document.pdf.as_ref().ok_or_else(|| {
+        MimusError::internal(
+            InternalReason::InvariantViolation,
+            "Parse did not retain a PDF",
+        )
+    })?;
+    for page in &mut document.extracted_pages {
+        if page.class != Some(PageClass::Content) {
+            continue;
+        }
+        // CONTEXT #32 要求在视觉页框内判定朝向。#14 尚未实现这层坐标变换，
+        // 因此只在会被改写的内容页上 fail-closed；透传页不需要重放坐标。
+        if page.geometry.rotate_degrees != 0 {
+            return Err(MimusError::input(
+                InputReason::UnsupportedPdf,
+                format!(
+                    "M1 does not yet support page /Rotate {}; page {} was not written",
+                    page.geometry.rotate_degrees,
+                    page.index + 1
+                ),
+            ));
+        }
+        page.walked_characters = walk_page(pdf, page.page_id)?;
+        page.engine_characters = context
+            .engine
+            .page_characters(&document.original_bytes, page.index)?;
+        validate_character_alignment(
+            page.index,
+            &page.walked_characters,
+            &page.engine_characters,
+            context.config.baseline_tolerance_pt,
+            &mut document.diagnostics,
+        )?;
     }
     Ok(())
 }
@@ -211,15 +250,17 @@ pub fn scan_detect(document: &mut Document, _context: &PassContext<'_>) -> Resul
 pub fn layout(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     let total_pages = document.extracted_pages.len();
     for page in &mut document.extracted_pages {
-        let raster = context
-            .engine
-            .rasterize_page(&document.original_bytes, page.index)?;
-        raster.validate()?;
-        page.layout_regions =
-            context
-                .layout_detector
-                .detect(page.geometry, &raster, &page.engine_characters)?;
-        page.input_raster = Some(raster);
+        if page.class == Some(PageClass::Content) {
+            let raster = context
+                .engine
+                .rasterize_page(&document.original_bytes, page.index)?;
+            raster.validate()?;
+            page.layout_regions =
+                context
+                    .layout_detector
+                    .detect(page.geometry, &raster, &page.engine_characters)?;
+            page.input_raster = Some(raster);
+        }
         context.events.emit(Event::new(EventKind::PageProgress {
             stage: Stage::Layout,
             page_index: page.index,
@@ -232,6 +273,14 @@ pub fn layout(document: &mut Document, context: &PassContext<'_>) -> Result<()> 
 pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
     let mut pages = Vec::with_capacity(document.extracted_pages.len());
     for extracted in &document.extracted_pages {
+        if extracted.class != Some(PageClass::Content) {
+            pages.push(il::Page {
+                index: extracted.index,
+                geometry: extracted.geometry,
+                paragraphs: Vec::new(),
+            });
+            continue;
+        }
         if extracted.layout_regions.len() != 1 {
             return Err(MimusError::input(
                 InputReason::UnsupportedPdf,
@@ -303,6 +352,9 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
 pub fn typeset(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
     let mut rewrites = Vec::with_capacity(document.il.pages.len());
     for page in &document.il.pages {
+        if page.paragraphs.is_empty() {
+            continue;
+        }
         let mut content = Vec::new();
         let mut fonts = BTreeSet::new();
         for paragraph in &page.paragraphs {
@@ -409,6 +461,11 @@ fn validate_output_roundtrip(
         )));
     }
 
+    let rewritten_pages = document
+        .rewrites
+        .iter()
+        .map(|rewrite| rewrite.page_index)
+        .collect::<BTreeSet<_>>();
     for expected in &document.extracted_pages {
         let geometry = context
             .engine
@@ -420,6 +477,9 @@ fn validate_output_roundtrip(
                 ))
             })?;
         validate_output_geometry(expected.index, expected.geometry, geometry)?;
+        if !rewritten_pages.contains(&expected.index) {
+            continue;
+        }
         let characters = context
             .engine
             .page_characters(candidate, expected.index)
@@ -1071,7 +1131,10 @@ mod tests {
             character_index,
             delta_x_pt,
             delta_y_pt,
-        } = diagnostics.entries()[0];
+        } = diagnostics.entries()[0]
+        else {
+            panic!("expected an engine baseline diagnostic");
+        };
         assert_eq!(page_index, 0);
         assert_eq!(character_index, 0);
         assert!((delta_x_pt - 0.01).abs() < 1e-12);

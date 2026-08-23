@@ -28,6 +28,17 @@ pub(crate) fn build_incremental(
     original: &Document,
     rewrites: &[PageRewrite],
 ) -> Result<(Vec<u8>, WriteReport)> {
+    if rewrites.is_empty() {
+        return Ok((
+            original_bytes.to_vec(),
+            WriteReport {
+                input_bytes: original_bytes.len(),
+                output_bytes: original_bytes.len(),
+                appended_bytes: 0,
+                content_objects: Vec::new(),
+            },
+        ));
+    }
     let object_ceiling = original
         .trailer
         .get(b"Size")

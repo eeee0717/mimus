@@ -152,6 +152,8 @@ pub enum MimusError {
         reason: InputReason,
         message: String,
         hint: Option<String>,
+        scanned_pages: Option<usize>,
+        total_pages: Option<usize>,
     },
     #[error("{message}")]
     Asset {
@@ -195,6 +197,8 @@ impl MimusError {
             reason,
             message: message.into(),
             hint: None,
+            scanned_pages: None,
+            total_pages: None,
         }
     }
 
@@ -245,6 +249,34 @@ impl MimusError {
             | Self::Internal { hint, .. } => *hint = Some(value.into()),
         }
         self
+    }
+
+    #[must_use]
+    pub fn with_scan_counts(mut self, scanned_pages: usize, total_pages: usize) -> Self {
+        if let Self::Input {
+            reason: InputReason::ScannedPdf,
+            scanned_pages: stored_scanned_pages,
+            total_pages: stored_total_pages,
+            ..
+        } = &mut self
+        {
+            *stored_scanned_pages = Some(scanned_pages);
+            *stored_total_pages = Some(total_pages);
+        }
+        self
+    }
+
+    #[must_use]
+    pub const fn scan_counts(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::Input {
+                reason: InputReason::ScannedPdf,
+                scanned_pages: Some(scanned_pages),
+                total_pages: Some(total_pages),
+                ..
+            } => Some((*scanned_pages, *total_pages)),
+            _ => None,
+        }
     }
 
     #[must_use]

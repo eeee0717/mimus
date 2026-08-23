@@ -6,6 +6,7 @@ use crate::engine::{LayoutDetector, LayoutRegion, PageCharSnapshot, PdfEngine, R
 use crate::error::Result;
 use crate::event::{Diagnostics, EventSink, Stage};
 use crate::il;
+use crate::scan::{PageClass, PageEvidence};
 use crate::translate::Translator;
 use crate::walk::WalkedChar;
 use crate::write::{PageRewrite, WriteReport};
@@ -105,7 +106,10 @@ impl Document {
 
 pub(crate) struct ExtractedPage {
     pub index: usize,
+    pub page_id: lopdf::ObjectId,
     pub geometry: il::PageGeometry,
+    pub evidence: PageEvidence,
+    pub class: Option<PageClass>,
     pub walked_characters: Vec<WalkedChar>,
     pub engine_characters: Vec<PageCharSnapshot>,
     pub layout_regions: Vec<LayoutRegion>,

@@ -357,7 +357,7 @@ fn debug_outputs_have_exact_stage_sets_and_no_temporary_files() {
 #[test]
 fn failed_pass_keeps_debug_prefix_and_finishes_json_with_one_error() {
     let directory = tempfile::tempdir().unwrap();
-    let input = write_program_pdf(directory.path(), "empty.pdf", b"");
+    let input = fixture_path("unit-scan-01-image-only");
     let debug = directory.path().join("debug");
 
     let output = run_inspect(&input, true, Some(&debug));
@@ -372,9 +372,12 @@ fn failed_pass_keeps_debug_prefix_and_finishes_json_with_one_error() {
         directory_names(&debug),
         vec!["00-parse.il.json", "diagnostics.ndjson"]
     );
+    let diagnostics = parse_events(&std::fs::read(debug.join("diagnostics.ndjson")).unwrap());
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0]["id"], "scan_summary");
     assert_eq!(
-        std::fs::read(debug.join("diagnostics.ndjson")).unwrap(),
-        b""
+        diagnostics[0]["scanned_page_indices"],
+        serde_json::json!([0])
     );
 }
 

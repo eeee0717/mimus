@@ -6,6 +6,7 @@ pub mod error;
 pub mod event;
 pub mod il;
 pub mod pass;
+mod scan;
 pub mod translate;
 pub mod walk;
 pub mod write;
