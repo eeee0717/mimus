@@ -13,7 +13,7 @@ ADR-0006 将字符度量与光栅化隐藏在 `PdfInspector` / `Rasterizer` trai
 
 ## 决策
 
-1. `PdfInspector` / `Rasterizer` 的方法**一次性返回 owned 快照**：inspect 返回页字符快照（unicode/code、baseline origin、tight/loose box，后续按需扩展 T1 诊断与字体字段），rasterize 返回 owned RGBA8 位图。调用返回后不保留任何指向后端内部状态的借用。
+1. `PdfInspector` / `Rasterizer` 的方法**一次性返回 owned 快照**：inspect 返回页字符快照（unicode/unicode_value、baseline origin、tight/loose box，后续按需扩展 T1 诊断与字体字段），rasterize 返回 owned RGBA8 位图。调用返回后不保留任何指向后端内部状态的借用。
 2. **快照类型由 `mimus-core` 自行定义。** trait 签名与快照结构不得出现 `pdfium-render`（或任何后端）的类型；`pdfium-render` 依赖只允许出现在 `engine/` 的实现模块内，pass 代码不得引用后端类型。
 3. **后端替换流程**：实现同一组 trait，并按 `docs/05` 的资格矩阵在固定 revision 上复跑（对 firecrawl-pdfium 而言前置是补齐 T1/F1/O1）。行为对拍一致本身不足以触发切换（与 ADR-0006 一致）；替换不得引起 pass 代码改动。
 4. M1 方法集只取 #14 所需最小子集（页数、页几何、页字符快照、页光栅）；诊断与字体字段随 #18/#19 扩展，扩展只加方法/字段、不改既有语义。

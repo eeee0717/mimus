@@ -191,6 +191,11 @@ impl Walker<'_> {
                     let TokenKind::Number(size) = tail[1].kind else {
                         return Err(walk_error("Tf size operand is not a number"));
                     };
+                    if size <= 0.0 {
+                        return Err(unsupported_error(format!(
+                            "M1 cannot faithfully re-emit non-positive Tf font size {size}"
+                        )));
+                    }
                     self.state.font_name.clone_from(name);
                     self.state.font_size = size;
                 }
@@ -234,8 +239,8 @@ impl Walker<'_> {
     }
 
     fn show_text(&mut self, bytes: &[u8], byte_start: usize, byte_end: usize) -> Result<()> {
-        if self.state.font_size <= 0.0 || self.state.font_name.is_empty() {
-            return Err(walk_error("Tj appeared before a valid Tf"));
+        if self.state.font_name.is_empty() {
+            return Err(walk_error("Tj appeared before Tf"));
         }
         let font = resolve_simple_font(self.document, &self.resources, &self.state.font_name)?;
         for byte in bytes {
@@ -322,6 +327,34 @@ fn resolve_simple_font(
         .get_object(object_id)
         .and_then(Object::as_dict)
         .map_err(|error| walk_error(format!("font object {} is invalid: {error}", object_id.0)))?;
+    let subtype = font
+        .get(b"Subtype")
+        .and_then(Object::as_name)
+        .map_err(|error| {
+            walk_error(format!(
+                "font object {} has no valid Subtype: {error}",
+                object_id.0
+            ))
+        })?;
+    if !matches!(subtype, b"Type1" | b"TrueType") {
+        return Err(unsupported_error(format!(
+            "M1 supports only Type1 and TrueType simple fonts with explicit metrics; font /{} uses /Subtype /{}",
+            display_pdf_name(name),
+            display_pdf_name(subtype)
+        )));
+    }
+    // Standard 14 字体合法省略 FontDescriptor；缺少显式度量是能力边界，不是内容流语法错误。
+    if subtype == b"Type1" && !font.has(b"FontDescriptor") {
+        if let Ok(base_font) = font.get(b"BaseFont").and_then(Object::as_name) {
+            if is_standard_14_name(base_font) {
+                return Err(unsupported_error(format!(
+                    "M1 requires explicit FontDescriptor metrics; font /{} uses Standard 14 /{}",
+                    display_pdf_name(name),
+                    display_pdf_name(base_font)
+                )));
+            }
+        }
+    }
     let first_char = font.get(b"FirstChar").and_then(Object::as_i64).unwrap_or(0);
     let widths = font
         .get(b"Widths")
@@ -426,6 +459,26 @@ fn object_number(object: &Object) -> Option<f64> {
         Object::Real(value) => Some(f64::from(*value)),
         _ => None,
     }
+}
+
+fn is_standard_14_name(name: &[u8]) -> bool {
+    const NAMES: [&[u8]; 14] = [
+        b"Times-Roman",
+        b"Times-Bold",
+        b"Times-Italic",
+        b"Times-BoldItalic",
+        b"Helvetica",
+        b"Helvetica-Bold",
+        b"Helvetica-Oblique",
+        b"Helvetica-BoldOblique",
+        b"Courier",
+        b"Courier-Bold",
+        b"Courier-Oblique",
+        b"Courier-BoldOblique",
+        b"Symbol",
+        b"ZapfDingbats",
+    ];
+    NAMES.contains(&name)
 }
 
 fn decode_win_ansi(code: u8) -> Option<char> {
@@ -613,6 +666,86 @@ mod tests {
             let error = result.unwrap_err();
             assert_eq!(error.category().code(), 2, "fixture {id}: {error}");
         }
+    }
+
+    #[test]
+    fn production_walk_classifies_legal_out_of_scope_fonts_as_unsupported() {
+        for (id, expected_message) in [
+            ("unit-cmap-01-identity-no-tounicode", "Subtype /Type0"),
+            ("unit-stream-02-type3-d1", "Subtype /Type3"),
+            ("unit-font-01-std14-custom-widths", "Standard 14 /Helvetica"),
+        ] {
+            let document = Document::load(fixture_path(id)).unwrap();
+            let page_id = document.get_pages()[&1];
+            let error = walk_page(&document, page_id).unwrap_err();
+            assert_eq!(
+                error.reason(),
+                ErrorReason::Input(InputReason::UnsupportedPdf),
+                "fixture {id}: {error}"
+            );
+            assert!(
+                error.to_string().contains(expected_message),
+                "fixture {id}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn production_walk_classifies_non_positive_tf_as_unsupported() {
+        for size in ["-12", "0"] {
+            let mut document = Document::load(fixture()).unwrap();
+            document
+                .get_object_mut((9, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_plain_content(
+                    format!("BT /F1 {size} Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET").into_bytes(),
+                );
+            let page_id = document.get_pages()[&1];
+            let error = walk_page(&document, page_id).unwrap_err();
+            assert_eq!(
+                error.reason(),
+                ErrorReason::Input(InputReason::UnsupportedPdf)
+            );
+            assert!(
+                error.to_string().contains("non-positive Tf font size"),
+                "Tf size {size}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn production_walk_attributes_composite_operands_to_their_operator() {
+        for id in ["unit-base-02-two-column", "unit-form-01-display"] {
+            let document = Document::load(fixture_path(id)).unwrap();
+            let page_id = document.get_pages()[&1];
+            let error = walk_page(&document, page_id).unwrap_err();
+            assert_eq!(
+                error.reason(),
+                ErrorReason::Input(InputReason::UnsupportedPdf)
+            );
+            assert!(
+                error.to_string().contains("operator BDC"),
+                "fixture {id}: {error}"
+            );
+            assert!(!error.to_string().contains("operator <<"));
+        }
+
+        let mut document = Document::load(fixture()).unwrap();
+        document
+            .get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm [(MIMUS)] TJ ET".to_vec());
+        let page_id = document.get_pages()[&1];
+        let error = walk_page(&document, page_id).unwrap_err();
+        assert_eq!(
+            error.reason(),
+            ErrorReason::Input(InputReason::UnsupportedPdf)
+        );
+        assert!(error.to_string().contains("operator TJ"), "{error}");
     }
 
     #[test]

@@ -732,6 +732,14 @@ mod tests {
         }
     }
 
+    struct NonIdentityTranslator;
+
+    impl Translator for NonIdentityTranslator {
+        fn translate(&self, text: &str) -> Result<String> {
+            Ok(format!("{text}!"))
+        }
+    }
+
     fn fixture() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus/fixtures/unit-base-01-single-line/unit-base-01-single-line.pdf")
@@ -786,6 +794,35 @@ mod tests {
             events.last().unwrap().kind,
             EventKind::Result { .. }
         ));
+    }
+
+    #[test]
+    fn non_identity_translator_stub_exercises_the_typeset_guard() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("must-not-exist.pdf");
+        let mut document = Document::new(fixture(), &output);
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &NonIdentityTranslator,
+            events: &events,
+            config: crate::context::PipelineConfig::default(),
+        };
+
+        let error = run(&mut document, &context).unwrap_err();
+        assert_eq!(
+            error.reason(),
+            crate::error::ErrorReason::Input(InputReason::UnsupportedPdf)
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("only the identity output from --backend none")
+        );
+        assert!(!output.exists());
+        assert!(document.rewrites.is_empty());
     }
 
     #[test]

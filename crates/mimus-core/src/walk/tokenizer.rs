@@ -13,6 +13,7 @@ pub(super) enum TokenKind {
     Number(f64),
     Name(Vec<u8>),
     Bytes(Vec<u8>),
+    CompositeDelimiter,
     Operator(Vec<u8>),
 }
 
@@ -30,14 +31,18 @@ pub(super) fn tokenize(input: &[u8]) -> Result<Vec<Token>> {
             b'(' => TokenKind::Bytes(read_literal_string(input, &mut cursor)?),
             b'<' if input.get(cursor + 1) == Some(&b'<') => {
                 cursor += 2;
-                TokenKind::Operator(b"<<".to_vec())
+                TokenKind::CompositeDelimiter
             }
             b'<' if input.get(cursor + 1) != Some(&b'<') => {
                 TokenKind::Bytes(read_hex_string(input, &mut cursor)?)
             }
             b'>' if input.get(cursor + 1) == Some(&b'>') => {
                 cursor += 2;
-                TokenKind::Operator(b">>".to_vec())
+                TokenKind::CompositeDelimiter
+            }
+            b'[' | b']' => {
+                cursor += 1;
+                TokenKind::CompositeDelimiter
             }
             byte if is_number_start(byte) => {
                 let word = read_word(input, &mut cursor);
@@ -251,10 +256,13 @@ mod tests {
     }
 
     #[test]
-    fn tokenizes_dictionary_delimiters_without_treating_them_as_hex_strings() {
-        let tokens = tokenize(b"/Span<</MCID 0>>BDC").unwrap();
-        assert!(matches!(&tokens[1].kind, TokenKind::Operator(value) if value == b"<<"));
-        assert!(matches!(&tokens[4].kind, TokenKind::Operator(value) if value == b">>"));
+    fn tokenizes_composite_delimiters_as_operands_until_their_operator() {
+        let tokens = tokenize(b"/Span<</MCID 0>>BDC [(M)]TJ").unwrap();
+        assert!(matches!(tokens[1].kind, TokenKind::CompositeDelimiter));
+        assert!(matches!(tokens[4].kind, TokenKind::CompositeDelimiter));
         assert!(matches!(&tokens[5].kind, TokenKind::Operator(value) if value == b"BDC"));
+        assert!(matches!(tokens[6].kind, TokenKind::CompositeDelimiter));
+        assert!(matches!(tokens[8].kind, TokenKind::CompositeDelimiter));
+        assert!(matches!(&tokens[9].kind, TokenKind::Operator(value) if value == b"TJ"));
     }
 }
