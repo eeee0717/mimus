@@ -13,7 +13,7 @@ ADR-0001 将 V1 交付形态定为 CLI，最初只设计了面向人的输出；
 
 1. **CLI 是唯一执行接口与行为真源。** 人、脚本和 Agent Skill 最终都调用同一个 `mimus` 二进制；skill 不实现 PDF、模型、翻译或缓存逻辑。
 2. **仓库提供一个通用 `mimus` Agent Skill。** 以 `skills/mimus/` 维护，至少包含 `SKILL.md` 与 agent 元数据；用户通过 `npx skills add eeee0717/mimus` 安装。skill 覆盖 `translate`、`inspect`、`assets pull` 三条既有工作流，不新增同义命令。
-3. **机器调用协议进入 V1。** 所有子命令支持 `--json`；该模式在 stdout 输出带 `schema_version` 与事件类型的 NDJSON，禁止 spinner、颜色和交互提示，最终必须有且仅有一个 result/error 终结事件。人类进度与诊断走 stderr，分类退出码保持为脚本的第一层判断依据。
+3. **机器调用协议进入 V1。** 所有子命令支持 `--json`；该模式在 stdout 输出带 `schema_version` 与事件类型的 NDJSON，禁止 spinner、颜色和交互提示，正常可写的流最终必须有且仅有一个 result/error 终结事件。结构化进度与诊断属于 NDJSON，人类可读的进度与诊断走 stderr；分类退出码保持为脚本的第一层判断依据。v2 wire、输出失败和 debug 合同见 ADR-0011。
 4. **skill 不接触密钥值。** 它只检查所需配置是否存在，API key 仍仅来自环境变量或配置文件，不进入参数、prompt、日志或结构化输出。
 5. **Skill 安装不承担运行时安装。** `npx skills add` 只安装指令包；`mimus` 二进制仍从 GitHub Release 安装，模型与字体仍由 CLI 的资产机制管理。skill 必须检查 CLI 是否存在及版本是否满足其声明的兼容范围，缺失或不兼容时给出明确安装指引。
 6. **分阶段交付。** M1 随首条端到端 CLI 固化机器协议并建立契约测试；M2 让真实翻译完整覆盖该协议；M4 编写、校验、通过 `npx skills add` 发布安装路径并以干净环境前向测试 Agent Skill。
