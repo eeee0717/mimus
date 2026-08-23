@@ -107,6 +107,44 @@ fn assert_one_terminal_last(events: &[serde_json::Value], expected: &str) {
     assert_eq!(events.last().unwrap()["event"], expected);
 }
 
+fn scan_summary(events: &[serde_json::Value]) -> Option<serde_json::Value> {
+    events
+        .iter()
+        .find(|event| event["event"] == "diagnostic" && event["id"] == "scan_summary")
+        .cloned()
+}
+
+fn assert_scan_summary(
+    summary: &serde_json::Value,
+    indices: &[usize],
+    scanned: usize,
+    blank: usize,
+    content: usize,
+    total: usize,
+) {
+    assert_eq!(summary["scanned_page_indices"], serde_json::json!(indices));
+    assert_eq!(summary["scanned_pages"], scanned);
+    assert_eq!(summary["blank_pages"], blank);
+    assert_eq!(summary["content_pages"], content);
+    assert_eq!(summary["total_pages"], total);
+}
+
+#[derive(Clone, Copy)]
+struct ScanExpectation<'a> {
+    indices: &'a [usize],
+    scanned: usize,
+    blank: usize,
+    content: usize,
+    total: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ContinuationCase<'a> {
+    id: &'a str,
+    summary: Option<ScanExpectation<'a>>,
+    passthrough_indices: &'a [usize],
+}
+
 fn directory_names(directory: &Path) -> Vec<String> {
     let mut names = std::fs::read_dir(directory)
         .unwrap()
@@ -382,6 +420,246 @@ fn failed_pass_keeps_debug_prefix_and_finishes_json_with_one_error() {
 }
 
 #[test]
+fn scan_rejection_matrix_matches_for_inspect_and_translate() {
+    let cases = [
+        ("unit-scan-01-image-only", vec![0], 1, 0, 1, 1),
+        ("unit-scan-02-invisible-ocr", vec![0], 1, 0, 1, 1),
+        (
+            "intg-scan-10-nine-of-ten",
+            (0..9).collect::<Vec<_>>(),
+            9,
+            0,
+            10,
+            10,
+        ),
+        (
+            "intg-scan-11-four-of-five",
+            (0..4).collect::<Vec<_>>(),
+            4,
+            0,
+            5,
+            5,
+        ),
+        ("intg-scan-12-image-with-blank-backs", vec![0], 1, 9, 1, 10),
+    ];
+    let directory = tempfile::tempdir().unwrap();
+
+    for (id, indices, scanned, blank, content, total) in cases {
+        let input = fixture_path(id);
+        let output_path = directory.path().join(format!("{id}-output.pdf"));
+        let inspect = run_inspect(&input, true, None);
+        let translate = run_none(&input, Some(&output_path), true);
+
+        for command in [&inspect, &translate] {
+            assert_eq!(command.status.code(), Some(2), "fixture {id}");
+            assert!(command.stderr.is_empty(), "fixture {id}");
+            let events = parse_events(&command.stdout);
+            assert_one_terminal_last(&events, "error");
+            let summary = scan_summary(&events).unwrap();
+            assert_scan_summary(&summary, &indices, scanned, blank, content, total);
+            let error = events.last().unwrap();
+            assert_eq!(error["category"], "input");
+            assert_eq!(error["reason"], "scanned_pdf");
+            assert_eq!(error["scanned_pages"], scanned);
+            assert_eq!(error["total_pages"], total);
+            assert_eq!(
+                error["message"],
+                format!("{scanned} of {content} content pages are scanned")
+            );
+            assert!(error["hint"].as_str().unwrap().contains("OCR"));
+        }
+        assert_eq!(
+            scan_summary(&parse_events(&inspect.stdout)),
+            scan_summary(&parse_events(&translate.stdout)),
+            "inspect and translate disagreed for {id}"
+        );
+        assert!(!output_path.exists(), "fixture {id} produced output");
+    }
+}
+
+#[test]
+fn scan_continuation_matrix_preserves_passthrough_pages() {
+    let cases = [
+        ContinuationCase {
+            id: "unit-scan-04-title-page",
+            summary: None,
+            passthrough_indices: &[],
+        },
+        ContinuationCase {
+            id: "intg-scan-06-blank-middle",
+            summary: None,
+            passthrough_indices: &[1],
+        },
+        ContinuationCase {
+            id: "intg-scan-07-image-middle",
+            summary: Some(ScanExpectation {
+                indices: &[1],
+                scanned: 1,
+                blank: 0,
+                content: 3,
+                total: 3,
+            }),
+            passthrough_indices: &[1],
+        },
+        ContinuationCase {
+            id: "intg-scan-08-text-first",
+            summary: Some(ScanExpectation {
+                indices: &[1, 2, 3],
+                scanned: 3,
+                blank: 0,
+                content: 4,
+                total: 4,
+            }),
+            passthrough_indices: &[1, 2, 3],
+        },
+        ContinuationCase {
+            id: "intg-scan-09-text-last",
+            summary: Some(ScanExpectation {
+                indices: &[0, 1, 2],
+                scanned: 3,
+                blank: 0,
+                content: 4,
+                total: 4,
+            }),
+            passthrough_indices: &[0, 1, 2],
+        },
+    ];
+    let directory = tempfile::tempdir().unwrap();
+
+    for case in cases {
+        let input = fixture_path(case.id);
+        let output_path = directory.path().join(format!("{}-output.pdf", case.id));
+        let inspect = run_inspect(&input, true, None);
+        let translate = run_none(&input, Some(&output_path), true);
+
+        assert!(inspect.status.success(), "inspect {}", case.id);
+        assert!(translate.status.success(), "translate {}", case.id);
+        let inspect_events = parse_events(&inspect.stdout);
+        let translate_events = parse_events(&translate.stdout);
+        assert_one_terminal_last(&inspect_events, "result");
+        assert_one_terminal_last(&translate_events, "result");
+        assert_eq!(
+            scan_summary(&inspect_events),
+            scan_summary(&translate_events)
+        );
+        let expected_warnings = usize::from(case.summary.is_some());
+        assert_eq!(
+            inspect_events.last().unwrap()["warnings"],
+            expected_warnings
+        );
+        assert_eq!(
+            translate_events.last().unwrap()["warnings"],
+            expected_warnings
+        );
+        match case.summary {
+            Some(summary) => assert_scan_summary(
+                &scan_summary(&inspect_events).unwrap(),
+                summary.indices,
+                summary.scanned,
+                summary.blank,
+                summary.content,
+                summary.total,
+            ),
+            None => assert!(scan_summary(&inspect_events).is_none()),
+        }
+        let il_pages = inspect_events.last().unwrap()["il"]["pages"]
+            .as_array()
+            .unwrap();
+        for index in case.passthrough_indices {
+            assert_eq!(il_pages[*index]["paragraphs"], serde_json::json!([]));
+        }
+        assert!(output_path.is_file());
+
+        if case.id == "intg-scan-07-image-middle" {
+            let input_pages = qpdf_pages(&input);
+            let output_pages = qpdf_pages(&output_path);
+            assert_eq!(output_pages[1], input_pages[1]);
+            let page_object = input_pages[1]["object"]
+                .as_str()
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap();
+            assert_eq!(
+                qpdf_object(&input, page_object),
+                qpdf_object(&output_path, page_object)
+            );
+        }
+    }
+
+    let human_output = directory.path().join("human-warning.pdf");
+    let human = run_none(
+        &fixture_path("intg-scan-07-image-middle"),
+        Some(&human_output),
+        false,
+    );
+    assert!(human.status.success());
+    assert!(String::from_utf8_lossy(&human.stderr).contains("warning[scan_summary]"));
+}
+
+#[test]
+fn native_image_text_and_hidden_watermark_remain_unsupported_not_scanned() {
+    let directory = tempfile::tempdir().unwrap();
+    for id in [
+        "unit-scan-03-visible-image-text",
+        "unit-scan-05-hidden-watermark",
+    ] {
+        let input = fixture_path(id);
+        let output_path = directory.path().join(format!("{id}-output.pdf"));
+        for command in [
+            run_inspect(&input, true, None),
+            run_none(&input, Some(&output_path), true),
+        ] {
+            assert_eq!(command.status.code(), Some(2), "fixture {id}");
+            let events = parse_events(&command.stdout);
+            assert_one_terminal_last(&events, "error");
+            assert!(scan_summary(&events).is_none());
+            let error = events.last().unwrap();
+            assert_eq!(error["reason"], "unsupported_pdf");
+            assert!(error.get("scanned_pages").is_none());
+            assert!(error.get("total_pages").is_none());
+        }
+        assert!(!output_path.exists());
+    }
+}
+
+#[test]
+fn encrypted_fixture_matrix_rejects_before_output_and_keeps_empty_password_guard() {
+    let directory = tempfile::tempdir().unwrap();
+    for id in [
+        "unit-doc-03-rc4-empty-password",
+        "unit-doc-03-aes128-user-password",
+    ] {
+        let input = fixture_path(id);
+        let output_path = directory.path().join(format!("{id}-output.pdf"));
+        for command in [
+            run_inspect(&input, true, None),
+            run_none(&input, Some(&output_path), true),
+        ] {
+            assert_eq!(command.status.code(), Some(2), "fixture {id}");
+            let events = parse_events(&command.stdout);
+            assert_one_terminal_last(&events, "error");
+            let error = events.last().unwrap();
+            assert_eq!(error["reason"], "encrypted_pdf");
+            assert!(error["hint"].as_str().unwrap().contains("qpdf"));
+            assert!(error.get("scanned_pages").is_none());
+            assert!(error.get("total_pages").is_none());
+        }
+        assert!(!output_path.exists());
+    }
+
+    let empty_password =
+        lopdf::Document::load(fixture_path("unit-doc-03-rc4-empty-password")).unwrap();
+    assert!(empty_password.was_encrypted());
+    assert!(!empty_password.is_encrypted());
+
+    let nonempty_password =
+        lopdf::Document::load(fixture_path("unit-doc-03-aes128-user-password")).unwrap();
+    assert!(!nonempty_password.was_encrypted());
+    assert!(nonempty_password.is_encrypted());
+}
+
+#[test]
 fn debug_directory_is_new_and_input_output_io_errors_are_typed() {
     let directory = tempfile::tempdir().unwrap();
     let debug = directory.path().join("debug");
@@ -645,6 +923,20 @@ fn qpdf_pages(pdf: &Path) -> Vec<serde_json::Value> {
         .as_array()
         .unwrap()
         .clone()
+}
+
+fn qpdf_object(pdf: &Path, object: &str) -> Vec<u8> {
+    let output = Command::new("qpdf")
+        .arg(format!("--show-object={object}"))
+        .arg(pdf)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
 }
 
 fn number(attributes: &BTreeMap<String, String>, name: &str) -> f64 {

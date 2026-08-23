@@ -223,6 +223,19 @@ mod tests {
     }
 
     #[test]
+    fn empty_rewrite_set_returns_the_exact_input_without_an_increment() {
+        let input = std::fs::read(fixture()).unwrap();
+        let document = Document::load_mem(&input).unwrap();
+
+        let (bytes, report) = build_incremental(&input, &document, &[]).unwrap();
+
+        assert_eq!(bytes, input);
+        assert_eq!(report.input_bytes, report.output_bytes);
+        assert_eq!(report.appended_bytes, 0);
+        assert!(report.content_objects.is_empty());
+    }
+
+    #[test]
     fn failed_temporary_write_preserves_an_existing_destination() {
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("existing.pdf");
