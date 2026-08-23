@@ -56,17 +56,28 @@ pub enum EventKind {
         reason: crate::error::ErrorReason,
         message: String,
         hint: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scanned_pages: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        total_pages: Option<usize>,
     },
 }
 
 impl EventKind {
     #[must_use]
     pub fn from_error(error: &MimusError) -> Self {
+        let (scanned_pages, total_pages) = error
+            .scan_counts()
+            .map_or((None, None), |(scanned, total)| {
+                (Some(scanned), Some(total))
+            });
         Self::Error {
             category: error.category(),
             reason: error.reason(),
             message: error.to_string(),
             hint: error.hint().map(str::to_owned),
+            scanned_pages,
+            total_pages,
         }
     }
 
@@ -155,6 +166,7 @@ impl EventSink for RecordingEventSink {
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticId {
     EngineBaselineMismatch,
+    ScanSummary,
     DroppedDiagnostics,
 }
 
@@ -167,6 +179,13 @@ pub enum Diagnostic {
         delta_x_pt: f64,
         delta_y_pt: f64,
     },
+    ScanSummary {
+        scanned_page_indices: Vec<usize>,
+        scanned_pages: usize,
+        blank_pages: usize,
+        content_pages: usize,
+        total_pages: usize,
+    },
 }
 
 impl Diagnostic {
@@ -174,6 +193,7 @@ impl Diagnostic {
     pub const fn id(&self) -> DiagnosticId {
         match self {
             Self::EngineBaselineMismatch { .. } => DiagnosticId::EngineBaselineMismatch,
+            Self::ScanSummary { .. } => DiagnosticId::ScanSummary,
         }
     }
 }
@@ -187,6 +207,13 @@ pub enum DiagnosticEvent {
         delta_x_pt: f64,
         delta_y_pt: f64,
     },
+    ScanSummary {
+        scanned_page_indices: Vec<usize>,
+        scanned_pages: usize,
+        blank_pages: usize,
+        content_pages: usize,
+        total_pages: usize,
+    },
     DroppedDiagnostics {
         count: usize,
     },
@@ -197,6 +224,7 @@ impl DiagnosticEvent {
     pub const fn id(&self) -> DiagnosticId {
         match self {
             Self::EngineBaselineMismatch { .. } => DiagnosticId::EngineBaselineMismatch,
+            Self::ScanSummary { .. } => DiagnosticId::ScanSummary,
             Self::DroppedDiagnostics { .. } => DiagnosticId::DroppedDiagnostics,
         }
     }
@@ -216,6 +244,19 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 delta_x_pt: *delta_x_pt,
                 delta_y_pt: *delta_y_pt,
             },
+            Diagnostic::ScanSummary {
+                scanned_page_indices,
+                scanned_pages,
+                blank_pages,
+                content_pages,
+                total_pages,
+            } => Self::ScanSummary {
+                scanned_page_indices: scanned_page_indices.clone(),
+                scanned_pages: *scanned_pages,
+                blank_pages: *blank_pages,
+                content_pages: *content_pages,
+                total_pages: *total_pages,
+            },
         }
     }
 }
@@ -228,7 +269,14 @@ pub struct Diagnostics {
 
 impl Diagnostics {
     pub fn push(&mut self, diagnostic: Diagnostic) {
-        if self.entries.len() < MAX_DIAGNOSTICS {
+        if matches!(diagnostic, Diagnostic::ScanSummary { .. })
+            || self
+                .entries
+                .iter()
+                .filter(|value| !matches!(value, Diagnostic::ScanSummary { .. }))
+                .count()
+                < MAX_DIAGNOSTICS
+        {
             self.entries.push(diagnostic);
         } else {
             self.dropped += 1;

@@ -240,6 +240,17 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 page_index + 1
             );
         }
+        DiagnosticEvent::ScanSummary {
+            scanned_page_indices,
+            scanned_pages,
+            content_pages,
+            ..
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[scan_summary]: {scanned_pages} of {content_pages} content pages are scanned; page indices: {scanned_page_indices:?}"
+            );
+        }
         DiagnosticEvent::DroppedDiagnostics { count } => {
             let _ = writeln!(
                 std::io::stderr().lock(),
