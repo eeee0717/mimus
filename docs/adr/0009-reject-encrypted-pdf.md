@@ -23,11 +23,11 @@
 
 ## 实现约束（务必）
 
-**检测必须用 `Document::was_encrypted()`，不能用 `is_encrypted()`。**
+**检测必须同时覆盖 `Document::was_encrypted()` 与 `Document::is_encrypted()`：任一为真即拒绝。**
 
-lopdf 的 reader 在加载时会**无条件先试空密码**，成功后把 `/Encrypt` 对象从 `objects` 里删掉、并从 trailer 移除。因此一个空 user password 的加密文档加载完成后 `is_encrypted()` 返回 `false`、`was_encrypted()` 返回 `true`。用错的后果不是崩溃，而是**静默放行**：文档被透明解密、一路跑完流水线，甚至可能产出看起来正常的输出——而这条路径我们既不测试，其依赖库又会静默吞掉单对象解密失败（`reader.rs` 中 `let _ = encryption::decrypt_object(...)`，失败只得到垃圾内容而非 `Err`）。拿着乱码去调 LLM 是最坏的失败形态。
+lopdf 的 reader 在加载时会**无条件先试空密码**，成功后把 `/Encrypt` 对象从 `objects` 里删掉、并从 trailer 移除。因此空 user password 的 RC4 fixture 加载完成后 `is_encrypted()` 返回 `false`、`was_encrypted()` 返回 `true`。只用 `is_encrypted()` 的后果不是崩溃，而是**静默放行**：文档被透明解密、一路跑完流水线，甚至可能产出看起来正常的输出——而这条路径我们既不支持，其依赖库又会静默吞掉单对象解密失败（`reader.rs` 中 `let _ = encryption::decrypt_object(...)`，失败只得到垃圾内容而非 `Err`）。拿着乱码去调 LLM 是最坏的失败形态。
 
-两条输入路径都要覆盖：需要密码的文档在 `Document::load*` 阶段直接返回 `Err(InvalidPassword)`；空密码的文档加载成功，只能靠 `was_encrypted()` 拦下。
+但非空 user password 并不保证在 `Document::load*` 阶段返回 `Err(InvalidPassword)`：入库的 AES-128 fixture 证明 lopdf 也可能加载成功并保留 `/Encrypt`，此时 `was_encrypted()` 返回 `false`、`is_encrypted()` 返回 `true`。因此两条检测腿缺一不可；两类 fixture 必须分别钉死 `(was_encrypted, is_encrypted) = (true, false)` 与 `(false, true)`，并共同断言 `encrypted_pdf` 拒绝路径。
 
 ## 后果
 
