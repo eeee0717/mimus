@@ -37,7 +37,7 @@
 | 28 | 性能：V1 无硬指标；方向值=20 页论文除 LLM 外 <5 分钟（arm64 笔记本）；LLM 段落级并发默认 4、指数退避重试 3 次、重试尽降级保原文 | — |
 | 29 | crate 结构：**生产侧**两分——`mimus-core`（lib：IL/pass/引擎 trait/翻译层）+ `mimus`（bin：CLI/进度/配置）。workspace 另含非生产成员 `corpus`（语料门禁工具），它不依赖 `mimus-core`，也不进 release archive | — |
 | 30 | Agent 集成：仓库提供一个可由 `npx skills add eeee0717/mimus` 安装的 `mimus` Agent Skill；skill 仅编排 CLI、不复制业务逻辑；MCP/daemon/vendor plugin 不进 V1 | [ADR-0008](docs/adr/0008-agent-skill.md) |
-| 31 | 加密 PDF：**V1 一律拒绝**（不论是否需要密码、不论 handler），退出码 2；不做权限位尊重、无密码参数、无 `--ignore-permissions`；检测必须用 `was_encrypted()` | [ADR-0009](docs/adr/0009-reject-encrypted-pdf.md) |
+| 31 | 加密 PDF：**V1 一律拒绝**（不论是否需要密码、不论 handler），退出码 2；不做权限位尊重、无密码参数、无 `--ignore-permissions`；检测必须同时覆盖 `was_encrypted()` 与 `is_encrypted()`，任一为真即拒绝 | [ADR-0009](docs/adr/0009-reject-encrypted-pdf.md) |
 | 32 | 非直立文本（旋转/镜像/斜切 > 20°，在视觉页框内度量）：**不翻译、原样 passthrough**；字符级检测、单元级隔离，同段其余字符照常翻译 | [ADR-0007](docs/adr/0007-ir-design.md) §5 |
 | 33 | M0 内部执行方式（历史）：实验 1 先行（不依赖自建确定性写出器），实验 2/3 在写出器就绪后并行；最小首批 10 份 fixture 独立验收后即启动对应实验，没有等待原计划约 45 份全部齐备。该排期不改变 M-1 的整体收口边界 | — |
 | 34 | Corpus v1 现实排版引擎钉死为 **Typst 0.15.1 / pdfTeX 1.40.29 / LuaHBTeX 1.24.0**；**XeTeX 出局**——xdvipdfmx 20260317 的随机字体子集标签过不了 SHA-256 复现门禁，且子集标签正是溯源断言的载体。唯一真源 `corpus/toolchain.toml`，门禁 `corpus doctor` / `corpus determinism` | — |
@@ -46,6 +46,7 @@
 | 37 | firecrawl-pdfium 资格结论为 **B：补齐上游后采用**。现有文本/渲染行为、稳定性和性能合格，但 T1 字符诊断、F1 字体快照、O1 对象来源映射尚未暴露；完成并复跑资格矩阵前不得改生产依赖 | [docs/05-pdfium-backend-qualification.md](docs/05-pdfium-backend-qualification.md) |
 | 38 | 引擎 trait 表面按 **owned snapshot** 设计：快照类型由 `mimus-core` 自定义，`pdfium-render` 只出现在 `engine/` 实现模块，pass 代码不得引用后端类型；替换后端（如 firecrawl-pdfium）= 重实现 trait + 复跑资格矩阵，pass 代码零改动 | [ADR-0010](docs/adr/0010-engine-owned-snapshot.md) |
 | 39 | CLI 机器协议 v2：`inspect` 只读至 ParagraphFind；typed diagnostic 与结构化进度走 stdout NDJSON，人类 renderer 走 stderr；正常可写流以恰一个 result/error 终结；EPIPE、部分写、Io/Internal 退出码和逐 pass debug 合同统一收口 | [ADR-0011](docs/adr/0011-cli-machine-protocol.md) |
+| 40 | 扫描件判定：单页判据=有图像且 0 可见文字对象（`Tr 3`/`Tr 7` 不算可见，非直立计入，不用光栅）；文档级=扫描页 ≥ 80% × 内容页（内容页=总页−空白页，含等于）即整份拒绝（`Input/scanned_pdf`、退出码 2），低于阈值继续、扫描/空白页豁免严格 walk 整页透传；数据来自宽容预扫（严格 walk 不动、挪到 ScanDetect 后），公开 IL 保持 v1；统计以 error 字段 `scanned_pages`/`total_pages` + 单条汇总 diagnostic 公开（v2 兼容扩展） | [ADR-0012](docs/adr/0012-scan-detection-policy.md) |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
@@ -62,9 +63,9 @@
 ### 输入路径
 
 - **原生 PDF（born-digital）**：content stream 里有真实文字对象的 PDF。**V1 唯一路径。**
-- **扫描件（scanned）**：页面本体是位图、0 文字对象。V1 检测后明确报错拒绝，V2 经 OCR 路径支持。
+- **扫描件（scanned）**：页面本体是位图。单页判据：有图像且 0 可见文字对象（`Tr 3` 隐形文字不算可见）；0 文字对象且无图像的是**空白页**，不是扫描页。文档级扫描页 ≥ 80% × 内容页时整份拒绝（ADR-0012）。V1 检测后明确报错拒绝，V2 经 OCR 路径支持。
 - **OCR 文字层（ocr layer）**：扫描图上叠加的不可见文字（`Tr 3`），他方 OCR 注入的产物；不是 OCR 本身。
-- **加密 PDF**：trailer 带 `/Encrypt` 的文档。V1 在 Parse 打开处一律拒绝（ADR-0009）。注意 lopdf 加载时会先试空密码并抹掉 `/Encrypt`，故判定用 `was_encrypted()` 而非 `is_encrypted()`——用错是静默放行，不是报错。
+- **加密 PDF**：输入带 `/Encrypt` 的文档。V1 在 Parse 打开处一律拒绝（ADR-0009）。lopdf 对空密码档可能解密并抹掉 `/Encrypt`（仅 `was_encrypted()` 为真），对非空密码档也可能加载后保留 `/Encrypt`（仅 `is_encrypted()` 为真），故检测取两者之或；缺任一腿都可能静默放行。
 
 ### 解析层
 
@@ -134,7 +135,7 @@
 
 ## 待决清单
 
-与 `docs/03-corpus-requirements.md` §6 同源，此处为索引。2026-08-21 的设计会话已收口其中三条：加密 PDF（决策 #31 / ADR-0009）、非直立文本（决策 #32）、M0 fixture 排期（决策 #33）。
+与 `docs/03-corpus-requirements.md` §6 同源，此处为索引。2026-08-21 的设计会话已收口其中三条：加密 PDF（决策 #31 / ADR-0009）、非直立文本（决策 #32）、M0 fixture 排期（决策 #33）。2026-08-23 的设计会话（#16 收口）补上扫描件判定政策（决策 #40 / ADR-0012）。
 
 **仍需决策者拍板（0 条）**
 
