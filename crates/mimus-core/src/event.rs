@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::error::{ErrorReason, MimusError};
 
+// CONTEXT "双 schema_version": CLI 事件协议与 IL 的演进节奏不同，禁止共用版本号。
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_DIAGNOSTICS: usize = 100;
 

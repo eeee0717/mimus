@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use lopdf::Document as LopdfDocument;
 
-use crate::engine::{LayoutDetector, LayoutRegion, PageCharSnapshot, PdfEngine};
+use crate::engine::{LayoutDetector, LayoutRegion, PageCharSnapshot, PdfEngine, RgbaImage};
 use crate::event::{Diagnostics, EventSink};
 use crate::il;
 use crate::translate::Translator;
@@ -75,4 +75,5 @@ pub(crate) struct ExtractedPage {
     pub walked_characters: Vec<WalkedChar>,
     pub engine_characters: Vec<PageCharSnapshot>,
     pub layout_regions: Vec<LayoutRegion>,
+    pub input_raster: Option<RgbaImage>,
 }

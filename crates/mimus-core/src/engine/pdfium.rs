@@ -5,7 +5,7 @@ use std::path::Path;
 use pdfium_render::prelude::*;
 
 use super::{PageCharSnapshot, PdfInspector, Rasterizer, RgbaImage};
-use crate::error::{ErrorReason, MimusError, Result};
+use crate::error::{AssetReason, InputReason, MimusError, Result};
 use crate::il::{PageGeometry, Point, Rect};
 
 #[derive(Debug)]
@@ -20,7 +20,7 @@ impl PdfiumEngine {
         }
         let executable = std::env::current_exe().map_err(|error| {
             MimusError::asset(
-                ErrorReason::PdfiumUnavailable,
+                AssetReason::PdfiumUnavailable,
                 format!("could not locate the mimus executable: {error}"),
             )
         })?;
@@ -32,7 +32,7 @@ impl PdfiumEngine {
             return Self::new(&adjacent);
         }
         Err(MimusError::asset(
-            ErrorReason::PdfiumUnavailable,
+            AssetReason::PdfiumUnavailable,
             format!(
                 "PDFium was not found next to the executable ({})",
                 adjacent.display()
@@ -44,7 +44,7 @@ impl PdfiumEngine {
     pub fn new(library: &Path) -> Result<Self> {
         if !library.is_file() {
             return Err(MimusError::asset(
-                ErrorReason::PdfiumUnavailable,
+                AssetReason::PdfiumUnavailable,
                 format!("PDFium library does not exist: {}", library.display()),
             ));
         }
@@ -53,7 +53,7 @@ impl PdfiumEngine {
             Err(PdfiumError::PdfiumLibraryBindingsAlreadyInitialized) => Pdfium::default(),
             Err(error) => {
                 return Err(MimusError::asset(
-                    ErrorReason::PdfiumUnavailable,
+                    AssetReason::PdfiumUnavailable,
                     format!("could not load PDFium from {}: {error}", library.display()),
                 ));
             }
@@ -66,7 +66,7 @@ impl PdfiumEngine {
             .load_pdf_from_byte_slice(pdf, None)
             .map_err(|error| {
                 MimusError::input(
-                    ErrorReason::UnsupportedPdf,
+                    InputReason::UnsupportedPdf,
                     format!("PDFium could not open the input PDF: {error}"),
                 )
             })
@@ -75,13 +75,13 @@ impl PdfiumEngine {
     fn page<'a>(document: &PdfDocument<'a>, page_index: usize) -> Result<PdfPage<'a>> {
         let index = i32::try_from(page_index).map_err(|_| {
             MimusError::input(
-                ErrorReason::UnsupportedPdf,
+                InputReason::UnsupportedPdf,
                 format!("page index {page_index} exceeds PDFium's range"),
             )
         })?;
         document.pages().get(index).map_err(|error| {
             MimusError::input(
-                ErrorReason::UnsupportedPdf,
+                InputReason::UnsupportedPdf,
                 format!("PDFium could not open page {page_index}: {error}"),
             )
         })
@@ -93,7 +93,7 @@ impl PdfInspector for PdfiumEngine {
         let document = self.load(pdf)?;
         usize::try_from(document.pages().len()).map_err(|_| {
             MimusError::input(
-                ErrorReason::UnsupportedPdf,
+                InputReason::UnsupportedPdf,
                 "PDF page count cannot be represented on this platform",
             )
         })
@@ -104,7 +104,7 @@ impl PdfInspector for PdfiumEngine {
         let page = Self::page(&document, page_index)?;
         let rotation = page.rotation().map_err(|error| {
             MimusError::input(
-                ErrorReason::UnsupportedPdf,
+                InputReason::UnsupportedPdf,
                 format!("PDFium could not read page {page_index} rotation: {error}"),
             )
         })?;
@@ -120,7 +120,7 @@ impl PdfInspector for PdfiumEngine {
         let page = Self::page(&document, page_index)?;
         let text = page.text().map_err(|error| {
             MimusError::input(
-                ErrorReason::UnsupportedPdf,
+                InputReason::UnsupportedPdf,
                 format!("PDFium could not load text for page {page_index}: {error}"),
             )
         })?;
@@ -128,7 +128,7 @@ impl PdfInspector for PdfiumEngine {
         for character in text.chars().iter() {
             if character.is_generated().map_err(|error| {
                 MimusError::input(
-                    ErrorReason::UnsupportedPdf,
+                    InputReason::UnsupportedPdf,
                     format!("PDFium could not classify a generated character: {error}"),
                 )
             })? {
@@ -140,12 +140,12 @@ impl PdfInspector for PdfiumEngine {
             snapshots.push(PageCharSnapshot {
                 index: u32::try_from(character.index()).map_err(|_| {
                     MimusError::input(
-                        ErrorReason::UnsupportedPdf,
+                        InputReason::UnsupportedPdf,
                         "PDFium returned a negative character index",
                     )
                 })?,
                 unicode: character.unicode_char(),
-                code: character.unicode_value(),
+                unicode_value: character.unicode_value(),
                 baseline_origin: Point {
                     x: f64::from(x.value),
                     y: f64::from(y.value),
@@ -175,25 +175,25 @@ impl Rasterizer for PdfiumEngine {
             )
             .map_err(|error| {
                 MimusError::input(
-                    ErrorReason::UnsupportedPdf,
+                    InputReason::UnsupportedPdf,
                     format!("PDFium could not rasterize page {page_index}: {error}"),
                 )
             })?;
-        Ok(RgbaImage {
-            width: u32::try_from(bitmap.width()).map_err(|_| {
-                MimusError::input(ErrorReason::UnsupportedPdf, "negative raster width")
+        RgbaImage::new(
+            u32::try_from(bitmap.width()).map_err(|_| {
+                MimusError::input(InputReason::UnsupportedPdf, "negative raster width")
             })?,
-            height: u32::try_from(bitmap.height()).map_err(|_| {
-                MimusError::input(ErrorReason::UnsupportedPdf, "negative raster height")
+            u32::try_from(bitmap.height()).map_err(|_| {
+                MimusError::input(InputReason::UnsupportedPdf, "negative raster height")
             })?,
-            rgba8: bitmap.as_rgba_bytes(),
-        })
+            bitmap.as_rgba_bytes(),
+        )
     }
 }
 
 fn character_error(error: PdfiumError) -> MimusError {
     MimusError::input(
-        ErrorReason::UnsupportedPdf,
+        InputReason::UnsupportedPdf,
         format!("PDFium could not inspect a character: {error}"),
     )
 }
@@ -210,7 +210,7 @@ fn pdfium_rect(value: PdfRect) -> Rect {
 fn pixel_dimension(points: f32, name: &str) -> Result<i32> {
     if !points.is_finite() || points <= 0.0 || points.ceil() > i32::MAX as f32 {
         return Err(MimusError::input(
-            ErrorReason::UnsupportedPdf,
+            InputReason::UnsupportedPdf,
             format!("page {name} {points} cannot be rasterized"),
         ));
     }
@@ -259,8 +259,8 @@ mod tests {
         }));
 
         let raster = engine.rasterize_page(&bytes, 0).unwrap();
-        assert_eq!((raster.width, raster.height), (300, 200));
-        assert_eq!(raster.rgba8.len(), 300 * 200 * 4);
+        assert_eq!((raster.width(), raster.height()), (300, 200));
+        assert_eq!(raster.rgba8().len(), 300 * 200 * 4);
     }
 
     fn assert_close(actual: f64, expected: f64, tolerance: f64) {

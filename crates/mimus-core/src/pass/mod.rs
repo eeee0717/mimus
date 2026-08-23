@@ -3,11 +3,14 @@ use std::collections::BTreeSet;
 use lopdf::Document as LopdfDocument;
 
 use crate::context::{Document, ExtractedPage, PassContext};
-use crate::error::{ErrorReason, MimusError, Result};
-use crate::event::{Event, EventKind, Stage};
-use crate::il::{self, Char, Paragraph, PassthroughRef, TextCarrier, TextTransform};
+use crate::engine::{PageCharSnapshot, RgbaImage};
+use crate::error::{InputReason, MimusError, Result};
+use crate::event::{Diagnostic, DiagnosticId, Diagnostics, Event, EventKind, Stage};
+use crate::il::{
+    self, Char, PageGeometry, Paragraph, PassthroughRef, Rect, TextCarrier, TextTransform,
+};
 use crate::walk::walk_page;
-use crate::write::{PageRewrite, incremental_publish};
+use crate::write::{PageRewrite, build_incremental, publish};
 
 pub const ORDER: [Stage; 10] = [
     Stage::Parse,
@@ -71,7 +74,7 @@ fn run_inner(document: &mut Document, context: &PassContext<'_>) -> Result<Trans
             .emit(Event::new(EventKind::StageFinished { stage }));
     }
     let write_report = document.write_report.as_ref().ok_or_else(|| {
-        MimusError::input(ErrorReason::OutputWrite, "write pass produced no report")
+        MimusError::input(InputReason::OutputWrite, "write pass produced no report")
     })?;
     Ok(TranslationResult {
         output: document.output_path().to_string_lossy().into_owned(),
@@ -84,7 +87,7 @@ fn run_inner(document: &mut Document, context: &PassContext<'_>) -> Result<Trans
 pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     let bytes = std::fs::read(document.input_path()).map_err(|error| {
         MimusError::input(
-            ErrorReason::InputRead,
+            InputReason::InputRead,
             format!(
                 "could not read {}: {error}",
                 document.input_path().display()
@@ -96,7 +99,7 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
         Err(lopdf::Error::InvalidPassword) => return Err(encrypted_pdf_error()),
         Err(error) => {
             return Err(MimusError::input(
-                ErrorReason::PdfParse,
+                InputReason::PdfParse,
                 format!(
                     "could not parse {}: {error}",
                     document.input_path().display()
@@ -104,6 +107,8 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
             ));
         }
     };
+    // ADR-0009: lopdf 会用空密码透明解密并移除 /Encrypt；is_encrypted() 此时为
+    // false，只有 was_encrypted() 能阻止这类文档被静默放行。
     if pdf.was_encrypted() {
         return Err(encrypted_pdf_error());
     }
@@ -111,7 +116,7 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     let engine_pages = context.engine.page_count(&bytes)?;
     if lopdf_pages.len() != engine_pages {
         return Err(MimusError::input(
-            ErrorReason::EngineMismatch,
+            InputReason::EngineMismatch,
             format!(
                 "lopdf found {} pages but the inspection engine found {engine_pages}",
                 lopdf_pages.len()
@@ -121,6 +126,18 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     let mut extracted_pages = Vec::with_capacity(engine_pages);
     for (index, page_id) in lopdf_pages.into_iter().enumerate() {
         let geometry = context.engine.page_geometry(&bytes, index)?;
+        // CONTEXT #32 要求在视觉页框内判定朝向。#14 尚未实现这层坐标变换，
+        // 因此先 fail-closed，避免把 /Rotate 90 的整页文字误判后静默重排。
+        if geometry.rotate_degrees != 0 {
+            return Err(MimusError::input(
+                InputReason::UnsupportedPdf,
+                format!(
+                    "M1 does not yet support page /Rotate {}; page {} was not written",
+                    geometry.rotate_degrees,
+                    index + 1
+                ),
+            ));
+        }
         let walked_characters = walk_page(&pdf, page_id)?;
         let engine_characters = context.engine.page_characters(&bytes, index)?;
         validate_character_alignment(
@@ -128,6 +145,7 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
             &walked_characters,
             &engine_characters,
             context.config.baseline_tolerance_pt,
+            &mut document.diagnostics,
         )?;
         extracted_pages.push(ExtractedPage {
             index,
@@ -135,6 +153,7 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
             walked_characters,
             engine_characters,
             layout_regions: Vec::new(),
+            input_raster: None,
         });
         context.events.emit(Event::new(EventKind::PageProgress {
             stage: Stage::Parse,
@@ -156,7 +175,7 @@ pub fn scan_detect(document: &mut Document, _context: &PassContext<'_>) -> Resul
         .sum::<usize>();
     if characters == 0 {
         return Err(MimusError::input(
-            ErrorReason::ScannedPdf,
+            InputReason::ScannedPdf,
             "the PDF has no native text; scanned PDFs are not supported in V1",
         ));
     }
@@ -169,10 +188,12 @@ pub fn layout(document: &mut Document, context: &PassContext<'_>) -> Result<()> 
         let raster = context
             .engine
             .rasterize_page(&document.original_bytes, page.index)?;
+        raster.validate()?;
         page.layout_regions =
             context
                 .layout_detector
                 .detect(page.geometry, &raster, &page.engine_characters)?;
+        page.input_raster = Some(raster);
         context.events.emit(Event::new(EventKind::PageProgress {
             stage: Stage::Layout,
             page: page.index + 1,
@@ -187,7 +208,7 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
     for extracted in &document.extracted_pages {
         if extracted.layout_regions.len() != 1 {
             return Err(MimusError::input(
-                ErrorReason::UnsupportedPdf,
+                InputReason::UnsupportedPdf,
                 format!(
                     "M1 supports exactly one detected line per page; page {} has {} regions",
                     extracted.index + 1,
@@ -202,7 +223,7 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
             .zip(&extracted.engine_characters)
             .map(|(walked, engine)| Char {
                 unicode: walked.unicode,
-                code: engine.code,
+                code: walked.code,
                 font: walked.font.clone(),
                 font_size: walked.font_size,
                 baseline_origin: walked.baseline_origin,
@@ -262,13 +283,13 @@ pub fn typeset(document: &mut Document, _context: &PassContext<'_>) -> Result<()
             let source = paragraph.source_text();
             if paragraph.translated_text.as_deref() != Some(source.as_str()) {
                 return Err(MimusError::input(
-                    ErrorReason::UnsupportedPdf,
+                    InputReason::UnsupportedPdf,
                     "M1 can typeset only the identity output from --backend none",
                 ));
             }
             let chars = paragraph.chars();
             let first = chars.first().ok_or_else(|| {
-                MimusError::input(ErrorReason::UnsupportedPdf, "cannot typeset an empty line")
+                MimusError::input(InputReason::UnsupportedPdf, "cannot typeset an empty line")
             })?;
             if chars.iter().any(|value| {
                 value.font != first.font
@@ -276,7 +297,7 @@ pub fn typeset(document: &mut Document, _context: &PassContext<'_>) -> Result<()
                     || value.text_transform != TextTransform::Upright
             }) {
                 return Err(MimusError::input(
-                    ErrorReason::UnsupportedPdf,
+                    InputReason::UnsupportedPdf,
                     "M1 single-line typesetting requires one upright font run",
                 ));
             }
@@ -308,8 +329,8 @@ pub fn typeset(document: &mut Document, _context: &PassContext<'_>) -> Result<()
 
 pub fn font_embed(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
     if document.rewrites.iter().any(|value| value.needs_new_font) {
-        return Err(MimusError::asset(
-            ErrorReason::UnsupportedPdf,
+        return Err(MimusError::input(
+            InputReason::UnsupportedPdf,
             "embedding a new font is deferred to issue #22",
         ));
     }
@@ -319,25 +340,178 @@ pub fn font_embed(document: &mut Document, _context: &PassContext<'_>) -> Result
         .any(|value| value.reused_fonts.is_empty())
     {
         return Err(MimusError::input(
-            ErrorReason::OutputWrite,
+            InputReason::UnsupportedPdf,
             "FontEmbed found a rewrite with no reusable input font",
         ));
     }
     Ok(())
 }
 
-pub fn write(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
+pub fn write(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     let pdf = document
         .pdf
         .as_ref()
-        .ok_or_else(|| MimusError::input(ErrorReason::OutputWrite, "Parse did not retain a PDF"))?;
-    document.write_report = Some(incremental_publish(
-        &document.original_bytes,
-        pdf,
-        &document.rewrites,
-        document.output_path(),
-    )?);
+        .ok_or_else(|| MimusError::input(InputReason::OutputWrite, "Parse did not retain a PDF"))?;
+    let (candidate, report) = build_incremental(&document.original_bytes, pdf, &document.rewrites)?;
+    validate_output_roundtrip(document, context, &candidate)?;
+    publish(document.output_path(), &candidate)?;
+    document.write_report = Some(report);
     Ok(())
+}
+
+fn validate_output_roundtrip(
+    document: &Document,
+    context: &PassContext<'_>,
+    candidate: &[u8],
+) -> Result<()> {
+    let page_count = context
+        .engine
+        .page_count(candidate)
+        .map_err(|error| output_mismatch(format!("inspection engine rejected output: {error}")))?;
+    if page_count != document.extracted_pages.len() {
+        return Err(output_mismatch(format!(
+            "output has {page_count} pages; input had {}",
+            document.extracted_pages.len()
+        )));
+    }
+
+    for expected in &document.extracted_pages {
+        let geometry = context
+            .engine
+            .page_geometry(candidate, expected.index)
+            .map_err(|error| {
+                output_mismatch(format!(
+                    "inspection engine rejected output page {} geometry: {error}",
+                    expected.index + 1
+                ))
+            })?;
+        validate_output_geometry(expected.index, expected.geometry, geometry)?;
+        let characters = context
+            .engine
+            .page_characters(candidate, expected.index)
+            .map_err(|error| {
+                output_mismatch(format!(
+                    "inspection engine rejected output page {} text: {error}",
+                    expected.index + 1
+                ))
+            })?;
+        validate_output_characters(
+            expected.index,
+            &expected.engine_characters,
+            &characters,
+            context.config.baseline_tolerance_pt,
+        )?;
+        let raster = context
+            .engine
+            .rasterize_page(candidate, expected.index)
+            .map_err(|error| {
+                output_mismatch(format!(
+                    "inspection engine rejected output page {} raster: {error}",
+                    expected.index + 1
+                ))
+            })?;
+        raster.validate().map_err(|error| {
+            output_mismatch(format!(
+                "inspection engine returned an invalid output page {} raster: {error}",
+                expected.index + 1
+            ))
+        })?;
+        let input_raster = expected.input_raster.as_ref().ok_or_else(|| {
+            MimusError::input(
+                InputReason::OutputWrite,
+                "Layout did not retain its input raster",
+            )
+        })?;
+        input_raster.validate()?;
+        validate_output_raster(expected.index, input_raster, &raster)?;
+    }
+    Ok(())
+}
+
+fn validate_output_geometry(
+    page_index: usize,
+    expected: PageGeometry,
+    actual: PageGeometry,
+) -> Result<()> {
+    if expected.rotate_degrees != actual.rotate_degrees
+        || !finite_close(expected.width, actual.width, 0.001)
+        || !finite_close(expected.height, actual.height, 0.001)
+    {
+        return Err(output_mismatch(format!(
+            "output page {} geometry differs from the input",
+            page_index + 1
+        )));
+    }
+    Ok(())
+}
+
+fn validate_output_characters(
+    page_index: usize,
+    expected: &[PageCharSnapshot],
+    actual: &[PageCharSnapshot],
+    tolerance: f64,
+) -> Result<()> {
+    if expected.len() != actual.len() {
+        return Err(output_mismatch(format!(
+            "output page {} has {} characters; input had {}",
+            page_index + 1,
+            actual.len(),
+            expected.len()
+        )));
+    }
+    for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+        if expected.index != actual.index
+            || expected.unicode != actual.unicode
+            || expected.unicode_value != actual.unicode_value
+            || !point_close(expected.baseline_origin, actual.baseline_origin, tolerance)
+            || !rect_close(expected.tight_box, actual.tight_box, tolerance)
+            || !rect_close(expected.loose_box, actual.loose_box, tolerance)
+        {
+            return Err(output_mismatch(format!(
+                "output page {} character {} differs from the input snapshot",
+                page_index + 1,
+                index
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_output_raster(
+    page_index: usize,
+    expected: &RgbaImage,
+    actual: &RgbaImage,
+) -> Result<()> {
+    if expected != actual {
+        return Err(output_mismatch(format!(
+            "output page {} pixels differ from the input",
+            page_index + 1
+        )));
+    }
+    Ok(())
+}
+
+fn point_close(expected: il::Point, actual: il::Point, tolerance: f64) -> bool {
+    finite_close(expected.x, actual.x, tolerance) && finite_close(expected.y, actual.y, tolerance)
+}
+
+fn rect_close(expected: Rect, actual: Rect, tolerance: f64) -> bool {
+    finite_close(expected.left, actual.left, tolerance)
+        && finite_close(expected.bottom, actual.bottom, tolerance)
+        && finite_close(expected.right, actual.right, tolerance)
+        && finite_close(expected.top, actual.top, tolerance)
+}
+
+fn finite_close(expected: f64, actual: f64, tolerance: f64) -> bool {
+    expected.is_finite()
+        && actual.is_finite()
+        && tolerance.is_finite()
+        && tolerance >= 0.0
+        && (expected - actual).abs() <= tolerance
+}
+
+fn output_mismatch(message: impl Into<String>) -> MimusError {
+    MimusError::input(InputReason::OutputMismatch, message)
 }
 
 fn validate_character_alignment(
@@ -345,10 +519,11 @@ fn validate_character_alignment(
     walked: &[crate::walk::WalkedChar],
     engine: &[crate::engine::PageCharSnapshot],
     tolerance: f64,
+    diagnostics: &mut Diagnostics,
 ) -> Result<()> {
     if walked.len() != engine.len() {
         return Err(MimusError::input(
-            ErrorReason::EngineMismatch,
+            InputReason::EngineMismatch,
             format!(
                 "page {} operator walk found {} characters but PDFium found {}",
                 page_index + 1,
@@ -360,7 +535,7 @@ fn validate_character_alignment(
     for (index, (walked, engine)) in walked.iter().zip(engine).enumerate() {
         if walked.unicode != engine.unicode {
             return Err(MimusError::input(
-                ErrorReason::EngineMismatch,
+                InputReason::EngineMismatch,
                 format!(
                     "page {} character {} differs between operator walk and PDFium",
                     page_index + 1,
@@ -370,15 +545,33 @@ fn validate_character_alignment(
         }
         let delta_x = (walked.baseline_origin.x - engine.baseline_origin.x).abs();
         let delta_y = (walked.baseline_origin.y - engine.baseline_origin.y).abs();
-        if delta_x > tolerance || delta_y > tolerance {
+        if !walked.baseline_origin.x.is_finite()
+            || !walked.baseline_origin.y.is_finite()
+            || !engine.baseline_origin.x.is_finite()
+            || !engine.baseline_origin.y.is_finite()
+            || !tolerance.is_finite()
+            || tolerance < 0.0
+        {
             return Err(MimusError::input(
-                ErrorReason::EngineMismatch,
+                InputReason::EngineMismatch,
                 format!(
-                    "page {} character {} baseline differs by ({delta_x:.6}, {delta_y:.6}) pt",
+                    "page {} character {} has a non-finite baseline or tolerance",
                     page_index + 1,
                     index
                 ),
             ));
+        }
+        if delta_x > tolerance || delta_y > tolerance {
+            // CONTEXT #35: PDFium 是交叉证据而非事实层；有限的 baseline 分歧记为
+            // 稳定 diagnostic，最终候选仍必须通过 Write 前的字符与像素往返验证。
+            diagnostics.push(Diagnostic {
+                id: DiagnosticId::EngineBaselineMismatch,
+                detail: format!(
+                    "page {} character {} delta=({delta_x:.6},{delta_y:.6})pt",
+                    page_index + 1,
+                    index
+                ),
+            });
         }
     }
     Ok(())
@@ -386,7 +579,7 @@ fn validate_character_alignment(
 
 fn encrypted_pdf_error() -> MimusError {
     MimusError::input(
-        ErrorReason::EncryptedPdf,
+        InputReason::EncryptedPdf,
         "encrypted PDFs are not supported in V1",
     )
     .with_hint("decrypt the input with qpdf, then retry")
@@ -466,6 +659,7 @@ mod tests {
     #[derive(Default)]
     struct FakeEngine {
         raster_calls: AtomicUsize,
+        corrupt_raster_after_bytes: Option<usize>,
     }
 
     impl PdfInspector for FakeEngine {
@@ -492,7 +686,7 @@ mod tests {
                 .map(|(index, (unicode, x))| PageCharSnapshot {
                     index: index as u32,
                     unicode: Some(unicode),
-                    code: unicode.into(),
+                    unicode_value: unicode.into(),
                     baseline_origin: Point { x, y: 120.0 },
                     tight_box: Rect {
                         left: x,
@@ -512,14 +706,17 @@ mod tests {
     }
 
     impl Rasterizer for FakeEngine {
-        fn rasterize_page(&self, _pdf: &[u8], page_index: usize) -> Result<RgbaImage> {
+        fn rasterize_page(&self, pdf: &[u8], page_index: usize) -> Result<RgbaImage> {
             assert_eq!(page_index, 0);
             self.raster_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(RgbaImage {
-                width: 300,
-                height: 200,
-                rgba8: vec![255; 300 * 200 * 4],
-            })
+            let mut rgba8 = vec![255; 300 * 200 * 4];
+            if self
+                .corrupt_raster_after_bytes
+                .is_some_and(|threshold| pdf.len() > threshold)
+            {
+                rgba8[0] = 0;
+            }
+            RgbaImage::new(300, 200, rgba8)
         }
     }
 
@@ -558,7 +755,7 @@ mod tests {
         let result = run(&mut document, &context).unwrap();
         assert_eq!(result.pages, 1);
         assert!(result.appended_bytes > 0);
-        assert_eq!(engine.raster_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(engine.raster_calls.load(Ordering::SeqCst), 2);
         assert_eq!(translator.calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             document.il.pages[0].paragraphs[0]
@@ -589,5 +786,111 @@ mod tests {
             events.last().unwrap().kind,
             EventKind::Result { .. }
         ));
+    }
+
+    #[test]
+    fn output_validation_failure_preserves_an_existing_destination() {
+        let input = std::fs::read(fixture()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("existing.pdf");
+        std::fs::write(&output, b"existing").unwrap();
+        let mut document = Document::new(fixture(), &output);
+        let engine = FakeEngine {
+            raster_calls: AtomicUsize::new(0),
+            corrupt_raster_after_bytes: Some(input.len()),
+        };
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            config: crate::context::PipelineConfig::default(),
+        };
+
+        let error = run(&mut document, &context).unwrap_err();
+        assert_eq!(
+            error.reason(),
+            crate::error::ErrorReason::Input(InputReason::OutputMismatch)
+        );
+        assert_eq!(std::fs::read(&output).unwrap(), b"existing");
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .unwrap()
+                .filter_map(std::result::Result::ok)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn output_validation_compares_pdfium_character_indices() {
+        let expected = FakeEngine::default().page_characters(&[], 0).unwrap();
+        let mut actual = expected.clone();
+        actual[0].index += 1;
+
+        let error = validate_output_characters(0, &expected, &actual, 0.001).unwrap_err();
+        assert_eq!(
+            error.reason(),
+            crate::error::ErrorReason::Input(InputReason::OutputMismatch)
+        );
+    }
+
+    #[test]
+    fn finite_pdfium_baseline_differences_become_bounded_diagnostics() {
+        let pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        let walked = walk_page(&pdf, page_id).unwrap();
+        let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap();
+        engine[0].baseline_origin.x += 0.01;
+        let mut diagnostics = Diagnostics::default();
+
+        validate_character_alignment(0, &walked, &engine, 0.001, &mut diagnostics).unwrap();
+        assert_eq!(diagnostics.entries().len(), 1);
+        assert_eq!(
+            diagnostics.entries()[0].id,
+            DiagnosticId::EngineBaselineMismatch
+        );
+
+        engine[0].baseline_origin.x = f64::NAN;
+        assert!(
+            validate_character_alignment(0, &walked, &engine, 0.001, &mut diagnostics).is_err()
+        );
+    }
+
+    #[test]
+    fn font_embed_deferred_paths_are_typed_as_unsupported_input() {
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            config: crate::context::PipelineConfig::default(),
+        };
+        let mut document = Document::new(fixture(), "unused.pdf");
+        document.rewrites = vec![PageRewrite {
+            page_index: 0,
+            content: Vec::new(),
+            reused_fonts: Vec::new(),
+            needs_new_font: true,
+        }];
+        let error = font_embed(&mut document, &context).unwrap_err();
+        assert_eq!(error.category().code(), 2);
+        assert_eq!(
+            error.reason(),
+            crate::error::ErrorReason::Input(InputReason::UnsupportedPdf)
+        );
+
+        document.rewrites[0].needs_new_font = false;
+        let error = font_embed(&mut document, &context).unwrap_err();
+        assert_eq!(error.category().code(), 2);
+        assert_eq!(
+            error.reason(),
+            crate::error::ErrorReason::Input(InputReason::UnsupportedPdf)
+        );
     }
 }

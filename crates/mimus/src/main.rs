@@ -10,7 +10,7 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use mimus_core::engine::SingleLineLayoutDetector;
 use mimus_core::engine::pdfium::PdfiumEngine;
-use mimus_core::error::{ErrorReason, MimusError};
+use mimus_core::error::{MimusError, UsageReason};
 use mimus_core::event::{Event, EventKind, EventSink, Stage};
 use mimus_core::pass;
 use mimus_core::translate::{NoneTranslator, openai_not_implemented};
@@ -113,7 +113,7 @@ fn default_output_path(input: &Path) -> Result<PathBuf, MimusError> {
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
             MimusError::usage(
-                ErrorReason::InvalidArguments,
+                UsageReason::InvalidArguments,
                 format!("input path has no file stem: {}", input.display()),
             )
         })?;
@@ -144,7 +144,10 @@ impl CliEventSink {
 
 impl EventSink for CliEventSink {
     fn emit(&self, event: Event) {
-        let _guard = self.output_lock.lock().expect("CLI output mutex poisoned");
+        let _guard = match self.output_lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         if self.json {
             let mut stdout = std::io::stdout().lock();
             if serde_json::to_writer(&mut stdout, &event).is_ok() {
@@ -153,22 +156,33 @@ impl EventSink for CliEventSink {
             return;
         }
         match event.kind {
-            EventKind::StageStarted { stage } => eprintln!("{}...", stage_name(stage)),
+            EventKind::StageStarted { stage } => {
+                let _ = writeln!(std::io::stderr().lock(), "{}...", stage_name(stage));
+            }
             EventKind::PageProgress {
                 stage,
                 page,
                 total_pages,
-            } => eprintln!("{}: page {page}/{total_pages}", stage_name(stage)),
+            } => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "{}: page {page}/{total_pages}",
+                    stage_name(stage)
+                );
+            }
             EventKind::StageFinished { .. } => {}
-            EventKind::Result { output, .. } => println!("{output}"),
+            EventKind::Result { output, .. } => {
+                let _ = writeln!(std::io::stdout().lock(), "{output}");
+            }
             EventKind::Error {
                 reason,
                 message,
                 hint,
             } => {
-                eprintln!("error[{reason}]: {message}");
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "error[{reason}]: {message}");
                 if let Some(hint) = hint {
-                    eprintln!("hint: {hint}");
+                    let _ = writeln!(stderr, "hint: {hint}");
                 }
             }
         }

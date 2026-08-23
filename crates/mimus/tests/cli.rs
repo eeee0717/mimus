@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
@@ -14,7 +14,14 @@ fn repo_root() -> PathBuf {
 }
 
 fn fixture() -> PathBuf {
-    repo_root().join("corpus/fixtures/unit-base-01-single-line/unit-base-01-single-line.pdf")
+    fixture_path("unit-base-01-single-line")
+}
+
+fn fixture_path(id: &str) -> PathBuf {
+    repo_root()
+        .join("corpus/fixtures")
+        .join(id)
+        .join(format!("{id}.pdf"))
 }
 
 fn pdfium_library() -> OsString {
@@ -25,6 +32,15 @@ fn pdfium_library() -> OsString {
 }
 
 fn run_none(input: &Path, output: Option<&Path>, json: bool) -> Output {
+    run_none_with_output_flag(input, output, json, "--output")
+}
+
+fn run_none_with_output_flag(
+    input: &Path,
+    output: Option<&Path>,
+    json: bool,
+    output_flag: &str,
+) -> Output {
     let mut command = Command::new(BIN);
     command.env(PDFIUM_ENV, pdfium_library());
     command.env("HTTP_PROXY", "http://127.0.0.1:9");
@@ -35,9 +51,22 @@ fn run_none(input: &Path, output: Option<&Path>, json: bool) -> Output {
     }
     command.args(["translate", "--backend", "none"]);
     if let Some(output) = output {
-        command.arg("--output").arg(output);
+        command.arg(output_flag).arg(output);
     }
     command.arg(input).output().unwrap()
+}
+
+fn write_program_pdf(directory: &Path, name: &str, program: &[u8]) -> PathBuf {
+    let path = directory.join(name);
+    let mut document = lopdf::Document::load(fixture()).unwrap();
+    document
+        .get_object_mut((9, 0))
+        .unwrap()
+        .as_stream_mut()
+        .unwrap()
+        .set_plain_content(program.to_vec());
+    document.save(&path).unwrap();
+    path
 }
 
 #[test]
@@ -140,6 +169,119 @@ fn explicit_output_and_json_emit_one_versioned_terminal_event() {
 }
 
 #[test]
+fn short_output_flag_is_supported() {
+    let directory = tempfile::tempdir().unwrap();
+    let translated = directory.path().join("short.pdf");
+    let output = run_none_with_output_flag(&fixture(), Some(&translated), false, "-o");
+    assert!(
+        output.status.success(),
+        "short output flag failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(translated.is_file());
+}
+
+#[test]
+fn unsupported_existing_fixtures_fail_closed_without_output() {
+    let directory = tempfile::tempdir().unwrap();
+    for id in [
+        "unit-base-02-two-column",
+        "unit-base-03-structured",
+        "unit-stream-08-inline-image-EI-in-data",
+        "unit-geom-01-rotate-90",
+    ] {
+        let translated = directory.path().join(format!("{id}.pdf"));
+        let result = run_none(&fixture_path(id), Some(&translated), false);
+        assert_eq!(
+            result.status.code(),
+            Some(2),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("unsupported_pdf"),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(!translated.exists(), "fixture {id} produced output");
+    }
+}
+
+#[test]
+fn unreplayed_state_graphics_and_multiple_lines_fail_closed() {
+    let directory = tempfile::tempdir().unwrap();
+    let programs: &[(&str, &[u8])] = &[
+        (
+            "scaled-ctm.pdf",
+            b"0.5 0 0 0.5 0 0 cm\nBT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
+        ),
+        (
+            "character-spacing.pdf",
+            b"BT /F1 12 Tf 2 Tc 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
+        ),
+        (
+            "invisible-text.pdf",
+            b"BT /F1 12 Tf 3 Tr 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
+        ),
+        (
+            "two-lines.pdf",
+            b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj 1 0 0 1 72 80 Tm (MIMUS) Tj ET",
+        ),
+        (
+            "rectangle.pdf",
+            b"0 0 10 10 re f BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
+        ),
+    ];
+    for (name, program) in programs {
+        let input = write_program_pdf(directory.path(), name, program);
+        let translated = directory.path().join(format!("out-{name}"));
+        let result = run_none(&input, Some(&translated), false);
+        assert_eq!(
+            result.status.code(),
+            Some(2),
+            "input {name}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(!translated.exists(), "input {name} produced output");
+    }
+}
+
+#[test]
+fn missing_pdfium_uses_asset_exit_code_three() {
+    let directory = tempfile::tempdir().unwrap();
+    let translated = directory.path().join("missing-pdfium.pdf");
+    let result = Command::new(BIN)
+        .env(PDFIUM_ENV, directory.path().join("missing-libpdfium.dylib"))
+        .args(["translate", "--backend", "none", "--output"])
+        .arg(&translated)
+        .arg(fixture())
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("pdfium_unavailable"));
+    assert!(!translated.exists());
+}
+
+#[test]
+fn a_closed_stdout_pipe_does_not_turn_success_into_a_panic() {
+    let directory = tempfile::tempdir().unwrap();
+    let translated = directory.path().join("broken-pipe.pdf");
+    let mut child = Command::new(BIN)
+        .env(PDFIUM_ENV, pdfium_library())
+        .args(["translate", "--backend", "none", "--output"])
+        .arg(&translated)
+        .arg(fixture())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(0));
+    assert!(translated.exists());
+}
+
+#[test]
 fn independent_tools_open_the_output_and_preserve_manifest_geometry() {
     let directory = tempfile::tempdir().unwrap();
     let translated = directory.path().join("validated.pdf");
@@ -155,6 +297,36 @@ fn independent_tools_open_the_output_and_preserve_manifest_geometry() {
         qpdf.status.success(),
         "{}",
         String::from_utf8_lossy(&qpdf.stderr)
+    );
+    let input_pages = qpdf_pages(&fixture());
+    let output_pages = qpdf_pages(&translated);
+    assert_eq!(output_pages[0]["object"], input_pages[0]["object"]);
+    let input_content = input_pages[0]["contents"][0].as_str().unwrap();
+    let output_content = output_pages[0]["contents"][0].as_str().unwrap();
+    assert_ne!(output_content, input_content);
+    let input_object = input_content
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    let output_object = output_content
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    assert!(output_object > input_object);
+    let active_stream = Command::new("qpdf")
+        .arg(format!("--show-object={output_object}"))
+        .arg("--raw-stream-data")
+        .arg(&translated)
+        .output()
+        .unwrap();
+    assert!(active_stream.status.success());
+    assert_eq!(
+        active_stream.stdout,
+        b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n"
     );
 
     let poppler = Command::new("pdftotext")
@@ -209,6 +381,23 @@ fn first_element_attributes(xml: &[u8], name: &[u8]) -> BTreeMap<String, String>
             _ => {}
         }
     }
+}
+
+fn qpdf_pages(pdf: &Path) -> Vec<serde_json::Value> {
+    let output = Command::new("qpdf")
+        .args(["--json", "--json-key=pages"])
+        .arg(pdf)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["pages"]
+        .as_array()
+        .unwrap()
+        .clone()
 }
 
 fn number(attributes: &BTreeMap<String, String>, name: &str) -> f64 {

@@ -11,7 +11,10 @@ pub mod walk;
 pub mod write;
 
 pub use context::{Document, PassContext, PipelineConfig};
-pub use error::{ErrorReason, ExitCategory, MimusError, Result};
+pub use error::{
+    AssetReason, ErrorReason, ExitCategory, InputReason, MimusError, Result, TranslationReason,
+    UsageReason,
+};
 
 /// Core version used by the CLI as its version source of truth.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

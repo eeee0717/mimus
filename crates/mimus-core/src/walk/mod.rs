@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
 
-use crate::error::{ErrorReason, MimusError, Result};
+use crate::error::{InputReason, MimusError, Result};
 use crate::il::{FontRef, Point, Rect, TextTransform};
 use tokenizer::{Token, TokenKind, tokenize};
 
@@ -13,6 +13,7 @@ const MAX_STREAM_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq)]
 pub struct WalkedChar {
     pub unicode: Option<char>,
+    pub code: u32,
     pub encoded: Vec<u8>,
     pub font: FontRef,
     pub font_size: f64,
@@ -53,6 +54,14 @@ impl Matrix {
         self.then(Self([1.0, 0.0, 0.0, 1.0, x, y]))
     }
 
+    fn has_identity_linear_part(self) -> bool {
+        let [a, b, c, d, _, _] = self.0;
+        (a - 1.0).abs() <= f64::EPSILON
+            && b.abs() <= f64::EPSILON
+            && c.abs() <= f64::EPSILON
+            && (d - 1.0).abs() <= f64::EPSILON
+    }
+
     fn point(self, x: f64, y: f64) -> Point {
         let [a, b, c, d, e, f] = self.0;
         Point {
@@ -64,57 +73,58 @@ impl Matrix {
 
 #[derive(Debug, Clone)]
 struct GraphicsState {
-    ctm: Matrix,
     text_matrix: Matrix,
-    line_matrix: Matrix,
     font_name: Vec<u8>,
     font_size: f64,
-    char_spacing: f64,
-    word_spacing: f64,
-    horizontal_scale: f64,
-    rise: f64,
-    in_text: bool,
+    phase: TextPhase,
 }
 
 impl Default for GraphicsState {
     fn default() -> Self {
         Self {
-            ctm: Matrix::IDENTITY,
             text_matrix: Matrix::IDENTITY,
-            line_matrix: Matrix::IDENTITY,
             font_name: Vec::new(),
             font_size: 0.0,
-            char_spacing: 0.0,
-            word_spacing: 0.0,
-            horizontal_scale: 1.0,
-            rise: 0.0,
-            in_text: false,
+            phase: TextPhase::Before,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextPhase {
+    Before,
+    Inside,
+    After,
 }
 
 struct Walker<'a> {
     document: &'a Document,
     resources: Dictionary,
     state: GraphicsState,
-    stack: Vec<GraphicsState>,
     operands: Vec<Token>,
     characters: Vec<WalkedChar>,
     content_object: ObjectId,
+    text_show_count: usize,
 }
 
 pub fn walk_page(document: &Document, page_id: ObjectId) -> Result<Vec<WalkedChar>> {
     let resources = inherited_page_resources(document, page_id)?;
+    let content_objects = document.get_page_contents(page_id);
+    if content_objects.len() > 1 {
+        return Err(unsupported_error(
+            "M1 supports exactly one content stream per page",
+        ));
+    }
     let mut walker = Walker {
         document,
         resources,
         state: GraphicsState::default(),
-        stack: Vec::new(),
         operands: Vec::new(),
         characters: Vec::new(),
         content_object: (0, 0),
+        text_show_count: 0,
     };
-    for object_id in document.get_page_contents(page_id) {
+    for object_id in content_objects {
         let stream = document
             .get_object(object_id)
             .and_then(Object::as_stream)
@@ -132,6 +142,9 @@ pub fn walk_page(document: &Document, page_id: ObjectId) -> Result<Vec<WalkedCha
         walker.content_object = object_id;
         walker.walk(tokenize(&decoded)?)?;
     }
+    if walker.state.phase == TextPhase::Inside {
+        return Err(walk_error("content stream ended before ET"));
+    }
     Ok(walker.characters)
 }
 
@@ -147,24 +160,30 @@ impl Walker<'_> {
             };
             let operands = std::mem::take(&mut self.operands);
             match operator.as_slice() {
-                b"q" => self.stack.push(self.state.clone()),
-                b"Q" => {
-                    self.state = self
-                        .stack
-                        .pop()
-                        .ok_or_else(|| walk_error("graphics state stack underflow"))?;
-                }
-                b"cm" => {
-                    let values = numeric_tail(&operands, 6, "cm")?;
-                    self.state.ctm = self.state.ctm.then(Matrix::from_values(&values));
-                }
                 b"BT" => {
+                    operand_tail(&operands, 0, "BT")?;
+                    if self.state.phase != TextPhase::Before {
+                        return Err(unsupported_error(
+                            "M1 supports exactly one text object per page",
+                        ));
+                    }
                     self.state.text_matrix = Matrix::IDENTITY;
-                    self.state.line_matrix = Matrix::IDENTITY;
-                    self.state.in_text = true;
+                    self.state.phase = TextPhase::Inside;
                 }
-                b"ET" => self.state.in_text = false,
+                b"ET" => {
+                    operand_tail(&operands, 0, "ET")?;
+                    if self.state.phase != TextPhase::Inside {
+                        return Err(walk_error("ET appeared outside a text object"));
+                    }
+                    if self.text_show_count != 1 {
+                        return Err(unsupported_error(
+                            "M1 requires exactly one text-show operation per page",
+                        ));
+                    }
+                    self.state.phase = TextPhase::After;
+                }
                 b"Tf" => {
+                    self.require_text_phase("Tf")?;
                     let tail = operand_tail(&operands, 2, "Tf")?;
                     let TokenKind::Name(name) = &tail[0].kind else {
                         return Err(walk_error("Tf font operand is not a name"));
@@ -176,28 +195,36 @@ impl Walker<'_> {
                     self.state.font_size = size;
                 }
                 b"Tm" => {
+                    self.require_text_phase("Tm")?;
                     let values = numeric_tail(&operands, 6, "Tm")?;
                     let matrix = Matrix::from_values(&values);
+                    if !matrix.has_identity_linear_part() {
+                        return Err(unsupported_error(
+                            "M1 cannot faithfully re-emit scaled, rotated, mirrored, or skewed text matrices",
+                        ));
+                    }
                     self.state.text_matrix = matrix;
-                    self.state.line_matrix = matrix;
                 }
-                b"Td" => {
-                    let values = numeric_tail(&operands, 2, "Td")?;
-                    self.state.line_matrix = self.state.line_matrix.translate(values[0], values[1]);
-                    self.state.text_matrix = self.state.line_matrix;
-                }
-                b"Tc" => self.state.char_spacing = numeric_tail(&operands, 1, "Tc")?[0],
-                b"Tw" => self.state.word_spacing = numeric_tail(&operands, 1, "Tw")?[0],
-                b"Tz" => self.state.horizontal_scale = numeric_tail(&operands, 1, "Tz")?[0] / 100.0,
-                b"Ts" => self.state.rise = numeric_tail(&operands, 1, "Ts")?[0],
                 b"Tj" => {
+                    self.require_text_phase("Tj")?;
+                    if self.text_show_count != 0 {
+                        return Err(unsupported_error(
+                            "M1 supports exactly one text-show operation per page",
+                        ));
+                    }
                     let tail = operand_tail(&operands, 1, "Tj")?;
                     let TokenKind::Bytes(bytes) = &tail[0].kind else {
                         return Err(walk_error("Tj operand is not a string"));
                     };
                     self.show_text(bytes, tail[0].span.start, tail[0].span.end)?;
+                    self.text_show_count += 1;
                 }
-                _ => {}
+                _ => {
+                    return Err(unsupported_error(format!(
+                        "M1 cannot faithfully re-emit operator {}",
+                        display_operator(operator)
+                    )));
+                }
             }
         }
         if !self.operands.is_empty() {
@@ -207,34 +234,30 @@ impl Walker<'_> {
     }
 
     fn show_text(&mut self, bytes: &[u8], byte_start: usize, byte_end: usize) -> Result<()> {
-        if !self.state.in_text {
-            return Err(walk_error("Tj appeared outside BT/ET"));
-        }
         if self.state.font_size <= 0.0 || self.state.font_name.is_empty() {
             return Err(walk_error("Tj appeared before a valid Tf"));
         }
         let font = resolve_simple_font(self.document, &self.resources, &self.state.font_name)?;
         for byte in bytes {
-            let transform = self.state.ctm.then(self.state.text_matrix);
-            let baseline = transform.point(0.0, self.state.rise);
-            let width = font.width(*byte);
-            let word_spacing = if *byte == b' ' {
-                self.state.word_spacing
-            } else {
-                0.0
-            };
-            let advance =
-                (width * self.state.font_size / 1000.0 + self.state.char_spacing + word_spacing)
-                    * self.state.horizontal_scale;
+            let transform = self.state.text_matrix;
+            let baseline = transform.point(0.0, 0.0);
+            let width = font.width(*byte).ok_or_else(|| {
+                unsupported_error(format!(
+                    "font /{} has no width for character code {byte}",
+                    display_pdf_name(&self.state.font_name)
+                ))
+            })?;
+            let glyph_width = width * self.state.font_size / 1000.0;
             let metric_box = transformed_box(
                 transform,
                 0.0,
-                self.state.rise + font.descent * self.state.font_size / 1000.0,
-                advance,
-                self.state.rise + font.ascent * self.state.font_size / 1000.0,
+                font.descent * self.state.font_size / 1000.0,
+                glyph_width,
+                font.ascent * self.state.font_size / 1000.0,
             );
             self.characters.push(WalkedChar {
                 unicode: decode_win_ansi(*byte),
+                code: u32::from(*byte),
                 encoded: vec![*byte],
                 font: font.reference.clone(),
                 font_size: self.state.font_size,
@@ -245,9 +268,17 @@ impl Walker<'_> {
                 byte_start,
                 byte_end,
             });
-            self.state.text_matrix = self.state.text_matrix.translate(advance, 0.0);
+            self.state.text_matrix = self.state.text_matrix.translate(glyph_width, 0.0);
         }
         Ok(())
+    }
+
+    fn require_text_phase(&self, operator: &str) -> Result<()> {
+        if self.state.phase == TextPhase::Inside {
+            Ok(())
+        } else {
+            Err(walk_error(format!("{operator} appeared outside BT/ET")))
+        }
     }
 }
 
@@ -260,13 +291,12 @@ struct SimpleFont {
 }
 
 impl SimpleFont {
-    fn width(&self, code: u8) -> f64 {
+    fn width(&self, code: u8) -> Option<f64> {
         let index = i64::from(code) - self.first_char;
         usize::try_from(index)
             .ok()
             .and_then(|index| self.widths.get(index))
             .copied()
-            .unwrap_or(0.0)
     }
 }
 
@@ -282,7 +312,7 @@ fn resolve_simple_font(
     let font_object = fonts.get(name).map_err(|error| {
         walk_error(format!(
             "font /{} is missing: {error}",
-            String::from_utf8_lossy(name)
+            display_pdf_name(name)
         ))
     })?;
     let object_id = font_object
@@ -327,7 +357,12 @@ fn resolve_simple_font(
         .ok_or_else(|| walk_error("font descriptor has no numeric Descent"))?;
     Ok(SimpleFont {
         reference: FontRef {
-            resource_name: String::from_utf8_lossy(name).into_owned(),
+            resource_name: String::from_utf8(name.to_vec()).map_err(|_| {
+                unsupported_error(format!(
+                    "M1 cannot faithfully re-emit non-UTF-8 font resource /{}",
+                    display_pdf_name(name)
+                ))
+            })?,
             object_number: object_id.0,
             generation: object_id.1,
         },
@@ -411,16 +446,20 @@ fn decode_win_ansi(code: u8) -> Option<char> {
 }
 
 fn classify_transform(matrix: Matrix) -> TextTransform {
+    // CONTEXT #32 / ADR-0007: 直立窗口只有 0deg +/-0.1deg，镜像优先于旋转，
+    // 斜切超过 20deg 才隔离；页面 /Rotate 在 Parse 中另行处理，不能混入这里。
+    const UPRIGHT_TOLERANCE_DEGREES: f64 = 0.1;
+    const MAX_UPRIGHT_SKEW_DEGREES: f64 = 20.0;
     let [a, b, c, d, _, _] = matrix.0;
     if a * d - b * c < 0.0 {
         return TextTransform::Mirrored;
     }
     let rotation = b.atan2(a).to_degrees();
-    if rotation.abs() > 0.1 {
+    if rotation.abs() > UPRIGHT_TOLERANCE_DEGREES {
         return TextTransform::Rotated(rotation);
     }
     let skew = c.atan2(d).to_degrees().abs();
-    if skew > 20.0 {
+    if skew > MAX_UPRIGHT_SKEW_DEGREES {
         TextTransform::Skewed(skew)
     } else {
         TextTransform::Upright
@@ -455,18 +494,55 @@ fn transformed_box(matrix: Matrix, left: f64, bottom: f64, right: f64, top: f64)
 }
 
 fn walk_error(message: impl Into<String>) -> MimusError {
-    MimusError::input(ErrorReason::OperatorWalk, message)
+    MimusError::input(InputReason::OperatorWalk, message)
+}
+
+fn unsupported_error(message: impl Into<String>) -> MimusError {
+    MimusError::input(InputReason::UnsupportedPdf, message)
+}
+
+fn display_operator(operator: &[u8]) -> String {
+    operator
+        .iter()
+        .map(|byte| {
+            if byte.is_ascii_graphic() {
+                char::from(*byte).to_string()
+            } else {
+                format!("\\x{byte:02X}")
+            }
+        })
+        .collect()
+}
+
+fn display_pdf_name(name: &[u8]) -> String {
+    name.iter()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') {
+                char::from(*byte).to_string()
+            } else {
+                format!("#{byte:02X}")
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
+    use crate::error::ErrorReason;
+
     use super::*;
 
-    fn fixture() -> PathBuf {
+    fn fixture_path(id: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../corpus/fixtures/unit-base-01-single-line/unit-base-01-single-line.pdf")
+            .join("../../corpus/fixtures")
+            .join(id)
+            .join(format!("{id}.pdf"))
+    }
+
+    fn fixture() -> PathBuf {
+        fixture_path("unit-base-01-single-line")
     }
 
     #[test]
@@ -496,5 +572,102 @@ mod tests {
         assert!((metric.bottom - 117.168).abs() < 1e-9);
         assert!((metric.right - 112.656).abs() < 1e-9);
         assert!((metric.top - 131.136).abs() < 1e-9);
+        assert_eq!(characters[0].code, u32::from(b'M'));
+    }
+
+    #[test]
+    fn production_walk_accepts_only_safe_experiment_2_decoding_variants() {
+        for id in [
+            "unit-parse-01-ascii85",
+            "unit-parse-02-cascade",
+            "unit-parse-03-lzw-earlychange",
+            "unit-parse-03-lzw-earlychange-1",
+            "unit-parse-07-inherited-page-resources",
+        ] {
+            let document = Document::load(fixture_path(id)).unwrap();
+            let page_id = document.get_pages()[&1];
+            let text = walk_page(&document, page_id)
+                .unwrap_or_else(|error| panic!("{id} should be accepted: {error}"))
+                .iter()
+                .filter_map(|character| character.unicode)
+                .collect::<String>();
+            assert_eq!(text, "MIMUS", "fixture {id}");
+        }
+    }
+
+    #[test]
+    fn production_walk_rejects_experiment_2_content_it_cannot_reemit() {
+        for id in [
+            "unit-parse-04-contents-array-numeric-split",
+            "unit-stream-01-bx-ex-unknown-op",
+            "unit-stream-02-type3-d1",
+            "unit-stream-03-unknown-op-outside-bx",
+            "unit-stream-08-inline-image-EI-in-data",
+            "unit-xobj-00-recursion-parent",
+            "unit-xobj-04-inherited-resources",
+        ] {
+            let document = Document::load(fixture_path(id)).unwrap();
+            let page_id = document.get_pages()[&1];
+            let result = walk_page(&document, page_id);
+            assert!(result.is_err(), "{id} must fail closed");
+            let error = result.unwrap_err();
+            assert_eq!(error.category().code(), 2, "fixture {id}: {error}");
+        }
+    }
+
+    #[test]
+    fn production_walk_rejects_unreplayed_state_and_multiple_text_shows() {
+        let programs: &[&[u8]] = &[
+            b"0.5 0 0 0.5 0 0 cm\nBT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
+            b"BT /F1 12 Tf 2 Tc 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
+            b"BT /F1 12 Tf 2 Tw 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
+            b"BT /F1 12 Tf 50 Tz 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
+            b"BT /F1 12 Tf 2 Ts 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
+            b"BT /F1 12 Tf 3 Tr 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
+            b"BT /F1 12 Tf 0.5 0 0 0.5 72 120 Tm (MIMUS) Tj ET",
+            b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj 1 0 0 1 72 80 Tm (MIMUS) Tj ET",
+            b"0 0 10 10 re f BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
+        ];
+        for program in programs {
+            let mut document = Document::load(fixture()).unwrap();
+            document
+                .get_object_mut((9, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_plain_content(program.to_vec());
+            let page_id = document.get_pages()[&1];
+            let error = walk_page(&document, page_id).unwrap_err();
+            assert_eq!(
+                error.reason(),
+                ErrorReason::Input(InputReason::UnsupportedPdf)
+            );
+        }
+    }
+
+    #[test]
+    fn production_walk_rejects_a_font_name_it_cannot_reemit_losslessly() {
+        let mut document = Document::load(fixture()).unwrap();
+        let resources = document
+            .get_object_mut((4, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap();
+        let fonts = resources.get_mut(b"Font").unwrap().as_dict_mut().unwrap();
+        let font = fonts.remove(b"F1").unwrap();
+        fonts.set(vec![0xff], font);
+        document
+            .get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(b"BT /#FF 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET".to_vec());
+
+        let page_id = document.get_pages()[&1];
+        let error = walk_page(&document, page_id).unwrap_err();
+        assert_eq!(
+            error.reason(),
+            ErrorReason::Input(InputReason::UnsupportedPdf)
+        );
     }
 }

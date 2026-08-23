@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+// ADR-0007: 这是 IL 快照版本，不是 event.rs 的 CLI 机器协议版本。
 pub const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -85,6 +86,7 @@ pub struct FontRef {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PassthroughRef {
+    // #14 只消费 encoded 做 none identity typeset；按区间拼接完整原流属于 #18。
     pub content_object: u32,
     pub byte_start: usize,
     pub byte_end: usize,

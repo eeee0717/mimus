@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crate::error::{ErrorReason, MimusError, Result};
+use crate::error::{InputReason, MimusError, Result};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Token {
@@ -28,8 +28,16 @@ pub(super) fn tokenize(input: &[u8]) -> Result<Vec<Token>> {
         let kind = match input[cursor] {
             b'/' => TokenKind::Name(read_name(input, &mut cursor)?),
             b'(' => TokenKind::Bytes(read_literal_string(input, &mut cursor)?),
+            b'<' if input.get(cursor + 1) == Some(&b'<') => {
+                cursor += 2;
+                TokenKind::Operator(b"<<".to_vec())
+            }
             b'<' if input.get(cursor + 1) != Some(&b'<') => {
                 TokenKind::Bytes(read_hex_string(input, &mut cursor)?)
+            }
+            b'>' if input.get(cursor + 1) == Some(&b'>') => {
+                cursor += 2;
+                TokenKind::Operator(b">>".to_vec())
             }
             byte if is_number_start(byte) => {
                 let word = read_word(input, &mut cursor);
@@ -228,7 +236,7 @@ const fn hex_value(value: u8) -> Option<u8> {
 }
 
 fn walk_error(message: impl Into<String>) -> MimusError {
-    MimusError::input(ErrorReason::OperatorWalk, message)
+    MimusError::input(InputReason::OperatorWalk, message)
 }
 
 #[cfg(test)]
@@ -240,5 +248,13 @@ mod tests {
         let tokens = tokenize(b"BT /F#31 12 Tf 1 0 0 1 72 120 Tm (MI\\115US) Tj ET").unwrap();
         assert!(matches!(&tokens[1].kind, TokenKind::Name(name) if name == b"F1"));
         assert!(matches!(&tokens[11].kind, TokenKind::Bytes(value) if value == b"MIMUS"));
+    }
+
+    #[test]
+    fn tokenizes_dictionary_delimiters_without_treating_them_as_hex_strings() {
+        let tokens = tokenize(b"/Span<</MCID 0>>BDC").unwrap();
+        assert!(matches!(&tokens[1].kind, TokenKind::Operator(value) if value == b"<<"));
+        assert!(matches!(&tokens[4].kind, TokenKind::Operator(value) if value == b">>"));
+        assert!(matches!(&tokens[5].kind, TokenKind::Operator(value) if value == b"BDC"));
     }
 }

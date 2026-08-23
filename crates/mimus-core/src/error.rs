@@ -1,6 +1,6 @@
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, MimusError>;
@@ -26,46 +26,97 @@ impl ExitCategory {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+macro_rules! reason_enum {
+    ($name:ident { $($variant:ident => $wire:literal),+ $(,)? }) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum $name {
+            $($variant),+
+        }
+
+        impl $name {
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $wire),+
+                }
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(self.as_str())
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+    };
+}
+
+reason_enum!(UsageReason {
+    InvalidArguments => "invalid_arguments",
+});
+
+reason_enum!(InputReason {
+    InputRead => "input_read",
+    PdfParse => "pdf_parse",
+    EncryptedPdf => "encrypted_pdf",
+    ScannedPdf => "scanned_pdf",
+    UnsupportedPdf => "unsupported_pdf",
+    OperatorWalk => "operator_walk",
+    EngineMismatch => "engine_mismatch",
+    OutputMismatch => "output_mismatch",
+    OutputWrite => "output_write",
+    AtomicPublish => "atomic_publish",
+});
+
+reason_enum!(AssetReason {
+    PdfiumUnavailable => "pdfium_unavailable",
+});
+
+reason_enum!(TranslationReason {
+    BackendNotImplemented => "backend_not_implemented",
+    TranslationFailed => "translation_failed",
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorReason {
-    InvalidArguments,
-    InputRead,
-    PdfParse,
-    EncryptedPdf,
-    ScannedPdf,
-    UnsupportedPdf,
-    OperatorWalk,
-    EngineMismatch,
-    OutputWrite,
-    AtomicPublish,
-    PdfiumUnavailable,
-    BackendNotImplemented,
-    TranslationFailed,
+    Usage(UsageReason),
+    Input(InputReason),
+    Asset(AssetReason),
+    Translation(TranslationReason),
+}
+
+impl ErrorReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Usage(reason) => reason.as_str(),
+            Self::Input(reason) => reason.as_str(),
+            Self::Asset(reason) => reason.as_str(),
+            Self::Translation(reason) => reason.as_str(),
+        }
+    }
 }
 
 impl fmt::Display for ErrorReason {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = serde_json_name(*self);
-        formatter.write_str(value)
+        formatter.write_str(self.as_str())
     }
 }
 
-const fn serde_json_name(reason: ErrorReason) -> &'static str {
-    match reason {
-        ErrorReason::InvalidArguments => "invalid_arguments",
-        ErrorReason::InputRead => "input_read",
-        ErrorReason::PdfParse => "pdf_parse",
-        ErrorReason::EncryptedPdf => "encrypted_pdf",
-        ErrorReason::ScannedPdf => "scanned_pdf",
-        ErrorReason::UnsupportedPdf => "unsupported_pdf",
-        ErrorReason::OperatorWalk => "operator_walk",
-        ErrorReason::EngineMismatch => "engine_mismatch",
-        ErrorReason::OutputWrite => "output_write",
-        ErrorReason::AtomicPublish => "atomic_publish",
-        ErrorReason::PdfiumUnavailable => "pdfium_unavailable",
-        ErrorReason::BackendNotImplemented => "backend_not_implemented",
-        ErrorReason::TranslationFailed => "translation_failed",
+impl Serialize for ErrorReason {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -73,25 +124,25 @@ const fn serde_json_name(reason: ErrorReason) -> &'static str {
 pub enum MimusError {
     #[error("{message}")]
     Usage {
-        reason: ErrorReason,
+        reason: UsageReason,
         message: String,
         hint: Option<String>,
     },
     #[error("{message}")]
     Input {
-        reason: ErrorReason,
+        reason: InputReason,
         message: String,
         hint: Option<String>,
     },
     #[error("{message}")]
     Asset {
-        reason: ErrorReason,
+        reason: AssetReason,
         message: String,
         hint: Option<String>,
     },
     #[error("{message}")]
     Translation {
-        reason: ErrorReason,
+        reason: TranslationReason,
         message: String,
         hint: Option<String>,
     },
@@ -99,7 +150,7 @@ pub enum MimusError {
 
 impl MimusError {
     #[must_use]
-    pub fn usage(reason: ErrorReason, message: impl Into<String>) -> Self {
+    pub fn usage(reason: UsageReason, message: impl Into<String>) -> Self {
         Self::Usage {
             reason,
             message: message.into(),
@@ -108,7 +159,7 @@ impl MimusError {
     }
 
     #[must_use]
-    pub fn input(reason: ErrorReason, message: impl Into<String>) -> Self {
+    pub fn input(reason: InputReason, message: impl Into<String>) -> Self {
         Self::Input {
             reason,
             message: message.into(),
@@ -117,7 +168,7 @@ impl MimusError {
     }
 
     #[must_use]
-    pub fn asset(reason: ErrorReason, message: impl Into<String>) -> Self {
+    pub fn asset(reason: AssetReason, message: impl Into<String>) -> Self {
         Self::Asset {
             reason,
             message: message.into(),
@@ -126,7 +177,7 @@ impl MimusError {
     }
 
     #[must_use]
-    pub fn translation(reason: ErrorReason, message: impl Into<String>) -> Self {
+    pub fn translation(reason: TranslationReason, message: impl Into<String>) -> Self {
         Self::Translation {
             reason,
             message: message.into(),
@@ -158,10 +209,10 @@ impl MimusError {
     #[must_use]
     pub const fn reason(&self) -> ErrorReason {
         match self {
-            Self::Usage { reason, .. }
-            | Self::Input { reason, .. }
-            | Self::Asset { reason, .. }
-            | Self::Translation { reason, .. } => *reason,
+            Self::Usage { reason, .. } => ErrorReason::Usage(*reason),
+            Self::Input { reason, .. } => ErrorReason::Input(*reason),
+            Self::Asset { reason, .. } => ErrorReason::Asset(*reason),
+            Self::Translation { reason, .. } => ErrorReason::Translation(*reason),
         }
     }
 
@@ -189,15 +240,22 @@ mod tests {
     }
 
     #[test]
-    fn errors_expose_enumerable_reasons_and_hints() {
+    fn typed_reasons_keep_category_and_wire_value_together() {
         let error = MimusError::translation(
-            ErrorReason::BackendNotImplemented,
+            TranslationReason::BackendNotImplemented,
             "openai is not implemented",
         )
         .with_hint("use --backend none");
         assert_eq!(error.category(), ExitCategory::Translation);
-        assert_eq!(error.reason(), ErrorReason::BackendNotImplemented);
+        assert_eq!(
+            error.reason(),
+            ErrorReason::Translation(TranslationReason::BackendNotImplemented)
+        );
         assert_eq!(error.hint(), Some("use --backend none"));
         assert_eq!(error.reason().to_string(), "backend_not_implemented");
+        assert_eq!(
+            serde_json::to_string(&error.reason()).unwrap(),
+            "\"backend_not_implemented\""
+        );
     }
 }

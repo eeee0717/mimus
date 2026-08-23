@@ -17,5 +17,6 @@ clap.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+lopdf.workspace = true
 quick-xml.workspace = true
 tempfile.workspace = true

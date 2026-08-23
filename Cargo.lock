@@ -729,6 +729,7 @@ name = "mimus"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "lopdf",
  "mimus-core",
  "quick-xml",
  "serde_json",

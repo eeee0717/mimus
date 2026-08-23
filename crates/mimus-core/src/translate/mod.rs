@@ -1,4 +1,4 @@
-use crate::error::{ErrorReason, MimusError, Result};
+use crate::error::{MimusError, Result, TranslationReason};
 
 pub trait Translator: Send + Sync {
     fn translate(&self, text: &str) -> Result<String>;
@@ -16,7 +16,7 @@ impl Translator for NoneTranslator {
 #[must_use]
 pub fn openai_not_implemented() -> MimusError {
     MimusError::translation(
-        ErrorReason::BackendNotImplemented,
+        TranslationReason::BackendNotImplemented,
         "the openai backend is not implemented in M1",
     )
     .with_hint("rerun with --backend none for an offline round trip")
