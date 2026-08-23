@@ -1,0 +1,929 @@
+{
+  "schema_version": 1,
+  "experiment": "firecrawl-pdfium-backend-qualification",
+  "date": "2026-08-23",
+  "decision": {
+    "code": "B",
+    "label": "adopt_after_listed_upstream_changes",
+    "current_action": "keep_pdfium-render until a fixed upstream revision closes T1/F1/O1 and is requalified"
+  },
+  "revisions": {
+    "baseline": "867ca9852925c18a41b3d7210b1e3f215cab5995",
+    "reference": "pdfium-render@0.9.1/pdfium_7763",
+    "candidate": "firecrawl-pdfium@1a4c91d0c5f80c0da779088ba241bf1e45271cd5",
+    "read_only_audit_fork": "1a4c91d0c5f80c0da779088ba241bf1e45271cd5"
+  },
+  "pdfium_releases": [
+    {
+      "release": "api-7763",
+      "archive_sha256": null,
+      "dylib_sha256": "cb8e259f914dda33f8930751e9a70afd3168893a569f7e59d34d29c4bc5701c3"
+    },
+    {
+      "release": "chromium-7988",
+      "archive_sha256": "2229b8a6ffa0fb1634aa78886ed5425a10a8a0bd01762f7f0c9244081d86a921",
+      "dylib_sha256": "fbdec47c3f2eaa80705ed25cf8bed5ac420998ba0f3e786d4d297b6238749064"
+    },
+    {
+      "release": "chromium-8009",
+      "archive_url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8009/pdfium-mac-arm64.tgz",
+      "archive_sha256": "b1f2f17c7432a9942514dda5094ee9822c743bdfd07e7187725efbd34fde941f",
+      "dylib_sha256": "cfab7b27942132aea1a1ff7ff42ce970c39f7d928c1fc317ea99d3bfa3a43d0c"
+    }
+  ],
+  "comparator": {
+    "schema_version": 1,
+    "geometry_tolerance_pt": 0.001,
+    "canonical_text": "UTF-16 decode of the FPDFText_GetUnicode character-code sequence",
+    "hyphen_pseudo_character_differential": {
+      "get_unicode_and_bounded_text": "U+0002",
+      "get_text": "U+FFFE",
+      "classification": "PDFium API-view semantic difference, not a backend difference"
+    }
+  },
+  "corpus_matrix": {
+    "legal_inputs": 58,
+    "malformed_inputs": 16,
+    "pdfium_releases": 3,
+    "comparisons": 222,
+    "results": {
+      "equal": 222,
+      "equivalent_failure": 0,
+      "different": 0,
+      "timeout": 0,
+      "crash": 0,
+      "protocol_error": 0
+    }
+  },
+  "is_generated_probe": {
+    "fixture_sha256": "1e06a6e12329f0c3760680a70baea126e040e66e0bf34d3b14a71863096ee1e3",
+    "results": [
+      {
+        "char_count": 30,
+        "generated_newline": {
+          "code": 13,
+          "index": 13,
+          "is_generated_raw": 1
+        },
+        "ordinary": {
+          "code": 72,
+          "index": 0,
+          "is_generated_raw": 0
+        },
+        "out_of_range": -1,
+        "passed": true,
+        "pdf_sha256": "1e06a6e12329f0c3760680a70baea126e040e66e0bf34d3b14a71863096ee1e3",
+        "pdfium_library_sha256": "cb8e259f914dda33f8930751e9a70afd3168893a569f7e59d34d29c4bc5701c3",
+        "pdfium_release": "api-7763",
+        "schema_version": 1
+      },
+      {
+        "char_count": 30,
+        "generated_newline": {
+          "code": 13,
+          "index": 13,
+          "is_generated_raw": 1
+        },
+        "ordinary": {
+          "code": 72,
+          "index": 0,
+          "is_generated_raw": 0
+        },
+        "out_of_range": -1,
+        "passed": true,
+        "pdf_sha256": "1e06a6e12329f0c3760680a70baea126e040e66e0bf34d3b14a71863096ee1e3",
+        "pdfium_library_sha256": "fbdec47c3f2eaa80705ed25cf8bed5ac420998ba0f3e786d4d297b6238749064",
+        "pdfium_release": "chromium-7988",
+        "schema_version": 1
+      },
+      {
+        "char_count": 30,
+        "generated_newline": {
+          "code": 13,
+          "index": 13,
+          "is_generated_raw": 1
+        },
+        "ordinary": {
+          "code": 72,
+          "index": 0,
+          "is_generated_raw": 0
+        },
+        "out_of_range": -1,
+        "passed": true,
+        "pdf_sha256": "1e06a6e12329f0c3760680a70baea126e040e66e0bf34d3b14a71863096ee1e3",
+        "pdfium_library_sha256": "cfab7b27942132aea1a1ff7ff42ce970c39f7d928c1fc317ea99d3bfa3a43d0c",
+        "pdfium_release": "chromium-8009",
+        "schema_version": 1
+      }
+    ]
+  },
+  "real_pdf_matrix": {
+    "source": "arXiv",
+    "sample_count": 20,
+    "total_pages": 707,
+    "pdfium_releases": 3,
+    "comparisons": 60,
+    "page_versions": 2121,
+    "results": {
+      "equal": 60,
+      "equivalent_failure": 0,
+      "different": 0,
+      "timeout": 0,
+      "crash": 0,
+      "protocol_error": 0
+    },
+    "samples": [
+      {
+        "id": "1210.5898",
+        "url": "https://arxiv.org/pdf/1210.5898",
+        "producer": "Acrobat Distiller 9.2.0 (Windows)",
+        "creator": "PScript5.dll Version 5.2.2",
+        "pages": 15,
+        "bytes": 686829,
+        "sha256": "546cf4e4cd6a42db8811b8f446c1ed02408ce28dcbd7cd830499a0809eaa2737"
+      },
+      {
+        "id": "2005.14165",
+        "url": "https://arxiv.org/pdf/2005.14165",
+        "producer": "pdfTeX-1.40.17",
+        "creator": "LaTeX with hyperref package",
+        "pages": 75,
+        "bytes": 6768044,
+        "sha256": "97fd272f1fdfc18677462d0292f5fbf26ca86b4d1b485c2dba03269b643a0e83"
+      },
+      {
+        "id": "2006.16212",
+        "url": "https://arxiv.org/pdf/2006.16212",
+        "producer": "dvips + GPL Ghostscript GIT PRERELEASE 9.22",
+        "creator": "LaTeX with hyperref package",
+        "pages": 4,
+        "bytes": 64135,
+        "sha256": "44ca646f01af561033fde842297eaaa1cbda4f28a9f7025979ae2944d618de6a"
+      },
+      {
+        "id": "2101.11436",
+        "url": "https://arxiv.org/pdf/2101.11436",
+        "producer": "Microsoft® Word 2013",
+        "creator": "Microsoft® Word 2013",
+        "pages": 8,
+        "bytes": 309050,
+        "sha256": "5d7783319c578b72a045a3f0deb6acdea2ec390984b48c0fd37d90ac9704b24d"
+      },
+      {
+        "id": "2103.00020",
+        "url": "https://arxiv.org/pdf/2103.00020",
+        "producer": "pdfTeX-1.40.21",
+        "creator": "LaTeX with hyperref",
+        "pages": 48,
+        "bytes": 6813639,
+        "sha256": "6478b6e571a7d6fcd846d8ef77bfd60c285f1986abb8f475eedc43de403074f5"
+      },
+      {
+        "id": "2103.14757",
+        "url": "https://arxiv.org/pdf/2103.14757",
+        "producer": "Microsoft® Word 2010",
+        "creator": "Microsoft® Word 2010",
+        "pages": 11,
+        "bytes": 784450,
+        "sha256": "7362d44a43bbf3b47927c7e7bb5d66c9c03bf2b997fce12b31a1c57023c74a10"
+      },
+      {
+        "id": "2105.05233",
+        "url": "https://arxiv.org/pdf/2105.05233",
+        "producer": "pdfTeX-1.40.21",
+        "creator": "LaTeX with hyperref",
+        "pages": 44,
+        "bytes": 39795106,
+        "sha256": "f3e66af0c1b698250d3f286dbd4641f91fce661d8af4f5b26ecdc427015b7ab6"
+      },
+      {
+        "id": "2106.09685",
+        "url": "https://arxiv.org/pdf/2106.09685",
+        "producer": "pdfTeX-1.40.21",
+        "creator": "LaTeX with hyperref",
+        "pages": 26,
+        "bytes": 1609513,
+        "sha256": "e9a0d3128767db616085dc0f4e6e455e672e89af823e8ed1282793682787395a"
+      },
+      {
+        "id": "2112.10752",
+        "url": "https://arxiv.org/pdf/2112.10752",
+        "producer": "pdfTeX-1.40.21",
+        "creator": "LaTeX with hyperref",
+        "pages": 45,
+        "bytes": 40842586,
+        "sha256": "46ede043a8dc07ca1f0f445620523fe1ad8b2436bd83856a3835612a47e9f79e"
+      },
+      {
+        "id": "2201.11903",
+        "url": "https://arxiv.org/pdf/2201.11903",
+        "producer": "pdfTeX-1.40.21",
+        "creator": "LaTeX with hyperref",
+        "pages": 43,
+        "bytes": 891773,
+        "sha256": "7d9f878c23b460e4566aa4ec9201b1abfb3b8faefb2b1356e411cb90fef72a12"
+      },
+      {
+        "id": "2203.15556",
+        "url": "https://arxiv.org/pdf/2203.15556",
+        "producer": "pdfTeX-1.40.21",
+        "creator": "LaTeX with hyperref",
+        "pages": 36,
+        "bytes": 6004349,
+        "sha256": "3fd3632a8ef48171bd25282990221d49535d75356192f068b3b2ebe08f2aedd4"
+      },
+      {
+        "id": "2205.14135",
+        "url": "https://arxiv.org/pdf/2205.14135",
+        "producer": "pdfTeX-1.40.21",
+        "creator": "LaTeX with hyperref",
+        "pages": 34,
+        "bytes": 2630825,
+        "sha256": "ca7f9fda10b90fc05dd291a3accc85e9c1a4a860b99b31928dab03ed3fcb14e4"
+      },
+      {
+        "id": "2212.08073",
+        "url": "https://arxiv.org/pdf/2212.08073",
+        "producer": "pdfTeX-1.40.21",
+        "creator": "LaTeX with hyperref",
+        "pages": 34,
+        "bytes": 2088111,
+        "sha256": "9a456a07ad346e3372f9867d346f69f5b0f68b4c65f060aca0b8a13fa9d98e83"
+      },
+      {
+        "id": "2301.11406",
+        "url": "https://arxiv.org/pdf/2301.11406",
+        "producer": "xdvipdfmx (20211117)",
+        "creator": "LaTeX with hyperref",
+        "pages": 7,
+        "bytes": 111618,
+        "sha256": "1303443dbf3f162e20d4c8eb7b82309e90316e2788c23036111477c234ccb7ec"
+      },
+      {
+        "id": "2302.13971",
+        "url": "https://arxiv.org/pdf/2302.13971",
+        "producer": "pdfTeX-1.40.21",
+        "creator": "LaTeX with hyperref",
+        "pages": 27,
+        "bytes": 726566,
+        "sha256": "2e663675ae36ad12adb2f5a05281bac2747ecf8d23d92bedd9f937a89fee7136"
+      },
+      {
+        "id": "2303.08774",
+        "url": "https://arxiv.org/pdf/2303.08774",
+        "producer": "pdfTeX-1.40.25",
+        "creator": "LaTeX with hyperref",
+        "pages": 100,
+        "bytes": 5245564,
+        "sha256": "c33a66dadca2388d7b172d6293b00dc32b71110c6f38fafe0d41112e61be7774"
+      },
+      {
+        "id": "2305.14314",
+        "url": "https://arxiv.org/pdf/2305.14314",
+        "producer": "pdfTeX-1.40.25",
+        "creator": "LaTeX with hyperref",
+        "pages": 26,
+        "bytes": 1065470,
+        "sha256": "33a4e757c19d6ea8d3cca8958fce8fe405e290272e135c99ee66065c775d5bd1"
+      },
+      {
+        "id": "2307.09288",
+        "url": "https://arxiv.org/pdf/2307.09288",
+        "producer": "pdfTeX-1.40.25",
+        "creator": "LaTeX with hyperref",
+        "pages": 77,
+        "bytes": 13661300,
+        "sha256": "1df284ce95f783002074bfe8f21d47c646b396ceb1736ea3ec0ea212fc070d91"
+      },
+      {
+        "id": "2312.00752",
+        "url": "https://arxiv.org/pdf/2312.00752",
+        "producer": "pdfTeX-1.40.25",
+        "creator": "LaTeX with hyperref",
+        "pages": 36,
+        "bytes": 1168615,
+        "sha256": "adf70ed1803c85b1899dec3e21f3af0b124411439e8654b840ea65f7b9f52b2e"
+      },
+      {
+        "id": "2602.06992",
+        "url": "https://arxiv.org/pdf/2602.06992",
+        "producer": "",
+        "creator": "WPS 文字",
+        "pages": 11,
+        "bytes": 1124373,
+        "sha256": "111c60ba8e9b97b103878e09cdbdd3e783acb4e4eaa33b8b3791a68631a88344"
+      }
+    ]
+  },
+  "performance": {
+    "warmup_iterations": 1,
+    "measured_iterations": 5,
+    "input_documents": 58,
+    "pages_per_iteration": 61,
+    "runs": [
+      {
+        "backend": "reference",
+        "pdfium_release": "api-7763",
+        "mode": "threads",
+        "concurrency": 1,
+        "elapsed_us": 648156,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 470.56572800375216,
+        "p50_document_us": 640,
+        "p95_document_us": 2418,
+        "peak_rss_kib": 112992,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "api-7763",
+        "mode": "threads",
+        "concurrency": 1,
+        "elapsed_us": 684755,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 445.41478338967954,
+        "p50_document_us": 642,
+        "p95_document_us": 2517,
+        "peak_rss_kib": 112864,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "api-7763",
+        "mode": "threads",
+        "concurrency": 2,
+        "elapsed_us": 365617,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 834.2062869067904,
+        "p50_document_us": 655,
+        "p95_document_us": 2497,
+        "peak_rss_kib": 194432,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "api-7763",
+        "mode": "threads",
+        "concurrency": 4,
+        "elapsed_us": 240162,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 1269.9760994661935,
+        "p50_document_us": 939,
+        "p95_document_us": 3618,
+        "peak_rss_kib": 279504,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "api-7763",
+        "mode": "threads",
+        "concurrency": 8,
+        "elapsed_us": 236155,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 1291.5246342444582,
+        "p50_document_us": 2880,
+        "p95_document_us": 10135,
+        "peak_rss_kib": 282352,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "api-7763",
+        "mode": "processes",
+        "concurrency": 1,
+        "elapsed_us": 688967,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 442.6917399527118,
+        "p50_document_us": 655,
+        "p95_document_us": 2475,
+        "peak_rss_kib": 113520,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "api-7763",
+        "mode": "processes",
+        "concurrency": 2,
+        "elapsed_us": 542237,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 562.4846699874778,
+        "p50_document_us": 650,
+        "p95_document_us": 2519,
+        "peak_rss_kib": 112416,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "api-7763",
+        "mode": "processes",
+        "concurrency": 4,
+        "elapsed_us": 472728,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 645.1913150902844,
+        "p50_document_us": 721,
+        "p95_document_us": 2602,
+        "peak_rss_kib": 111808,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "api-7763",
+        "mode": "processes",
+        "concurrency": 8,
+        "elapsed_us": 435739,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 699.9602973339545,
+        "p50_document_us": 1115,
+        "p95_document_us": 3447,
+        "peak_rss_kib": 110976,
+        "success": true
+      },
+      {
+        "backend": "reference",
+        "pdfium_release": "chromium-7988",
+        "mode": "threads",
+        "concurrency": 1,
+        "elapsed_us": 652877,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 467.16303377205816,
+        "p50_document_us": 606,
+        "p95_document_us": 2420,
+        "peak_rss_kib": 111824,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "chromium-7988",
+        "mode": "threads",
+        "concurrency": 1,
+        "elapsed_us": 685972,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 444.62456193547257,
+        "p50_document_us": 642,
+        "p95_document_us": 2468,
+        "peak_rss_kib": 112752,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "chromium-7988",
+        "mode": "threads",
+        "concurrency": 2,
+        "elapsed_us": 375027,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 813.2747775493498,
+        "p50_document_us": 739,
+        "p95_document_us": 2548,
+        "peak_rss_kib": 195312,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "chromium-7988",
+        "mode": "threads",
+        "concurrency": 4,
+        "elapsed_us": 238610,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 1278.23645278907,
+        "p50_document_us": 914,
+        "p95_document_us": 3607,
+        "peak_rss_kib": 278560,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "chromium-7988",
+        "mode": "threads",
+        "concurrency": 8,
+        "elapsed_us": 220962,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 1380.3278391759668,
+        "p50_document_us": 2504,
+        "p95_document_us": 8969,
+        "peak_rss_kib": 282688,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "chromium-7988",
+        "mode": "processes",
+        "concurrency": 1,
+        "elapsed_us": 687308,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 443.76029378386403,
+        "p50_document_us": 653,
+        "p95_document_us": 2468,
+        "peak_rss_kib": 112720,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "chromium-7988",
+        "mode": "processes",
+        "concurrency": 2,
+        "elapsed_us": 543391,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 561.2901207417863,
+        "p50_document_us": 654,
+        "p95_document_us": 2530,
+        "peak_rss_kib": 112432,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "chromium-7988",
+        "mode": "processes",
+        "concurrency": 4,
+        "elapsed_us": 471915,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 646.302829958785,
+        "p50_document_us": 709,
+        "p95_document_us": 2589,
+        "peak_rss_kib": 111728,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "chromium-7988",
+        "mode": "processes",
+        "concurrency": 8,
+        "elapsed_us": 435223,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 700.7901696371745,
+        "p50_document_us": 1134,
+        "p95_document_us": 4537,
+        "peak_rss_kib": 110544,
+        "success": true
+      },
+      {
+        "backend": "reference",
+        "pdfium_release": "chromium-8009",
+        "mode": "threads",
+        "concurrency": 1,
+        "elapsed_us": 646994,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 471.4108631610185,
+        "p50_document_us": 610,
+        "p95_document_us": 2406,
+        "peak_rss_kib": 111520,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "chromium-8009",
+        "mode": "threads",
+        "concurrency": 1,
+        "elapsed_us": 692376,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 440.51209169584155,
+        "p50_document_us": 658,
+        "p95_document_us": 2732,
+        "peak_rss_kib": 113024,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "chromium-8009",
+        "mode": "threads",
+        "concurrency": 2,
+        "elapsed_us": 372270,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 819.2978214736615,
+        "p50_document_us": 681,
+        "p95_document_us": 2575,
+        "peak_rss_kib": 194976,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "chromium-8009",
+        "mode": "threads",
+        "concurrency": 4,
+        "elapsed_us": 236580,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 1289.204497421591,
+        "p50_document_us": 923,
+        "p95_document_us": 3506,
+        "peak_rss_kib": 278768,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "chromium-8009",
+        "mode": "threads",
+        "concurrency": 8,
+        "elapsed_us": 227201,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 1342.423668909908,
+        "p50_document_us": 2687,
+        "p95_document_us": 9103,
+        "peak_rss_kib": 282352,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "chromium-8009",
+        "mode": "processes",
+        "concurrency": 1,
+        "elapsed_us": 688370,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 443.0756715138661,
+        "p50_document_us": 653,
+        "p95_document_us": 2496,
+        "peak_rss_kib": 112928,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "chromium-8009",
+        "mode": "processes",
+        "concurrency": 2,
+        "elapsed_us": 542433,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 562.28142461834,
+        "p50_document_us": 647,
+        "p95_document_us": 2533,
+        "peak_rss_kib": 112576,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "chromium-8009",
+        "mode": "processes",
+        "concurrency": 4,
+        "elapsed_us": 471604,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 646.7290353771384,
+        "p50_document_us": 700,
+        "p95_document_us": 2663,
+        "peak_rss_kib": 111552,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "chromium-8009",
+        "mode": "processes",
+        "concurrency": 8,
+        "elapsed_us": 434101,
+        "jobs": 290,
+        "pages": 305,
+        "throughput_pages_per_second": 702.6014683218882,
+        "p50_document_us": 1029,
+        "p95_document_us": 4172,
+        "peak_rss_kib": 110144,
+        "success": true
+      }
+    ]
+  },
+  "stability": {
+    "started_unix_seconds": 1787421403,
+    "requested_rounds": 200,
+    "completed_rounds": 200,
+    "backend_pdfium_combinations": 6,
+    "fixture_jobs": 69600,
+    "pages": 73200,
+    "failures": 0,
+    "rss_requires_investigation": false,
+    "records": [
+      {
+        "backend": "reference",
+        "pdfium_release": "api-7763",
+        "requested_rounds": 200,
+        "completed_rounds": 200,
+        "partial_round_fixtures": 0,
+        "elapsed_us": 315596691,
+        "jobs": 11600,
+        "pages": 12200,
+        "throughput_pages_per_second": 38.656932559536884,
+        "p50_document_us": 1153,
+        "p95_document_us": 3338,
+        "failed_jobs": 0,
+        "content_stability_failures": [],
+        "process_exit": 0,
+        "reached_time_limit": false,
+        "peak_rss_kib": 113536,
+        "first_half_mean_rss_kib": 106291.09677419355,
+        "second_half_mean_rss_kib": 110168.1038961039,
+        "rss_growth_ratio": 0.036475370370358765,
+        "rss_nondecreasing_fraction": 0.9642857142857143,
+        "rss_monotonic_growth_detected": false,
+        "rss_requires_investigation": false,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "api-7763",
+        "requested_rounds": 200,
+        "completed_rounds": 200,
+        "partial_round_fixtures": 0,
+        "elapsed_us": 315674255,
+        "jobs": 11600,
+        "pages": 12200,
+        "throughput_pages_per_second": 38.647434203970796,
+        "p50_document_us": 1223,
+        "p95_document_us": 3656,
+        "failed_jobs": 0,
+        "content_stability_failures": [],
+        "process_exit": 0,
+        "reached_time_limit": false,
+        "peak_rss_kib": 117760,
+        "first_half_mean_rss_kib": 109829.16129032258,
+        "second_half_mean_rss_kib": 113786.07792207792,
+        "rss_growth_ratio": 0.03602792359759196,
+        "rss_nondecreasing_fraction": 0.9545454545454546,
+        "rss_monotonic_growth_detected": false,
+        "rss_requires_investigation": false,
+        "success": true
+      },
+      {
+        "backend": "reference",
+        "pdfium_release": "chromium-7988",
+        "requested_rounds": 200,
+        "completed_rounds": 200,
+        "partial_round_fixtures": 0,
+        "elapsed_us": 315629401,
+        "jobs": 11600,
+        "pages": 12200,
+        "throughput_pages_per_second": 38.652926379314074,
+        "p50_document_us": 1110,
+        "p95_document_us": 3559,
+        "failed_jobs": 0,
+        "content_stability_failures": [],
+        "process_exit": 0,
+        "reached_time_limit": false,
+        "peak_rss_kib": 113680,
+        "first_half_mean_rss_kib": 107499.25161290323,
+        "second_half_mean_rss_kib": 110149.92207792208,
+        "rss_growth_ratio": 0.02465757133420532,
+        "rss_nondecreasing_fraction": 0.9805194805194806,
+        "rss_monotonic_growth_detected": false,
+        "rss_requires_investigation": false,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "chromium-7988",
+        "requested_rounds": 200,
+        "completed_rounds": 200,
+        "partial_round_fixtures": 0,
+        "elapsed_us": 315756934,
+        "jobs": 11600,
+        "pages": 12200,
+        "throughput_pages_per_second": 38.63731461238473,
+        "p50_document_us": 1226,
+        "p95_document_us": 3568,
+        "failed_jobs": 0,
+        "content_stability_failures": [],
+        "process_exit": 0,
+        "reached_time_limit": false,
+        "peak_rss_kib": 117056,
+        "first_half_mean_rss_kib": 109310.14193548387,
+        "second_half_mean_rss_kib": 113689.45454545454,
+        "rss_growth_ratio": 0.04006318656648889,
+        "rss_nondecreasing_fraction": 0.9512987012987013,
+        "rss_monotonic_growth_detected": false,
+        "rss_requires_investigation": false,
+        "success": true
+      },
+      {
+        "backend": "reference",
+        "pdfium_release": "chromium-8009",
+        "requested_rounds": 200,
+        "completed_rounds": 200,
+        "partial_round_fixtures": 0,
+        "elapsed_us": 315528158,
+        "jobs": 11600,
+        "pages": 12200,
+        "throughput_pages_per_second": 38.66532888009317,
+        "p50_document_us": 1163,
+        "p95_document_us": 3305,
+        "failed_jobs": 0,
+        "content_stability_failures": [],
+        "process_exit": 0,
+        "reached_time_limit": false,
+        "peak_rss_kib": 113408,
+        "first_half_mean_rss_kib": 106203.76774193549,
+        "second_half_mean_rss_kib": 110060.15584415584,
+        "rss_growth_ratio": 0.03631121742866029,
+        "rss_nondecreasing_fraction": 0.9675324675324676,
+        "rss_monotonic_growth_detected": false,
+        "rss_requires_investigation": false,
+        "success": true
+      },
+      {
+        "backend": "candidate",
+        "pdfium_release": "chromium-8009",
+        "requested_rounds": 200,
+        "completed_rounds": 200,
+        "partial_round_fixtures": 0,
+        "elapsed_us": 315761525,
+        "jobs": 11600,
+        "pages": 12200,
+        "throughput_pages_per_second": 38.636752846946756,
+        "p50_document_us": 1232,
+        "p95_document_us": 3628,
+        "failed_jobs": 0,
+        "content_stability_failures": [],
+        "process_exit": 0,
+        "reached_time_limit": false,
+        "peak_rss_kib": 117712,
+        "first_half_mean_rss_kib": 110050.68387096774,
+        "second_half_mean_rss_kib": 113611.22077922078,
+        "rss_growth_ratio": 0.03235361001870463,
+        "rss_nondecreasing_fraction": 0.9577922077922078,
+        "rss_monotonic_growth_detected": false,
+        "rss_requires_investigation": false,
+        "success": true
+      }
+    ]
+  },
+  "capability_audit": {
+    "audited_unbound_symbols": [
+      "FPDFText_IsGenerated",
+      "FPDFText_HasUnicodeMapError",
+      "FPDFText_IsHyphen",
+      "FPDFText_GetFontSize",
+      "FPDFText_GetFontInfo",
+      "FPDFText_GetMatrix",
+      "FPDFText_GetCharAngle",
+      "FPDFText_GetFillColor",
+      "FPDFText_GetStrokeColor",
+      "FPDFFont_GetBaseFontName",
+      "FPDFFont_GetAscent",
+      "FPDFFont_GetDescent",
+      "FPDFFont_GetGlyphWidth",
+      "FPDFFont_GetGlyphPath",
+      "FPDFFont_GetFontData",
+      "FPDFFont_GetIsEmbedded",
+      "FPDFText_GetTextObject",
+      "FPDFTextObj_GetFont",
+      "FPDFPage_CountObjects",
+      "FPDFPage_GetObject",
+      "FPDFPageObj_GetType",
+      "FPDFFormObj_CountObjects",
+      "FPDFFormObj_GetObject"
+    ],
+    "exported_by_all_tested_dylibs": true,
+    "minimum_required_upstream_work": [
+      "T1",
+      "F1",
+      "O1"
+    ],
+    "optional_upstream_work": [
+      "G1"
+    ]
+  },
+  "sample_discovery": {
+    "arxiv_queries": [
+      {
+        "query": "Chinese language processing",
+        "attempts": 1
+      },
+      {
+        "query": "Arabic natural language processing",
+        "attempts": 1
+      }
+    ],
+    "gemini_query": {
+      "purpose": "find a LuaTeX arXiv identifier",
+      "attempts": 1,
+      "result": "failed: no browser session; not retried"
+    }
+  },
+  "evidence_paths": {
+    "corpus_matrix": ".context/experiment-4/results/correctness-harness-v3/matrix-checkpoint.json",
+    "real_matrix": [
+      ".context/experiment-4/results/real-smoke-v2/matrix-checkpoint.json",
+      ".context/experiment-4/results/real-smoke-7988/matrix-checkpoint.json",
+      ".context/experiment-4/results/real-smoke-8009/matrix-checkpoint.json"
+    ],
+    "performance": ".context/experiment-4/results/performance-final-v5/benchmark-summary.json",
+    "stability": ".context/experiment-4/results/long-run-final-v2/long-run-summary.json"
+  }
+}

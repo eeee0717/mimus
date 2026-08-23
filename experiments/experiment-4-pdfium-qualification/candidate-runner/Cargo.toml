@@ -1,0 +1,16 @@
+[package]
+name = "candidate-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+experiment-4-common.workspace = true
+firecrawl-pdfium = { git = "https://github.com/firecrawl/pdfium-rs.git", rev = "1a4c91d0c5f80c0da779088ba241bf1e45271cd5" }
+libloading = "0.8"
+serde.workspace = true
+serde_json.workspace = true
