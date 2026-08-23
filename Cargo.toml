@@ -12,3 +12,10 @@ rust-version = "1.85"
 [workspace.dependencies]
 mimus-core = { path = "crates/mimus-core" }
 clap = { version = "4", features = ["derive"] }
+lopdf = { version = "0.44", default-features = false }
+pdfium-render = { version = "=0.9.1", default-features = false, features = ["pdfium_7763", "thread_safe"] }
+quick-xml = "0.41"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"

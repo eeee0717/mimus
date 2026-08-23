@@ -1,30 +1,218 @@
-//! `mimus` — 保留版面的 PDF 翻译 CLI（ADR-0001：CLI 是唯一执行接口）。
-//!
-//! T01 只交付外壳：确立二进制边界、`--help` / `--version` 两条入口，以及
-//! 「版本号来自 `mimus-core`」这一事实。子命令（`translate` / `inspect` /
-//! `assets pull`，决策 #25）随功能里程碑落地，此处刻意不预先声明——声明了
-//! 就得同时定下它们的分类退出码语义，而那是 M1 的工作。
+//! `mimus` - the CLI boundary defined by ADR-0001.
 
+use std::ffi::OsString;
 use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::sync::Mutex;
 
-use clap::{CommandFactory, Parser};
+use clap::error::ErrorKind;
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use mimus_core::engine::SingleLineLayoutDetector;
+use mimus_core::engine::pdfium::PdfiumEngine;
+use mimus_core::error::{MimusError, UsageReason};
+use mimus_core::event::{Event, EventKind, EventSink, Stage};
+use mimus_core::pass;
+use mimus_core::translate::{NoneTranslator, openai_not_implemented};
+use mimus_core::{Document, PassContext, PipelineConfig};
 
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 #[command(
     name = "mimus",
     version = mimus_core::VERSION,
-    about = "保留版面的 PDF 翻译 CLI",
-    long_about = "保留版面的 PDF 翻译 CLI。\n\n\
-                  本版本只提供工程外壳：翻译、诊断与资产子命令随功能里程碑落地。"
+    about = "Layout-preserving PDF translation CLI"
 )]
-struct Cli {}
+struct Cli {
+    #[arg(long, global = true, help = "Emit versioned NDJSON events")]
+    json: bool,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
 
-fn main() {
-    let _ = Cli::parse();
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Translate a native PDF while preserving its layout.
+    Translate(TranslateArgs),
+}
 
-    // 没有子命令可执行时打印帮助而不是静默退出；退出码保持 0，避免在分类
-    // 退出码（决策 #16）尚未定义前就占用其中一个取值。
-    let mut help = Vec::new();
-    let _ = write!(help, "{}", Cli::command().render_long_help());
-    let _ = std::io::stdout().write_all(&help);
+#[derive(Debug, clap::Args)]
+struct TranslateArgs {
+    /// Input native PDF.
+    input: PathBuf,
+    /// Output PDF path. Defaults to <stem>.zh.pdf.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// Translation backend. M1 implements only the offline none backend.
+    #[arg(long, value_enum, default_value_t = Backend::Openai)]
+    backend: Backend,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum Backend {
+    Openai,
+    None,
+}
+
+fn main() -> ExitCode {
+    let cli = match Cli::try_parse() {
+        Ok(value) => value,
+        Err(error) => {
+            let success = matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            );
+            let _ = error.print();
+            return ExitCode::from(if success { 0 } else { 1 });
+        }
+    };
+    let Some(command) = cli.command else {
+        let mut stdout = std::io::stdout().lock();
+        let _ = write!(stdout, "{}", Cli::command().render_long_help());
+        return ExitCode::SUCCESS;
+    };
+    let sink = CliEventSink::new(cli.json);
+    match command {
+        Command::Translate(args) => run_translate(args, &sink),
+    }
+}
+
+fn run_translate(args: TranslateArgs, sink: &CliEventSink) -> ExitCode {
+    let output = match args.output {
+        Some(value) => value,
+        None => match default_output_path(&args.input) {
+            Ok(value) => value,
+            Err(error) => return emit_error(sink, error),
+        },
+    };
+    if matches!(args.backend, Backend::Openai) {
+        return emit_error(sink, openai_not_implemented());
+    }
+    let engine = match PdfiumEngine::from_environment() {
+        Ok(value) => value,
+        Err(error) => return emit_error(sink, error),
+    };
+    let translator = NoneTranslator;
+    let layout_detector = SingleLineLayoutDetector;
+    let context = PassContext {
+        engine: &engine,
+        layout_detector: &layout_detector,
+        translator: &translator,
+        events: sink,
+        config: PipelineConfig::default(),
+    };
+    let mut document = Document::new(args.input, output);
+    match pass::run(&mut document, &context) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(error) => ExitCode::from(error.category().code()),
+    }
+}
+
+fn default_output_path(input: &Path) -> Result<PathBuf, MimusError> {
+    let stem = input
+        .file_stem()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            MimusError::usage(
+                UsageReason::InvalidArguments,
+                format!("input path has no file stem: {}", input.display()),
+            )
+        })?;
+    let mut filename = OsString::from(stem);
+    filename.push(".zh.pdf");
+    Ok(input.with_file_name(filename))
+}
+
+fn emit_error(sink: &CliEventSink, error: MimusError) -> ExitCode {
+    let code = error.category().code();
+    sink.emit(Event::new(EventKind::from_error(&error)));
+    ExitCode::from(code)
+}
+
+struct CliEventSink {
+    json: bool,
+    output_lock: Mutex<()>,
+}
+
+impl CliEventSink {
+    const fn new(json: bool) -> Self {
+        Self {
+            json,
+            output_lock: Mutex::new(()),
+        }
+    }
+}
+
+impl EventSink for CliEventSink {
+    fn emit(&self, event: Event) {
+        let _guard = match self.output_lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if self.json {
+            let mut stdout = std::io::stdout().lock();
+            if serde_json::to_writer(&mut stdout, &event).is_ok() {
+                let _ = stdout.write_all(b"\n");
+            }
+            return;
+        }
+        match event.kind {
+            EventKind::StageStarted { stage } => {
+                let _ = writeln!(std::io::stderr().lock(), "{}...", stage_name(stage));
+            }
+            EventKind::PageProgress {
+                stage,
+                page,
+                total_pages,
+            } => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "{}: page {page}/{total_pages}",
+                    stage_name(stage)
+                );
+            }
+            EventKind::StageFinished { .. } => {}
+            EventKind::Result { output, .. } => {
+                let _ = writeln!(std::io::stdout().lock(), "{output}");
+            }
+            EventKind::Error {
+                reason,
+                message,
+                hint,
+            } => {
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "error[{reason}]: {message}");
+                if let Some(hint) = hint {
+                    let _ = writeln!(stderr, "hint: {hint}");
+                }
+            }
+        }
+    }
+}
+
+const fn stage_name(stage: Stage) -> &'static str {
+    match stage {
+        Stage::Parse => "parse",
+        Stage::ScanDetect => "scan detect",
+        Stage::Layout => "layout",
+        Stage::ParagraphFind => "paragraph find",
+        Stage::StylesAndFormulas => "styles and formulas",
+        Stage::ExtractTerms => "extract terms",
+        Stage::Translate => "translate",
+        Stage::Typeset => "typeset",
+        Stage::FontEmbed => "font embed",
+        Stage::Write => "write",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_output_uses_the_input_directory_and_stem() {
+        assert_eq!(
+            default_output_path(Path::new("reports/paper.pdf")).unwrap(),
+            PathBuf::from("reports/paper.zh.pdf")
+        );
+    }
 }
