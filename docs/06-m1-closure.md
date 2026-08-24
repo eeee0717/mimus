@@ -24,8 +24,13 @@ fixture 可以覆盖多个 case；不同 concern 复用相同的精确父本而�
    快照，`none` 的段落文本守恒，增量输出保留完整输入前缀并通过 `qpdf --check`；
    拒绝路径必须是 Input/2 且不产生输出。专门矩阵继续断言 manifest 几何、字符
    transform、扫描/加密分类、段页降级和资源对象图。
-2. `cargo run -p corpus -- verify` 不依赖 `mimus-core`，使用 qpdf、Poppler 与
-   MuPDF 对全部 manifest、PDF 结构、文本、坐标和渲染结果重新验收。
+2. `cargo run -p corpus -- audit` 不依赖 `mimus-core`，逐份复核 manifest schema、
+   PDF SHA-256、单变量谱系、字体 pin、legal fixture 的 qpdf 合法性，以及已提交的
+   Poppler/MuPDF 几何与双渲染器哈希记录。畸形输入的声明错误由 production matrix
+   与钉死工具链复核。托管 runner 的 MuPDF/排版引擎版本不符合
+   `corpus/toolchain.toml`，因此版本敏感的实时重放仍由钉死工具链上的
+   `corpus doctor` + `corpus determinism` + `corpus verify` 执行，不能用 runner
+   的不同结果改写裁定文件或放宽容差。
 
 M1 尚无占位符编码阶段：`StylesAndFormulas` 与 `ExtractTerms` 仍是显式空 pass，
 `none` translator 是 identity adapter。因此本里程碑的“基础占位符守恒”落实为

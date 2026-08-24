@@ -94,6 +94,139 @@ pub fn discover(repo_root: &Path) -> Result<Vec<Manifest>> {
     dirs.iter().map(|d| Manifest::load(d)).collect()
 }
 
+/// Audit committed acceptance evidence without rerunning version-sensitive
+/// typesetters or renderers. Hosted CI uses this together with the production
+/// all-fixture gate; `doctor` + `determinism` + `verify` remain the authority
+/// whenever the exact pinned corpus toolchain is available.
+pub fn audit_committed(manifests: &[Manifest], repo_root: &Path) -> Result<bool> {
+    if manifests.is_empty() {
+        println!("corpus/fixtures/ 下没有 fixture。");
+        return Ok(true);
+    }
+
+    let all_manifests = discover(repo_root)?;
+    let mut passed = true;
+    for manifest in manifests {
+        let mut outcomes = vec![
+            check_lineage(manifest, &all_manifests),
+            check_pins(manifest)?,
+            check_committed_hash(manifest)?,
+            check_recorded_adjudication(manifest)?,
+        ];
+        if manifest.requires(Check::Legality) && manifest.identity.legality == Legality::Legal {
+            outcomes.push(check_legality(manifest, &manifest.pdf_path())?);
+        }
+        println!(
+            "\n{}  [{:?}] {}",
+            manifest.id(),
+            manifest.identity.priority,
+            manifest.identity.name
+        );
+        for outcome in &outcomes {
+            print_outcome(outcome);
+            passed &= outcome.passed;
+        }
+    }
+
+    println!(
+        "\n{} 份 fixture，{}",
+        manifests.len(),
+        if passed {
+            "全部通过入库证据审计"
+        } else {
+            "存在未通过的入库证据"
+        }
+    );
+    Ok(passed)
+}
+
+fn check_committed_hash(manifest: &Manifest) -> Result<Outcome> {
+    let actual = hash::of_file(&manifest.pdf_path())?;
+    Ok(if actual == manifest.source.pdf_sha256 {
+        Outcome::ok(
+            "committed-hash",
+            "§2.6",
+            format!("PDF SHA-256 匹配（{}）", &actual[..16]),
+        )
+    } else {
+        Outcome::fail(
+            "committed-hash",
+            "§2.6",
+            format!(
+                "PDF SHA-256 不符：manifest {}，实际 {actual}",
+                manifest.source.pdf_sha256
+            ),
+        )
+    })
+}
+
+fn check_recorded_adjudication(manifest: &Manifest) -> Result<Outcome> {
+    let required = manifest.requires(Check::DualParserGeometry) || manifest.requires(Check::Render);
+    if !required {
+        return Ok(Outcome::ok(
+            "recorded-evidence",
+            "§2.8",
+            "该 fixture 由声明的非栅格 oracle 裁定",
+        ));
+    }
+
+    let recorded = Adjudicated::load(&manifest.adjudicated_path())?;
+    let mut problems = Vec::new();
+    if recorded.fixture != manifest.id() {
+        problems.push(format!("fixture 字段为 {:?}", recorded.fixture));
+    }
+    if manifest.requires(Check::DualParserGeometry)
+        && recorded.block.len() != manifest.expected.block.len()
+    {
+        problems.push(format!(
+            "裁定块数 {}，manifest 块数 {}",
+            recorded.block.len(),
+            manifest.expected.block.len()
+        ));
+    }
+    if manifest.requires(Check::Render) {
+        if recorded.render.len() != manifest.page.len() {
+            problems.push(format!(
+                "参考栅格页数 {}，manifest 页数 {}",
+                recorded.render.len(),
+                manifest.page.len()
+            ));
+        }
+        for (index, render) in recorded.render.iter().enumerate() {
+            if render.page != index || render.dpi != render::DPI {
+                problems.push(format!(
+                    "参考栅格 {index} 的 page/dpi 为 {}/{}",
+                    render.page, render.dpi
+                ));
+            }
+            if !is_lower_hex(&render.poppler_sha256, 64) || !is_lower_hex(&render.mutool_md5, 32) {
+                problems.push(format!("参考栅格 {index} 的哈希格式无效"));
+            }
+        }
+    }
+
+    Ok(if problems.is_empty() {
+        Outcome::ok(
+            "recorded-evidence",
+            "§2.8",
+            format!(
+                "{} 块双解析器几何 + {} 页双渲染器哈希已记录",
+                recorded.block.len(),
+                recorded.render.len()
+            ),
+        )
+    } else {
+        Outcome::fail("recorded-evidence", "§2.8", problems.join("；"))
+    })
+}
+
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// 跑一批 fixture 的验收；返回 `true` 表示全部通过。
 pub fn run(
     manifests: &[Manifest],

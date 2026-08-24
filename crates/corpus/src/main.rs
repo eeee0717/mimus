@@ -50,6 +50,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// 不依赖版本敏感渲染结果，审计全部入库 manifest、哈希、谱系与裁定记录。
+    Audit,
+
     /// 检查 §2.8 独立验收工具链是否齐备且版本符合钉死值。
     Doctor,
 
@@ -114,6 +117,10 @@ fn run() -> Result<bool> {
         .unwrap_or_else(|| repo_root.join(".context/m0-lab/work"));
 
     match &cli.command {
+        Command::Audit => {
+            let manifests = verify::discover(&repo_root)?;
+            verify::audit_committed(&manifests, &repo_root)
+        }
         Command::Doctor => {
             let toolchain = Toolchain::load(&repo_root)?;
             doctor::run(&toolchain, &repo_root)
