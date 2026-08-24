@@ -217,6 +217,7 @@ PDF，`corpus determinism` 对同一配方连续生成两次并比较 SHA-256。
 - **谱系**（畸形 fixture 必填）：合法父本的 fixture ID + 变异的字节偏移与语义描述
 - **页面几何**：逐页 MediaBox、CropBox、`/Rotate`
 - **期望内容**：按 §2.2 分列的 baseline origin / 度量盒 / visual bbox；字符与其 Unicode；XObject 嵌套层级与逐层矩阵
+- **生产分类与降级**：需要由生产路径裁定时，以 `[[expected.transform]]` / `[[expected.degradation]]` 声明，不得只留在散文行为断言里
 - **期望行为**：mimus 处理后**独立可观察**的断言（见 §2.9）
 - **oracle**：本 fixture 适用的验证手段清单
 - **优先级**：M0 / M1 / M3
@@ -244,6 +245,36 @@ original_bytes = [57, 48]        # "90"
 replacement_bytes = [52, 53]     # "45"
 description = "make /Rotate a non-multiple of 90"
 ```
+
+字符朝向期望引用既有 block，并精确列出该 block 内的字符下标。`rotated` / `skewed`
+必须带有限的 `degrees`（绝对值不超过 180）；`upright` / `mirrored` 不得带。下标不得
+越界或重复：
+
+```toml
+[[expected.transform]]
+block = "T1"
+char_indices = [0, 1]
+kind = "rotated"               # upright | rotated | mirrored | skewed
+degrees = 45.0
+```
+
+降级期望区分页与段。页级不得带 `paragraph`，reason 只能取
+`content_stream_syntax` / `nesting_too_deep` / `content_decode` /
+`bad_page_geometry` / `unsupported_rotation` / `missing_resource` /
+`bad_form_bbox` / `bad_form_matrix` / `x_object_not_a_stream`；段级必须带
+`paragraph`，reason 只能取 `unreliable_unicode` / `unsupported_font` /
+`non_positive_advance` / `unlocatable`：
+
+```toml
+[[expected.degradation]]
+scope = "paragraph"             # page | paragraph
+page = 0
+paragraph = 0
+reason = "unlocatable"
+```
+
+TOML 没有 null 标量。仅对声明 `bad_page_geometry` 页级降级的 malformed fixture，
+`page.media_box` 可用字符串 `"null"` 表达 PDF 的 `null` token；其他字符串一律非法。
 
 ### 2.8 独立验收
 
@@ -275,13 +306,13 @@ description = "make /Rotate a non-multiple of 90"
 |---|---|---|---|
 | 自由文本（如 `outline cycle`） | 容器本身非法 | 必须失败，且报告含该字符串 | qpdf 报告 |
 | `operator-walk:<诊断 ID>` | 容器合法，畸形在 content stream 里 | 必须能装载 | 冻结的 M0 PoC 走查器（`[oracle] checks` 必须含 `operator-walk`） |
-| `content-semantics:<case 号>` | 同上 | 必须能装载 | `mimus-core` 的生产测试（`[oracle] checks` **不得**含 `operator-walk`） |
+| `content-semantics:<case 号>` | 同上 | 必须能装载 | mimus 生产路径测试（`[oracle] checks` **不得**含 `operator-walk`） |
 
-第三种是 2026-08-24 随 #18 加入的。`operator-walk:*` 是 M0 PoC 的诊断命名空间且已冻结，新的生产行为不能挤进去；但这类 fixture 与它对 qpdf 的期望完全一致，所以只分叉「谁裁定」这一件事。对应地，这类 fixture 的期望行为写在 `[[expected.behaviour]]` 里，由 `mimus-core` 读 manifest 后断言，`corpus verify` 只负责确定性、容器合法性、页面几何与独立渲染这四项。
+第三种是 2026-08-24 随 #18 加入的。`operator-walk:*` 是 M0 PoC 的诊断命名空间且已冻结，新的生产行为不能挤进去；但这类 fixture 与它对 qpdf 的期望完全一致，所以只分叉「谁裁定」这一件事。对应地，这类 fixture 的期望行为写在 `[[expected.behaviour]]` 里，由 `mimus-core` 单元测试或 `mimus` CLI 生产路径测试断言；可机器比较的分类与降级另写入 `[[expected.transform]]` / `[[expected.degradation]]`。`corpus verify` 只负责确定性、容器合法性、页面几何与独立渲染等事实层门禁。
 
 #### oracle 自身的性质（2026-08-21 实测，写 fixture 时必须知道）
 
-两个解析器不是等价的两份「正确答案」，它们各自只在某些量上可信。以下五条是写第一批 fixture 时逐条测出来的，每条都改变了门禁的实现或某份 fixture 的检查清单：
+两个解析器不是等价的两份「正确答案」，它们各自只在某些量上可信。以下条目是写 fixture 时逐条测出来的，每条都改变了门禁的实现或某份 fixture 的检查清单：
 
 | # | 观测 | 影响 |
 |---|---|---|
@@ -291,6 +322,8 @@ description = "make /Rotate a non-multiple of 90"
 | O4 | poppler 的版面分析在两栏的块**逐行对齐成网格**时退化为行优先；栏间距 20pt→80pt 均无变化，判据是行对齐而非栏间距。 | `unit-order-01/02/03` 的纵向槽位改成真实双栏正文的样子（只有首行对齐）。网格式对齐是表格版面，本不该出现在双栏正文 fixture 里。 |
 | O5 | 栏间距压到 8pt（约 0.8 字宽）时 poppler 把整页并成**一个**跨栏的块（`unit-layout-08` 上是 11 行、x 跨度 30..519.76pt），mutool 仍给出干净的 6 块。O4 说的是「栏间距在 20–80pt 区间内不影响」，这条说的是「到某个下限就影响」，两者不矛盾。 | `unit-layout-08-narrow-gutter` 的块划分无法双解析器裁定，改用 `glyphs`。分歧本身就是 LAYOUT-08 要暴露的现象。 |
 | O6 | MuPDF `stext` 的字符 quad 横向覆盖 advance 范围，不是字形轮廓的真实墨迹外接框；两者对 `MIMUS` 等文本可明显不同。 | 精确 fixture 的 visual bbox 不再用 `stext` quad 裁定。manifest 先按钉死字体轮廓手推，验收时用 `mutool draw -F svg` 导出的字形 path，并计算直线、二次及三次 Bezier 的真实极值；空白与注释外观不计入文本墨迹。现实排版 fixture 继续把 stext quad 作为 §2.1 双解析器裁定下的近似值。 |
+| O7 | Poppler 的 word bbox 对 45° 旋转与 shear 不是稳定的字体度量盒；它混入词聚合/投影策略，不能从 descriptor ascent/descent 与 advance 复算。 | DOC-04 任意变换 fixture 不用 Poppler word box 裁定 metric box，改启用 `transformed-text-geometry`：qpdf 读取 descriptor ascent/descent，MuPDF trace 提供逐字 `trm`、origin 与 advance，组合出字体度量四角的页面空间外接框；baseline 用 trace origin，visual bbox 仍由 MuPDF SVG 轮廓独立核验。Poppler 只保留作差分信号。 |
+| O8 | `mutool pages` 只显示页面字典上的本地 CropBox，不显示从 `/Pages` 继承的 CropBox。 | 页树继承由 qpdf JSON 对象图沿 `/Parent`（深度 128、去环）解析；MuPDF stext 的有效观看框作第二份证据。manifest 有继承 CropBox 而 `mutool pages` 未列出时不再判矛盾。 |
 
 还有一条关于字体而非解析器的：mutool 的字形 quad（墨迹盒）会比 poppler 的词盒（度量盒）略大，Typst 内嵌字体下 < 0.05pt，TeX Live 的 Computer Modern Type1 下约 0.22pt。因此 manifest 把「两个解析器报同一个量」的容差（`tolerance_pt`）与「墨迹盒允许越出度量盒的余量」（`ink_margin_pt`）分开声明——用同一个数去卡两件事，要么放松了 x 跨度判据，要么把正常的字体度差判成解析器不一致。
 

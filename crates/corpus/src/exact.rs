@@ -72,6 +72,78 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
         "unit-write-05-indirect-resources-objstm" => resources_in_object_stream(repo_root),
         "unit-parse-11-outline-siblings" => outline_siblings(repo_root),
         "unit-write-06-free-object-slot" => free_object_slot(repo_root),
+        "unit-doc-04-rotated-90" => geometry_text_page(
+            repo_root,
+            fixture_id,
+            "",
+            "/MediaBox [0 0 612 792]",
+            b"BT\n/F1 12 Tf\n0 1 -1 0 100 700 Tm\n(M) Tj\nET\n",
+            &[],
+        ),
+        "unit-doc-04-rotated-45" => geometry_text_page(
+            repo_root,
+            fixture_id,
+            "",
+            "/MediaBox [0 0 612 792]",
+            b"BT\n/F1 12 Tf\n0.707107 0.707107 -0.707107 0.707107 100 700 Tm\n(M) Tj\nET\n",
+            &[],
+        ),
+        "unit-doc-04-mirrored" => geometry_text_page(
+            repo_root,
+            fixture_id,
+            "",
+            "/MediaBox [0 0 612 792]",
+            b"BT\n/F1 12 Tf\n-1 0 0 1 100 700 Tm\n(M) Tj\nET\n",
+            &[],
+        ),
+        "unit-doc-04-skew-15" => geometry_text_page(
+            repo_root,
+            fixture_id,
+            "",
+            "/MediaBox [0 0 612 792]",
+            b"BT\n/F1 12 Tf\n1 0 0.267949 1 100 700 Tm\n(M) Tj\nET\n",
+            &[],
+        ),
+        "unit-doc-04-rotate90-compensated" => geometry_text_page(
+            repo_root,
+            fixture_id,
+            "",
+            "/MediaBox [0 0 612 792] /Rotate 90",
+            b"BT\n/F1 12 Tf\n0 -1 1 0 100 700 Tm\n(M) Tj\nET\n",
+            &[],
+        ),
+        "unit-doc-04-mixed-char" => geometry_text_page(
+            repo_root,
+            fixture_id,
+            "",
+            "/MediaBox [0 0 612 792]",
+            b"BT\n/F1 12 Tf\n1 0 0 1 100 700 Tm\n(I) Tj\n0.707107 0.707107 -0.707107 0.707107 200 700 Tm\n(M) Tj\n1 0 0 1 300 700 Tm\n(S) Tj\nET\n",
+            &[],
+        ),
+        "unit-geom-06-mediabox-double-space" => geometry_text_page(
+            repo_root,
+            fixture_id,
+            "",
+            "/MediaBox [0  000 612 792]",
+            b"BT\n/F1 12 Tf\n1 0 0 1 100 700 Tm\n(M) Tj\nET\n",
+            &[],
+        ),
+        "unit-geom-06-mediabox-indirect" => geometry_text_page(
+            repo_root,
+            fixture_id,
+            "",
+            "/MediaBox 10 0 R",
+            b"BT\n/F1 12 Tf\n1 0 0 1 100 700 Tm\n(M) Tj\nET\n",
+            &[b"[0 0 612 792]"],
+        ),
+        "unit-geom-08-cropbox-inherited" => geometry_text_page(
+            repo_root,
+            fixture_id,
+            "/CropBox [50 50 562 742]",
+            "/MediaBox [0 0 612 792]",
+            b"BT\n/F1 12 Tf\n1 0 0 1 100 700 Tm\n(M) Tj\nET\n",
+            &[],
+        ),
         "unit-scan-01-image-only" => scan_document(fixture_id, repo_root, &[ScanPage::Image]),
         "unit-scan-02-invisible-ocr" => {
             scan_document(fixture_id, repo_root, &[ScanPage::ImageInvisibleText])
@@ -1002,6 +1074,36 @@ fn nonzero_origin_boxes(repo_root: &Path) -> Result<Vec<u8>> {
         b"BT\n/F1 12 Tf\n1 0 0 1 150 220 Tm\n(MIMUS) Tj\nET\n",
         0,
     )
+}
+
+fn geometry_text_page(
+    repo_root: &Path,
+    fixture_id: &str,
+    pages_entries: &str,
+    page_entries: &str,
+    content: &[u8],
+    tail_objects: &[&[u8]],
+) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new(fixture_id);
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(format!("<< /Type /Pages /Kids [3 0 R] /Count 1{pages_entries} >>").as_bytes())?;
+    pdf.object(
+        format!("<< /Type /Page /Parent 2 0 R {page_entries} /Resources 4 0 R /Contents 9 0 R >>")
+            .as_bytes(),
+    )?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(
+        b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>",
+    )?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", to_unicode())?;
+    pdf.stream(b"", content)?;
+    for object in tail_objects {
+        pdf.object(object)?;
+    }
+    pdf.finish(1)
 }
 
 fn mixed_codespace(repo_root: &Path) -> Result<Vec<u8>> {

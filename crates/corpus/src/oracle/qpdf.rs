@@ -109,6 +109,69 @@ impl Document {
             .with_context(|| format!("object {object} path {} is absent", path.join("/")))
     }
 
+    /// Resolve an inheritable page-tree array through `/Parent`, including an
+    /// indirect array and indirect numeric elements. qpdf supplies the object
+    /// model; this method only applies the inheritance rule from ISO 32000.
+    pub fn inherited_numeric_array(&self, page_object: u32, key: &str) -> Result<Option<Vec<f64>>> {
+        let mut current = page_object;
+        let mut visited = std::collections::BTreeSet::new();
+        for _ in 0..128 {
+            if !visited.insert(current) {
+                bail!("page tree cycle while resolving {key} at object {current}");
+            }
+            let dictionary = self.dictionary(current)?;
+            if let Some(value) = dictionary.get(key) {
+                return self.numeric_array_value(value).map(Some);
+            }
+            let Some(parent) = dictionary.get("/Parent") else {
+                return Ok(None);
+            };
+            current = parse_reference(parent)
+                .with_context(|| format!("object {current} has invalid /Parent"))?
+                .0;
+        }
+        bail!("page tree exceeds 128 levels while resolving {key}")
+    }
+
+    pub fn number(&self, object: u32, key: &str) -> Result<f64> {
+        let value = self
+            .dictionary(object)?
+            .get(key)
+            .with_context(|| format!("object {object} has no {key}"))?;
+        self.numeric_value(value)
+            .with_context(|| format!("object {object} {key} is not numeric"))
+    }
+
+    fn numeric_array_value(&self, value: &Value) -> Result<Vec<f64>> {
+        let value = self.resolve_value(value)?;
+        value
+            .as_array()
+            .context("page-tree value is not an array")?
+            .iter()
+            .map(|value| self.numeric_value(value))
+            .collect()
+    }
+
+    fn numeric_value(&self, value: &Value) -> Result<f64> {
+        let value = self.resolve_value(value)?;
+        value
+            .as_f64()
+            .or_else(|| value.as_i64().map(|number| number as f64))
+            .context("value is not a number")
+    }
+
+    fn resolve_value<'a>(&'a self, value: &'a Value) -> Result<&'a Value> {
+        if !value.is_string() {
+            return Ok(value);
+        }
+        let (object, generation) = parse_reference(value)?;
+        self.objects()?
+            .get(&format!("obj:{object} {generation} R"))
+            .with_context(|| format!("qpdf JSON has no object {object} {generation} R"))?
+            .get("value")
+            .with_context(|| format!("object {object} {generation} R has no value"))
+    }
+
     fn optional_value(&self, object: u32, path: &[String]) -> Result<Option<&Value>> {
         if path.is_empty() {
             bail!("object value path must not be empty");

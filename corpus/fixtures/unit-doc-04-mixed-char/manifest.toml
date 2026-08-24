@@ -1,0 +1,114 @@
+schema_version = 1
+
+[identity]
+id = "unit-doc-04-mixed-char"
+name = "One rotated character between upright characters"
+class = "unit"
+legality = "legal"
+cases = ["DOC-04"]
+priority = "M1"
+variable = "The middle character is rotated 45 degrees while its two neighbours remain upright in the same baseline group"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-doc-04-mixed-char.pdf"
+pdf_sha256 = "0ed07926b3857339e7374efbb3a3936fbbf2b6c3fe35938a13659af97d8e5943"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 612.0, 792.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d646f632d30342d6d697865"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 3
+columns = 1
+
+[[expected.block]]
+key = "U1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "I"
+baseline_origin = [100.0, 700.0]
+metric_box = [100.0, 697.168, 103.54, 711.136]
+visual_bbox = [101.177734, 700.0, 102.361328, 708.748047]
+
+[[expected.block]]
+key = "R1"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "M"
+baseline_origin = [200.0, 700.0]
+metric_box = [192.125656, 697.997473, 209.325327, 715.197144]
+visual_bbox = [194.646979, 700.832784, 206.492402, 712.678208]
+
+[[expected.block]]
+key = "U2"
+page = 0
+column = "full"
+draw_order = 3
+reading_order = 3
+text = "S"
+baseline_origin = [300.0, 700.0]
+metric_box = [300.0, 697.168, 307.62, 711.136]
+visual_bbox = [300.791016, 699.830078, 306.949219, 708.90625]
+
+[[expected.transform]]
+block = "U1"
+char_indices = [0]
+kind = "upright"
+
+[[expected.transform]]
+block = "R1"
+char_indices = [0]
+kind = "rotated"
+degrees = 45.0
+
+[[expected.transform]]
+block = "U2"
+char_indices = [0]
+kind = "upright"
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 100 700 Tm
+(I) Tj
+0.707107 0.707107 -0.707107 0.707107 200 700 Tm
+(M) Tj
+1 0 0 1 300 700 Tm
+(S) Tj
+ET
+"""
+
+[[expected.behaviour]]
+id = "DOC-04-unit-isolation"
+assertion = "Production translation sends I and S as upright units, keeps the rotated M out of the request, and reconstructs source order as IMS"
+observable_via = "mimus inspect IL, translator call log, and translated_text"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "transformed-text-geometry", "pdf-bytes", "pdf-structure", "render"]

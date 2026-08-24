@@ -5,6 +5,7 @@ use std::process::{Command, Output, Stdio};
 
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
+use serde::Deserialize;
 
 const BIN: &str = env!("CARGO_BIN_EXE_mimus");
 const PDFIUM_ENV: &str = "MIMUS_PDFIUM_LIBRARY";
@@ -22,6 +23,130 @@ fn fixture_path(id: &str) -> PathBuf {
         .join("corpus/fixtures")
         .join(id)
         .join(format!("{id}.pdf"))
+}
+
+fn manifest_path(id: &str) -> PathBuf {
+    repo_root()
+        .join("corpus/fixtures")
+        .join(id)
+        .join("manifest.toml")
+}
+
+#[derive(Debug, Deserialize)]
+struct FixtureManifest {
+    page: Vec<ManifestPage>,
+    expected: ManifestExpected,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestPage {
+    media_box: [ManifestCoordinate; 4],
+    #[serde(default)]
+    crop_box: Option<[f64; 4]>,
+    rotate: i32,
+}
+
+impl ManifestPage {
+    fn effective_box(&self) -> Option<[f64; 4]> {
+        self.crop_box.or_else(|| {
+            let mut result = [0.0; 4];
+            for (index, coordinate) in self.media_box.iter().enumerate() {
+                result[index] = match coordinate {
+                    ManifestCoordinate::Number(value) => *value,
+                    ManifestCoordinate::Keyword(keyword) => {
+                        assert_eq!(keyword, "null");
+                        return None;
+                    }
+                };
+            }
+            Some(result)
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ManifestCoordinate {
+    Number(f64),
+    Keyword(String),
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ManifestExpected {
+    #[serde(default)]
+    block: Vec<ManifestBlock>,
+    #[serde(default)]
+    transform: Vec<ManifestTransform>,
+    #[serde(default)]
+    degradation: Vec<ManifestDegradation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestBlock {
+    key: String,
+    page: usize,
+    draw_order: usize,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestTransform {
+    block: String,
+    char_indices: Vec<usize>,
+    kind: String,
+    #[serde(default)]
+    degrees: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestDegradation {
+    scope: String,
+    page: usize,
+    #[serde(default)]
+    paragraph: Option<usize>,
+    reason: String,
+}
+
+fn fixture_manifest(id: &str) -> FixtureManifest {
+    toml::from_str(&std::fs::read_to_string(manifest_path(id)).unwrap()).unwrap()
+}
+
+fn expected_page_transforms(
+    manifest: &FixtureManifest,
+    page_index: usize,
+) -> Vec<(String, Option<f64>)> {
+    let mut blocks = manifest
+        .expected
+        .block
+        .iter()
+        .filter(|block| block.page == page_index)
+        .collect::<Vec<_>>();
+    blocks.sort_by_key(|block| block.draw_order);
+
+    let mut result = Vec::new();
+    for block in blocks {
+        let mut block_transforms = vec![None; block.text.chars().count()];
+        for expected in manifest
+            .expected
+            .transform
+            .iter()
+            .filter(|expected| expected.block == block.key)
+        {
+            for &char_index in &expected.char_indices {
+                assert!(block_transforms[char_index].is_none());
+                block_transforms[char_index] = Some((expected.kind.clone(), expected.degrees));
+            }
+        }
+        result.extend(block_transforms.into_iter().map(|expected| {
+            expected.unwrap_or_else(|| {
+                panic!(
+                    "manifest block {} does not declare every transform",
+                    block.key
+                )
+            })
+        }));
+    }
+    result
 }
 
 fn pdfium_library() -> OsString {
@@ -197,6 +322,19 @@ fn decoded_page_streams(path: &Path, page_number: u32) -> Vec<Vec<u8>> {
                 .unwrap()
         })
         .collect()
+}
+
+fn local_page_entry(path: &Path, page_number: u32, key: &[u8]) -> Option<lopdf::Object> {
+    let document = lopdf::Document::load(path).unwrap();
+    let page_id = document.get_pages()[&page_number];
+    document
+        .get_object(page_id)
+        .unwrap()
+        .as_dict()
+        .unwrap()
+        .get(key)
+        .ok()
+        .cloned()
 }
 
 #[test]
@@ -794,6 +932,215 @@ fn structured_and_inline_image_programs_round_trip_without_rebuilding_content() 
         assert_eq!(
             decoded_page_streams(&translated, 1),
             decoded_page_streams(&input, 1),
+            "fixture {id}"
+        );
+    }
+}
+
+#[test]
+fn doc_04_production_results_match_manifest_transform_and_degradation_expectations() {
+    for id in [
+        "unit-doc-04-rotated-90",
+        "unit-doc-04-rotated-45",
+        "unit-doc-04-mirrored",
+        "unit-doc-04-skew-15",
+        "unit-doc-04-rotate90-compensated",
+        "unit-doc-04-mixed-char",
+        "mal-doc-04-degenerate-tm",
+    ] {
+        let manifest = fixture_manifest(id);
+        let input = fixture_path(id);
+        let inspected = run_inspect(&input, true, None);
+        assert!(
+            inspected.status.success(),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&inspected.stderr)
+        );
+        let events = parse_events(&inspected.stdout);
+        assert_one_terminal_last(&events, "result");
+        let result = events.last().unwrap();
+
+        for page_index in 0..manifest.page.len() {
+            let expected = expected_page_transforms(&manifest, page_index);
+            if expected.is_empty() {
+                continue;
+            }
+            let actual = result["il"]["pages"][page_index]["paragraphs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|paragraph| paragraph["text"]["chars"].as_array().unwrap().iter())
+                .collect::<Vec<_>>();
+            assert_eq!(actual.len(), expected.len(), "fixture {id}");
+            for (character_index, (character, (kind, degrees))) in
+                actual.into_iter().zip(expected).enumerate()
+            {
+                assert_eq!(
+                    character["text_transform"]["kind"].as_str(),
+                    Some(kind.as_str()),
+                    "fixture {id}, character {character_index}"
+                );
+                match degrees {
+                    Some(expected) => assert_close(
+                        character["text_transform"]["degrees"].as_f64().unwrap(),
+                        expected,
+                        0.001,
+                    ),
+                    None => assert!(
+                        character["text_transform"].get("degrees").is_none(),
+                        "fixture {id}, character {character_index}"
+                    ),
+                }
+            }
+        }
+
+        let expected_preserved = manifest
+            .expected
+            .degradation
+            .iter()
+            .filter(|expected| expected.scope == "paragraph")
+            .map(|expected| {
+                serde_json::json!({
+                    "page_index": expected.page,
+                    "paragraph_index": expected.paragraph.unwrap(),
+                    "reason": expected.reason,
+                })
+            })
+            .collect::<Vec<_>>();
+        let summary = events
+            .iter()
+            .find(|event| event["event"] == "diagnostic" && event["id"] == "degradation_summary");
+        if expected_preserved.is_empty() {
+            assert!(summary.is_none(), "fixture {id}");
+        } else {
+            assert_eq!(
+                summary.unwrap()["preserved_paragraphs"],
+                serde_json::json!(expected_preserved),
+                "fixture {id}"
+            );
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let translated = directory.path().join(format!("{id}-translated.pdf"));
+        let translated_result = run_none(&input, Some(&translated), false);
+        assert!(
+            translated_result.status.success(),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&translated_result.stderr)
+        );
+        if manifest.expected.degradation.is_empty() {
+            assert_eq!(
+                decoded_page_streams(&translated, 1),
+                decoded_page_streams(&input, 1),
+                "fixture {id}"
+            );
+        } else {
+            assert_eq!(
+                std::fs::read(&translated).unwrap(),
+                std::fs::read(&input).unwrap(),
+                "fixture {id}"
+            );
+        }
+    }
+}
+
+#[test]
+fn geometry_fixtures_match_manifest_frames_and_preserve_page_box_entries() {
+    for id in [
+        "unit-geom-06-mediabox-double-space",
+        "unit-geom-06-mediabox-indirect",
+        "unit-geom-08-cropbox-inherited",
+    ] {
+        let manifest = fixture_manifest(id);
+        let input = fixture_path(id);
+        let inspected = run_inspect(&input, true, None);
+        assert!(
+            inspected.status.success(),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&inspected.stderr)
+        );
+        let events = parse_events(&inspected.stdout);
+        assert_one_terminal_last(&events, "result");
+        assert!(
+            events.iter().all(|event| event["id"] != "page_degraded"),
+            "fixture {id}"
+        );
+        let page = &manifest.page[0];
+        let effective_box = page.effective_box().unwrap();
+        let mut expected_width = effective_box[2] - effective_box[0];
+        let mut expected_height = effective_box[3] - effective_box[1];
+        if page.rotate.rem_euclid(180) != 0 {
+            std::mem::swap(&mut expected_width, &mut expected_height);
+        }
+        let geometry = &events.last().unwrap()["il"]["pages"][0]["geometry"];
+        assert_close(geometry["width"].as_f64().unwrap(), expected_width, 0.001);
+        assert_close(geometry["height"].as_f64().unwrap(), expected_height, 0.001);
+        assert_eq!(geometry["rotate_degrees"], page.rotate);
+
+        let directory = tempfile::tempdir().unwrap();
+        let translated = directory.path().join(format!("{id}-translated.pdf"));
+        let translated_result = run_none(&input, Some(&translated), false);
+        assert!(
+            translated_result.status.success(),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&translated_result.stderr)
+        );
+        assert_eq!(
+            decoded_page_streams(&translated, 1),
+            decoded_page_streams(&input, 1),
+            "fixture {id}"
+        );
+        for key in [b"MediaBox".as_slice(), b"CropBox", b"Rotate"] {
+            assert_eq!(
+                local_page_entry(&translated, 1, key),
+                local_page_entry(&input, 1, key),
+                "fixture {id}, key {}",
+                String::from_utf8_lossy(key)
+            );
+        }
+    }
+}
+
+#[test]
+fn malformed_geometry_fixtures_degrade_the_declared_page_without_rewriting_it() {
+    for id in ["mal-geom-07-mediabox-null", "mal-geom-02-rotate-45"] {
+        let manifest = fixture_manifest(id);
+        let expected = manifest
+            .expected
+            .degradation
+            .iter()
+            .find(|expected| expected.scope == "page")
+            .unwrap();
+        assert!(expected.paragraph.is_none());
+        let input = fixture_path(id);
+        let directory = tempfile::tempdir().unwrap();
+        let translated = directory.path().join(format!("{id}-translated.pdf"));
+        let output = run_none(&input, Some(&translated), true);
+        assert!(
+            output.status.success(),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let events = parse_events(&output.stdout);
+        assert_one_terminal_last(&events, "result");
+        let degraded = events
+            .iter()
+            .find(|event| event["event"] == "diagnostic" && event["id"] == "page_degraded")
+            .unwrap();
+        assert_eq!(degraded["page_index"], expected.page, "fixture {id}");
+        assert_eq!(degraded["reason"], expected.reason, "fixture {id}");
+        let summary = events
+            .iter()
+            .find(|event| event["event"] == "diagnostic" && event["id"] == "degradation_summary")
+            .unwrap();
+        assert_eq!(
+            summary["degraded_page_indices"],
+            serde_json::json!([expected.page]),
+            "fixture {id}"
+        );
+        assert_eq!(
+            std::fs::read(&translated).unwrap(),
+            std::fs::read(&input).unwrap(),
             "fixture {id}"
         );
     }

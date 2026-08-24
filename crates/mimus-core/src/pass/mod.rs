@@ -414,7 +414,23 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
             });
             continue;
         }
-        if extracted.layout_regions.len() != 1 {
+        let synthetic_unlocatable_region = (extracted.layout_regions.is_empty()
+            && !extracted.walked_characters.is_empty()
+            && extracted
+                .walked_characters
+                .iter()
+                .all(|character| !character.locatable))
+        .then(|| {
+            let bounds = extracted.walked_characters[1..].iter().fold(
+                extracted.walked_characters[0].metric_box,
+                |bounds, character| bounds.union(character.metric_box),
+            );
+            crate::engine::LayoutRegion {
+                bounds,
+                reading_order: 0,
+            }
+        });
+        if extracted.layout_regions.len() != 1 && synthetic_unlocatable_region.is_none() {
             return Err(MimusError::input(
                 InputReason::UnsupportedPdf,
                 format!(
@@ -424,7 +440,7 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
                 ),
             ));
         }
-        let region = extracted.layout_regions[0];
+        let region = synthetic_unlocatable_region.unwrap_or_else(|| extracted.layout_regions[0]);
         let engine_boxes_are_aligned = extracted.walked_characters.len()
             == extracted.engine_characters.len()
             && extracted

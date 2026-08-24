@@ -15,6 +15,7 @@
 
 pub mod mupdf;
 pub mod mupdf_svg;
+pub mod mupdf_trace;
 pub mod poppler;
 pub mod qpdf;
 pub mod render;

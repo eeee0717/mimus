@@ -762,8 +762,10 @@ dependencies = [
  "lopdf",
  "mimus-core",
  "quick-xml",
+ "serde",
  "serde_json",
  "tempfile",
+ "toml",
 ]
 
 [[package]]

@@ -1,0 +1,73 @@
+schema_version = 1
+
+[identity]
+id = "unit-geom-08-cropbox-inherited"
+name = "CropBox inherited from the Pages node"
+class = "unit"
+legality = "legal"
+cases = ["GEOM-03"]
+priority = "M1"
+variable = "CropBox exists only on the parent Pages dictionary while MediaBox remains on the page"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-geom-08-cropbox-inherited.pdf"
+pdf_sha256 = "28705e7f69ebcfb24f762e3548ef65b66ae11d33d5fd0678de324a26ca5acdaa"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 612.0, 792.0]
+crop_box = [50.0, 50.0, 562.0, 742.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d67656f6d2d30382d63726f"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "T1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "M"
+baseline_origin = [100.0, 700.0]
+metric_box = [100.0, 697.168, 110.356, 711.136]
+visual_bbox = [101.177734, 700.0, 109.181641, 708.748047]
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 100 700 Tm
+(M) Tj
+ET
+"""
+
+[[expected.behaviour]]
+id = "GEOM-03-inherited-crop"
+assertion = "The effective page frame is inherited CropBox [50,50,562,742], while the page dictionary remains without a local CropBox"
+observable_via = "qpdf page tree, mutool pages, mimus inspect geometry, and output page dictionary"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]

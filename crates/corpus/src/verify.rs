@@ -18,7 +18,7 @@ use crate::hash;
 use crate::manifest::{Check, GeometrySource, Legality, Manifest, Method};
 use crate::mutation::{self, MutationSpec};
 use crate::oracle::render::PageRaster;
-use crate::oracle::{ParsedPage, mupdf, mupdf_svg, poppler, qpdf, render};
+use crate::oracle::{ParsedPage, mupdf, mupdf_svg, mupdf_trace, poppler, qpdf, render};
 use crate::proc;
 use crate::text;
 use crate::toolchain::Toolchain;
@@ -281,22 +281,58 @@ fn verify_one(
         bail!("[{}] PDF 不存在：{}", manifest.id(), pdf.display());
     }
 
-    let media_frames: Vec<PageFrame> = manifest
-        .page
-        .iter()
-        .map(|p| PageFrame::new(p.media_box, p.rotate))
-        .collect::<Result<_>>()
-        .with_context(|| format!("[{}] 页面框无效", manifest.id()))?;
+    let needs_text_oracles = [
+        Check::Glyphs,
+        Check::ReadingOrder,
+        Check::DualParserGeometry,
+        Check::HandWrittenGeometry,
+        Check::Type3Geometry,
+        Check::FontAdvance,
+        Check::EmbeddedCmap,
+    ]
+    .into_iter()
+    .any(|check| manifest.requires(check))
+        || manifest.requires(Check::Structure);
+    let needs_frames = manifest.requires(Check::PageGeometry)
+        || needs_text_oracles
+        || manifest.requires(Check::TransformedTextGeometry);
+    let media_frames: Vec<PageFrame> = if needs_frames {
+        manifest
+            .page
+            .iter()
+            .map(|page| {
+                let media_box = page
+                    .numeric_media_box()
+                    .context("non-numeric MediaBox has no coordinate frame")?;
+                PageFrame::new(media_box, page.rotate)
+            })
+            .collect::<Result<_>>()
+            .with_context(|| format!("[{}] 页面框无效", manifest.id()))?
+    } else {
+        Vec::new()
+    };
     // MuPDF reports text quads relative to the effective viewing box, while
     // Poppler and pdftoppm report page dimensions/coordinates relative to the
     // MediaBox. Keep those parser-specific origins explicit so both signals
     // are converted into the same page-space contract.
-    let mutool_frames: Vec<PageFrame> = manifest
-        .page
-        .iter()
-        .map(|p| PageFrame::new(p.effective_box(), p.rotate))
-        .collect::<Result<_>>()
-        .with_context(|| format!("[{}] MuPDF 页面框无效", manifest.id()))?;
+    let needs_mutool_frames =
+        needs_text_oracles || manifest.requires(Check::TransformedTextGeometry);
+    let mutool_frames: Vec<PageFrame> = if needs_mutool_frames {
+        manifest
+            .page
+            .iter()
+            .map(|page| {
+                PageFrame::new(
+                    page.effective_box()
+                        .context("page has no numeric effective box")?,
+                    page.rotate,
+                )
+            })
+            .collect::<Result<_>>()
+            .with_context(|| format!("[{}] MuPDF 页面框无效", manifest.id()))?
+    } else {
+        Vec::new()
+    };
 
     outcomes.push(check_pins(manifest)?);
 
@@ -349,19 +385,8 @@ fn verify_one(
 
     // 语义畸形 fixture 不应被一个未声明的文本解析器提前短路；只在对应门禁
     // 真正需要时调用两个文本/几何 oracle。
-    let needs_text_oracles = [
-        Check::Glyphs,
-        Check::ReadingOrder,
-        Check::DualParserGeometry,
-        Check::HandWrittenGeometry,
-        Check::Type3Geometry,
-        Check::FontAdvance,
-        Check::EmbeddedCmap,
-    ]
-    .into_iter()
-    .any(|check| manifest.requires(check))
-        || (manifest.requires(Check::Structure) && !uses_parser_failure_structure);
-    let (mutool_pages, poppler_pages) = if needs_text_oracles {
+    let run_text_oracles = needs_text_oracles && !uses_parser_failure_structure;
+    let (mutool_pages, poppler_pages) = if run_text_oracles {
         (
             mupdf::blocks(&pdf, &mutool_frames)?,
             poppler::blocks(&pdf, &media_frames)?,
@@ -398,6 +423,13 @@ fn verify_one(
             &mutool_frames,
             &mutool_pages,
             &poppler_pages,
+        )?);
+    }
+    if manifest.requires(Check::TransformedTextGeometry) {
+        outcomes.extend(check_transformed_text_geometry(
+            manifest,
+            &pdf,
+            &mutool_frames,
         )?);
     }
     if manifest.requires(Check::Type3Geometry) {
@@ -1757,12 +1789,32 @@ fn check_page_geometry(
     }
 
     let tol = manifest.expected.tolerance_pt;
+    let qpdf_document = qpdf::Document::load(pdf)?;
+    let page_objects = qpdf_document.page_objects()?;
     let mut problems = Vec::new();
-    for (page, seen) in manifest.page.iter().zip(&observed) {
-        if !arrays_close(&page.media_box, &seen.media_box, tol) {
+    for ((page, seen), page_object) in manifest.page.iter().zip(&observed).zip(page_objects) {
+        let Some(media_box) = page.numeric_media_box() else {
+            problems.push(format!("第 {} 页 MediaBox 含非数值分量", page.index));
+            continue;
+        };
+        let inherited_media = qpdf_document.inherited_numeric_array(page_object, "/MediaBox")?;
+        if inherited_media.as_deref() != Some(media_box.as_slice()) {
+            problems.push(format!(
+                "第 {} 页 qpdf 继承 MediaBox：manifest {:?}，qpdf {:?}",
+                page.index, media_box, inherited_media
+            ));
+        }
+        if !arrays_close(&media_box, &seen.media_box, tol) {
             problems.push(format!(
                 "第 {} 页 MediaBox：manifest {:?}，mutool {:?}",
-                page.index, page.media_box, seen.media_box
+                page.index, media_box, seen.media_box
+            ));
+        }
+        let inherited_crop = qpdf_document.inherited_numeric_array(page_object, "/CropBox")?;
+        if inherited_crop.as_deref() != page.crop_box.as_ref().map(<[f64; 4]>::as_slice) {
+            problems.push(format!(
+                "第 {} 页 qpdf 继承 CropBox：manifest {:?}，qpdf {:?}",
+                page.index, page.crop_box, inherited_crop
             ));
         }
         match (page.crop_box, seen.crop_box) {
@@ -1770,10 +1822,16 @@ fn check_page_geometry(
                 "第 {} 页 CropBox：manifest {a:?}，mutool {b:?}",
                 page.index
             )),
-            (a, b) if a.is_some() != b.is_some() => problems.push(format!(
-                "第 {} 页 CropBox 有无不一致：manifest {a:?}，mutool {b:?}",
-                page.index
-            )),
+            // `mutool pages` exposes only a local CropBox. qpdf's object tree
+            // above and MuPDF's effective stext frame independently cover an
+            // inherited value, so absence here is not a contradiction.
+            (Some(_), None) if inherited_crop.is_some() => {}
+            (a, b) if a.is_some() != b.is_some() => {
+                problems.push(format!(
+                    "第 {} 页 CropBox 有无不一致：manifest {a:?}，mutool {b:?}",
+                    page.index
+                ));
+            }
             _ => {}
         }
         if page.rotate.rem_euclid(360) != seen.rotate.rem_euclid(360) {
@@ -1805,8 +1863,11 @@ fn check_page_geometry(
     let mut size_problems = Vec::new();
     for ((frame, expected_page), page) in frames.iter().zip(&manifest.page).zip(&poppler_pages) {
         let (w, h) = frame.box_size();
-        let media_w = expected_page.media_box[2] - expected_page.media_box[0];
-        let media_h = expected_page.media_box[3] - expected_page.media_box[1];
+        let media_box = expected_page
+            .numeric_media_box()
+            .context("page-geometry check requires numeric MediaBox")?;
+        let media_w = media_box[2] - media_box[0];
+        let media_h = media_box[3] - media_box[1];
         // Poppler's <page width height> is defined by MediaBox even when a
         // CropBox is present (and does not apply /Rotate). Keep that measured
         // behaviour explicit rather than rejecting a valid non-zero CropBox.
@@ -2294,6 +2355,128 @@ fn check_hand_written_geometry(
             visual_tolerance,
             visual_problems,
             "mutool SVG glyph outlines",
+        ),
+    ])
+}
+
+fn check_transformed_text_geometry(
+    manifest: &Manifest,
+    pdf: &Path,
+    frames: &[PageFrame],
+) -> Result<Vec<Outcome>> {
+    let qpdf_document = qpdf::Document::load(pdf)?;
+    let font = manifest
+        .source
+        .fonts
+        .first()
+        .context("transformed-text-geometry requires one pinned font")?;
+    let descriptor = font
+        .descriptor_object
+        .context("transformed-text-geometry font has no descriptor object")?;
+    let ascent = qpdf_document.number(descriptor, "/Ascent")? / 1000.0;
+    let descent = qpdf_document.number(descriptor, "/Descent")? / 1000.0;
+    let expected_font = format!(
+        "{}+{}",
+        font.subset_tag
+            .as_deref()
+            .context("transformed-text-geometry font has no subset tag")?,
+        font.base_name
+            .as_deref()
+            .context("transformed-text-geometry font has no base name")?
+    );
+
+    let mut blocks = manifest.expected.block.iter().collect::<Vec<_>>();
+    blocks.sort_by_key(|block| block.draw_order);
+    let glyphs = mupdf_trace::glyphs(pdf)?;
+    let outlines = outline_blocks(manifest, pdf, frames)?;
+    let arithmetic_tolerance = manifest.expected.tolerance_pt;
+    let visual_tolerance = manifest
+        .expected
+        .visual_tolerance_pt
+        .context("transformed text geometry missing visual_tolerance_pt")?;
+    let mut baseline_problems = Vec::new();
+    let mut metric_problems = Vec::new();
+    let mut visual_problems = Vec::new();
+
+    if blocks.len() != glyphs.len() {
+        let problem = format!(
+            "manifest has {} transformed blocks but MuPDF trace has {} glyphs",
+            blocks.len(),
+            glyphs.len()
+        );
+        baseline_problems.push(problem.clone());
+        metric_problems.push(problem);
+    }
+    for (block, glyph) in blocks.into_iter().zip(&glyphs) {
+        if block.text.chars().count() != 1 || glyph.unicode != block.text {
+            let problem = format!(
+                "block {} expected one glyph {:?}, trace reported {:?}",
+                block.key, block.text, glyph.unicode
+            );
+            baseline_problems.push(problem.clone());
+            metric_problems.push(problem);
+            continue;
+        }
+        if glyph.font != expected_font {
+            metric_problems.push(format!(
+                "block {} trace font {:?}, expected {:?}",
+                block.key, glyph.font, expected_font
+            ));
+        }
+        let expected_baseline = block
+            .baseline_origin
+            .context("transformed block missing baseline_origin")?;
+        if !close(glyph.origin[0], expected_baseline[0], arithmetic_tolerance)
+            || !close(glyph.origin[1], expected_baseline[1], arithmetic_tolerance)
+        {
+            baseline_problems.push(format!(
+                "block {} manifest {:?}, trace {:?}",
+                block.key, expected_baseline, glyph.origin
+            ));
+        }
+        let expected_metric = block
+            .metric_box
+            .context("transformed block missing metric_box")?;
+        let actual_metric = glyph.metric_box(ascent, descent).to_array();
+        if !arrays_close(&actual_metric, &expected_metric, arithmetic_tolerance) {
+            metric_problems.push(format!(
+                "block {} manifest {:?}, qpdf+trace {:?}",
+                block.key, expected_metric, actual_metric
+            ));
+        }
+        let expected_visual = block
+            .visual_bbox
+            .context("transformed block missing visual_bbox")?;
+        let actual_visual = outlines
+            .get(&block.key)
+            .with_context(|| format!("outline oracle missing block `{}`", block.key))?
+            .to_array();
+        if !arrays_close(&actual_visual, &expected_visual, visual_tolerance) {
+            visual_problems.push(format!(
+                "block {} manifest {:?}, MuPDF SVG {:?}",
+                block.key, expected_visual, actual_visual
+            ));
+        }
+    }
+
+    Ok(vec![
+        geometry_outcome(
+            "geometry/transform-baseline",
+            arithmetic_tolerance,
+            baseline_problems,
+            "MuPDF trace glyph origin",
+        ),
+        geometry_outcome(
+            "geometry/transform-metric",
+            arithmetic_tolerance,
+            metric_problems,
+            "qpdf descriptor metrics composed with MuPDF trace trm/advance",
+        ),
+        geometry_outcome(
+            "geometry/transform-visual",
+            visual_tolerance,
+            visual_problems,
+            "MuPDF SVG glyph outlines",
         ),
     ])
 }

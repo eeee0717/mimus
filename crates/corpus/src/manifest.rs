@@ -179,11 +179,21 @@ pub struct Mutation {
 pub struct Page {
     pub index: usize,
     /// §2.2：页面空间由 MediaBox 定义，原点不必是 (0,0)。
-    pub media_box: [f64; 4],
+    pub media_box: [PageBoxValue; 4],
     /// 缺失时等同 MediaBox（§2.3）。
     #[serde(default)]
     pub crop_box: Option<[f64; 4]>,
     pub rotate: i32,
+}
+
+/// A malformed geometry fixture must describe the bytes it actually contains.
+/// TOML has no null scalar, so the literal PDF token `null` is represented by
+/// the string `"null"`; all legal coordinates remain ordinary TOML numbers.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum PageBoxValue {
+    Number(f64),
+    Keyword(String),
 }
 
 impl Expected {
@@ -194,9 +204,20 @@ impl Expected {
 }
 
 impl Page {
+    pub fn numeric_media_box(&self) -> Option<[f64; 4]> {
+        let mut values = [0.0; 4];
+        for (index, value) in self.media_box.iter().enumerate() {
+            values[index] = match value {
+                PageBoxValue::Number(value) => *value,
+                PageBoxValue::Keyword(_) => return None,
+            };
+        }
+        Some(values)
+    }
+
     /// 观看用的有效框：CropBox 优先，缺失时退回 MediaBox。
-    pub fn effective_box(&self) -> [f64; 4] {
-        self.crop_box.unwrap_or(self.media_box)
+    pub fn effective_box(&self) -> Option<[f64; 4]> {
+        self.crop_box.or_else(|| self.numeric_media_box())
     }
 }
 
@@ -242,6 +263,13 @@ pub struct Expected {
     /// mapping comes from the embedded font cmap rather than ToUnicode.
     #[serde(default)]
     pub cid_sequence: Vec<u16>,
+    /// Production-path expectations consumed by mimus-core tests. The corpus
+    /// crate validates their references but deliberately does not execute the
+    /// production walker.
+    #[serde(default)]
+    pub transform: Vec<TransformExpectation>,
+    #[serde(default)]
+    pub degradation: Vec<DegradationExpectation>,
     #[serde(default)]
     pub reference: Vec<ObjectReference>,
     #[serde(default)]
@@ -266,6 +294,86 @@ pub struct Expected {
     /// cannot produce a reference raster by design.
     #[serde(default)]
     pub renderer_diagnostic: Option<String>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum TransformKind {
+    Upright,
+    Rotated,
+    Mirrored,
+    Skewed,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransformExpectation {
+    pub block: String,
+    pub char_indices: Vec<usize>,
+    pub kind: TransformKind,
+    #[serde(default)]
+    pub degrees: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum DegradationScope {
+    Page,
+    Paragraph,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum DegradationReason {
+    ContentStreamSyntax,
+    NestingTooDeep,
+    ContentDecode,
+    BadPageGeometry,
+    UnsupportedRotation,
+    MissingResource,
+    BadFormBBox,
+    BadFormMatrix,
+    XObjectNotAStream,
+    UnreliableUnicode,
+    UnsupportedFont,
+    NonPositiveAdvance,
+    Unlocatable,
+}
+
+impl DegradationReason {
+    fn supports(self, scope: DegradationScope) -> bool {
+        match scope {
+            DegradationScope::Page => matches!(
+                self,
+                Self::ContentStreamSyntax
+                    | Self::NestingTooDeep
+                    | Self::ContentDecode
+                    | Self::BadPageGeometry
+                    | Self::UnsupportedRotation
+                    | Self::MissingResource
+                    | Self::BadFormBBox
+                    | Self::BadFormMatrix
+                    | Self::XObjectNotAStream
+            ),
+            DegradationScope::Paragraph => matches!(
+                self,
+                Self::UnreliableUnicode
+                    | Self::UnsupportedFont
+                    | Self::NonPositiveAdvance
+                    | Self::Unlocatable
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DegradationExpectation {
+    pub scope: DegradationScope,
+    pub page: usize,
+    #[serde(default)]
+    pub paragraph: Option<usize>,
+    pub reason: DegradationReason,
 }
 
 /// 结构化期望——**先于生成写死**，生成结果不符即为失败（§2.1 例外条款）。
@@ -487,6 +595,9 @@ pub enum Check {
     DualParserGeometry,
     /// §2.2: compare all three hand-written geometry quantities independently.
     HandWrittenGeometry,
+    /// Arbitrarily rotated or sheared text: qpdf descriptor metrics composed
+    /// with MuPDF trace matrices, plus MuPDF baseline and outline geometry.
+    TransformedTextGeometry,
     /// Type3 d1 geometry: MuPDF independently observes baseline and the
     /// painted CharProc bbox. Poppler's synthesized Type3 metric box is kept
     /// as differential evidence rather than treated as the specification.
@@ -628,6 +739,7 @@ impl Manifest {
                 && !self.requires(Check::Structure)
                 && !self.requires(Check::Glyphs)
                 && !self.requires(Check::EmbeddedCmap)
+                && !self.requires(Check::TransformedTextGeometry)
                 && !self.requires(Check::OperatorWalk),
             "§2.1",
             "手写的 block.text 无人核对——oracle.checks 必须含 structure、glyphs、embedded-cmap 或 operator-walk 之一",
@@ -840,10 +952,48 @@ impl Manifest {
                     page.index
                 ),
             )?;
+            let bad_geometry_expected = self.expected.degradation.iter().any(|expected| {
+                expected.scope == DegradationScope::Page
+                    && expected.page == i
+                    && expected.reason == DegradationReason::BadPageGeometry
+            });
+            let unsupported_rotation_expected = self.expected.degradation.iter().any(|expected| {
+                expected.scope == DegradationScope::Page
+                    && expected.page == i
+                    && expected.reason == DegradationReason::UnsupportedRotation
+            });
+            match page.numeric_media_box() {
+                Some(media_box) => {
+                    fail_if(
+                        !media_box.iter().all(|value| value.is_finite())
+                            || media_box[0] >= media_box[2]
+                            || media_box[1] >= media_box[3],
+                        "§2.2",
+                        &format!("第 {i} 页 MediaBox 退化：{media_box:?}"),
+                    )?;
+                }
+                None => {
+                    fail_if(
+                        page.media_box.iter().any(|value| {
+                            matches!(value, PageBoxValue::Keyword(keyword) if keyword != "null")
+                        }),
+                        "§2.7",
+                        "MediaBox 的非数值分量只允许用字符串 \"null\" 表达 PDF null token",
+                    )?;
+                    fail_if(
+                        self.identity.legality != Legality::Malformed || !bad_geometry_expected,
+                        "§2.2/§2.8",
+                        "非数值 MediaBox 只允许出现在声明 bad_page_geometry 页级降级的畸形 fixture",
+                    )?;
+                }
+            }
             fail_if(
-                page.media_box[0] >= page.media_box[2] || page.media_box[1] >= page.media_box[3],
-                "§2.2",
-                &format!("第 {i} 页 MediaBox 退化：{:?}", page.media_box),
+                page.rotate % 90 != 0 && !unsupported_rotation_expected,
+                "§2.3/§2.8",
+                &format!(
+                    "第 {i} 页 /Rotate = {} 非 90 整数倍，但未声明 unsupported_rotation 页级降级",
+                    page.rotate
+                ),
             )?;
         }
         fail_if(
@@ -878,6 +1028,95 @@ impl Manifest {
             "§2.2",
             "expected.ink_margin_pt 若给出则必须为正",
         )?;
+
+        let block_by_key = blocks
+            .iter()
+            .map(|block| (block.key.as_str(), block))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut covered_transforms = BTreeSet::new();
+        for expected in &self.expected.transform {
+            let block = block_by_key.get(expected.block.as_str()).with_context(|| {
+                format!("[§2.7] transform 引用了不存在的 block {:?}", expected.block)
+            })?;
+            fail_if(
+                expected.char_indices.is_empty(),
+                "§2.7",
+                "transform.char_indices 不得为空",
+            )?;
+            let char_count = block.text.chars().count();
+            let unique = expected
+                .char_indices
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            fail_if(
+                unique.len() != expected.char_indices.len()
+                    || unique.iter().any(|index| *index >= char_count),
+                "§2.7",
+                &format!(
+                    "block {:?} 的 transform.char_indices 必须唯一且小于字符数 {char_count}",
+                    expected.block
+                ),
+            )?;
+            let needs_degrees = matches!(
+                expected.kind,
+                TransformKind::Rotated | TransformKind::Skewed
+            );
+            fail_if(
+                needs_degrees != expected.degrees.is_some()
+                    || expected
+                        .degrees
+                        .is_some_and(|degrees| !degrees.is_finite() || degrees.abs() > 180.0),
+                "§2.7",
+                "rotated/skewed transform 必须声明有限且绝对值不超过 180 的 degrees；upright/mirrored 不得声明",
+            )?;
+            for index in unique {
+                fail_if(
+                    !covered_transforms.insert((expected.block.as_str(), index)),
+                    "§2.7",
+                    &format!(
+                        "block {:?} 的字符 {index} 被重复声明 transform",
+                        expected.block
+                    ),
+                )?;
+            }
+        }
+
+        let mut degradations = BTreeSet::new();
+        for expected in &self.expected.degradation {
+            fail_if(
+                expected.page >= self.page.len(),
+                "§2.7",
+                &format!("degradation.page {} 超出页面范围", expected.page),
+            )?;
+            fail_if(
+                !expected.reason.supports(expected.scope),
+                "§2.7",
+                "degradation.reason 与 scope 不相容",
+            )?;
+            match expected.scope {
+                DegradationScope::Page => fail_if(
+                    expected.paragraph.is_some(),
+                    "§2.7",
+                    "页级 degradation 不得声明 paragraph",
+                )?,
+                DegradationScope::Paragraph => fail_if(
+                    expected.paragraph.is_none(),
+                    "§2.7",
+                    "段级 degradation 必须声明 paragraph",
+                )?,
+            }
+            fail_if(
+                !degradations.insert((
+                    expected.scope,
+                    expected.page,
+                    expected.paragraph,
+                    expected.reason,
+                )),
+                "§2.7",
+                "重复的 degradation 期望",
+            )?;
+        }
         fail_if(
             self.expected
                 .visual_tolerance_pt
@@ -1059,11 +1298,12 @@ impl Manifest {
             )?;
             fail_if(
                 !self.requires(Check::HandWrittenGeometry)
+                    && !self.requires(Check::TransformedTextGeometry)
                     && !self.requires(Check::Type3Geometry)
                     && !self.requires(Check::FontAdvance)
                     && !self.requires(Check::EmbeddedCmap),
                 "§2.8",
-                "exact-writer fixture 必须启用 hand-written-geometry、type3-geometry、font-advance 或 embedded-cmap 门禁",
+                "exact-writer fixture 必须启用 hand-written-geometry、transformed-text-geometry、type3-geometry、font-advance 或 embedded-cmap 门禁",
             )?;
         }
 
