@@ -6,6 +6,7 @@ use lopdf::{Dictionary, Document, Object, ObjectId};
 
 use crate::error::{ErrorReason, InputReason, MimusError, Result};
 use crate::event::{PageDegradeReason, RecoveryKind};
+use crate::geometry::{PageFrame, PageGeometryResolveError};
 use crate::il::{FontRef, Point, Rect, TextTransform};
 use tokenizer::{CompositeDelimiter, InlineImageLengthSource, Token, TokenKind, tokenize};
 
@@ -70,6 +71,16 @@ impl Matrix {
         let [a, b, c, d, _, _] = self.0;
         (a * d - b * c).abs() <= 1e-12
     }
+
+    fn page_rotation(degrees: i32) -> Self {
+        match degrees.rem_euclid(360) {
+            0 => Self::IDENTITY,
+            90 => Self([0.0, 1.0, -1.0, 0.0, 0.0, 0.0]),
+            180 => Self([-1.0, 0.0, 0.0, -1.0, 0.0, 0.0]),
+            270 => Self([0.0, -1.0, 1.0, 0.0, 0.0, 0.0]),
+            _ => unreachable!("page rotation is validated before walking"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +138,7 @@ struct Walker<'a> {
     active_forms: Vec<ObjectId>,
     form_cycles: Vec<Vec<ObjectId>>,
     degradation: Option<PageDegradeReason>,
+    visual_rotation: Matrix,
 }
 
 struct ScopeSnapshot {
@@ -181,6 +193,21 @@ pub(crate) fn walk_page_detailed(
     document: &Document,
     page_id: ObjectId,
 ) -> std::result::Result<PageWalk, PageWalkError> {
+    let rotate_degrees = match PageFrame::resolve(document, page_id) {
+        Ok(frame) => frame.rotate_degrees,
+        Err(PageGeometryResolveError::Degraded { reason, source }) => {
+            return Err(PageWalkError::Degraded { reason, source });
+        }
+        Err(PageGeometryResolveError::Fatal(error)) => return Err(PageWalkError::Fatal(error)),
+    };
+    walk_page_detailed_with_rotation(document, page_id, rotate_degrees)
+}
+
+pub(crate) fn walk_page_detailed_with_rotation(
+    document: &Document,
+    page_id: ObjectId,
+    rotate_degrees: i32,
+) -> std::result::Result<PageWalk, PageWalkError> {
     let resources = inherited_page_resources(document, page_id).map_err(PageWalkError::Fatal)?;
     let content_objects = document.get_page_contents(page_id);
     let mut walker = Walker {
@@ -197,6 +224,7 @@ pub(crate) fn walk_page_detailed(
         active_forms: Vec::new(),
         form_cycles: Vec::new(),
         degradation: None,
+        visual_rotation: Matrix::page_rotation(rotate_degrees),
     };
     let mut content_streams = Vec::with_capacity(content_objects.len());
     for object_id in content_objects {
@@ -801,7 +829,7 @@ impl Walker<'_> {
                 font_size: self.state.font_size,
                 baseline_origin: baseline,
                 metric_box,
-                text_transform: classify_transform(transform),
+                text_transform: classify_transform(self.visual_rotation.then(transform)),
                 content_object: self.content_object,
                 byte_start,
                 byte_end,
@@ -963,7 +991,7 @@ fn resolve_simple_font(
     }
     let first_char = font.get(b"FirstChar").and_then(Object::as_i64).unwrap_or(0);
     let widths = font
-        .get(b"Widths")
+        .get_deref(b"Widths", document)
         .and_then(Object::as_array)
         .map_err(|error| {
             walk_error(format!(
@@ -1226,7 +1254,7 @@ fn decode_win_ansi(code: u8) -> Option<char> {
 
 fn classify_transform(matrix: Matrix) -> TextTransform {
     // CONTEXT #32 / ADR-0007: 直立窗口只有 0deg +/-0.1deg，镜像优先于旋转，
-    // 斜切超过 20deg 才隔离；页面 /Rotate 在 Parse 中另行处理，不能混入这里。
+    // 斜切超过 20deg 才隔离。调用方传入 R(/Rotate) * CTM * Tm 的视觉线性变换。
     const UPRIGHT_TOLERANCE_DEGREES: f64 = 0.1;
     const MAX_UPRIGHT_SKEW_DEGREES: f64 = 20.0;
     let [a, b, c, d, _, _] = matrix.0;
@@ -1411,6 +1439,45 @@ mod tests {
         assert!((metric.right - 112.656).abs() < 1e-9);
         assert!((metric.top - 131.136).abs() < 1e-9);
         assert_eq!(characters[0].code, u32::from(b'M'));
+    }
+
+    #[test]
+    fn production_walk_classifies_text_in_the_rotated_visual_page_frame() {
+        let mut document = Document::load(fixture()).unwrap();
+        let page_id = document.get_pages()[&1];
+        document
+            .get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Rotate", 90);
+        document
+            .get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(
+                b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (M) Tj 0 -1 1 0 72 120 Tm (I) Tj ET\n".to_vec(),
+            );
+
+        let characters = walk_page(&document, page_id).unwrap().characters;
+
+        assert_eq!(characters.len(), 2);
+        assert_eq!(characters[0].text_transform, TextTransform::Rotated(90.0));
+        assert_eq!(characters[1].text_transform, TextTransform::Upright);
+    }
+
+    #[test]
+    fn production_walk_handles_the_realistic_rotated_fixture() {
+        let walked = walk_fixture("unit-geom-01-rotate-90");
+
+        assert!(!walked.characters.is_empty());
+        assert!(
+            walked
+                .characters
+                .iter()
+                .all(|character| character.text_transform == TextTransform::Rotated(90.0))
+        );
     }
 
     #[test]

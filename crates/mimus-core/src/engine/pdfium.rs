@@ -223,13 +223,19 @@ mod tests {
 
     use super::*;
 
+    fn fixture_path(id: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/fixtures")
+            .join(id)
+            .join(format!("{id}.pdf"))
+    }
+
     #[test]
     fn adapter_returns_owned_m1_snapshots() {
         let library = std::env::var_os("MIMUS_PDFIUM_LIBRARY")
             .expect("MIMUS_PDFIUM_LIBRARY must point to the pinned test dylib");
         let engine = PdfiumEngine::new(Path::new(&library)).unwrap();
-        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../corpus/fixtures/unit-base-01-single-line/unit-base-01-single-line.pdf");
+        let fixture = fixture_path("unit-base-01-single-line");
         let bytes = std::fs::read(fixture).unwrap();
         assert_eq!(engine.page_count(&bytes).unwrap(), 1);
         assert_eq!(
@@ -261,6 +267,64 @@ mod tests {
         let raster = engine.rasterize_page(&bytes, 0).unwrap();
         assert_eq!((raster.width(), raster.height()), (300, 200));
         assert_eq!(raster.rgba8().len(), 300 * 200 * 4);
+
+        assert_rotated_crop_box_view_geometry(&engine);
+    }
+
+    fn assert_rotated_crop_box_view_geometry(engine: &PdfiumEngine) {
+        for (id, expected) in [
+            (
+                "unit-geom-01-rotate-0",
+                PageGeometry {
+                    width: 300.0,
+                    height: 200.0,
+                    rotate_degrees: 0,
+                },
+            ),
+            (
+                "unit-geom-01-rotate-90",
+                PageGeometry {
+                    width: 200.0,
+                    height: 300.0,
+                    rotate_degrees: 90,
+                },
+            ),
+            (
+                "unit-geom-01-rotate-180",
+                PageGeometry {
+                    width: 300.0,
+                    height: 200.0,
+                    rotate_degrees: 180,
+                },
+            ),
+            (
+                "unit-geom-01-rotate-270",
+                PageGeometry {
+                    width: 200.0,
+                    height: 300.0,
+                    rotate_degrees: 270,
+                },
+            ),
+            (
+                "unit-geom-01-rotate-neg90",
+                PageGeometry {
+                    width: 200.0,
+                    height: 300.0,
+                    rotate_degrees: 270,
+                },
+            ),
+            (
+                "unit-geom-05-nonzero-origin-boxes",
+                PageGeometry {
+                    width: 260.0,
+                    height: 160.0,
+                    rotate_degrees: 0,
+                },
+            ),
+        ] {
+            let bytes = std::fs::read(fixture_path(id)).unwrap();
+            assert_eq!(engine.page_geometry(&bytes, 0).unwrap(), expected, "{id}");
+        }
     }
 
     fn assert_close(actual: f64, expected: f64, tolerance: f64) {

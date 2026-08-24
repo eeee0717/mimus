@@ -302,6 +302,13 @@ mod tests {
         )
     }
 
+    fn fixture_path(id: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/fixtures")
+            .join(id)
+            .join(format!("{id}.pdf"))
+    }
+
     fn rewrite() -> PageRewrite {
         PageRewrite {
             page_index: 0,
@@ -468,6 +475,51 @@ mod tests {
                 .iter()
                 .all(|object_id| object_id.0 > document.max_id)
         );
+    }
+
+    #[test]
+    fn writer_preserves_page_boxes_and_raw_rotation_objects() {
+        for id in [
+            "unit-geom-05-nonzero-origin-boxes",
+            "unit-geom-01-rotate-neg90",
+        ] {
+            let input = std::fs::read(fixture_path(id)).unwrap();
+            let document = Document::load_mem(&input).unwrap();
+            let input_page_id = document.get_pages()[&1];
+            let input_page = document
+                .get_object(input_page_id)
+                .unwrap()
+                .as_dict()
+                .unwrap();
+            let expected = [b"MediaBox".as_slice(), b"CropBox", b"Rotate"]
+                .into_iter()
+                .filter_map(|key| {
+                    input_page
+                        .get(key)
+                        .ok()
+                        .map(|value| (key.to_vec(), value.clone()))
+                })
+                .collect::<Vec<_>>();
+            let rewrite = PageRewrite {
+                page_index: 0,
+                replacements: Vec::new(),
+                reused_fonts: Vec::new(),
+                needs_new_font: false,
+            };
+
+            let (output, _) = build_incremental(&input, &document, &[rewrite]).unwrap();
+            let output = Document::load_mem(&output).unwrap();
+            let output_page_id = output.get_pages()[&1];
+            let output_page = output
+                .get_object(output_page_id)
+                .unwrap()
+                .as_dict()
+                .unwrap();
+
+            for (key, value) in expected {
+                assert_eq!(output_page.get(&key).unwrap(), &value, "{id} /{key:?}");
+            }
+        }
     }
 
     #[test]

@@ -9,13 +9,14 @@ use crate::event::{
     Diagnostic, Diagnostics, Event, EventKind, PageDegradeReason, PreservedParagraph, RecoveryKind,
     Stage,
 };
+use crate::geometry::{PageFrame, PageGeometryResolveError};
 use crate::il::{
     self, Char, PageGeometry, Paragraph, PassthroughRef, Rect, TextCarrier, TextTransform,
 };
 use crate::scan::{PageClass, prescan_page};
 #[cfg(test)]
 use crate::walk::walk_page;
-use crate::walk::{PageWalkError, walk_page_detailed};
+use crate::walk::{PageWalkError, walk_page_detailed_with_rotation};
 use crate::write::{ContentSpanReplacement, PageRewrite, build_incremental, publish};
 
 pub const ORDER: [Stage; 10] = [
@@ -209,12 +210,33 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     }
     let mut extracted_pages = Vec::with_capacity(engine_pages);
     for (index, page_id) in lopdf_pages.into_iter().enumerate() {
-        let geometry = context.engine.page_geometry(&bytes, index)?;
+        let (geometry, frame, degraded) = match PageFrame::resolve(&pdf, page_id) {
+            Ok(frame) => {
+                let geometry = frame.geometry();
+                let engine_geometry = context.engine.page_geometry(&bytes, index)?;
+                validate_input_geometry(index, geometry, engine_geometry)?;
+                (geometry, Some(frame), None)
+            }
+            Err(PageGeometryResolveError::Degraded { reason, .. }) => {
+                let geometry =
+                    context
+                        .engine
+                        .page_geometry(&bytes, index)
+                        .unwrap_or(PageGeometry {
+                            width: 0.0,
+                            height: 0.0,
+                            rotate_degrees: 0,
+                        });
+                (geometry, None, Some(reason))
+            }
+            Err(PageGeometryResolveError::Fatal(error)) => return Err(error),
+        };
         let evidence = prescan_page(&pdf, page_id);
-        extracted_pages.push(ExtractedPage {
+        let mut extracted = ExtractedPage {
             index,
             page_id,
             geometry,
+            frame,
             evidence,
             class: None,
             degraded: None,
@@ -224,7 +246,11 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
             engine_characters: Vec::new(),
             layout_regions: Vec::new(),
             input_raster: None,
-        });
+        };
+        if let Some(reason) = degraded {
+            degrade_page(&mut extracted, &mut document.diagnostics, reason);
+        }
+        extracted_pages.push(extracted);
         context.events.emit(Event::new(EventKind::PageProgress {
             stage: Stage::Parse,
             page_index: index,
@@ -234,6 +260,26 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     document.original_bytes = bytes;
     document.pdf = Some(pdf);
     document.extracted_pages = extracted_pages;
+    Ok(())
+}
+
+fn validate_input_geometry(
+    page_index: usize,
+    expected: PageGeometry,
+    engine: PageGeometry,
+) -> Result<()> {
+    if expected.rotate_degrees != engine.rotate_degrees
+        || !finite_close(expected.width, engine.width, 0.001)
+        || !finite_close(expected.height, engine.height, 0.001)
+    {
+        return Err(MimusError::input(
+            InputReason::EngineMismatch,
+            format!(
+                "page {} geometry differs between the PDF object tree and the inspection engine",
+                page_index + 1
+            ),
+        ));
+    }
     Ok(())
 }
 
@@ -280,17 +326,13 @@ pub fn scan_detect(document: &mut Document, context: &PassContext<'_>) -> Result
         if !page.is_translatable() {
             continue;
         }
-        // CONTEXT #32 要求在视觉页框内判定朝向。#14 尚未实现这层坐标变换，
-        // 因此旋转页降级透传；透传页不需要重放坐标。
-        if page.geometry.rotate_degrees != 0 {
-            degrade_page(
-                page,
-                &mut document.diagnostics,
-                PageDegradeReason::UnsupportedRotation,
-            );
-            continue;
-        }
-        match walk_page_detailed(pdf, page.page_id) {
+        let frame = page.frame.ok_or_else(|| {
+            MimusError::internal(
+                InternalReason::InvariantViolation,
+                "a translatable page has no resolved geometry frame",
+            )
+        })?;
+        match walk_page_detailed_with_rotation(pdf, page.page_id, frame.rotate_degrees) {
             Ok(walked) => {
                 page.recoveries = walked.recoveries;
                 for &recovery in &page.recoveries {
@@ -449,17 +491,61 @@ pub fn extract_terms(_document: &mut Document, _context: &PassContext<'_>) -> Re
 }
 
 pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
+    let page_content_objects = document
+        .extracted_pages
+        .iter()
+        .map(|page| {
+            page.content_streams
+                .iter()
+                .map(|stream| stream.object_id.0)
+                .collect::<BTreeSet<_>>()
+        })
+        .collect::<Vec<_>>();
     for page in &mut document.il.pages {
+        let content_objects = page_content_objects.get(page.index).ok_or_else(|| {
+            MimusError::internal(
+                InternalReason::InvariantViolation,
+                format!("Translate could not find extracted page {}", page.index),
+            )
+        })?;
         for paragraph in &mut page.paragraphs {
             if paragraph.preserved.is_some() {
                 paragraph.translated_text = None;
                 continue;
             }
-            let source = paragraph.source_text();
-            paragraph.translated_text = Some(context.translator.translate(&source)?);
+            let chars = paragraph.chars();
+            let mut translated = String::new();
+            let mut start = 0;
+            while start < chars.len() {
+                let should_translate = character_is_translatable(&chars[start], content_objects);
+                let mut end = start + 1;
+                while end < chars.len()
+                    && character_is_translatable(&chars[end], content_objects) == should_translate
+                {
+                    end += 1;
+                }
+                let source = chars[start..end]
+                    .iter()
+                    .filter_map(|character| character.unicode)
+                    .collect::<String>();
+                if should_translate && !source.is_empty() {
+                    translated.push_str(&context.translator.translate(&source)?);
+                } else {
+                    translated.push_str(&source);
+                }
+                start = end;
+            }
+            paragraph.translated_text = Some(translated);
         }
     }
     Ok(())
+}
+
+fn character_is_translatable(character: &Char, content_objects: &BTreeSet<u32>) -> bool {
+    character.unicode.is_some()
+        && character.visible
+        && character.text_transform == TextTransform::Upright
+        && content_objects.contains(&character.passthrough.content_object)
 }
 
 pub fn typeset(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
@@ -672,6 +758,9 @@ fn validate_output_roundtrip(
         .map(|rewrite| rewrite.page_index)
         .collect::<BTreeSet<_>>();
     for expected in &document.extracted_pages {
+        if expected.degraded.is_some() && expected.frame.is_none() {
+            continue;
+        }
         let geometry = context
             .engine
             .page_geometry(candidate, expected.index)
@@ -1020,6 +1109,18 @@ mod tests {
         fn translate(&self, text: &str) -> Result<String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(text.to_owned())
+        }
+    }
+
+    #[derive(Default)]
+    struct WrappingTranslator {
+        inputs: Mutex<Vec<String>>,
+    }
+
+    impl Translator for WrappingTranslator {
+        fn translate(&self, text: &str) -> Result<String> {
+            self.inputs.lock().unwrap().push(text.to_owned());
+            Ok(format!("[{text}]"))
         }
     }
 
@@ -1571,12 +1672,102 @@ mod tests {
         run(&mut document, &context).unwrap();
 
         assert_eq!(document.il.pages[0].paragraphs[0].source_text(), "MIMUS");
-        assert_eq!(translator.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            document.il.pages[0].paragraphs[0]
+                .translated_text
+                .as_deref(),
+            Some("MIMUS")
+        );
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 0);
         assert!(document.rewrites.is_empty());
         assert_eq!(
             std::fs::read(&output).unwrap(),
             std::fs::read(form_fixture()).unwrap()
         );
+    }
+
+    #[test]
+    fn translate_only_sends_visible_upright_page_content_units() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = WrappingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let content_object = document.extracted_pages[0].content_streams[0].object_id.0;
+        let TextCarrier::Chars { chars } = &mut document.il.pages[0].paragraphs[0].text;
+        chars[2].text_transform = TextTransform::Rotated(90.0);
+        chars[3].visible = false;
+        chars[4].passthrough.content_object = u32::MAX;
+        let mut trailing = chars[4].clone();
+        trailing.unicode = Some('!');
+        trailing.code = u32::from(b'!');
+        trailing.visible = true;
+        trailing.text_transform = TextTransform::Upright;
+        trailing.passthrough.content_object = content_object;
+        trailing.passthrough.encoded = vec![b'!'];
+        chars.push(trailing);
+
+        translate(&mut document, &context).unwrap();
+
+        assert_eq!(translator.inputs.lock().unwrap().as_slice(), ["MI", "!"]);
+        assert_eq!(
+            document.il.pages[0].paragraphs[0]
+                .translated_text
+                .as_deref(),
+            Some("[MI]MUS[!]")
+        );
+    }
+
+    #[test]
+    fn invalid_page_rotation_degrades_and_preserves_the_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let input_path = directory.path().join("rotate-45.pdf");
+        let output_path = directory.path().join("rotate-45-output.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        pdf.get_object_mut(page_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Rotate", 45);
+        pdf.save(&input_path).unwrap();
+        let input = std::fs::read(&input_path).unwrap();
+        let mut document = Document::new(&input_path, &output_path);
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+
+        run(&mut document, &context).unwrap();
+
+        assert_eq!(std::fs::read(output_path).unwrap(), input);
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 0);
+        assert!(document.rewrites.is_empty());
+        assert!(document.diagnostics.entries().iter().any(|diagnostic| {
+            matches!(
+                diagnostic,
+                Diagnostic::PageDegraded {
+                    page_index: 0,
+                    reason: PageDegradeReason::UnsupportedRotation,
+                }
+            )
+        }));
     }
 
     #[test]

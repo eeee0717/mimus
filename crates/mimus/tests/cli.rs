@@ -167,6 +167,20 @@ fn write_program_pdf(directory: &Path, name: &str, program: &[u8]) -> PathBuf {
     path
 }
 
+fn write_rotated_pdf(directory: &Path, name: &str, rotate: i64) -> PathBuf {
+    let path = directory.join(name);
+    let mut document = lopdf::Document::load(fixture()).unwrap();
+    let page_id = document.get_pages()[&1];
+    document
+        .get_object_mut(page_id)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set("Rotate", rotate);
+    document.save(&path).unwrap();
+    path
+}
+
 fn decoded_page_streams(path: &Path, page_number: u32) -> Vec<Vec<u8>> {
     let document = lopdf::Document::load(path).unwrap();
     let page_id = document.get_pages()[&page_number];
@@ -785,13 +799,27 @@ fn structured_and_inline_image_programs_round_trip_without_rebuilding_content() 
     }
 }
 
-/// ADR-0013 §2：整篇失败与逐页降级的分界。旋转页 #17 之前还重放不了，但那是
-/// **这一页**的能力缺口——文档其余部分照常翻译，这一页原样透传。
+/// ADR-0013 §6：合法 `/Rotate` 进入视觉页框朝向分类，而不是作为页级降级处理。
 #[test]
-fn a_rotated_page_degrades_instead_of_failing_the_document() {
+fn a_legal_rotated_page_uses_the_visual_transform_without_degradation() {
     let directory = tempfile::tempdir().unwrap();
-    let input = fixture_path("unit-geom-01-rotate-90");
+    let input = write_rotated_pdf(directory.path(), "rotate-90.pdf", 90);
     let translated = directory.path().join("rotated.pdf");
+    let inspected = run_inspect(&input, true, None);
+    assert!(inspected.status.success());
+    let events = parse_events(&inspected.stdout);
+    assert_one_terminal_last(&events, "result");
+    let chars = events.last().unwrap()["il"]["pages"][0]["paragraphs"][0]["text"]["chars"]
+        .as_array()
+        .unwrap();
+    assert!(chars.iter().all(|character| {
+        character["text_transform"]
+            == serde_json::json!({
+                "kind": "rotated",
+                "degrees": 90.0,
+            })
+    }));
+
     let result = run_none(&input, Some(&translated), false);
 
     assert_eq!(
@@ -801,18 +829,12 @@ fn a_rotated_page_degrades_instead_of_failing_the_document() {
         String::from_utf8_lossy(&result.stderr)
     );
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(
-        stderr.contains("warning[page_degraded]: page 1"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains("warning[degradation_summary]: 1 of 1 pages kept as-is [1]"),
-        "{stderr}"
-    );
+    assert!(!stderr.contains("warning[page_degraded]"), "{stderr}");
+    assert!(!stderr.contains("warning[degradation_summary]"), "{stderr}");
     assert_eq!(
         std::fs::read(&translated).unwrap(),
         std::fs::read(&input).unwrap(),
-        "a degraded page must be republished byte for byte"
+        "an all-non-upright page has no replacement spans"
     );
 }
 

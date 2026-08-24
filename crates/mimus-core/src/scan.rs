@@ -499,6 +499,22 @@ mod tests {
     }
 
     #[test]
+    fn non_upright_text_still_counts_as_visible_scan_evidence() {
+        let mut document = Document::with_version("1.7");
+        let page = page_with_content(
+            &mut document,
+            b"BT 0 1 -1 0 100 100 Tm (rotated) Tj ET",
+            Dictionary::new(),
+        );
+
+        let evidence = prescan_page(&document, page);
+
+        assert_eq!(evidence.visible_text_shows, 1);
+        assert_eq!(evidence.invisible_text_shows, 0);
+        assert_eq!(evidence.classify(), PageClass::Content);
+    }
+
+    #[test]
     fn graphics_state_save_and_restore_restores_the_rendering_mode() {
         let mut document = Document::with_version("1.7");
         let page = page_with_content(

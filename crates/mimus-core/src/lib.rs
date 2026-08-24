@@ -4,6 +4,7 @@ pub mod context;
 pub mod engine;
 pub mod error;
 pub mod event;
+mod geometry;
 pub mod il;
 pub mod pass;
 mod scan;

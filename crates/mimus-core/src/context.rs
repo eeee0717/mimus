@@ -6,6 +6,7 @@ use lopdf::Document as LopdfDocument;
 use crate::engine::{LayoutDetector, LayoutRegion, PageCharSnapshot, PdfEngine, RgbaImage};
 use crate::error::Result;
 use crate::event::{Diagnostics, EventSink, PageDegradeReason, RecoveryKind, Stage};
+use crate::geometry::PageFrame;
 use crate::il;
 use crate::scan::{PageClass, PageEvidence};
 use crate::translate::Translator;
@@ -109,6 +110,7 @@ pub(crate) struct ExtractedPage {
     pub index: usize,
     pub page_id: lopdf::ObjectId,
     pub geometry: il::PageGeometry,
+    pub frame: Option<PageFrame>,
     pub evidence: PageEvidence,
     pub class: Option<PageClass>,
     // ADR-0013 §2: 页级降级标记。置位后该页不再进入后续 pass，也不产生 rewrite。
