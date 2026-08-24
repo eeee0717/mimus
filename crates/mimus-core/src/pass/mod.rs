@@ -286,7 +286,15 @@ pub fn scan_detect(document: &mut Document, context: &PassContext<'_>) -> Result
             continue;
         }
         match walk_page(pdf, page.page_id) {
-            Ok(characters) => page.walked_characters = characters,
+            Ok(walked) => {
+                for recovery in walked.recoveries {
+                    document.diagnostics.push(Diagnostic::ContentRecovered {
+                        page_index: page.index,
+                        recovery,
+                    });
+                }
+                page.walked_characters = walked.characters;
+            }
             // ADR-0013 §3：内容流的语法错误只毁掉它所在的那一页，整篇不该跟着失败。
             // 能力边界（UnsupportedPdf）仍是文档级失败——那不是这一页坏了，
             // 而是 M1 还不会处理这类内容，降级会把「没实现」伪装成「文件有问题」。
@@ -1257,7 +1265,7 @@ mod tests {
     fn finite_pdfium_baseline_differences_become_bounded_diagnostics() {
         let pdf = LopdfDocument::load(fixture()).unwrap();
         let page_id = pdf.get_pages()[&1];
-        let walked = walk_page(&pdf, page_id).unwrap();
+        let walked = walk_page(&pdf, page_id).unwrap().characters;
         let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap();
         engine[0].baseline_origin.x += 0.01;
         engine[0].baseline_origin.y -= 0.02;

@@ -86,6 +86,7 @@ M0 实验 2 的参数不自动成为生产政策（其 §范围限制明确不�
 
 - **`PageDegraded { page_index, reason }`**：逐页一条，吃 100 条上限，超限由既有 `dropped_diagnostics` 汇总兜底。
 - **`DegradationSummary { degraded_page_indices, preserved_paragraphs, … }`**：单条汇总，仿 `ScanSummary` 的特权——无条件入库、不吃 100 条上限，终结事件之前发出。这满足 #18「终结报告列出受影响页」而**不触碰 `result` 的形状**（ADR-0011 §2 明文规定 result 不重复诊断内容、只保留 `warnings` 总数）。
+- **`ContentRecovered { page_index, recovery }`**：§3 每一条「+ warning」的出线口。它与 `PageDegraded` 是同一枚硬币的两面——降级说「这一页没翻」，恢复说「这一页翻了，但走查偏离了输入的字面结构」。**每页每类恢复只报一条**，不是每次恢复一条：§3 要求恢复决定页级一致，逐次计数会随内容长度漂移，做不成稳定断言。
 - **不新增 ExitCategory、不新增 reason**：页级与段级降级不是错误，退出码仍为 0。
 - 人类模式：逐条 stderr `warning[page_degraded]: …`，外加一行汇总。
 - `--debug` 的 `diagnostics.ndjson` 与 stdout 共用同一 serializer，自动获得新诊断，不引入第三个 schema。

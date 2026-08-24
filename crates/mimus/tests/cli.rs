@@ -789,6 +789,52 @@ fn a_truncated_content_stream_degrades_its_page() {
     );
 }
 
+/// `mal-stream-09-orphan-text` 与 `mal-stream-11-tj-array-type` 的声明行为在生产
+/// 路径上的对应断言：文字一个不少地进入 IL，恢复每页只报一次。
+#[test]
+fn malformed_content_streams_are_recovered_and_reported_once_per_page() {
+    for (id, recovery) in [
+        ("mal-stream-09-orphan-text", "text operators outside BT/ET"),
+        (
+            "mal-stream-11-tj-array-type",
+            "an illegal element inside a TJ array",
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let input = fixture_path(id);
+        let translated = directory.path().join("recovered.pdf");
+        let result = run_none(&input, Some(&translated), false);
+        assert_eq!(
+            result.status.code(),
+            Some(0),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        let warnings = stderr
+            .lines()
+            .filter(|line| line.starts_with("warning[content_recovered]:"))
+            .collect::<Vec<_>>();
+        assert_eq!(warnings.len(), 1, "fixture {id}: {stderr}");
+        assert!(warnings[0].contains(recovery), "fixture {id}: {stderr}");
+        assert!(
+            !stderr.contains("warning[page_degraded]"),
+            "fixture {id} must be translated, not degraded: {stderr}"
+        );
+
+        let il: serde_json::Value =
+            serde_json::from_slice(&run_inspect(&input, false, None).stdout).unwrap();
+        let text = il["pages"][0]["paragraphs"][0]["text"]["chars"]
+            .as_array()
+            .unwrap_or_else(|| panic!("fixture {id} produced no characters"))
+            .iter()
+            .filter_map(|character| character["unicode"].as_str())
+            .collect::<String>();
+        assert_eq!(text, "MIMUS", "fixture {id} lost characters");
+    }
+}
+
 #[test]
 fn unreplayed_state_graphics_and_multiple_lines_fail_closed() {
     let directory = tempfile::tempdir().unwrap();

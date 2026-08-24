@@ -168,8 +168,21 @@ pub enum DiagnosticId {
     EngineBaselineMismatch,
     ScanSummary,
     PageDegraded,
+    ContentRecovered,
     DegradationSummary,
     DroppedDiagnostics,
+}
+
+/// 有界宽容 walk 从畸形 content stream 里恢复出来的一处偏离（ADR-0013 §3）。
+/// 与降级相反：这一页照常翻译，但它的写回结果不再与输入逐字节同源，
+/// 所以恢复本身必须报告出来。
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryKind {
+    /// 文本操作符出现在任何 `BT` 之前，按隐式 `BT`（`Tm` 为单位阵）处理（STREAM-05）。
+    ImplicitTextObject,
+    /// `TJ` 数组里既非字符串也非数字的元素被跳过，字距按 0 计（STREAM-11）。
+    SkippedTjElement,
 }
 
 /// 页级降级的原因（ADR-0013 §2）。降级页不产生 `PageRewrite`，
@@ -225,6 +238,10 @@ pub enum Diagnostic {
         page_index: usize,
         reason: PageDegradeReason,
     },
+    ContentRecovered {
+        page_index: usize,
+        recovery: RecoveryKind,
+    },
     DegradationSummary {
         degraded_page_indices: Vec<usize>,
         degraded_pages: usize,
@@ -240,6 +257,7 @@ impl Diagnostic {
             Self::EngineBaselineMismatch { .. } => DiagnosticId::EngineBaselineMismatch,
             Self::ScanSummary { .. } => DiagnosticId::ScanSummary,
             Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
+            Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
             Self::DegradationSummary { .. } => DiagnosticId::DegradationSummary,
         }
     }
@@ -275,6 +293,10 @@ pub enum DiagnosticEvent {
         page_index: usize,
         reason: PageDegradeReason,
     },
+    ContentRecovered {
+        page_index: usize,
+        recovery: RecoveryKind,
+    },
     DegradationSummary {
         degraded_page_indices: Vec<usize>,
         degraded_pages: usize,
@@ -293,6 +315,7 @@ impl DiagnosticEvent {
             Self::EngineBaselineMismatch { .. } => DiagnosticId::EngineBaselineMismatch,
             Self::ScanSummary { .. } => DiagnosticId::ScanSummary,
             Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
+            Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
             Self::DegradationSummary { .. } => DiagnosticId::DegradationSummary,
             Self::DroppedDiagnostics { .. } => DiagnosticId::DroppedDiagnostics,
         }
@@ -329,6 +352,13 @@ impl From<&Diagnostic> for DiagnosticEvent {
             Diagnostic::PageDegraded { page_index, reason } => Self::PageDegraded {
                 page_index: *page_index,
                 reason: *reason,
+            },
+            Diagnostic::ContentRecovered {
+                page_index,
+                recovery,
+            } => Self::ContentRecovered {
+                page_index: *page_index,
+                recovery: *recovery,
             },
             Diagnostic::DegradationSummary {
                 degraded_page_indices,

@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use lopdf::{Dictionary, Document, Object, ObjectId};
 
 use crate::error::{InputReason, MimusError, Result};
+use crate::event::RecoveryKind;
 use crate::il::{FontRef, Point, Rect, TextTransform};
 use tokenizer::{Token, TokenKind, tokenize};
 
@@ -105,9 +106,20 @@ struct Walker<'a> {
     characters: Vec<WalkedChar>,
     content_object: ObjectId,
     text_show_count: usize,
+    recoveries: BTreeSet<RecoveryKind>,
+    text_object_is_implicit: bool,
 }
 
-pub fn walk_page(document: &Document, page_id: ObjectId) -> Result<Vec<WalkedChar>> {
+/// 一页走查的结果。`recoveries` 用集合而非计数：ADR-0013 §3 要求恢复决定
+/// **每页一致**，所以消费者要知道的是「这一页用过哪几类恢复」，
+/// 而不是「用过多少次」——后者会随内容长度漂移，做不成稳定断言。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageWalk {
+    pub characters: Vec<WalkedChar>,
+    pub recoveries: BTreeSet<RecoveryKind>,
+}
+
+pub fn walk_page(document: &Document, page_id: ObjectId) -> Result<PageWalk> {
     let resources = inherited_page_resources(document, page_id)?;
     let content_objects = document.get_page_contents(page_id);
     if content_objects.len() > 1 {
@@ -123,6 +135,8 @@ pub fn walk_page(document: &Document, page_id: ObjectId) -> Result<Vec<WalkedCha
         characters: Vec::new(),
         content_object: (0, 0),
         text_show_count: 0,
+        recoveries: BTreeSet::new(),
+        text_object_is_implicit: false,
     };
     for object_id in content_objects {
         let stream = document
@@ -142,10 +156,15 @@ pub fn walk_page(document: &Document, page_id: ObjectId) -> Result<Vec<WalkedCha
         walker.content_object = object_id;
         walker.walk(tokenize(&decoded)?)?;
     }
-    if walker.state.phase == TextPhase::Inside {
+    // 显式 `BT` 没等到 `ET` 是流被截断的信号，仍然报错；隐式打开的文本对象本来就
+    // 没有对应的 `ET`，在流尾隐式闭合。
+    if walker.state.phase == TextPhase::Inside && !walker.text_object_is_implicit {
         return Err(walk_error("content stream ended before ET"));
     }
-    Ok(walker.characters)
+    Ok(PageWalk {
+        characters: walker.characters,
+        recoveries: walker.recoveries,
+    })
 }
 
 impl Walker<'_> {
@@ -183,7 +202,7 @@ impl Walker<'_> {
                     self.state.phase = TextPhase::After;
                 }
                 b"Tf" => {
-                    self.require_text_phase("Tf")?;
+                    self.enter_text_phase("Tf")?;
                     let tail = operand_tail(&operands, 2, "Tf")?;
                     let TokenKind::Name(name) = &tail[0].kind else {
                         return Err(walk_error("Tf font operand is not a name"));
@@ -200,7 +219,7 @@ impl Walker<'_> {
                     self.state.font_size = size;
                 }
                 b"Tm" => {
-                    self.require_text_phase("Tm")?;
+                    self.enter_text_phase("Tm")?;
                     let values = numeric_tail(&operands, 6, "Tm")?;
                     let matrix = Matrix::from_values(&values);
                     if !matrix.has_identity_linear_part() {
@@ -211,18 +230,18 @@ impl Walker<'_> {
                     self.state.text_matrix = matrix;
                 }
                 b"Tj" => {
-                    self.require_text_phase("Tj")?;
-                    if self.text_show_count != 0 {
-                        return Err(unsupported_error(
-                            "M1 supports exactly one text-show operation per page",
-                        ));
-                    }
+                    self.enter_text_phase("Tj")?;
+                    self.begin_text_show()?;
                     let tail = operand_tail(&operands, 1, "Tj")?;
                     let TokenKind::Bytes(bytes) = &tail[0].kind else {
                         return Err(walk_error("Tj operand is not a string"));
                     };
                     self.show_text(bytes, tail[0].span.start, tail[0].span.end)?;
-                    self.text_show_count += 1;
+                }
+                b"TJ" => {
+                    self.enter_text_phase("TJ")?;
+                    self.begin_text_show()?;
+                    self.show_text_array(&operands)?;
                 }
                 _ => {
                     return Err(unsupported_error(format!(
@@ -278,12 +297,70 @@ impl Walker<'_> {
         Ok(())
     }
 
-    fn require_text_phase(&self, operator: &str) -> Result<()> {
-        if self.state.phase == TextPhase::Inside {
-            Ok(())
-        } else {
-            Err(walk_error(format!("{operator} appeared outside BT/ET")))
+    /// STREAM-05：`BT` 之前出现的文本操作符按隐式 `BT` 处理——渲染器确实会画出
+    /// 这些字，丢掉它们就是丢正文。`ET` 之后再出现则是第二个文本对象，
+    /// 与 M1 的单文本对象边界撞车，仍然拒绝。
+    fn enter_text_phase(&mut self, operator: &str) -> Result<()> {
+        match self.state.phase {
+            TextPhase::Inside => Ok(()),
+            TextPhase::Before => {
+                self.state.text_matrix = Matrix::IDENTITY;
+                self.state.phase = TextPhase::Inside;
+                self.text_object_is_implicit = true;
+                self.recoveries.insert(RecoveryKind::ImplicitTextObject);
+                Ok(())
+            }
+            TextPhase::After => Err(unsupported_error(format!(
+                "M1 supports exactly one text object per page; {operator} appeared after ET"
+            ))),
         }
+    }
+
+    fn begin_text_show(&mut self) -> Result<()> {
+        if self.text_show_count != 0 {
+            return Err(unsupported_error(
+                "M1 supports exactly one text-show operation per page",
+            ));
+        }
+        self.text_show_count += 1;
+        Ok(())
+    }
+
+    /// STREAM-11：`TJ` 数组里合法的元素只有字符串与数字。别的类型跳过并记一次
+    /// 恢复，字距按 0 计——规范没有给出别的可推断值，而整条 `TJ` 一起丢会连带
+    /// 丢掉渲染器确实画出来的字符。
+    fn show_text_array(&mut self, operands: &[Token]) -> Result<()> {
+        let (Some(first), Some(last)) = (operands.first(), operands.last()) else {
+            return Err(walk_error("TJ requires an array operand"));
+        };
+        if !matches!(first.kind, TokenKind::CompositeDelimiter)
+            || !matches!(last.kind, TokenKind::CompositeDelimiter)
+            || operands.len() < 2
+        {
+            return Err(walk_error("TJ operand is not a bracketed array"));
+        }
+        for element in &operands[1..operands.len() - 1] {
+            match &element.kind {
+                TokenKind::Bytes(bytes) => {
+                    self.show_text(bytes, element.span.start, element.span.end)?;
+                }
+                TokenKind::Number(adjustment) => {
+                    let shift = -adjustment * self.state.font_size / 1000.0;
+                    self.state.text_matrix = self.state.text_matrix.translate(shift, 0.0);
+                }
+                // 扁平 token 流里嵌套数组只表现为一个多余的分隔符。把它当成可跳过的
+                // 元素会把内层的数字悄悄当成字距，位置就错了——那不是恢复，是编造。
+                TokenKind::CompositeDelimiter => {
+                    return Err(unsupported_error(
+                        "M1 does not yet handle arrays nested inside TJ",
+                    ));
+                }
+                TokenKind::Name(_) | TokenKind::Operator(_) => {
+                    self.recoveries.insert(RecoveryKind::SkippedTjElement);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -598,11 +675,32 @@ mod tests {
         fixture_path("unit-base-01-single-line")
     }
 
+    /// 把一段 content stream 装进钉死的单行 fixture 再走查。用同一份字体与页面，
+    /// 所以两段程序的走查结果可以逐字符直接比较。
+    fn walk_program(program: &[u8]) -> Result<PageWalk> {
+        let mut document = Document::load(fixture()).unwrap();
+        document
+            .get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(program.to_vec());
+        let page_id = document.get_pages()[&1];
+        walk_page(&document, page_id)
+    }
+
+    fn text_of(walk: &PageWalk) -> String {
+        walk.characters
+            .iter()
+            .filter_map(|character| character.unicode)
+            .collect()
+    }
+
     #[test]
     fn production_walk_reads_the_exact_single_line_without_the_poc() {
         let document = Document::load(fixture()).unwrap();
         let page_id = document.get_pages()[&1];
-        let characters = walk_page(&document, page_id).unwrap();
+        let characters = walk_page(&document, page_id).unwrap().characters;
         assert_eq!(
             characters
                 .iter()
@@ -641,6 +739,7 @@ mod tests {
             let page_id = document.get_pages()[&1];
             let text = walk_page(&document, page_id)
                 .unwrap_or_else(|error| panic!("{id} should be accepted: {error}"))
+                .characters
                 .iter()
                 .filter_map(|character| character.unicode)
                 .collect::<String>();
@@ -732,20 +831,89 @@ mod tests {
             assert!(!error.to_string().contains("operator <<"));
         }
 
-        let mut document = Document::load(fixture()).unwrap();
-        document
-            .get_object_mut((9, 0))
+        // `[` 与 `]` 是操作数分隔符，不是操作符——`TJ` 必须拿到它们之间的元素。
+        let walked = walk_program(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm [(MIMUS)] TJ ET").unwrap();
+        assert_eq!(text_of(&walked), "MIMUS");
+        assert_eq!(
+            walked.characters[0].baseline_origin,
+            Point { x: 72.0, y: 120.0 }
+        );
+        assert!(walked.recoveries.is_empty());
+    }
+
+    /// STREAM-11。`/X` 被跳过且字距按 0 计，所以 `MIM` 与 `US` 仍然首尾相接——
+    /// 与同一行写成一个字符串时逐字符同位。
+    #[test]
+    fn production_walk_skips_an_illegal_tj_element_without_moving_the_rest() {
+        let recovered =
+            walk_program(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm [(MIM) /X (US)] TJ ET").unwrap();
+        let intact = walk_program(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET").unwrap();
+
+        assert_eq!(text_of(&recovered), "MIMUS");
+        assert_eq!(
+            recovered.recoveries,
+            BTreeSet::from([RecoveryKind::SkippedTjElement])
+        );
+        let origins = |walk: &PageWalk| {
+            walk.characters
+                .iter()
+                .map(|character| character.baseline_origin)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(origins(&recovered), origins(&intact));
+    }
+
+    /// STREAM-11 的字距元素本身仍要生效：`TJ` 里的数字按 -value/1000 × 字号左移。
+    #[test]
+    fn production_walk_applies_tj_kerning() {
+        let kerned = walk_program(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm [(MI) -1000 (MUS)] TJ ET")
             .unwrap()
-            .as_stream_mut()
+            .characters;
+        let intact = walk_program(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET")
             .unwrap()
-            .set_plain_content(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm [(MIMUS)] TJ ET".to_vec());
-        let page_id = document.get_pages()[&1];
-        let error = walk_page(&document, page_id).unwrap_err();
+            .characters;
+
+        assert_eq!(kerned.len(), intact.len());
+        for index in 0..2 {
+            assert_eq!(kerned[index].baseline_origin, intact[index].baseline_origin);
+        }
+        for index in 2..5 {
+            let shift = kerned[index].baseline_origin.x - intact[index].baseline_origin.x;
+            assert!((shift - 12.0).abs() < 1e-9, "character {index}: {shift}");
+        }
+    }
+
+    /// STREAM-05。`BT` 之前的文本操作符按隐式文本对象处理，字符位置与显式写法
+    /// 完全一致，并且恢复这件事必须被报告出来。
+    #[test]
+    fn production_walk_recovers_text_operators_outside_bt_et() {
+        let orphan = walk_program(b"/F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj\n").unwrap();
+        let intact = walk_program(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET").unwrap();
+
+        assert_eq!(text_of(&orphan), "MIMUS");
+        // 字节跨度当然不同——少了 `BT `，字符串在流里的位置就前移了。
+        // 需要一致的是几何：隐式文本对象的 `Tm` 与显式写法同为单位阵起点。
+        for (recovered, expected) in orphan.characters.iter().zip(&intact.characters) {
+            assert_eq!(recovered.baseline_origin, expected.baseline_origin);
+            assert_eq!(recovered.metric_box, expected.metric_box);
+            assert_eq!(recovered.text_transform, expected.text_transform);
+        }
+        assert_eq!(
+            orphan.recoveries,
+            BTreeSet::from([RecoveryKind::ImplicitTextObject])
+        );
+        assert!(intact.recoveries.is_empty());
+    }
+
+    /// 隐式 `BT` 在流尾隐式闭合，但显式 `BT` 少了 `ET` 依旧是截断信号。
+    #[test]
+    fn an_explicit_text_object_still_needs_its_et() {
+        let error = walk_program(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj").unwrap_err();
         assert_eq!(
             error.reason(),
-            ErrorReason::Input(InputReason::UnsupportedPdf)
+            ErrorReason::Input(InputReason::OperatorWalk)
         );
-        assert!(error.to_string().contains("operator TJ"), "{error}");
+        assert!(error.to_string().contains("ended before ET"), "{error}");
     }
 
     #[test]

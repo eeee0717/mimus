@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use mimus_core::error::{ErrorReason, InternalReason, IoReason, MimusError, Result};
 use mimus_core::event::{
     DiagnosticEvent, Event, EventKind, EventSink, MINIMAL_SERIALIZATION_ERROR_LINE,
-    PageDegradeReason, ResultPayload, Stage, serialize_line,
+    PageDegradeReason, RecoveryKind, ResultPayload, Stage, serialize_line,
 };
 
 type Serializer = fn(&Event) -> Result<Vec<u8>>;
@@ -259,6 +259,17 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 human_page_degrade_reason(reason)
             );
         }
+        DiagnosticEvent::ContentRecovered {
+            page_index,
+            recovery,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[content_recovered]: page {} translated after recovering from malformed content ({})",
+                page_index + 1,
+                human_recovery_kind(recovery)
+            );
+        }
         DiagnosticEvent::DegradationSummary {
             degraded_page_indices,
             degraded_pages,
@@ -282,6 +293,13 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 "warning[dropped_diagnostics]: {count} additional diagnostics dropped"
             );
         }
+    }
+}
+
+const fn human_recovery_kind(recovery: RecoveryKind) -> &'static str {
+    match recovery {
+        RecoveryKind::ImplicitTextObject => "text operators outside BT/ET",
+        RecoveryKind::SkippedTjElement => "an illegal element inside a TJ array",
     }
 }
 
