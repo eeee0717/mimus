@@ -1,0 +1,82 @@
+schema_version = 1
+
+[identity]
+id = "unit-font-escaped-name"
+name = "Escaped font resource name"
+class = "unit"
+legality = "legal"
+cases = ["FONT-01", "FONT-09"]
+priority = "M1"
+variable = "The content stream selects resource F1 through its equivalent escaped spelling /F#31"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-font-escaped-name.pdf"
+pdf_sha256 = "14c6e98eaa8be60f788e332e9b62680fd20cc829825546e509dd5775410bc83f"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d666f6e742d657363617065"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "ESCAPED"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.168, 112.656, 131.136]
+visual_bbox = [73.177734, 119.830078, 111.985219, 128.90625]
+
+[[expected.content_stream]]
+object = 8
+compressed = false
+bytes = """BT
+/F#31 12 Tf
+1 0 0 1 72 120 Tm
+(MIMUS) Tj
+ET
+"""
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 8
+
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 5
+
+[[expected.behaviour]]
+id = "FONT-01-escaped-resource-name"
+assertion = "PDF name escapes are decoded before resource lookup, so /F#31 selects /F1 and yields exactly MIMUS"
+observable_via = "qpdf resource dictionary, literal content bytes, independent text extraction and production walk"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]

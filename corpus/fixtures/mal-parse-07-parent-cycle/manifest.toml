@@ -21,8 +21,8 @@ parent = "unit-parse-07-inherited-page-resources"
 
 [[lineage.mutations]]
 byte_offset = 169
-original_byte = 50
-replacement_byte = 51
+original_bytes = [50]
+replacement_bytes = [51]
 description = "change /Parent 2 0 R to /Parent 3 0 R so page object 3 points to itself"
 
 [[page]]

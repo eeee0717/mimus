@@ -3,8 +3,10 @@ use std::collections::BTreeSet;
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 
+use crate::pdf_stream;
+
 const MAX_CONTENT_BYTES: usize = 16 * 1024 * 1024;
-const MAX_FORM_DEPTH: usize = 32;
+const MAX_FORM_DEPTH: usize = 64;
 const MAX_PAGE_TREE_DEPTH: usize = 128;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -108,7 +110,7 @@ impl Scanner<'_> {
                 }
             };
             let remaining = MAX_CONTENT_BYTES.saturating_sub(data.len());
-            let decoded = match stream.decompressed_content_with_limit(remaining) {
+            let decoded = match pdf_stream::decode(self.document, stream, remaining) {
                 Ok(value) => value,
                 Err(_) => {
                     self.evidence.complete = false;
@@ -369,7 +371,7 @@ impl Scanner<'_> {
             },
             Err(_) => parent_resources,
         };
-        match stream.decompressed_content_with_limit(MAX_CONTENT_BYTES) {
+        match pdf_stream::decode(self.document, stream, MAX_CONTENT_BYTES) {
             Ok(data) => {
                 let mut state = ScanState {
                     rendering_mode,
@@ -496,6 +498,22 @@ mod tests {
             );
             assert_eq!(evidence.classify(), PageClass::Content);
         }
+    }
+
+    #[test]
+    fn non_upright_text_still_counts_as_visible_scan_evidence() {
+        let mut document = Document::with_version("1.7");
+        let page = page_with_content(
+            &mut document,
+            b"BT 0 1 -1 0 100 100 Tm (rotated) Tj ET",
+            Dictionary::new(),
+        );
+
+        let evidence = prescan_page(&document, page);
+
+        assert_eq!(evidence.visible_text_shows, 1);
+        assert_eq!(evidence.invisible_text_shows, 0);
+        assert_eq!(evidence.classify(), PageClass::Content);
     }
 
     #[test]

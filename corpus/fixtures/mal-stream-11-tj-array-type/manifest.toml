@@ -1,0 +1,58 @@
+schema_version = 1
+[identity]
+id = "mal-stream-11-tj-array-type"
+name = "TJ array carrying an illegal element type"
+class = "mal"
+legality = "malformed"
+cases = ["STREAM-11"]
+priority = "M1"
+variable = "The page Contents reference selects the stream whose TJ array holds a name between two strings"
+[source]
+method = "byte-mutation"
+pdf = "mal-stream-11-tj-array-type.pdf"
+pdf_sha256 = "cc35590495c63571d8c033327b5db20cec56d711711e3238c537a13364ab93f8"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+[lineage]
+parent = "unit-stream-00-malformed-parent"
+[[lineage.mutations]]
+byte_offset = 210
+original_bytes = [48]
+replacement_bytes = [57]
+description = "change /Contents 10 0 R to 19 0 R, selecting the mistyped-TJ candidate"
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "content-semantics:STREAM-11"
+renderer_diagnostic = "syntax error in array"
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+[[expected.behaviour]]
+id = "STREAM-11-skip-element"
+assertion = "The name element is skipped with a warning and contributes zero adjustment, so MIM and US stay contiguous and the run reads MIMUS at (72,120)"
+observable_via = "production walk character sequence and per-character origins"
+[[expected.behaviour]]
+id = "STREAM-11-diverges-from-mupdf"
+assertion = "MuPDF abandons the whole page on this array; mimus deliberately recovers, so the two disagree about how much text the page contains"
+observable_via = "mutool trace reports a syntax error while the production walk still yields five characters"
+[[expected.behaviour]]
+id = "STREAM-11-run-survives"
+assertion = "One mistyped element does not discard the whole TJ, so no character is lost"
+observable_via = "character count equals the byte-identical parent's five characters"
+[oracle]
+checks = ["determinism","legality","page-geometry","render-diagnostic"]
+[[adjudication]]
+date = "2026-08-24"
+issue = "STREAM-11 allows skipping the bad element or discarding the whole TJ"
+resolution = "Skip the element with zero adjustment: zero is the only adjustment the spec lets us infer, and skipping keeps the run intact"
+[[adjudication]]
+date = "2026-08-24"
+issue = "MuPDF turned out to reject the page outright, so it cannot serve as a raster reference and it contradicts the recovery chosen above"
+resolution = "Keep the recovery and record the divergence as an asserted behaviour: MuPDF's refusal is evidence the stream is genuinely malformed, not evidence that dropping the text is correct"

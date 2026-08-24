@@ -1,0 +1,55 @@
+schema_version = 1
+
+[identity]
+id = "mal-geom-02-rotate-45"
+name = "Page Rotate value is not a quarter turn"
+class = "mal"
+legality = "malformed"
+cases = ["GEOM-04"]
+priority = "M1"
+variable = "The page dictionary changes /Rotate from legal 90 to unsupported 45"
+
+[source]
+method = "byte-mutation"
+pdf = "mal-geom-02-rotate-45.pdf"
+pdf_sha256 = "0c12e88e55b345e28c2042632ab991bc46ba32191d92b3a7a263488185c8bb65"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+
+[lineage]
+parent = "unit-doc-04-rotate90-compensated"
+
+[[lineage.mutations]]
+byte_offset = 190
+original_bytes = [57, 48]
+replacement_bytes = [52, 53]
+description = "change /Rotate 90 to /Rotate 45 without changing the page dictionary length"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 612.0, 792.0]
+rotate = 45
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "content-semantics:GEOM-04"
+
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+
+[[expected.degradation]]
+scope = "page"
+page = 0
+reason = "unsupported_rotation"
+
+[[expected.behaviour]]
+id = "GEOM-04-unsupported-rotation"
+assertion = "Production geometry resolution emits UnsupportedRotation for page 0 and republishes the original /Rotate 45 page unchanged"
+observable_via = "page_degraded/degradation_summary diagnostics and byte-identical output"
+
+[oracle]
+checks = ["determinism", "legality", "render"]

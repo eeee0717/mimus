@@ -10,15 +10,15 @@ variable = "The page Contents reference selects two unmatched Q operators"
 [source]
 method = "byte-mutation"
 pdf = "mal-stream-05-unbalanced-Q.pdf"
-pdf_sha256 = "02a5d8872b72940d3e8b496ee6b7605c12f09d10fb3f7f9e0473573572697a30"
+pdf_sha256 = "bc743b3fffde53cbb6f0d504b3effbba4cd0d76254c4447c3b508dd9fb229ac2"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
 [lineage]
 parent = "unit-stream-00-malformed-parent"
 [[lineage.mutations]]
 byte_offset = 210
-original_byte = 48
-replacement_byte = 51
+original_bytes = [48]
+replacement_bytes = [51]
 description = "change /Contents 10 0 R to 13 0 R, selecting the unmatched-Q candidate"
 [[page]]
 index = 0

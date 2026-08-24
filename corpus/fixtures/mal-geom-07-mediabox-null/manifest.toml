@@ -1,0 +1,55 @@
+schema_version = 1
+
+[identity]
+id = "mal-geom-07-mediabox-null"
+name = "MediaBox containing a null component"
+class = "mal"
+legality = "malformed"
+cases = ["GEOM-01"]
+priority = "M1"
+variable = "The second MediaBox component is the PDF null object instead of a number"
+
+[source]
+method = "byte-mutation"
+pdf = "mal-geom-07-mediabox-null.pdf"
+pdf_sha256 = "497bfab17535772a2c7eba8567f03e5506e7dc997e9a56226badc41df1e50686"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+
+[lineage]
+parent = "unit-geom-06-mediabox-double-space"
+
+[[lineage.mutations]]
+byte_offset = 171
+original_bytes = [32, 48, 48, 48]
+replacement_bytes = [110, 117, 108, 108]
+description = "replace the zero token and its leading whitespace with a null MediaBox component"
+
+[[page]]
+index = 0
+media_box = [0.0, "null", 612.0, 792.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "content-semantics:GEOM-01"
+
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+
+[[expected.degradation]]
+scope = "page"
+page = 0
+reason = "bad_page_geometry"
+
+[[expected.behaviour]]
+id = "GEOM-01-null-component"
+assertion = "Production geometry resolution emits BadPageGeometry for page 0 and republishes its content stream unchanged"
+observable_via = "page_degraded/degradation_summary diagnostics and decoded output stream"
+
+[oracle]
+checks = ["determinism", "legality", "render"]

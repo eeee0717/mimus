@@ -1,0 +1,47 @@
+schema_version = 1
+[identity]
+id = "mal-font-no-descendant-subtype"
+name = "CID descendant without Subtype"
+class = "mal"
+legality = "malformed"
+cases = ["FONT-07"]
+priority = "M1"
+variable = "The descendant CIDFont Subtype key is renamed and therefore absent"
+[source]
+method = "byte-mutation"
+pdf = "mal-font-no-descendant-subtype.pdf"
+pdf_sha256 = "6a7e69b5b01c44d6b3a18c085187a42490fd9c54ff9ebe81f6eae3a09f3666be"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+[lineage]
+parent = "unit-cmap-01-identity-no-tounicode"
+[[lineage.mutations]]
+byte_offset = 3465
+original_bytes = [83]
+replacement_bytes = [88]
+description = "rename descendant /Subtype to /Xubtype without changing its remaining value"
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+block = []
+declared_failure = "content-semantics:FONT-07"
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+[[expected.degradation]]
+scope = "paragraph"
+page = 0
+paragraph = 0
+reason = "unsupported_font"
+[[expected.behaviour]]
+id = "FONT-07-descendant-subtype"
+assertion = "A missing CIDFont Subtype is not guessed as a simple font; the paragraph is explicitly preserved"
+observable_via = "single-byte lineage, qpdf descendant dictionary and production degradation summary"
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "render"]

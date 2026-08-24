@@ -1,0 +1,55 @@
+schema_version = 1
+
+[identity]
+id = "mal-xobj-bbox-null"
+name = "Form XObject BBox contains null"
+class = "mal"
+legality = "malformed"
+cases = ["XOBJ-05"]
+priority = "M1"
+variable = "The page invokes dormant Form X2 whose BBox contains a null component"
+
+[source]
+method = "byte-mutation"
+pdf = "mal-xobj-bbox-null.pdf"
+pdf_sha256 = "cd353519de53667d71aa37f7812b98c75362f231e9abee0ce1c301d6a6e0756a"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+
+[lineage]
+parent = "unit-xobj-m1-switchboard"
+
+[[lineage.mutations]]
+byte_offset = 4024
+original_bytes = [48]
+replacement_bytes = [50]
+description = "change /X0 Do to /X2 Do, selecting the null-BBox Form"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "content-semantics:XOBJ-05"
+
+[[expected.degradation]]
+scope = "page"
+page = 0
+reason = "bad_form_b_box"
+
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+
+[[expected.behaviour]]
+id = "XOBJ-05-null-bbox"
+assertion = "The null BBox produces bad_form_bbox, skips the Do atomically, and preserves the page without panicking or failing the document"
+observable_via = "degradation_summary, output byte equality, and bounded completion"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "render"]

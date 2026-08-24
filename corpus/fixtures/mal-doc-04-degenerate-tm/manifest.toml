@@ -1,0 +1,56 @@
+schema_version = 1
+
+[identity]
+id = "mal-doc-04-degenerate-tm"
+name = "Degenerate all-zero text matrix"
+class = "mal"
+legality = "malformed"
+cases = ["DOC-04"]
+priority = "M1"
+variable = "The only text matrix has an all-zero linear component and cannot locate its glyph"
+
+[source]
+method = "byte-mutation"
+pdf = "mal-doc-04-degenerate-tm.pdf"
+pdf_sha256 = "b0c92000e5f21dd238ff6899e3c74573f6c2178ba7ea566f7d8b2e63e4a40529"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+
+[lineage]
+parent = "unit-doc-04-rotated-90"
+
+[[lineage.mutations]]
+byte_offset = 3288
+original_bytes = [48, 32, 49, 32, 45, 49, 32, 48, 32, 49, 48, 48, 32, 55, 48, 48]
+replacement_bytes = [48, 32, 48, 32, 48, 32, 48, 32, 49, 48, 48, 32, 55, 48, 48, 32]
+description = "replace the text matrix with 0 0 0 0 100 700 Tm while preserving stream length"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 612.0, 792.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "content-semantics:DOC-04"
+
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+
+[[expected.degradation]]
+scope = "paragraph"
+page = 0
+paragraph = 0
+reason = "unlocatable"
+
+[[expected.behaviour]]
+id = "DOC-04-unlocatable"
+assertion = "Production walk retains the source character, marks paragraph 0 Unlocatable, makes no translation call, and preserves the input stream"
+observable_via = "mimus inspect IL, degradation_summary, translator call log, and decoded output stream"
+
+[oracle]
+checks = ["determinism", "legality", "render"]

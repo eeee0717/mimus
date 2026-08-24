@@ -4,14 +4,14 @@ id = "unit-stream-00-malformed-parent"
 name = "Legal switchboard parent for operator mutations"
 class = "unit"
 legality = "legal"
-cases = ["STREAM-02","STREAM-04","STREAM-06","PARSE-08"]
+cases = ["STREAM-02","STREAM-04","STREAM-05","STREAM-06","STREAM-07","STREAM-08","STREAM-11","PARSE-08"]
 priority = "M0"
 variable = "The page references the sole well-formed stream while malformed candidates remain unreferenced"
 [source]
 method = "exact-writer"
 generator = "corpus-exact-writer-v1"
 pdf = "unit-stream-00-malformed-parent.pdf"
-pdf_sha256 = "bc752a5b09476a2aa651143b7334faa47fb58ffbacc59b56579a1f62985c0883"
+pdf_sha256 = "579674877294cba3740fe937a6c7bd02e064aa767d913f5402d61f280a6501ea"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
 [[page]]
@@ -25,7 +25,7 @@ visual_tolerance_pt = 0.01
 [expected.pdf]
 version = "1.7"
 header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
-object_numbers = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+object_numbers = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21]
 root_object = 1
 xref_kind = "table"
 trailer_id_hex = "756e69742d73747265616d2d30302d6d"
@@ -60,7 +60,7 @@ path = ["/Contents"]
 to_object = 10
 [[expected.behaviour]]
 id = "M0-malformed-parent"
-assertion = "The legal parent renders only object 10; each child changes the final digit of that one reference"
+assertion = "The legal parent renders only object 10; each child changes only the two-digit Contents reference"
 observable_via = "qpdf xref/object graph, exact byte diff, and independent renderers"
 [oracle]
 checks = ["determinism","legality","page-geometry","structure","hand-written-geometry","pdf-bytes","pdf-structure","render"]

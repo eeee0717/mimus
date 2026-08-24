@@ -17,8 +17,8 @@ fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f
 parent = "unit-xobj-05-scope-parent"
 [[lineage.mutations]]
 byte_offset = 3410
-original_byte = 81
-replacement_byte = 49
+original_bytes = [81]
+replacement_bytes = [49]
 description = "change the child Form closing Q to operand 1, leaving one q and one trailing operand in child scope"
 [[page]]
 index = 0

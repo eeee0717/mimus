@@ -1,0 +1,55 @@
+schema_version = 1
+
+[identity]
+id = "mal-xobj-bad-matrix"
+name = "Form XObject Matrix has four elements"
+class = "mal"
+legality = "malformed"
+cases = ["XOBJ-06"]
+priority = "M1"
+variable = "The page invokes dormant Form X3 whose Matrix contains only four numbers"
+
+[source]
+method = "byte-mutation"
+pdf = "mal-xobj-bad-matrix.pdf"
+pdf_sha256 = "1f6b18a25d25a133c3e6e76defa6ac10fee39865d489be9d4489c90033126c8e"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+
+[lineage]
+parent = "unit-xobj-m1-switchboard"
+
+[[lineage.mutations]]
+byte_offset = 4024
+original_bytes = [48]
+replacement_bytes = [51]
+description = "change /X0 Do to /X3 Do, selecting the four-element Matrix Form"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "content-semantics:XOBJ-06"
+
+[[expected.degradation]]
+scope = "page"
+page = 0
+reason = "bad_form_matrix"
+
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+
+[[expected.behaviour]]
+id = "XOBJ-06-bad-matrix"
+assertion = "The four-element Matrix produces bad_form_matrix, skips the Do atomically, and never substitutes an identity matrix"
+observable_via = "degradation_summary, output byte equality, and absence of Form text in production IL"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "render"]

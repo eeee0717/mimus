@@ -120,7 +120,7 @@ fixture 分两类：
 |---|---|---|
 | **精确几何 fixture** | 手写 content stream + 自研确定性对象 writer（裸字节） | 需要逐字节可控、可读、可 diff；任何库都会带来不受控的对象重排与默认值 |
 | **现实排版 fixture** | 固定版本的 Typst 或 LaTeX（pdfTeX / XeTeX / LuaTeX） | 需要真实排版引擎的产物特征（字体嵌入方式、CMap 风格、断行痕迹），手写造不出来 |
-| **畸形 fixture** | 从**一个合法最小 PDF** 做**单变量字节级变异** | 每个畸形 fixture 必须有可追溯的合法父本 + 一处明确变异，才能断言"是这处变异导致了这个行为" |
+| **畸形 fixture** | 从**一个合法最小 PDF** 做**单变量字节级变异**（一处连续等长区间，见 §2.5） | 每个畸形 fixture 必须有可追溯的合法父本 + 一处明确变异，才能断言"是这处变异导致了这个行为" |
 | **工具生成入库 fixture** | 固定版本外部工具一次性生成，记录结构化 argv 与入库二进制 SHA-256 | 仅用于加密等工具自身引入随机字节、且被测行为不要求往返重现的输入；不得伪装成确定性生成 |
 
 **禁止事项**：
@@ -141,12 +141,20 @@ indirect object、经典 xref、trailer、`startxref` 和 EOF；字典项与 con
 或替换失败时不得留下半成品，也不得破坏既有目标。`corpus build` 负责复现提交的
 PDF，`corpus determinism` 对同一配方连续生成两次并比较 SHA-256。
 
-#### 单字节畸形派生接口
+#### 畸形派生接口：一处等长字节区间
 
 畸形 fixture 的 manifest 必须记录合法父本 fixture ID，并且恰好包含一条变异记录：
-唯一字节偏移、原字节、替换字节和变异语义。派生时先核对父本在该偏移的原字节，产出
-后再比较完整父子字节串，要求长度不变且差异集合严格等于该唯一偏移。这样后续畸形
-fixture 可以复用同一 API，同时仍满足 §2.4 的单变量原则。
+起始字节偏移、原字节序列、替换字节序列和变异语义。派生时先核对父本在该区间的原
+字节，产出后再比较完整父子字节串，要求**长度不变**且区间之外没有任何差异。
+
+区间可以长于一个字节。本文档钉死的若干畸形取值——`/Rotate 45`（GEOM-04）、退化
+矩阵 `0 0 0 0 100 700 Tm`（DOC-04）、含 `null` 分量的 MediaBox（GEOM-01）——单个
+字节表达不出来；就近改成单字节可达的值会让 fixture 与需求文档永久错位。**等长**
+这条不放宽：改变文件长度会让其后所有 xref 偏移失效，畸形档就会以「xref 坏了」
+而不是以声明的那种方式失败。必要时在父本里预留等宽的字面量（例如让被替换的数字
+与 `null` 同宽）。
+
+一条记录、一处连续区间、一个语义变量——§2.4 的单变量原则不变。
 
 现实排版引擎的选择（全部已装并钉死版本，见 `corpus/toolchain.toml`）：
 
@@ -209,6 +217,7 @@ fixture 可以复用同一 API，同时仍满足 §2.4 的单变量原则。
 - **谱系**（畸形 fixture 必填）：合法父本的 fixture ID + 变异的字节偏移与语义描述
 - **页面几何**：逐页 MediaBox、CropBox、`/Rotate`
 - **期望内容**：按 §2.2 分列的 baseline origin / 度量盒 / visual bbox；字符与其 Unicode；XObject 嵌套层级与逐层矩阵
+- **生产分类与降级**：需要由生产路径裁定时，以 `[[expected.transform]]` / `[[expected.degradation]]` 声明，不得只留在散文行为断言里
 - **期望行为**：mimus 处理后**独立可观察**的断言（见 §2.9）
 - **oracle**：本 fixture 适用的验证手段清单
 - **优先级**：M0 / M1 / M3
@@ -222,10 +231,50 @@ parent = "unit-base-01-single-line"
 
 [[lineage.mutations]]
 byte_offset = 123
-original_byte = 84
-replacement_byte = 81
+original_bytes = [84]
+replacement_bytes = [81]
 description = "replace the selected T operator byte with Q"
 ```
+
+多字节区间同形，两个数组等长即可：
+
+```toml
+[[lineage.mutations]]
+byte_offset = 210
+original_bytes = [57, 48]        # "90"
+replacement_bytes = [52, 53]     # "45"
+description = "make /Rotate a non-multiple of 90"
+```
+
+字符朝向期望引用既有 block，并精确列出该 block 内的字符下标。`rotated` / `skewed`
+必须带有限的 `degrees`（绝对值不超过 180）；`upright` / `mirrored` 不得带。下标不得
+越界或重复：
+
+```toml
+[[expected.transform]]
+block = "T1"
+char_indices = [0, 1]
+kind = "rotated"               # upright | rotated | mirrored | skewed
+degrees = 45.0
+```
+
+降级期望区分页与段。页级不得带 `paragraph`，reason 只能取
+`content_stream_syntax` / `nesting_too_deep` / `content_decode` /
+`bad_page_geometry` / `unsupported_rotation` / `missing_resource` /
+`bad_form_bbox` / `bad_form_matrix` / `x_object_not_a_stream`；段级必须带
+`paragraph`，reason 只能取 `unreliable_unicode` / `unsupported_font` /
+`non_positive_advance` / `unlocatable`：
+
+```toml
+[[expected.degradation]]
+scope = "paragraph"             # page | paragraph
+page = 0
+paragraph = 0
+reason = "unlocatable"
+```
+
+TOML 没有 null 标量。仅对声明 `bad_page_geometry` 页级降级的 malformed fixture，
+`page.media_box` 可用字符串 `"null"` 表达 PDF 的 `null` token；其他字符串一律非法。
 
 ### 2.8 独立验收
 
@@ -249,9 +298,21 @@ description = "replace the selected T operator byte with Q"
 4. **视觉核验**：独立渲染器出图，人工看一次，并存下参考栅格哈希供回归；
 5. **裁定与记录**：任何不一致按 §2.1 裁定并留痕。
 
+#### 声明失败的三种形态
+
+第 2 步的"声明的方式"分三类，由 `expected.declared_failure` 的前缀选出，因为**容器合法但 content stream 畸形**的 fixture 无法用 qpdf 的失败来定义自己：
+
+| `declared_failure` 形态 | 含义 | qpdf 期望 | 谁来裁定语义 |
+|---|---|---|---|
+| 自由文本（如 `outline cycle`） | 容器本身非法 | 必须失败，且报告含该字符串 | qpdf 报告 |
+| `operator-walk:<诊断 ID>` | 容器合法，畸形在 content stream 里 | 必须能装载 | 冻结的 M0 PoC 走查器（`[oracle] checks` 必须含 `operator-walk`） |
+| `content-semantics:<case 号>` | 同上 | 必须能装载 | mimus 生产路径测试（`[oracle] checks` **不得**含 `operator-walk`） |
+
+第三种是 2026-08-24 随 #18 加入的。`operator-walk:*` 是 M0 PoC 的诊断命名空间且已冻结，新的生产行为不能挤进去；但这类 fixture 与它对 qpdf 的期望完全一致，所以只分叉「谁裁定」这一件事。对应地，这类 fixture 的期望行为写在 `[[expected.behaviour]]` 里，由 `mimus-core` 单元测试或 `mimus` CLI 生产路径测试断言；可机器比较的分类与降级另写入 `[[expected.transform]]` / `[[expected.degradation]]`。`corpus verify` 只负责确定性、容器合法性、页面几何与独立渲染等事实层门禁。
+
 #### oracle 自身的性质（2026-08-21 实测，写 fixture 时必须知道）
 
-两个解析器不是等价的两份「正确答案」，它们各自只在某些量上可信。以下五条是写第一批 fixture 时逐条测出来的，每条都改变了门禁的实现或某份 fixture 的检查清单：
+两个解析器不是等价的两份「正确答案」，它们各自只在某些量上可信。以下条目是写 fixture 时逐条测出来的，每条都改变了门禁的实现或某份 fixture 的检查清单：
 
 | # | 观测 | 影响 |
 |---|---|---|
@@ -261,6 +322,8 @@ description = "replace the selected T operator byte with Q"
 | O4 | poppler 的版面分析在两栏的块**逐行对齐成网格**时退化为行优先；栏间距 20pt→80pt 均无变化，判据是行对齐而非栏间距。 | `unit-order-01/02/03` 的纵向槽位改成真实双栏正文的样子（只有首行对齐）。网格式对齐是表格版面，本不该出现在双栏正文 fixture 里。 |
 | O5 | 栏间距压到 8pt（约 0.8 字宽）时 poppler 把整页并成**一个**跨栏的块（`unit-layout-08` 上是 11 行、x 跨度 30..519.76pt），mutool 仍给出干净的 6 块。O4 说的是「栏间距在 20–80pt 区间内不影响」，这条说的是「到某个下限就影响」，两者不矛盾。 | `unit-layout-08-narrow-gutter` 的块划分无法双解析器裁定，改用 `glyphs`。分歧本身就是 LAYOUT-08 要暴露的现象。 |
 | O6 | MuPDF `stext` 的字符 quad 横向覆盖 advance 范围，不是字形轮廓的真实墨迹外接框；两者对 `MIMUS` 等文本可明显不同。 | 精确 fixture 的 visual bbox 不再用 `stext` quad 裁定。manifest 先按钉死字体轮廓手推，验收时用 `mutool draw -F svg` 导出的字形 path，并计算直线、二次及三次 Bezier 的真实极值；空白与注释外观不计入文本墨迹。现实排版 fixture 继续把 stext quad 作为 §2.1 双解析器裁定下的近似值。 |
+| O7 | Poppler 的 word bbox 对 45° 旋转与 shear 不是稳定的字体度量盒；它混入词聚合/投影策略，不能从 descriptor ascent/descent 与 advance 复算。 | DOC-04 任意变换 fixture 不用 Poppler word box 裁定 metric box，改启用 `transformed-text-geometry`：qpdf 读取 descriptor ascent/descent，MuPDF trace 提供逐字 `trm`、origin 与 advance，组合出字体度量四角的页面空间外接框；baseline 用 trace origin，visual bbox 仍由 MuPDF SVG 轮廓独立核验。Poppler 只保留作差分信号。 |
+| O8 | `mutool pages` 只显示页面字典上的本地 CropBox，不显示从 `/Pages` 继承的 CropBox。 | 页树继承由 qpdf JSON 对象图沿 `/Parent`（深度 128、去环）解析；MuPDF stext 的有效观看框作第二份证据。manifest 有继承 CropBox 而 `mutool pages` 未列出时不再判矛盾。 |
 
 还有一条关于字体而非解析器的：mutool 的字形 quad（墨迹盒）会比 poppler 的词盒（度量盒）略大，Typst 内嵌字体下 < 0.05pt，TeX Live 的 Computer Modern Type1 下约 0.22pt。因此 manifest 把「两个解析器报同一个量」的容差（`tolerance_pt`）与「墨迹盒允许越出度量盒的余量」（`ink_margin_pt`）分开声明——用同一个数去卡两件事，要么放松了 x 跨度判据，要么把正常的字体度差判成解析器不一致。
 
@@ -1495,7 +1558,7 @@ BabelDOC 的输出**不得作为唯一正确性 oracle**。它是参考实现而
 | `unit-geom-03-nonzero-origin-raster` | GEOM-05 | MediaBox 原点非零且无 CropBox |
 | `unit-geom-04-oversized-page` | GEOM-05 | 接近规范上限的超大页面 |
 
-`mal-geom-02-rotate-45` **推迟到实验 2**：按 §2.5 它必须从合法父本做字节级变异，而字节级变异要等自建的确定性 writer 就绪。
+`mal-geom-02-rotate-45` **推迟到实验 2**：按 §2.5 它必须从合法父本做字节级变异，而字节级变异要等自建的确定性 writer 就绪。（2026-08-24 补记：writer 早已就绪，真正卡住它的是当时「恰一个字节」的派生接口——`90` → `45` 要改两个字节。§2.5 扩展为一处等长区间后，本 fixture 在 #17 落地。）
 
 #### 实验 1 · 红利清单验证批（§3.10 的 D1–D12）
 

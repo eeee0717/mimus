@@ -47,6 +47,8 @@
 | 38 | 引擎 trait 表面按 **owned snapshot** 设计：快照类型由 `mimus-core` 自定义，`pdfium-render` 只出现在 `engine/` 实现模块，pass 代码不得引用后端类型；替换后端（如 firecrawl-pdfium）= 重实现 trait + 复跑资格矩阵，pass 代码零改动 | [ADR-0010](docs/adr/0010-engine-owned-snapshot.md) |
 | 39 | CLI 机器协议 v2：`inspect` 只读至 ParagraphFind；typed diagnostic 与结构化进度走 stdout NDJSON，人类 renderer 走 stderr；正常可写流以恰一个 result/error 终结；EPIPE、部分写、Io/Internal 退出码和逐 pass debug 合同统一收口 | [ADR-0011](docs/adr/0011-cli-machine-protocol.md) |
 | 40 | 扫描件判定：单页判据=有图像且 0 可见文字对象（`Tr 3`/`Tr 7` 不算可见，非直立计入，不用光栅）；文档级=扫描页 ≥ 80% × 内容页（内容页=总页−空白页，含等于）即整份拒绝（`Input/scanned_pdf`、退出码 2），低于阈值继续、扫描/空白页豁免严格 walk 整页透传；数据来自宽容预扫（严格 walk 不动、挪到 ScanDetect 后），公开 IL 保持 v1；统计以 error 字段 `scanned_pages`/`total_pages` + 单条汇总 diagnostic 公开（v2 兼容扩展） | [ADR-0012](docs/adr/0012-scan-detection-policy.md) |
+| 41 | 写回改为**区间替换**（只替换被翻译单元的 text-show 操作数区间，其余原样透传），取代整流重建——这是拆除三堵 fail-closed 守卫而不破坏 Write 像素等值合同的前提；走查从白名单 fail-closed 变为有界宽容（恢复语义与边界数值见 ADR）；降级分文档/页/段三级，页级=不产生 rewrite 天然保留原流、段级=`Paragraph.preserved` 且区间不替换；「单元」是段内连续同因字符区间的**派生分组**，不是 IL 层级；非直立判定输入改为 `R(/Rotate)∘CTM∘Tm` 线性部分，页面几何事实层改由 lopdf 提供、engine 几何降为交叉证据 | [ADR-0013](docs/adr/0013-bounded-walk-and-graded-degradation.md) |
+| 42 | 字体/CMap 可靠性判定链：ToUnicode → 嵌入字体 cmap → 标准编码链，任一层失败即 `unicode=None`，链中**无「CID 当 Unicode」分支**；段内存在不可解码字符、advance 非正或字体不可解析即整段保留原文；M1 预定义 CMap 只支持 Identity 及别名，其余显式降级；缺 `/Widths` 走段级降级（PDFium glyph-width 未绑定）；CJK 输入 fixture 用 Noto Sans SC 确定性子集入库 | [ADR-0014](docs/adr/0014-font-decoding-reliability.md) |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
@@ -80,7 +82,10 @@
 - **文本载体 enum**：tagged enum，V1 仅 `Chars`，V2 加 `OcrLine`（扫描预留）。
 - **非直立文本（non-upright text）**：旋转 ≠ 0°、镜像（变换行列式为负）或斜切 > 20° 的字符，三者合并为一个概念。判定在**视觉页框**内做——即先应用页面 `/Rotate`，否则一张 `/Rotate 90` 的页面会整篇被误判为旋转。直立容差 **±0.1°**（沿用 BabelDOC 的实测值），**180° 算非直立**，所以直立窗口只有 `0° ± 0.1°`。斜切 ≤ 20° 且无旋转/镜像分量的**仍算直立、照常翻译**（伪斜体在真实 PDF 中太常见，且字形样式本就按既有 CJK 政策丢弃）。
 - **TextTransform**：非直立判定在 IR 中的载体，和类型 `{ Upright, Rotated(deg), Mirrored, Skewed(deg) }`（ADR-0007 §5）。
-- **单元级隔离**：非直立检测是**字符级**的，但隔离是**单元级**的——非直立字符成为独立的 passthrough 单元，同段其余字符照常翻译。非直立字符**参与** layout 归属、**不参与** fallback 聚类、**计入**扫描件判定的文本对象计数。
+- **单元（unit）**：段内**连续、同一隔离原因**的字符区间（非直立、不可见 `Tr 3`/`Tr 7`、不可定位等）。它**不是 IL 层级**——IL 保持 Document → Page → Paragraph → Char 四级，单元由 Typeset 从 `Char.text_transform` 与可见性标记动态聚合（ADR-0013 §2）。
+- **单元级隔离**：非直立检测是**字符级**的，但隔离是**单元级**的——非直立字符成为独立的 passthrough 单元，同段其余字符照常翻译。落地形式是「该单元的字节区间不进替换集」。非直立字符**参与** layout 归属、**不参与** fallback 聚类、**计入**扫描件判定的文本对象计数。
+- **段级保留**：整段不翻译、原文原样保留，载体是 `il::Paragraph.preserved`（可选字段，IL schema 仍为 v1），此时 `translated_text` 恒为 `None`。触发条件见 ADR-0014 §4。
+- **页级降级**：该页不产生 `PageRewrite`，增量写回天然逐字节保留其原 content stream；其余页继续处理，受影响页号进汇总 diagnostic（ADR-0013 §2/§5）。
 - **fallback_line**：版面模型漏检区域由字符聚类兜底生成的伪 layout，防漏检段落丢失。
 
 ### 版面与推理
@@ -92,6 +97,7 @@
 ### 写回
 
 - **增量改写（incremental rewrite）**：保留原 PDF 全部对象，只改 content stream、追加字体。**V1 写回模型**（lopdf）。
+- **区间替换（span splice）**：页面输出 content = 原解码流字节，只把被翻译单元的 text-show 操作数区间换成新字节，其余（未知操作符、图形状态、内联图像、Form 调用、隔离单元、保留段）原样透传。取代「从 IL 重建整流」，是有界宽容走查能与 Write 像素等值验证共存的前提（ADR-0013 §1）。多 Contents 页逐流替换、不合并。
 - **从零重建（rebuild）**：全新构建文档，扫描件路径（V2，krilla/pdf-writer 一类）。两模型不可互换。
 
 ### 翻译层
@@ -135,7 +141,7 @@
 
 ## 待决清单
 
-与 `docs/03-corpus-requirements.md` §6 同源，此处为索引。2026-08-21 的设计会话已收口其中三条：加密 PDF（决策 #31 / ADR-0009）、非直立文本（决策 #32）、M0 fixture 排期（决策 #33）。2026-08-23 的设计会话（#16 收口）补上扫描件判定政策（决策 #40 / ADR-0012）。
+与 `docs/03-corpus-requirements.md` §6 同源，此处为索引。2026-08-21 的设计会话已收口其中三条：加密 PDF（决策 #31 / ADR-0009）、非直立文本（决策 #32）、M0 fixture 排期（决策 #33）。2026-08-23 的设计会话（#16 收口）补上扫描件判定政策（决策 #40 / ADR-0012）。2026-08-24 的 #17/#18/#19 联合设计会话补上有界走查与分级降级（决策 #41 / ADR-0013）、字体可靠性判定链（决策 #42 / ADR-0014），并收口 CJK fixture 字体选型。
 
 **仍需决策者拍板（0 条）**
 
@@ -146,7 +152,7 @@
 - ~~确定性生成的引擎侧机制尚未实测~~ → 已收口（决策 #34）：三条配方实测通过，XeTeX 出局。
 - ~~验收工具链缺四件（qpdf / poppler / mupdf-tools / Typst）~~ → 已收口（决策 #34）：四件齐备并钉死版本。
 - ~~PP-DocLayoutV3 的 25 类是否含目录类未确认~~ → 已结清（M0 实验 1）：**`content` 就是目录类**，`unit-para-04-toc` 上 0.955 一个框盖住整个目录；但模型只给整块框，条目与页码的切分仍需自行实现。见 [docs/04-m0-experiment-1.md](docs/04-m0-experiment-1.md) §4 D7。
-- CJK 输入 fixture 的字体选型 → M1 #19 执行（溯源手段已改为对象号 + 子集标签，不再依赖字体族差异）。
+- ~~CJK 输入 fixture 的字体选型~~ → 2026-08-24 收口（决策 #42 / ADR-0014 §6）：Noto Sans SC Regular 的确定性子集入库，沿用 `MimusExact.ttf` 的范式（pyftsubset 钉参数 + OFL 许可证并排 + 两次生成比对 + manifest 钉 SHA-256）。与输出字体同族无碍——溯源依据是对象号 + 子集标签。
 
 **由实验给出结论，不是决策**
 

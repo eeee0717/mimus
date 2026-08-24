@@ -1,0 +1,72 @@
+schema_version = 1
+
+[identity]
+id = "unit-geom-06-mediabox-double-space"
+name = "MediaBox with repeated whitespace"
+class = "unit"
+legality = "legal"
+cases = ["GEOM-01"]
+priority = "M1"
+variable = "The direct MediaBox contains repeated whitespace and a zero written with leading zeros"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-geom-06-mediabox-double-space.pdf"
+pdf_sha256 = "a9ffdfb98383e969d521b0b1a3d1ab971f342d3b9186ff0f8631522b5f9372df"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 612.0, 792.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d67656f6d2d30362d6d6564"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "T1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "M"
+baseline_origin = [100.0, 700.0]
+metric_box = [100.0, 697.168, 110.356, 711.136]
+visual_bbox = [101.177734, 700.0, 109.181641, 708.748047]
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 100 700 Tm
+(M) Tj
+ET
+"""
+
+[[expected.behaviour]]
+id = "GEOM-01-object-parser"
+assertion = "The page resolves to MediaBox [0,0,612,792] without string splitting or page degradation"
+observable_via = "mutool pages, mimus inspect page geometry, and absence of page_degraded"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]

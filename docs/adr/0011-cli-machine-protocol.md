@@ -64,6 +64,12 @@ CLI 机器协议版本升为 2；IL 的 `schema_version` 独立保持 1。每行
 - IL schema 独立演进；IL 升版不要求 CLI schema 同步升级。
 - #15 不实现 `assets pull`、真实 layout 模型、扫描策略、页面旋转、完整 operator walk、字体/CMap、真实翻译排版、Agent Skill 或配置层。
 
+已按本节做过的兼容扩展（登记，便于审计「只增不删」）：
+
+- ADR-0012 §5（#16）：`scanned_pdf` error 的 `scanned_pages`/`total_pages` 字段与扫描汇总 diagnostic。
+- ADR-0013 §5（#17/#18/#19）：`page_degraded` 与降级汇总两类 diagnostic。后者沿用扫描汇总的特权（无条件入库、不吃 100 条上限）。`result` 形状未变——§2 的「result 不重复诊断内容、只保留 warnings 总数」仍然成立，受影响页号只经 diagnostic 出线。
+- ADR-0013 §3（#18）：`content_recovered` diagnostic。与 `page_degraded` 相反的一侧——这一页照常翻译，但走查为此偏离了输入的字面结构，所以偏离本身必须出线。每页每类恢复只报一条：恢复决定是页级一致的，报告次数不应随内容长度漂移。
+
 ## 后果
 
 - 脚本能在不解析散文的前提下观察 pass、诊断和最终结果，`inspect` 与 `translate` 仍复用同一条流水线。

@@ -1,0 +1,78 @@
+schema_version = 1
+
+[identity]
+id = "unit-doc-04-rotated-90"
+name = "Text rotated 90 degrees in page space"
+class = "unit"
+legality = "legal"
+cases = ["DOC-04"]
+priority = "M1"
+variable = "The text matrix rotates one visible glyph counter-clockwise by 90 degrees"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-doc-04-rotated-90.pdf"
+pdf_sha256 = "add5f5b00a4854ce1dade47f86c7d1db506d4cf701d2188394f428f3e7b9a6c1"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 612.0, 792.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d646f632d30342d726f7461"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "T1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "M"
+baseline_origin = [100.0, 700.0]
+metric_box = [88.864, 700.0, 102.832, 710.356]
+visual_bbox = [91.251953, 701.177734, 100.0, 709.181641]
+
+[[expected.transform]]
+block = "T1"
+char_indices = [0]
+kind = "rotated"
+degrees = 90.0
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+0 1 -1 0 100 700 Tm
+(M) Tj
+ET
+"""
+
+[[expected.behaviour]]
+id = "DOC-04-rotated-90"
+assertion = "Production IL classifies M as Rotated(90), excludes it from translation, and preserves its text-show bytes"
+observable_via = "mimus inspect IL, translator call log, and decoded output stream"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "transformed-text-geometry", "pdf-bytes", "pdf-structure", "render"]

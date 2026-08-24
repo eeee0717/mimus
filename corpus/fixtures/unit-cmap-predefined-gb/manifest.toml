@@ -1,0 +1,73 @@
+schema_version = 1
+
+[identity]
+id = "unit-cmap-predefined-gb"
+name = "Unsupported predefined GBK CMap"
+class = "unit"
+legality = "legal"
+cases = ["CMAP-01"]
+priority = "M1"
+variable = "A legal Type0 font uses the predefined GBK-EUC-H CMap outside the M1 allowlist"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-cmap-predefined-gb.pdf"
+pdf_sha256 = "1712c9b6313d049f63d9e1e3829a62ae66211004bbe7227960f560eca5e65c12"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusCJK.ttf", sha256 = "a1677185f15e59c1ccb25e0fb320ab23d3a34d27649496eff089df41e27074ac", pdf_object = 5, descriptor_object = 7, subset_tag = "MIMUSC", base_name = "NotoSansSC-Regular" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9,10,11]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d636d61702d707265646566"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "GBK"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "\u4e2d\u6587\u6d4b\u8bd5"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 118.56, 120.0, 130.56]
+visual_bbox = [73.15191648, 119.052, 119.604, 130.164]
+
+[[expected.content_stream]]
+object = 11
+compressed = false
+bytes_hex = "42540a2f46312031322054660a312030203020312037322031323020546d0a3c443644304345433442324532434144343e20546a0a45540a"
+
+[[expected.degradation]]
+scope = "paragraph"
+page = 0
+paragraph = 0
+reason = "unsupported_font"
+
+[[expected.behaviour]]
+id = "CMAP-01-explicit-unsupported"
+assertion = "GBK-EUC-H renders the pinned Chinese text, but the M1 production walk explicitly preserves the paragraph as unsupported instead of returning zero characters"
+observable_via = "qpdf font dictionary, Adobe GB1 CMap arithmetic, pinned CIDToGIDMap, independent extraction and degradation summary"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]

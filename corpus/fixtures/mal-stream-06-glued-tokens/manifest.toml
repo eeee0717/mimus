@@ -10,15 +10,15 @@ variable = "The page Contents reference selects 12Tf and 120Td without separator
 [source]
 method = "byte-mutation"
 pdf = "mal-stream-06-glued-tokens.pdf"
-pdf_sha256 = "4e2b7b0c14690bd3261266281551b3053c0fa2abd5b12ec22b792637da2915d3"
+pdf_sha256 = "d71c59f9c9af9de5d6297a066d02bb0498c4f07d243711ee45b9884255e8603d"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
 [lineage]
 parent = "unit-stream-00-malformed-parent"
 [[lineage.mutations]]
 byte_offset = 210
-original_byte = 48
-replacement_byte = 52
+original_bytes = [48]
+replacement_bytes = [52]
 description = "change /Contents 10 0 R to 14 0 R, selecting the glued-token candidate"
 [[page]]
 index = 0

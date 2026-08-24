@@ -1,0 +1,47 @@
+schema_version = 1
+[identity]
+id = "mal-cmap-missing-encoding"
+name = "Type0 font without Encoding"
+class = "mal"
+legality = "malformed"
+cases = ["CMAP-02"]
+priority = "M1"
+variable = "The Type0 Encoding key is renamed and therefore absent"
+[source]
+method = "byte-mutation"
+pdf = "mal-cmap-missing-encoding.pdf"
+pdf_sha256 = "6141301a5da16b7a5bd49295a1fb78f3ef98feeb21efee55e9df7e8beda8d29d"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+[lineage]
+parent = "unit-cmap-01-identity-no-tounicode"
+[[lineage.mutations]]
+byte_offset = 3383
+original_bytes = [69]
+replacement_bytes = [88]
+description = "rename /Encoding to /Xncoding while retaining /Identity-H as an unrelated value"
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+block = []
+declared_failure = "content-semantics:CMAP-02"
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+[[expected.degradation]]
+scope = "paragraph"
+page = 0
+paragraph = 0
+reason = "unsupported_font"
+[[expected.behaviour]]
+id = "CMAP-02-missing-encoding"
+assertion = "A Type0 font without Encoding is never guessed as Identity-H; its paragraph is preserved"
+observable_via = "single-byte lineage, qpdf Type0 dictionary and production degradation summary"
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "render"]

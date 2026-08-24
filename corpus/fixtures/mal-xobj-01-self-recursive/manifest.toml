@@ -17,8 +17,8 @@ fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f
 parent = "unit-xobj-00-recursion-parent"
 [[lineage.mutations]]
 byte_offset = 4256
-original_byte = 48
-replacement_byte = 49
+original_bytes = [48]
+replacement_bytes = [49]
 description = "change /X0 Do to /X1 Do, selecting the Form whose /X1 resource points to itself"
 [[page]]
 index = 0

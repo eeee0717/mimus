@@ -21,8 +21,8 @@ parent = "unit-parse-11-outline-siblings"
 
 [[lineage.mutations]]
 byte_offset = 3389
-original_byte = 49
-replacement_byte = 48
+original_bytes = [49]
+replacement_bytes = [48]
 description = "change the legal sibling /Next 11 0 R into a self-cycle /Next 10 0 R"
 
 [[page]]

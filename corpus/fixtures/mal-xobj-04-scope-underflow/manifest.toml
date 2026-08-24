@@ -17,8 +17,8 @@ fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f
 parent = "unit-xobj-05-scope-parent"
 [[lineage.mutations]]
 byte_offset = 3408
-original_byte = 113
-replacement_byte = 81
+original_bytes = [113]
+replacement_bytes = [81]
 description = "change the child Form opening q to Q so it attempts to pop caller graphics state"
 [[page]]
 index = 0

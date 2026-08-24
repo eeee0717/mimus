@@ -1,0 +1,47 @@
+schema_version = 1
+[identity]
+id = "mal-cmap-bfrange-arity"
+name = "ToUnicode bfrange count mismatch"
+class = "mal"
+legality = "malformed"
+cases = ["CMAP-05"]
+priority = "M1"
+variable = "The ToUnicode bfrange count changes from three entries to four while the body remains unchanged"
+[source]
+method = "byte-mutation"
+pdf = "mal-cmap-bfrange-arity.pdf"
+pdf_sha256 = "bb21065c94e8dc083b340dc36cdb49949c4332e75a7916d5d9c0279c58453ebc"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+[lineage]
+parent = "unit-cmap-embedded-ok"
+[[lineage.mutations]]
+byte_offset = 3585
+original_bytes = [51]
+replacement_bytes = [52]
+description = "declare four bfrange entries while providing only the three parent entries"
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+block = []
+declared_failure = "content-semantics:CMAP-05"
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+[[expected.degradation]]
+scope = "paragraph"
+page = 0
+paragraph = 0
+reason = "unreliable_unicode"
+[[expected.behaviour]]
+id = "CMAP-05-bfrange-arity"
+assertion = "A malformed ToUnicode section invalidates Unicode for the shown characters instead of silently retaining partial mappings"
+observable_via = "single-byte lineage, raw ToUnicode bytes and production degradation summary"
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "render"]

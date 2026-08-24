@@ -1,0 +1,77 @@
+schema_version = 1
+
+[identity]
+id = "unit-doc-04-rotate90-compensated"
+name = "Page rotation compensated by the text matrix"
+class = "unit"
+legality = "legal"
+cases = ["DOC-04"]
+priority = "M1"
+variable = "A page /Rotate 90 is composed with a -90 degree text matrix, producing upright visual text"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-doc-04-rotate90-compensated.pdf"
+pdf_sha256 = "279e2d744b33dcc2d53c72953270507d0d4a65e909c9240efce298d09ea5e88a"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 612.0, 792.0]
+rotate = 90
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d646f632d30342d726f7461"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "T1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "M"
+baseline_origin = [100.0, 700.0]
+metric_box = [97.168, 689.644, 111.136, 700.0]
+visual_bbox = [100.0, 690.818359, 108.748047, 698.822266]
+
+[[expected.transform]]
+block = "T1"
+char_indices = [0]
+kind = "upright"
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+0 -1 1 0 100 700 Tm
+(M) Tj
+ET
+"""
+
+[[expected.behaviour]]
+id = "DOC-04-visual-frame"
+assertion = "Production IL composes /Rotate 90 with Tm -90 and classifies the resulting visual transform as Upright"
+observable_via = "mimus inspect IL and translator call log"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "transformed-text-geometry", "pdf-bytes", "pdf-structure", "render"]

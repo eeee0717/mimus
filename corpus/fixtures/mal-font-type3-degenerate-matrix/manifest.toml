@@ -1,0 +1,47 @@
+schema_version = 1
+[identity]
+id = "mal-font-type3-degenerate-matrix"
+name = "Type3 font with degenerate FontMatrix"
+class = "mal"
+legality = "malformed"
+cases = ["FONT-06"]
+priority = "M1"
+variable = "The Type3 FontMatrix x scale changes from 0.001 to 0.000, making its determinant zero"
+[source]
+method = "byte-mutation"
+pdf = "mal-font-type3-degenerate-matrix.pdf"
+pdf_sha256 = "7aea452f729df45882b093a2bc22c683a840f4bd73cd966dcbd2df8d06164a36"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+[lineage]
+parent = "unit-stream-02-type3-d1"
+[[lineage.mutations]]
+byte_offset = 3408
+original_bytes = [49]
+replacement_bytes = [48]
+description = "change the first FontMatrix scale from 0.001 to 0.000"
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+block = []
+declared_failure = "content-semantics:FONT-06-degenerate-matrix"
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+[[expected.degradation]]
+scope = "paragraph"
+page = 0
+paragraph = 0
+reason = "unsupported_font"
+[[expected.behaviour]]
+id = "FONT-06-degenerate-matrix"
+assertion = "A singular Type3 FontMatrix is detected before metric arithmetic and preserves the paragraph"
+observable_via = "single-byte lineage, determinant arithmetic and production degradation summary"
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "render"]

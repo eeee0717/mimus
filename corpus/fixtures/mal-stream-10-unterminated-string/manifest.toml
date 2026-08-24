@@ -1,0 +1,54 @@
+schema_version = 1
+[identity]
+id = "mal-stream-10-unterminated-string"
+name = "Content stream truncated inside a literal string"
+class = "mal"
+legality = "malformed"
+cases = ["STREAM-08"]
+priority = "M1"
+variable = "The page Contents reference selects the stream whose literal string never closes"
+[source]
+method = "byte-mutation"
+pdf = "mal-stream-10-unterminated-string.pdf"
+pdf_sha256 = "9c59961f8256cb0f8f8e93cb11ece6ed01b4d2d6863737ecc329beaeb0a4a04d"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+[lineage]
+parent = "unit-stream-00-malformed-parent"
+[[lineage.mutations]]
+byte_offset = 210
+original_bytes = [48]
+replacement_bytes = [56]
+description = "change /Contents 10 0 R to 18 0 R, selecting the unterminated-string candidate"
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "content-semantics:STREAM-08"
+renderer_diagnostic = "syntax error in content stream"
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+[[expected.behaviour]]
+id = "STREAM-08-page-degrades"
+assertion = "The tokenizer reaches end of stream inside a literal string, so the page degrades and its content stream is written back byte for byte"
+observable_via = "output page content stream equals input, exit code 0, and one page-degraded diagnostic"
+[[expected.behaviour]]
+id = "STREAM-08-no-partial-il"
+assertion = "No characters from the truncated stream reach the IL, because a partially tokenized page cannot be spliced safely"
+observable_via = "the degraded page carries zero paragraphs in the inspect JSON"
+[oracle]
+checks = ["determinism","legality","page-geometry","render-diagnostic"]
+[[adjudication]]
+date = "2026-08-24"
+issue = "A truncated stream could be salvaged up to the last complete operator instead of degrading the page"
+resolution = "Degrade the page: ADR-0013 §3 keeps truncation a page-level failure so writeback never has to reason about a half-parsed tail"
+[[adjudication]]
+date = "2026-08-24"
+issue = "The render check could not be used: mutool draw exits non-zero on this page, so there is no reference raster to compare"
+resolution = "Take mutool's own diagnostic as the independent evidence instead—an independent renderer refusing the stream is exactly the observation this fixture needs"

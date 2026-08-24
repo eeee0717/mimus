@@ -18,7 +18,7 @@ use crate::hash;
 use crate::manifest::{Check, GeometrySource, Legality, Manifest, Method};
 use crate::mutation::{self, MutationSpec};
 use crate::oracle::render::PageRaster;
-use crate::oracle::{ParsedPage, mupdf, mupdf_svg, poppler, qpdf, render};
+use crate::oracle::{ParsedPage, mupdf, mupdf_svg, mupdf_trace, poppler, qpdf, render};
 use crate::proc;
 use crate::text;
 use crate::toolchain::Toolchain;
@@ -232,18 +232,21 @@ fn check_lineage(manifest: &Manifest, all: &[Manifest]) -> Outcome {
                 parent_fixture_id: &lineage.parent,
                 byte_offset: usize::try_from(mutation.byte_offset)
                     .context("mutation offset exceeds usize")?,
-                expected_byte: mutation.original_byte,
-                replacement_byte: mutation.replacement_byte,
+                expected_bytes: &mutation.original_bytes,
+                replacement_bytes: &mutation.replacement_bytes,
                 semantics: &mutation.description,
             },
         )?;
         mutation::verify(&parent_bytes, &child_bytes, &derived.record)?;
         if derived.bytes != child_bytes {
-            bail!("child bytes do not equal the single-byte derivation");
+            bail!("child bytes do not equal the declared derivation");
         }
         Ok(format!(
-            "父本 `{}`，唯一偏移 {}：{}",
-            lineage.parent, mutation.byte_offset, mutation.description
+            "父本 `{}`，唯一区间 {}..{}：{}",
+            lineage.parent,
+            mutation.byte_offset,
+            mutation.byte_offset + mutation.original_bytes.len() as u64,
+            mutation.description
         ))
     })();
 
@@ -278,22 +281,58 @@ fn verify_one(
         bail!("[{}] PDF 不存在：{}", manifest.id(), pdf.display());
     }
 
-    let media_frames: Vec<PageFrame> = manifest
-        .page
-        .iter()
-        .map(|p| PageFrame::new(p.media_box, p.rotate))
-        .collect::<Result<_>>()
-        .with_context(|| format!("[{}] 页面框无效", manifest.id()))?;
+    let needs_text_oracles = [
+        Check::Glyphs,
+        Check::ReadingOrder,
+        Check::DualParserGeometry,
+        Check::HandWrittenGeometry,
+        Check::Type3Geometry,
+        Check::FontAdvance,
+        Check::EmbeddedCmap,
+    ]
+    .into_iter()
+    .any(|check| manifest.requires(check))
+        || manifest.requires(Check::Structure);
+    let needs_frames = manifest.requires(Check::PageGeometry)
+        || needs_text_oracles
+        || manifest.requires(Check::TransformedTextGeometry);
+    let media_frames: Vec<PageFrame> = if needs_frames {
+        manifest
+            .page
+            .iter()
+            .map(|page| {
+                let media_box = page
+                    .numeric_media_box()
+                    .context("non-numeric MediaBox has no coordinate frame")?;
+                PageFrame::new(media_box, page.rotate)
+            })
+            .collect::<Result<_>>()
+            .with_context(|| format!("[{}] 页面框无效", manifest.id()))?
+    } else {
+        Vec::new()
+    };
     // MuPDF reports text quads relative to the effective viewing box, while
     // Poppler and pdftoppm report page dimensions/coordinates relative to the
     // MediaBox. Keep those parser-specific origins explicit so both signals
     // are converted into the same page-space contract.
-    let mutool_frames: Vec<PageFrame> = manifest
-        .page
-        .iter()
-        .map(|p| PageFrame::new(p.effective_box(), p.rotate))
-        .collect::<Result<_>>()
-        .with_context(|| format!("[{}] MuPDF 页面框无效", manifest.id()))?;
+    let needs_mutool_frames =
+        needs_text_oracles || manifest.requires(Check::TransformedTextGeometry);
+    let mutool_frames: Vec<PageFrame> = if needs_mutool_frames {
+        manifest
+            .page
+            .iter()
+            .map(|page| {
+                PageFrame::new(
+                    page.effective_box()
+                        .context("page has no numeric effective box")?,
+                    page.rotate,
+                )
+            })
+            .collect::<Result<_>>()
+            .with_context(|| format!("[{}] MuPDF 页面框无效", manifest.id()))?
+    } else {
+        Vec::new()
+    };
 
     outcomes.push(check_pins(manifest)?);
 
@@ -314,10 +353,16 @@ fn verify_one(
     // A deliberately broken object graph uses qpdf's declared failure as its
     // structure gate. Content-stream failures still run the operator walker
     // and independent text oracles requested by their manifests.
+    let declares_parser_failure = manifest
+        .expected
+        .declared_failure
+        .as_deref()
+        .is_some_and(|failure| !failure.starts_with("content-semantics:"));
     let uses_parser_failure_structure = manifest.identity.legality == Legality::Malformed
         && manifest.requires(Check::Legality)
         && manifest.requires(Check::Structure)
-        && !manifest.requires(Check::OperatorWalk);
+        && !manifest.requires(Check::OperatorWalk)
+        && declares_parser_failure;
     if uses_parser_failure_structure {
         outcomes.push(check_malformed_structure(manifest, &pdf)?);
     }
@@ -346,23 +391,19 @@ fn verify_one(
 
     // 语义畸形 fixture 不应被一个未声明的文本解析器提前短路；只在对应门禁
     // 真正需要时调用两个文本/几何 oracle。
-    let needs_text_oracles = [
-        Check::Glyphs,
-        Check::ReadingOrder,
-        Check::DualParserGeometry,
-        Check::HandWrittenGeometry,
-        Check::Type3Geometry,
-        Check::FontAdvance,
-        Check::EmbeddedCmap,
-    ]
-    .into_iter()
-    .any(|check| manifest.requires(check))
-        || (manifest.requires(Check::Structure) && !uses_parser_failure_structure);
-    let (mutool_pages, poppler_pages) = if needs_text_oracles {
-        (
-            mupdf::blocks(&pdf, &mutool_frames)?,
-            poppler::blocks(&pdf, &media_frames)?,
-        )
+    let run_text_oracles = needs_text_oracles && !uses_parser_failure_structure;
+    let (mutool_pages, poppler_pages) = if run_text_oracles {
+        let mutool_pages = if manifest
+            .expected
+            .block
+            .iter()
+            .any(|block| block.mutool_extractable)
+        {
+            mupdf::blocks(&pdf, &mutool_frames)?
+        } else {
+            Vec::new()
+        };
+        (mutool_pages, poppler::blocks(&pdf, &media_frames)?)
     } else {
         (Vec::new(), Vec::new())
     };
@@ -395,6 +436,13 @@ fn verify_one(
             &mutool_frames,
             &mutool_pages,
             &poppler_pages,
+        )?);
+    }
+    if manifest.requires(Check::TransformedTextGeometry) {
+        outcomes.extend(check_transformed_text_geometry(
+            manifest,
+            &pdf,
+            &mutool_frames,
         )?);
     }
     if manifest.requires(Check::Type3Geometry) {
@@ -544,9 +592,10 @@ fn check_pins(manifest: &Manifest) -> Result<Outcome> {
     if let Some(lineage) = &manifest.lineage {
         let size = std::fs::metadata(manifest.pdf_path())?.len();
         for mutation in &lineage.mutations {
-            if mutation.byte_offset >= size {
+            let end = mutation.byte_offset + mutation.original_bytes.len() as u64;
+            if end > size {
                 problems.push(format!(
-                    "变异偏移 {} 超出 PDF 长度 {size}（描述：{}）",
+                    "变异区间 {}..{end} 超出 PDF 长度 {size}（描述：{}）",
                     mutation.byte_offset, mutation.description
                 ));
             }
@@ -677,8 +726,8 @@ fn regenerate_mutation(manifest: &Manifest, repo_root: &Path) -> Result<Vec<u8>>
             parent_fixture_id: &lineage.parent,
             byte_offset: usize::try_from(mutation.byte_offset)
                 .context("mutation offset exceeds usize")?,
-            expected_byte: mutation.original_byte,
-            replacement_byte: mutation.replacement_byte,
+            expected_bytes: &mutation.original_bytes,
+            replacement_bytes: &mutation.replacement_bytes,
             semantics: &mutation.description,
         },
     )?
@@ -735,17 +784,23 @@ fn check_legality(manifest: &Manifest, pdf: &Path) -> Result<Outcome> {
                 .declared_failure
                 .as_deref()
                 .context("畸形 fixture 缺少 declared_failure")?;
-            if let Some(error_id) = declared.strip_prefix("operator-walk:") {
+            // 两个前缀都表示「容器合法、畸形只在 content stream 里」。区别只在谁裁定：
+            // `operator-walk:` 交给冻结的 M0 PoC，`content-semantics:` 交给 mimus-core
+            // 的生产测试。qpdf 对这两类的期望是一样的——容器必须能装载。
+            let content_semantic = declared
+                .strip_prefix("operator-walk:")
+                .or_else(|| declared.strip_prefix("content-semantics:"));
+            if let Some(error_id) = content_semantic {
                 let container_loaded =
                     result.passed || result.report.contains("operation succeeded with warnings");
                 return Ok(if container_loaded && !error_id.is_empty() {
                     Outcome::ok(
                         CHECK,
                         CLAUSE,
-                        format!("qpdf 完成容器检查；走查器应报告 {error_id}"),
+                        format!("qpdf 完成容器检查；生产路径负责裁定 {error_id}"),
                     )
                 } else if error_id.is_empty() {
-                    Outcome::fail(CHECK, CLAUSE, "operator-walk failure ID 为空")
+                    Outcome::fail(CHECK, CLAUSE, "content 语义 failure ID 为空")
                 } else {
                     Outcome::fail(
                         CHECK,
@@ -1074,15 +1129,7 @@ fn check_pdf_bytes(manifest: &Manifest, pdf: &Path, document: &qpdf::Document) -
                     decoded.len()
                 ));
             }
-            let observed = match dictionary.get("/Filter") {
-                Some(Value::String(name)) => vec![name.trim_start_matches('/').to_string()],
-                Some(Value::Array(values)) => values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(|name| name.trim_start_matches('/').to_string())
-                    .collect(),
-                _ => Vec::new(),
-            };
+            let observed = document.stream_filters(stream.object)?;
             if observed != stream.filters {
                 problems.push(format!(
                     "content object {} filters：manifest {:?}，qpdf {:?}",
@@ -1747,12 +1794,32 @@ fn check_page_geometry(
     }
 
     let tol = manifest.expected.tolerance_pt;
+    let qpdf_document = qpdf::Document::load(pdf)?;
+    let page_objects = qpdf_document.page_objects()?;
     let mut problems = Vec::new();
-    for (page, seen) in manifest.page.iter().zip(&observed) {
-        if !arrays_close(&page.media_box, &seen.media_box, tol) {
+    for ((page, seen), page_object) in manifest.page.iter().zip(&observed).zip(page_objects) {
+        let Some(media_box) = page.numeric_media_box() else {
+            problems.push(format!("第 {} 页 MediaBox 含非数值分量", page.index));
+            continue;
+        };
+        let inherited_media = qpdf_document.inherited_numeric_array(page_object, "/MediaBox")?;
+        if inherited_media.as_deref() != Some(media_box.as_slice()) {
+            problems.push(format!(
+                "第 {} 页 qpdf 继承 MediaBox：manifest {:?}，qpdf {:?}",
+                page.index, media_box, inherited_media
+            ));
+        }
+        if !arrays_close(&media_box, &seen.media_box, tol) {
             problems.push(format!(
                 "第 {} 页 MediaBox：manifest {:?}，mutool {:?}",
-                page.index, page.media_box, seen.media_box
+                page.index, media_box, seen.media_box
+            ));
+        }
+        let inherited_crop = qpdf_document.inherited_numeric_array(page_object, "/CropBox")?;
+        if inherited_crop.as_deref() != page.crop_box.as_ref().map(<[f64; 4]>::as_slice) {
+            problems.push(format!(
+                "第 {} 页 qpdf 继承 CropBox：manifest {:?}，qpdf {:?}",
+                page.index, page.crop_box, inherited_crop
             ));
         }
         match (page.crop_box, seen.crop_box) {
@@ -1760,10 +1827,16 @@ fn check_page_geometry(
                 "第 {} 页 CropBox：manifest {a:?}，mutool {b:?}",
                 page.index
             )),
-            (a, b) if a.is_some() != b.is_some() => problems.push(format!(
-                "第 {} 页 CropBox 有无不一致：manifest {a:?}，mutool {b:?}",
-                page.index
-            )),
+            // `mutool pages` exposes only a local CropBox. qpdf's object tree
+            // above and MuPDF's effective stext frame independently cover an
+            // inherited value, so absence here is not a contradiction.
+            (Some(_), None) if inherited_crop.is_some() => {}
+            (a, b) if a.is_some() != b.is_some() => {
+                problems.push(format!(
+                    "第 {} 页 CropBox 有无不一致：manifest {a:?}，mutool {b:?}",
+                    page.index
+                ));
+            }
             _ => {}
         }
         if page.rotate.rem_euclid(360) != seen.rotate.rem_euclid(360) {
@@ -1795,8 +1868,11 @@ fn check_page_geometry(
     let mut size_problems = Vec::new();
     for ((frame, expected_page), page) in frames.iter().zip(&manifest.page).zip(&poppler_pages) {
         let (w, h) = frame.box_size();
-        let media_w = expected_page.media_box[2] - expected_page.media_box[0];
-        let media_h = expected_page.media_box[3] - expected_page.media_box[1];
+        let media_box = expected_page
+            .numeric_media_box()
+            .context("page-geometry check requires numeric MediaBox")?;
+        let media_w = media_box[2] - media_box[0];
+        let media_h = media_box[3] - media_box[1];
         // Poppler's <page width height> is defined by MediaBox even when a
         // CropBox is present (and does not apply /Rotate). Keep that measured
         // behaviour explicit rather than rejecting a valid non-zero CropBox.
@@ -1875,11 +1951,11 @@ fn check_structure(
 ) -> Vec<Outcome> {
     const CLAUSE: &str = "§2.1";
 
-    let expected_draw = ordered_texts(manifest, |b| b.draw_order);
+    let expected_draw = ordered_mutool_texts(manifest);
 
     // poppler 只被要求看到**同一组**块，不被要求同意它们的先后——那是
     // reading-order 检查的事，且并非每份 fixture 都适合断言它。
-    let mut expected_set = expected_draw.clone();
+    let mut expected_set = ordered_texts(manifest, |block| block.draw_order);
     expected_set.sort();
     let mut poppler_set = flatten(poppler_pages);
     poppler_set.sort();
@@ -1908,7 +1984,7 @@ fn check_glyphs(
     mutool_pages: &[ParsedPage],
     poppler_pages: &[ParsedPage],
 ) -> Vec<Outcome> {
-    let expected = glyph_counts(
+    let expected_poppler = glyph_counts(
         &manifest
             .expected
             .block
@@ -1916,15 +1992,16 @@ fn check_glyphs(
             .map(|b| b.text.clone())
             .collect::<Vec<_>>(),
     );
+    let expected_mutool = glyph_counts(&ordered_mutool_texts(manifest));
     [
-        ("glyphs/mutool", mutool_pages),
-        ("glyphs/poppler", poppler_pages),
+        ("glyphs/mutool", mutool_pages, &expected_mutool),
+        ("glyphs/poppler", poppler_pages, &expected_poppler),
     ]
     .into_iter()
-    .map(|(check, pages)| {
+    .map(|(check, pages, expected)| {
         let actual = glyph_counts(&flatten(pages));
         let mut problems = Vec::new();
-        for (ch, n) in &expected {
+        for (ch, n) in expected {
             let got = actual.get(ch).copied().unwrap_or(0);
             if got != *n {
                 problems.push(format!("{ch:?}：手写 {n} 个，解析器给出 {got} 个"));
@@ -2007,6 +2084,20 @@ fn ordered_texts(
     let mut blocks: Vec<&crate::manifest::Block> = manifest.expected.block.iter().collect();
     blocks.sort_by_key(|b| key(b));
     blocks.iter().map(|b| text::compare_key(&b.text)).collect()
+}
+
+fn ordered_mutool_texts(manifest: &Manifest) -> Vec<String> {
+    let mut blocks: Vec<&crate::manifest::Block> = manifest
+        .expected
+        .block
+        .iter()
+        .filter(|block| block.mutool_extractable)
+        .collect();
+    blocks.sort_by_key(|block| block.draw_order);
+    blocks
+        .iter()
+        .map(|block| text::compare_key(&block.text))
+        .collect()
 }
 
 fn flatten(pages: &[ParsedPage]) -> Vec<String> {
@@ -2190,6 +2281,7 @@ fn check_hand_written_geometry(
             .filter(|other| {
                 other.page == block.page
                     && other.draw_order < block.draw_order
+                    && other.mutool_extractable
                     && text::compare_key(&other.text) == key
             })
             .count();
@@ -2213,22 +2305,23 @@ fn check_hand_written_geometry(
             .visual_bbox
             .context("hand-written block missing visual_bbox")?;
 
-        match pick_on_page(mutool_pages, block.page, &key, draw_occurrence) {
-            Ok(observed) => match observed.baseline_origin {
-                Some(point)
-                    if close(point.x, expected_baseline[0], arithmetic_tolerance)
-                        && close(point.y, expected_baseline[1], arithmetic_tolerance) => {}
-                Some(point) => baseline_problems.push(format!(
-                    "块 `{}`：manifest {:?}，mutool {:?}",
-                    block.key,
-                    expected_baseline,
-                    point.to_array()
-                )),
-                None => {
-                    baseline_problems.push(format!("块 `{}`：mutool 未报告 baseline", block.key))
-                }
-            },
-            Err(error) => baseline_problems.push(format!("块 `{}`：{error}", block.key)),
+        if block.mutool_extractable {
+            match pick_on_page(mutool_pages, block.page, &key, draw_occurrence) {
+                Ok(observed) => match observed.baseline_origin {
+                    Some(point)
+                        if close(point.x, expected_baseline[0], arithmetic_tolerance)
+                            && close(point.y, expected_baseline[1], arithmetic_tolerance) => {}
+                    Some(point) => baseline_problems.push(format!(
+                        "块 `{}`：manifest {:?}，mutool {:?}",
+                        block.key,
+                        expected_baseline,
+                        point.to_array()
+                    )),
+                    None => baseline_problems
+                        .push(format!("块 `{}`：mutool 未报告 baseline", block.key)),
+                },
+                Err(error) => baseline_problems.push(format!("块 `{}`：{error}", block.key)),
+            }
         }
 
         match pick_on_page(poppler_pages, block.page, &key, reading_occurrence) {
@@ -2247,7 +2340,7 @@ fn check_hand_written_geometry(
             Err(error) => metric_problems.push(format!("块 `{}`：{error}", block.key)),
         }
 
-        if block.visible {
+        if block.visible && block.mutool_extractable {
             let observed_visual = outlines
                 .get(&block.key)
                 .with_context(|| format!("outline oracle missing block `{}`", block.key))?;
@@ -2284,6 +2377,128 @@ fn check_hand_written_geometry(
             visual_tolerance,
             visual_problems,
             "mutool SVG glyph outlines",
+        ),
+    ])
+}
+
+fn check_transformed_text_geometry(
+    manifest: &Manifest,
+    pdf: &Path,
+    frames: &[PageFrame],
+) -> Result<Vec<Outcome>> {
+    let qpdf_document = qpdf::Document::load(pdf)?;
+    let font = manifest
+        .source
+        .fonts
+        .first()
+        .context("transformed-text-geometry requires one pinned font")?;
+    let descriptor = font
+        .descriptor_object
+        .context("transformed-text-geometry font has no descriptor object")?;
+    let ascent = qpdf_document.number(descriptor, "/Ascent")? / 1000.0;
+    let descent = qpdf_document.number(descriptor, "/Descent")? / 1000.0;
+    let expected_font = format!(
+        "{}+{}",
+        font.subset_tag
+            .as_deref()
+            .context("transformed-text-geometry font has no subset tag")?,
+        font.base_name
+            .as_deref()
+            .context("transformed-text-geometry font has no base name")?
+    );
+
+    let mut blocks = manifest.expected.block.iter().collect::<Vec<_>>();
+    blocks.sort_by_key(|block| block.draw_order);
+    let glyphs = mupdf_trace::glyphs(pdf)?;
+    let outlines = outline_blocks(manifest, pdf, frames)?;
+    let arithmetic_tolerance = manifest.expected.tolerance_pt;
+    let visual_tolerance = manifest
+        .expected
+        .visual_tolerance_pt
+        .context("transformed text geometry missing visual_tolerance_pt")?;
+    let mut baseline_problems = Vec::new();
+    let mut metric_problems = Vec::new();
+    let mut visual_problems = Vec::new();
+
+    if blocks.len() != glyphs.len() {
+        let problem = format!(
+            "manifest has {} transformed blocks but MuPDF trace has {} glyphs",
+            blocks.len(),
+            glyphs.len()
+        );
+        baseline_problems.push(problem.clone());
+        metric_problems.push(problem);
+    }
+    for (block, glyph) in blocks.into_iter().zip(&glyphs) {
+        if block.text.chars().count() != 1 || glyph.unicode != block.text {
+            let problem = format!(
+                "block {} expected one glyph {:?}, trace reported {:?}",
+                block.key, block.text, glyph.unicode
+            );
+            baseline_problems.push(problem.clone());
+            metric_problems.push(problem);
+            continue;
+        }
+        if glyph.font != expected_font {
+            metric_problems.push(format!(
+                "block {} trace font {:?}, expected {:?}",
+                block.key, glyph.font, expected_font
+            ));
+        }
+        let expected_baseline = block
+            .baseline_origin
+            .context("transformed block missing baseline_origin")?;
+        if !close(glyph.origin[0], expected_baseline[0], arithmetic_tolerance)
+            || !close(glyph.origin[1], expected_baseline[1], arithmetic_tolerance)
+        {
+            baseline_problems.push(format!(
+                "block {} manifest {:?}, trace {:?}",
+                block.key, expected_baseline, glyph.origin
+            ));
+        }
+        let expected_metric = block
+            .metric_box
+            .context("transformed block missing metric_box")?;
+        let actual_metric = glyph.metric_box(ascent, descent).to_array();
+        if !arrays_close(&actual_metric, &expected_metric, arithmetic_tolerance) {
+            metric_problems.push(format!(
+                "block {} manifest {:?}, qpdf+trace {:?}",
+                block.key, expected_metric, actual_metric
+            ));
+        }
+        let expected_visual = block
+            .visual_bbox
+            .context("transformed block missing visual_bbox")?;
+        let actual_visual = outlines
+            .get(&block.key)
+            .with_context(|| format!("outline oracle missing block `{}`", block.key))?
+            .to_array();
+        if !arrays_close(&actual_visual, &expected_visual, visual_tolerance) {
+            visual_problems.push(format!(
+                "block {} manifest {:?}, MuPDF SVG {:?}",
+                block.key, expected_visual, actual_visual
+            ));
+        }
+    }
+
+    Ok(vec![
+        geometry_outcome(
+            "geometry/transform-baseline",
+            arithmetic_tolerance,
+            baseline_problems,
+            "MuPDF trace glyph origin",
+        ),
+        geometry_outcome(
+            "geometry/transform-metric",
+            arithmetic_tolerance,
+            metric_problems,
+            "qpdf descriptor metrics composed with MuPDF trace trm/advance",
+        ),
+        geometry_outcome(
+            "geometry/transform-visual",
+            visual_tolerance,
+            visual_problems,
+            "MuPDF SVG glyph outlines",
         ),
     ])
 }
@@ -2429,7 +2644,14 @@ fn check_embedded_cmap(manifest: &Manifest, mutool_pages: &[ParsedPage]) -> Resu
 
     let observed = flatten_blocks(mutool_pages);
     let mut geometry_problems = Vec::new();
-    if observed.len() != 1 {
+    let identity_alias =
+        manifest.identity.cases.iter().any(|case| case == "CMAP-02") && observed.is_empty();
+    if identity_alias {
+        // MuPDF and Poppler do not implement the legal Distiller DLIdent-H/V
+        // aliases. The static half of this oracle still proves the raw CID
+        // sequence against the pinned font cmap; production-path tests own
+        // alias recognition and paragraph behavior.
+    } else if observed.len() != 1 {
         geometry_problems.push(format!(
             "mutool reported {} blocks, expected 1",
             observed.len()
@@ -2485,15 +2707,21 @@ fn check_embedded_cmap(manifest: &Manifest, mutool_pages: &[ParsedPage]) -> Resu
             ));
         }
     }
-    Ok(vec![
-        cmap_outcome,
+    let geometry_outcome = if identity_alias {
+        Outcome::ok(
+            "geometry/cid-glyphs",
+            "§2.8/CMAP-02",
+            "MuPDF/Poppler expose no glyphs for DLIdent-H; static CID/cmap proof passed",
+        )
+    } else {
         geometry_outcome(
             "geometry/cid-glyphs",
             manifest.expected.visual_tolerance_pt.unwrap_or(0.01),
             geometry_problems,
             "mutool glyph count/baseline/ink bbox",
-        ),
-    ])
+        )
+    };
+    Ok(vec![cmap_outcome, geometry_outcome])
 }
 
 fn geometry_outcome(
@@ -2519,7 +2747,12 @@ fn outline_blocks(
     frames: &[PageFrame],
 ) -> Result<BTreeMap<String, Rect>> {
     let mut by_page: BTreeMap<usize, Vec<&crate::manifest::Block>> = BTreeMap::new();
-    for block in manifest.expected.block.iter().filter(|block| block.visible) {
+    for block in manifest
+        .expected
+        .block
+        .iter()
+        .filter(|block| block.visible && block.mutool_extractable)
+    {
         by_page.entry(block.page).or_default().push(block);
     }
     for blocks in by_page.values_mut() {
@@ -2930,8 +3163,8 @@ pub fn build(
                         parent_fixture_id: &lineage.parent,
                         byte_offset: usize::try_from(mutation.byte_offset)
                             .context("mutation offset exceeds usize")?,
-                        expected_byte: mutation.original_byte,
-                        replacement_byte: mutation.replacement_byte,
+                        expected_bytes: &mutation.original_bytes,
+                        replacement_bytes: &mutation.replacement_bytes,
                         semantics: &mutation.description,
                     },
                 )?;

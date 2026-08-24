@@ -17,8 +17,8 @@ fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f
 parent = "unit-parse-05-contents-array-string-parent"
 [[lineage.mutations]]
 byte_offset = 3381
-original_byte = 41
-replacement_byte = 32
+original_bytes = [41]
+replacement_bytes = [32]
 description = "replace the first stream's closing ')' with space so the literal string cannot cross the stream boundary"
 [[page]]
 index = 0

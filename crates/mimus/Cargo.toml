@@ -21,3 +21,5 @@ tempfile.workspace = true
 insta.workspace = true
 lopdf.workspace = true
 quick-xml.workspace = true
+serde.workspace = true
+toml = "0.9"

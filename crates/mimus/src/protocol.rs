@@ -4,8 +4,8 @@ use std::sync::Mutex;
 
 use mimus_core::error::{ErrorReason, InternalReason, IoReason, MimusError, Result};
 use mimus_core::event::{
-    DiagnosticEvent, Event, EventKind, EventSink, MINIMAL_SERIALIZATION_ERROR_LINE, ResultPayload,
-    Stage, serialize_line,
+    DiagnosticEvent, Event, EventKind, EventSink, MINIMAL_SERIALIZATION_ERROR_LINE,
+    PageDegradeReason, RecoveryKind, ResultPayload, Stage, serialize_line,
 };
 
 type Serializer = fn(&Event) -> Result<Vec<u8>>;
@@ -240,6 +240,32 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 page_index + 1
             );
         }
+        DiagnosticEvent::EngineCharacterMismatch {
+            page_index,
+            character_index,
+            walked_character_count,
+            engine_character_count,
+            walked_unicode,
+            engine_unicode,
+        } => {
+            let detail = character_index.map_or_else(
+                || {
+                    format!(
+                        "character count walk={walked_character_count}, engine={engine_character_count}"
+                    )
+                },
+                |index| {
+                    format!(
+                        "character {index} unicode walk={walked_unicode:?}, engine={engine_unicode:?}"
+                    )
+                },
+            );
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[engine_character_mismatch]: page {} {detail}",
+                page_index + 1
+            );
+        }
         DiagnosticEvent::ScanSummary {
             scanned_page_indices,
             scanned_pages,
@@ -251,12 +277,97 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 "warning[scan_summary]: {scanned_pages} of {content_pages} content pages are scanned; page indices: {scanned_page_indices:?}"
             );
         }
+        DiagnosticEvent::PageDegraded { page_index, reason } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[page_degraded]: page {} kept as-is ({})",
+                page_index + 1,
+                human_page_degrade_reason(reason)
+            );
+        }
+        DiagnosticEvent::ContentRecovered {
+            page_index,
+            recovery,
+            form_cycle_paths,
+        } => {
+            let paths = if form_cycle_paths.is_empty() {
+                String::new()
+            } else {
+                format!("; object paths: {form_cycle_paths:?}")
+            };
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[content_recovered]: page {} translated after recovering from malformed content ({}{paths})",
+                page_index + 1,
+                human_recovery_kind(recovery)
+            );
+        }
+        DiagnosticEvent::DegradationSummary {
+            degraded_page_indices,
+            degraded_pages,
+            preserved_paragraphs,
+            total_pages,
+        } => {
+            let pages = degraded_page_indices
+                .iter()
+                .map(|index| (index + 1).to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[degradation_summary]: {degraded_pages} of {total_pages} pages kept as-is [{pages}]; {} paragraphs kept as source text",
+                preserved_paragraphs.len()
+            );
+        }
         DiagnosticEvent::DroppedDiagnostics { count } => {
             let _ = writeln!(
                 std::io::stderr().lock(),
                 "warning[dropped_diagnostics]: {count} additional diagnostics dropped"
             );
         }
+    }
+}
+
+const fn human_recovery_kind(recovery: RecoveryKind) -> &'static str {
+    match recovery {
+        RecoveryKind::ArityExcess => "excess operator operands",
+        RecoveryKind::ArityShort => "missing operator operands",
+        RecoveryKind::InvalidOperands => "invalid operator operand types",
+        RecoveryKind::GluedToken => "a number glued to an operator",
+        RecoveryKind::DoubleDecimal => "a number containing two decimal points",
+        RecoveryKind::UnknownOperator => "an unknown operator outside BX/EX",
+        RecoveryKind::CompatibilityUnderflow => "an EX without a matching BX",
+        RecoveryKind::CompatibilityUnclosed => "an unclosed BX compatibility section",
+        RecoveryKind::GraphicsStateUnderflow => "a Q without a matching q",
+        RecoveryKind::GraphicsStateUnclosed => "an unclosed q graphics-state scope",
+        RecoveryKind::ImplicitTextObject => "text operators outside BT/ET",
+        RecoveryKind::NestedTextObject => "a nested BT text object",
+        RecoveryKind::UnexpectedTextEnd => "an ET outside a text object",
+        RecoveryKind::TextObjectUnclosed => "a text object without ET",
+        RecoveryKind::SkippedTjElement => "an illegal element inside a TJ array",
+        RecoveryKind::InlineImageEiScan => "a bounded EI scan for an inline image",
+        RecoveryKind::DanglingOperands => "operands left at the end of content",
+        RecoveryKind::SelfRecursiveForm => "a self-recursive Form XObject",
+        RecoveryKind::MutuallyRecursiveForm => "mutually recursive Form XObjects",
+        RecoveryKind::FormDepthExceeded => "a Form XObject nesting chain deeper than 64",
+        RecoveryKind::ScopedGraphicsStateUnclosed => {
+            "an unclosed q graphics-state scope inside a Form XObject"
+        }
+        RecoveryKind::ScopedDanglingOperands => "operands left at the end of a Form XObject",
+    }
+}
+
+const fn human_page_degrade_reason(reason: PageDegradeReason) -> &'static str {
+    match reason {
+        PageDegradeReason::ContentStreamSyntax => "content stream syntax could not be recovered",
+        PageDegradeReason::NestingTooDeep => "nesting exceeded the supported depth",
+        PageDegradeReason::ContentDecode => "content stream could not be decoded",
+        PageDegradeReason::BadPageGeometry => "page boxes could not be parsed",
+        PageDegradeReason::UnsupportedRotation => "its /Rotate is not supported yet",
+        PageDegradeReason::MissingResource => "a referenced resource is missing",
+        PageDegradeReason::BadFormBBox => "a form XObject has an unusable /BBox",
+        PageDegradeReason::BadFormMatrix => "a form XObject has an unusable /Matrix",
+        PageDegradeReason::XObjectNotAStream => "an XObject is not a stream",
     }
 }
 
