@@ -48,6 +48,7 @@ struct FixtureManifest {
 #[derive(Debug, Deserialize)]
 struct ManifestIdentity {
     cases: Vec<String>,
+    legality: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,6 +139,50 @@ fn fixture_ids_with_case_prefixes(prefixes: &[&str]) -> BTreeSet<String> {
                 .any(|case| prefixes.iter().any(|prefix| case.starts_with(prefix)))
         })
         .collect()
+}
+
+fn all_fixture_ids() -> BTreeSet<String> {
+    std::fs::read_dir(repo_root().join("corpus/fixtures"))
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.path().join("manifest.toml").is_file())
+        .map(|entry| entry.file_name().into_string().unwrap())
+        .collect()
+}
+
+fn snapshot_names(directory: &Path) -> Vec<String> {
+    directory_names(directory)
+        .into_iter()
+        .filter(|name| name.ends_with(".il.json"))
+        .collect()
+}
+
+fn assert_parseable_snapshots(directory: &Path, id: &str) {
+    for name in snapshot_names(directory) {
+        let value: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.join(&name)).unwrap_or_else(|error| {
+                panic!("fixture {id}: could not read snapshot {name}: {error}")
+            }),
+        )
+        .unwrap_or_else(|error| panic!("fixture {id}: snapshot {name} is invalid: {error}"));
+        assert_eq!(value["schema_version"], 1, "fixture {id}: {name}");
+    }
+}
+
+fn assert_none_translation_identity(snapshot: &serde_json::Value, id: &str) {
+    for page in snapshot["pages"].as_array().unwrap() {
+        for paragraph in page["paragraphs"].as_array().unwrap() {
+            if paragraph.get("preserved").is_some() {
+                assert!(paragraph["translated_text"].is_null(), "fixture {id}");
+            } else {
+                assert_eq!(
+                    paragraph["translated_text"].as_str(),
+                    Some(il_paragraph_text(paragraph).as_str()),
+                    "fixture {id}: none backend changed paragraph text"
+                );
+            }
+        }
+    }
 }
 
 fn expected_page_transforms(
@@ -666,6 +711,146 @@ fn failed_pass_keeps_debug_prefix_and_finishes_json_with_one_error() {
         diagnostics[0]["scanned_page_indices"],
         serde_json::json!([0])
     );
+}
+
+#[test]
+fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
+    let ids = all_fixture_ids();
+    let cases = ids
+        .iter()
+        .flat_map(|id| fixture_manifest(id).identity.cases)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(ids.len(), 133, "M1 closure fixture inventory changed");
+    assert_eq!(cases.len(), 72, "M1 closure case inventory changed");
+
+    for id in ids {
+        let input = fixture_path(&id);
+        let directory = tempfile::tempdir().unwrap();
+
+        let inspect_debug = directory.path().join("inspect-debug");
+        let inspected = run_inspect(&input, true, Some(&inspect_debug));
+        let inspect_code = inspected
+            .status
+            .code()
+            .unwrap_or_else(|| panic!("fixture {id}: inspect terminated by signal"));
+        assert!(inspected.stderr.is_empty(), "fixture {id}: inspect stderr");
+        let inspect_events = parse_events(&inspected.stdout);
+        assert_one_terminal_last(
+            &inspect_events,
+            if inspect_code == 0 { "result" } else { "error" },
+        );
+        assert!(
+            matches!(inspect_code, 0 | 2),
+            "fixture {id}: unexpected inspect exit code {inspect_code}"
+        );
+        assert_parseable_snapshots(&inspect_debug, &id);
+        if inspect_code == 0 {
+            assert_eq!(
+                snapshot_names(&inspect_debug),
+                vec![
+                    "00-parse.il.json",
+                    "01-scan_detect.il.json",
+                    "02-layout.il.json",
+                    "03-paragraph_find.il.json",
+                ],
+                "fixture {id}: incomplete inspect snapshots"
+            );
+            let terminal = inspect_events.last().unwrap();
+            assert_eq!(terminal["il"]["schema_version"], 1, "fixture {id}");
+            assert_eq!(
+                terminal["pages"].as_u64(),
+                Some(fixture_manifest(&id).page.len() as u64),
+                "fixture {id}"
+            );
+        } else {
+            assert_eq!(
+                inspect_events.last().unwrap()["category"],
+                "input",
+                "fixture {id}"
+            );
+        }
+
+        let translate_debug = directory.path().join("translate-debug");
+        let translated = directory.path().join("translated.pdf");
+        let translated_result = run_none_with_debug(&input, &translated, &translate_debug, true);
+        let translate_code = translated_result
+            .status
+            .code()
+            .unwrap_or_else(|| panic!("fixture {id}: translate terminated by signal"));
+        assert!(
+            translated_result.stderr.is_empty(),
+            "fixture {id}: translate stderr"
+        );
+        let translate_events = parse_events(&translated_result.stdout);
+        assert_one_terminal_last(
+            &translate_events,
+            if translate_code == 0 {
+                "result"
+            } else {
+                "error"
+            },
+        );
+        assert!(
+            matches!(translate_code, 0 | 2),
+            "fixture {id}: unexpected translate exit code {translate_code}"
+        );
+        assert_parseable_snapshots(&translate_debug, &id);
+
+        if translate_code == 0 {
+            assert_eq!(
+                snapshot_names(&translate_debug),
+                vec![
+                    "00-parse.il.json",
+                    "01-scan_detect.il.json",
+                    "02-layout.il.json",
+                    "03-paragraph_find.il.json",
+                    "04-styles_and_formulas.il.json",
+                    "05-extract_terms.il.json",
+                    "06-translate.il.json",
+                    "07-typeset.il.json",
+                    "08-font_embed.il.json",
+                    "09-write.il.json",
+                ],
+                "fixture {id}: incomplete translate snapshots"
+            );
+            let translate_snapshot: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(translate_debug.join("06-translate.il.json")).unwrap(),
+            )
+            .unwrap();
+            assert_none_translation_identity(&translate_snapshot, &id);
+            assert!(translated.is_file(), "fixture {id}: no translated output");
+            let input_bytes = std::fs::read(&input).unwrap();
+            let output_bytes = std::fs::read(&translated).unwrap();
+            assert!(output_bytes.starts_with(&input_bytes), "fixture {id}");
+            let qpdf = Command::new("qpdf")
+                .arg("--check")
+                .arg(&translated)
+                .output()
+                .unwrap();
+            let legality = fixture_manifest(&id).identity.legality;
+            if legality == "legal" {
+                assert!(
+                    qpdf.status.success(),
+                    "fixture {id}: {}",
+                    String::from_utf8_lossy(&qpdf.stderr)
+                );
+            } else {
+                assert_eq!(legality, "malformed", "fixture {id}");
+                assert!(
+                    matches!(qpdf.status.code(), Some(0 | 3)),
+                    "fixture {id}: {}",
+                    String::from_utf8_lossy(&qpdf.stderr)
+                );
+            }
+        } else {
+            assert_eq!(
+                translate_events.last().unwrap()["category"],
+                "input",
+                "fixture {id}"
+            );
+            assert!(!translated.exists(), "fixture {id}: failure wrote output");
+        }
+    }
 }
 
 #[test]

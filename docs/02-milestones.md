@@ -46,7 +46,7 @@
 
 补充资格实验 [05-pdfium-backend-qualification.md](05-pdfium-backend-qualification.md) 的结论为 **B：firecrawl-pdfium 补齐 T1/F1/O1 后采用**。这不阻塞 M1：生产侧继续使用 pdfium-render，待上游能力进入固定 revision 并重跑资格矩阵后再决定替换。
 
-## M1 · 最小端到端（当前）
+## M1 · 最小端到端（已完成）
 
 当前入口为 GitHub Issue #14：先设计支撑单行原生 PDF 以 `none` 后端完成“解析 → 排版 → 字体嵌入 → 增量写回”的最小接口与所有权边界，再实现这条 walking skeleton；不提前设计 M2–M4 的完整模块表面。
 
@@ -59,6 +59,8 @@
 - 测试网与 CI 同步建立：insta IL 快照（逐 pass）、全语料零 panic、CI 绿才合并。
 
 **收口断言**：在基线文本 fixture 上以 `none` 后端产出有效 PDF，字符经"解析→排版→写回"往返后，baseline origin 与度量盒仍在 manifest 容差内；扫描件与加密 fixture 按分类退出码拒绝（加密的空密码档必须**未产生任何输出文件**——它是"静默放行"这一失败模式的唯一守卫）；非直立 fixture 的 `TextTransform` 取值与 manifest 一致，含 `/Rotate 90` 负例；畸形 fixture 以 manifest 声明的方式 fail-fast，不 panic。
+
+**状态（2026-08-24）**：上述断言均满足。M1 最终库存为 133 份 fixture、72 个去重 case；规划期的约 138/87 是容量估算，实际矩阵通过合并等价变体、让单份 fixture 覆盖多个 case、跨 concern 复用精确父本去重。普通 CI 对全量 fixture 执行 production `inspect`/`none` 路径与逐 pass IL 快照，并以独立 qpdf、Poppler、MuPDF 门禁重新验收 Corpus v1；详见 [M1 收口记录](06-m1-closure.md)。
 
 ## M2 · 真翻译
 

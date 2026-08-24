@@ -22,7 +22,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install PDF validation tools
-        run: sudo apt-get update && sudo apt-get install --yes qpdf poppler-utils mupdf-tools
+        run: sudo apt-get update && sudo apt-get install --yes ghostscript qpdf poppler-utils mupdf-tools
 
       - name: Install pinned PDFium
         env:
@@ -44,6 +44,9 @@ jobs:
         env:
           MIMUS_PDFIUM_LIBRARY: ${{ github.workspace }}/pdfium/lib/libpdfium.so
         run: cargo test --workspace --all-targets --all-features
+
+      - name: Verify Corpus v1 with independent PDF tools
+        run: cargo run -p corpus -- verify
 
       - name: Incremental writeback PoC
         run: cargo test --manifest-path experiments/m0-experiment-3-poc/Cargo.toml
