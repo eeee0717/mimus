@@ -3,6 +3,8 @@ use std::collections::BTreeSet;
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 
+use crate::pdf_stream;
+
 const MAX_CONTENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FORM_DEPTH: usize = 64;
 const MAX_PAGE_TREE_DEPTH: usize = 128;
@@ -108,7 +110,7 @@ impl Scanner<'_> {
                 }
             };
             let remaining = MAX_CONTENT_BYTES.saturating_sub(data.len());
-            let decoded = match stream.decompressed_content_with_limit(remaining) {
+            let decoded = match pdf_stream::decode(self.document, stream, remaining) {
                 Ok(value) => value,
                 Err(_) => {
                     self.evidence.complete = false;
@@ -369,7 +371,7 @@ impl Scanner<'_> {
             },
             Err(_) => parent_resources,
         };
-        match stream.decompressed_content_with_limit(MAX_CONTENT_BYTES) {
+        match pdf_stream::decode(self.document, stream, MAX_CONTENT_BYTES) {
             Ok(data) => {
                 let mut state = ScanState {
                     rendering_mode,

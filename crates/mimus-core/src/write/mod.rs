@@ -7,6 +7,7 @@ use lopdf::{Document, IncrementalDocument, Object, ObjectId, Stream};
 
 use crate::error::{InternalReason, IoReason, MimusError, Result};
 use crate::il::FontRef;
+use crate::pdf_stream;
 use crate::walk::MAX_STREAM_BYTES;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,8 +117,7 @@ pub(crate) fn build_incremental(
                 .get_object(source_id)
                 .and_then(Object::as_stream)
                 .map_err(output_build_error)?;
-            let decoded = source
-                .decompressed_content_with_limit(MAX_STREAM_BYTES)
+            let decoded = pdf_stream::decode(original, source, MAX_STREAM_BYTES)
                 .map_err(output_build_error)?;
             let content = apply_span_replacements(
                 &decoded,

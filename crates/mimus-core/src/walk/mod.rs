@@ -1,3 +1,4 @@
+mod font;
 mod tokenizer;
 
 use std::collections::BTreeSet;
@@ -8,6 +9,8 @@ use crate::error::{ErrorReason, InputReason, MimusError, Result};
 use crate::event::{PageDegradeReason, RecoveryKind};
 use crate::geometry::{PageFrame, PageGeometryResolveError};
 use crate::il::{FontRef, Point, Rect, TextTransform};
+use crate::pdf_stream;
+use font::ResolvedFont;
 use tokenizer::{CompositeDelimiter, InlineImageLengthSource, Token, TokenKind, tokenize};
 
 pub(crate) const MAX_STREAM_BYTES: usize = 16 * 1024 * 1024;
@@ -22,6 +25,9 @@ pub struct WalkedChar {
     pub encoded: Vec<u8>,
     pub font: FontRef,
     pub font_size: f64,
+    pub advance: f64,
+    pub font_supported: bool,
+    pub engine_mismatch_tolerated: bool,
     pub baseline_origin: Point,
     pub metric_box: Rect,
     pub text_transform: TextTransform,
@@ -229,10 +235,10 @@ pub(crate) fn walk_page_detailed_with_rotation(
     let mut content_streams = Vec::with_capacity(content_objects.len());
     for object_id in content_objects {
         let content = document.get_object(object_id).map_err(|error| {
-            PageWalkError::Fatal(walk_error(format!(
-                "page content {} is missing: {error}",
-                object_id.0
-            )))
+            PageWalkError::Fatal(MimusError::input(
+                InputReason::PdfParse,
+                format!("page content {} is missing: {error}", object_id.0),
+            ))
         })?;
         let stream = content
             .as_stream()
@@ -243,12 +249,12 @@ pub(crate) fn walk_page_detailed_with_rotation(
                     object_id.0
                 )),
             })?;
-        let decoded = stream
-            .decompressed_content_with_limit(MAX_STREAM_BYTES)
-            .map_err(|error| PageWalkError::Degraded {
+        let decoded = pdf_stream::decode(document, stream, MAX_STREAM_BYTES).map_err(|error| {
+            PageWalkError::Degraded {
                 reason: PageDegradeReason::ContentDecode,
                 source: walk_error(format!("could not decode content {}: {error}", object_id.0)),
-            })?;
+            }
+        })?;
         walker.content_object = object_id;
         let tokens = tokenize(&decoded).map_err(|failure| PageWalkError::Degraded {
             reason: failure.reason,
@@ -566,7 +572,7 @@ impl Walker<'_> {
             },
             Err(_) => self.resources.clone(),
         };
-        let decoded = match stream.decompressed_content_with_limit(MAX_STREAM_BYTES) {
+        let decoded = match pdf_stream::decode(self.document, stream, MAX_STREAM_BYTES) {
             Ok(decoded) => decoded,
             Err(error) => {
                 return Err(self.degrade_error(
@@ -793,19 +799,24 @@ impl Walker<'_> {
         if self.state.font_name.is_empty() {
             return Err(walk_error("Tj appeared before Tf"));
         }
-        let font = resolve_simple_font(self.document, &self.resources, &self.state.font_name)?;
-        for byte in bytes {
+        let font = ResolvedFont::resolve(self.document, &self.resources, &self.state.font_name)
+            .map_err(|object_id| {
+                MimusError::input(
+                    InputReason::PdfParse,
+                    format!(
+                        "font /{} points to missing object {} {} R",
+                        display_pdf_name(&self.state.font_name),
+                        object_id.0,
+                        object_id.1
+                    ),
+                )
+            })?;
+        for glyph in font.decode(bytes) {
             let transform = self.state.ctm.then(self.state.text_matrix);
             let locatable = !transform.is_singular();
             let baseline = transform.point(0.0, self.state.rise);
-            let width = font.width(*byte).ok_or_else(|| {
-                unsupported_error(format!(
-                    "font /{} has no width for character code {byte}",
-                    display_pdf_name(&self.state.font_name)
-                ))
-            })?;
-            let glyph_width = width * self.state.font_size / 1000.0;
-            let word_spacing = if *byte == b' ' {
+            let glyph_width = glyph.advance_em * self.state.font_size;
+            let word_spacing = if glyph.encoded.as_slice() == b" " {
                 self.state.word_spacing
             } else {
                 0.0
@@ -815,18 +826,21 @@ impl Walker<'_> {
             let metric_box = transformed_box(
                 transform,
                 0.0,
-                font.descent * self.state.font_size / 1000.0 + self.state.rise,
+                font.descent_em * self.state.font_size + self.state.rise,
                 glyph_width * self.state.horizontal_scale,
-                font.ascent * self.state.font_size / 1000.0 + self.state.rise,
+                font.ascent_em * self.state.font_size + self.state.rise,
             );
             self.characters.push(WalkedChar {
-                unicode: decode_win_ansi(*byte),
-                code: u32::from(*byte),
+                unicode: glyph.unicode,
+                code: glyph.code,
                 visible: !matches!(self.state.rendering_mode, 3 | 7),
                 locatable,
-                encoded: vec![*byte],
+                encoded: glyph.encoded,
                 font: font.reference.clone(),
                 font_size: self.state.font_size,
+                advance: glyph_width * self.state.horizontal_scale,
+                font_supported: glyph.font_supported,
+                engine_mismatch_tolerated: font.engine_mismatch_tolerated,
                 baseline_origin: baseline,
                 metric_box,
                 text_transform: classify_transform(self.visual_rotation.then(transform)),
@@ -919,125 +933,6 @@ impl Walker<'_> {
         }
         Ok(())
     }
-}
-
-struct SimpleFont {
-    reference: FontRef,
-    first_char: i64,
-    widths: Vec<f64>,
-    ascent: f64,
-    descent: f64,
-}
-
-impl SimpleFont {
-    fn width(&self, code: u8) -> Option<f64> {
-        let index = i64::from(code) - self.first_char;
-        usize::try_from(index)
-            .ok()
-            .and_then(|index| self.widths.get(index))
-            .copied()
-    }
-}
-
-fn resolve_simple_font(
-    document: &Document,
-    resources: &Dictionary,
-    name: &[u8],
-) -> Result<SimpleFont> {
-    let fonts = resources
-        .get_deref(b"Font", document)
-        .and_then(Object::as_dict)
-        .map_err(|error| walk_error(format!("page has no usable Font resources: {error}")))?;
-    let font_object = fonts.get(name).map_err(|error| {
-        walk_error(format!(
-            "font /{} is missing: {error}",
-            display_pdf_name(name)
-        ))
-    })?;
-    let object_id = font_object
-        .as_reference()
-        .map_err(|_| walk_error("font resource must be an indirect object in the M1 path"))?;
-    let font = document
-        .get_object(object_id)
-        .and_then(Object::as_dict)
-        .map_err(|error| walk_error(format!("font object {} is invalid: {error}", object_id.0)))?;
-    let subtype = font
-        .get(b"Subtype")
-        .and_then(Object::as_name)
-        .map_err(|error| {
-            walk_error(format!(
-                "font object {} has no valid Subtype: {error}",
-                object_id.0
-            ))
-        })?;
-    if !matches!(subtype, b"Type1" | b"TrueType") {
-        return Err(unsupported_error(format!(
-            "M1 supports only Type1 and TrueType simple fonts with explicit metrics; font /{} uses /Subtype /{}",
-            display_pdf_name(name),
-            display_pdf_name(subtype)
-        )));
-    }
-    // Standard 14 字体合法省略 FontDescriptor；缺少显式度量是能力边界，不是内容流语法错误。
-    if subtype == b"Type1" && !font.has(b"FontDescriptor") {
-        if let Ok(base_font) = font.get(b"BaseFont").and_then(Object::as_name) {
-            if is_standard_14_name(base_font) {
-                return Err(unsupported_error(format!(
-                    "M1 requires explicit FontDescriptor metrics; font /{} uses Standard 14 /{}",
-                    display_pdf_name(name),
-                    display_pdf_name(base_font)
-                )));
-            }
-        }
-    }
-    let first_char = font.get(b"FirstChar").and_then(Object::as_i64).unwrap_or(0);
-    let widths = font
-        .get_deref(b"Widths", document)
-        .and_then(Object::as_array)
-        .map_err(|error| {
-            walk_error(format!(
-                "font object {} has no widths: {error}",
-                object_id.0
-            ))
-        })?
-        .iter()
-        .map(object_number)
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| walk_error("font Widths contains a non-number"))?;
-    let descriptor = font
-        .get_deref(b"FontDescriptor", document)
-        .and_then(Object::as_dict)
-        .map_err(|error| {
-            walk_error(format!(
-                "font object {} has no descriptor: {error}",
-                object_id.0
-            ))
-        })?;
-    let ascent = descriptor
-        .get(b"Ascent")
-        .ok()
-        .and_then(object_number)
-        .ok_or_else(|| walk_error("font descriptor has no numeric Ascent"))?;
-    let descent = descriptor
-        .get(b"Descent")
-        .ok()
-        .and_then(object_number)
-        .ok_or_else(|| walk_error("font descriptor has no numeric Descent"))?;
-    Ok(SimpleFont {
-        reference: FontRef {
-            resource_name: String::from_utf8(name.to_vec()).map_err(|_| {
-                unsupported_error(format!(
-                    "M1 cannot faithfully re-emit non-UTF-8 font resource /{}",
-                    display_pdf_name(name)
-                ))
-            })?,
-            object_number: object_id.0,
-            generation: object_id.1,
-        },
-        first_char,
-        widths,
-        ascent,
-        descent,
-    })
 }
 
 fn inherited_page_resources(document: &Document, page_id: ObjectId) -> Result<Dictionary> {
@@ -1215,26 +1110,6 @@ fn numeric_array(
         .map(Some)
 }
 
-fn is_standard_14_name(name: &[u8]) -> bool {
-    const NAMES: [&[u8]; 14] = [
-        b"Times-Roman",
-        b"Times-Bold",
-        b"Times-Italic",
-        b"Times-BoldItalic",
-        b"Helvetica",
-        b"Helvetica-Bold",
-        b"Helvetica-Oblique",
-        b"Helvetica-BoldOblique",
-        b"Courier",
-        b"Courier-Bold",
-        b"Courier-Oblique",
-        b"Courier-BoldOblique",
-        b"Symbol",
-        b"ZapfDingbats",
-    ];
-    NAMES.contains(&name)
-}
-
 fn decode_win_ansi(code: u8) -> Option<char> {
     const C1: [u16; 32] = [
         0x20ac, 0, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021, 0x02c6, 0x2030, 0x0160, 0x2039,
@@ -1304,10 +1179,6 @@ fn walk_error(message: impl Into<String>) -> MimusError {
     MimusError::input(InputReason::OperatorWalk, message)
 }
 
-fn unsupported_error(message: impl Into<String>) -> MimusError {
-    MimusError::input(InputReason::UnsupportedPdf, message)
-}
-
 fn display_pdf_name(name: &[u8]) -> String {
     name.iter()
         .map(|byte| {
@@ -1325,8 +1196,6 @@ mod tests {
     use std::path::PathBuf;
 
     use lopdf::dictionary;
-
-    use crate::error::ErrorReason;
 
     use super::*;
 
@@ -1502,6 +1371,38 @@ mod tests {
     }
 
     #[test]
+    fn production_walk_resolves_an_indirect_content_filter() {
+        let mut document = Document::load(fixture()).unwrap();
+        let mut program = vec![b'%'];
+        program.extend(std::iter::repeat_n(b'A', 512));
+        program.push(b'\n');
+        program.extend_from_slice(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET");
+        let filter = {
+            let stream = document
+                .get_object_mut((9, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap();
+            stream.set_plain_content(program);
+            stream.compress().unwrap();
+            stream.dict.remove(b"Filter").unwrap()
+        };
+        let filter_id = document.add_object(filter);
+        document
+            .get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Filter", filter_id);
+
+        let page_id = document.get_pages()[&1];
+        let walked = walk_page(&document, page_id).unwrap();
+        assert_eq!(text_of(&walked), "MIMUS");
+        assert!(walked.recoveries.is_empty());
+    }
+
+    #[test]
     fn production_walk_keeps_contents_streams_separate_and_carries_state_between_them() {
         let id = "unit-parse-04-contents-array-numeric-split";
         let document = Document::load(fixture_path(id)).unwrap();
@@ -1658,25 +1559,70 @@ mod tests {
     }
 
     #[test]
-    fn production_walk_classifies_legal_out_of_scope_fonts_as_unsupported() {
-        for (id, expected_message) in [
-            ("unit-cmap-01-identity-no-tounicode", "Subtype /Type0"),
-            ("unit-stream-02-type3-d1", "Subtype /Type3"),
-            ("unit-font-01-std14-custom-widths", "Standard 14 /Helvetica"),
+    fn production_walk_decodes_type0_type3_and_file_defined_standard14_widths() {
+        for (id, expected_text, expected_advance) in [
+            ("unit-cmap-01-identity-no-tounicode", "MIMUS", 10.356),
+            ("unit-stream-02-type3-d1", "M", 12.0),
+            ("unit-stream-04-type3-d0", "M", 12.0),
+            ("unit-font-01-std14-custom-widths", "AAAA", 12.0),
         ] {
-            let document = Document::load(fixture_path(id)).unwrap();
-            let page_id = document.get_pages()[&1];
-            let error = walk_page(&document, page_id).unwrap_err();
-            assert_eq!(
-                error.reason(),
-                ErrorReason::Input(InputReason::UnsupportedPdf),
-                "fixture {id}: {error}"
+            let walked = walk_fixture(id);
+            assert_eq!(text_of(&walked), expected_text, "fixture {id}");
+            assert!(
+                walked.characters.iter().all(|character| {
+                    character.font_supported
+                        && character.advance.is_finite()
+                        && character.advance > 0.0
+                }),
+                "fixture {id}"
             );
             assert!(
-                error.to_string().contains(expected_message),
-                "fixture {id}: {error}"
+                (walked.characters[0].advance - expected_advance).abs() < 0.001,
+                "fixture {id}"
             );
         }
+    }
+
+    #[test]
+    fn simple_font_fallback_requires_the_character_in_the_embedded_cmap() {
+        let mut document = Document::load(fixture_path("unit-font-escaped-name")).unwrap();
+        document
+            .get_object_mut((8, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(b"BT /F#31 12 Tf 1 0 0 1 72 120 Tm (Z) Tj ET".to_vec());
+
+        let page_id = document.get_pages()[&1];
+        let walked = walk_page(&document, page_id).unwrap();
+
+        assert_eq!(walked.characters.len(), 1);
+        assert_eq!(walked.characters[0].code, u32::from(b'Z'));
+        assert_eq!(walked.characters[0].unicode, None);
+        assert!(walked.characters[0].font_supported);
+        assert!(walked.characters[0].advance > 0.0);
+    }
+
+    #[test]
+    fn a_used_dangling_font_reference_is_a_fatal_parse_error() {
+        let mut document = Document::load(fixture()).unwrap();
+        document
+            .get_object_mut((4, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"Font")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("F1", (99, 0));
+        let page_id = document.get_pages()[&1];
+
+        assert!(matches!(
+            walk_page_detailed(&document, page_id),
+            Err(PageWalkError::Fatal(error))
+                if error.reason() == ErrorReason::Input(InputReason::PdfParse)
+        ));
     }
 
     #[test]
@@ -1791,6 +1737,73 @@ mod tests {
     }
 
     #[test]
+    fn nested_bt_resets_text_matrices_and_reports_recovery() {
+        let walked = walk_program(
+            b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (MI) Tj BT /F1 12 Tf 1 0 0 1 100 80 Tm (MUS) Tj ET",
+        )
+        .unwrap();
+
+        assert_eq!(text_of(&walked), "MIMUS");
+        assert_eq!(
+            walked.characters[2].baseline_origin,
+            Point { x: 100.0, y: 80.0 }
+        );
+        assert_eq!(
+            walked.recoveries,
+            BTreeSet::from([RecoveryKind::NestedTextObject])
+        );
+    }
+
+    #[test]
+    fn production_walk_pads_odd_hex_and_degrades_invalid_hex() {
+        let odd = walk_program(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm <4D494D55534> Tj ET").unwrap();
+        assert_eq!(
+            odd.characters
+                .iter()
+                .map(|character| character.code)
+                .collect::<Vec<_>>(),
+            vec![0x4d, 0x49, 0x4d, 0x55, 0x53, 0x40]
+        );
+        assert_eq!(odd.characters.last().unwrap().encoded, vec![0x40]);
+        assert!(odd.recoveries.is_empty());
+
+        let mut document = Document::load(fixture()).unwrap();
+        document
+            .get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm <4G> Tj ET".to_vec());
+        let page_id = document.get_pages()[&1];
+        assert!(matches!(
+            walk_page_detailed(&document, page_id),
+            Err(PageWalkError::Degraded {
+                reason: PageDegradeReason::ContentStreamSyntax,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn tr_seven_characters_are_invisible_without_hiding_later_text() {
+        let walked =
+            walk_program(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm 7 Tr (MI) Tj 0 Tr (MUS) Tj ET").unwrap();
+
+        assert_eq!(text_of(&walked), "MIMUS");
+        assert!(
+            walked.characters[..2]
+                .iter()
+                .all(|character| !character.visible)
+        );
+        assert!(
+            walked.characters[2..]
+                .iter()
+                .all(|character| character.visible)
+        );
+        assert!(walked.recoveries.is_empty());
+    }
+
+    #[test]
     fn production_walk_tracks_graphics_text_state_and_multiple_text_shows() {
         let programs: &[(&[u8], &str)] = &[
             (
@@ -1803,7 +1816,7 @@ mod tests {
             ),
             (
                 b"BT /F1 12 Tf 2 Tw 1 0 0 1 72 120 Tm (MI MUS) Tj ET",
-                "MI MUS",
+                "MIMUS",
             ),
             (
                 b"BT /F1 12 Tf 50 Tz 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
@@ -1862,7 +1875,9 @@ mod tests {
         let page_id = document.get_pages()[&1];
         let walked = walk_page(&document, page_id).unwrap();
 
-        assert_eq!(text_of(&walked), "IIIIIIH");
+        assert_eq!(text_of(&walked), "IIIIII");
+        assert_eq!(walked.characters.last().unwrap().code, u32::from(b'H'));
+        assert_eq!(walked.characters.last().unwrap().unicode, None);
         assert_eq!(
             walked.characters[0].baseline_origin,
             Point { x: 110.0, y: 176.0 }
@@ -1930,6 +1945,48 @@ mod tests {
     }
 
     #[test]
+    fn production_walk_classifies_missing_and_non_stream_xobjects() {
+        let mut missing = Document::load(fixture()).unwrap();
+        missing
+            .get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(b"/Missing Do".to_vec());
+        let page_id = missing.get_pages()[&1];
+        assert!(matches!(
+            walk_page_detailed(&missing, page_id),
+            Err(PageWalkError::Degraded {
+                reason: PageDegradeReason::MissingResource,
+                ..
+            })
+        ));
+
+        let mut non_stream = Document::load(fixture()).unwrap();
+        let object_id = non_stream.add_object(Object::Integer(42));
+        non_stream
+            .get_object_mut((4, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("XObject", dictionary! { "Broken" => object_id });
+        non_stream
+            .get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(b"/Broken Do".to_vec());
+        let page_id = non_stream.get_pages()[&1];
+        assert!(matches!(
+            walk_page_detailed(&non_stream, page_id),
+            Err(PageWalkError::Degraded {
+                reason: PageDegradeReason::XObjectNotAStream,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn form_scopes_cannot_pop_or_leak_caller_state() {
         let underflow = walk_fixture("mal-xobj-04-scope-underflow");
         assert_eq!(text_of(&underflow), "MIMUS");
@@ -1960,7 +2017,14 @@ mod tests {
     #[test]
     fn singular_form_characters_are_unlocatable_without_poisoning_the_page() {
         let walked = walk_fixture("unit-xobj-05-singular-ctm");
-        assert_eq!(text_of(&walked), "FORMMIMUS");
+        assert_eq!(text_of(&walked), "MMIMUS");
+        assert_eq!(
+            walked.characters[..4]
+                .iter()
+                .map(|character| character.code)
+                .collect::<Vec<_>>(),
+            b"FORM".iter().copied().map(u32::from).collect::<Vec<_>>()
+        );
         assert!(
             walked.characters[..4]
                 .iter()
@@ -1992,7 +2056,7 @@ mod tests {
     }
 
     #[test]
-    fn production_walk_rejects_a_font_name_it_cannot_reemit_losslessly() {
+    fn production_walk_serializes_non_utf8_font_names_without_losing_bytes() {
         let mut document = Document::load(fixture()).unwrap();
         let resources = document
             .get_object_mut((4, 0))
@@ -2010,10 +2074,13 @@ mod tests {
             .set_plain_content(b"BT /#FF 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET".to_vec());
 
         let page_id = document.get_pages()[&1];
-        let error = walk_page(&document, page_id).unwrap_err();
-        assert_eq!(
-            error.reason(),
-            ErrorReason::Input(InputReason::UnsupportedPdf)
+        let walked = walk_page(&document, page_id).unwrap();
+        assert_eq!(text_of(&walked), "MIMUS");
+        assert!(
+            walked
+                .characters
+                .iter()
+                .all(|character| character.font.resource_name == "#FF")
         );
     }
 }

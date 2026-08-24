@@ -7,6 +7,7 @@ pub mod event;
 mod geometry;
 pub mod il;
 pub mod pass;
+mod pdf_stream;
 mod scan;
 pub mod translate;
 pub mod walk;

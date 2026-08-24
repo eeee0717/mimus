@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -34,8 +34,14 @@ fn manifest_path(id: &str) -> PathBuf {
 
 #[derive(Debug, Deserialize)]
 struct FixtureManifest {
+    identity: ManifestIdentity,
     page: Vec<ManifestPage>,
     expected: ManifestExpected,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestIdentity {
+    cases: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +117,22 @@ fn fixture_manifest(id: &str) -> FixtureManifest {
     toml::from_str(&std::fs::read_to_string(manifest_path(id)).unwrap()).unwrap()
 }
 
+fn fixture_ids_with_case_prefixes(prefixes: &[&str]) -> BTreeSet<String> {
+    std::fs::read_dir(repo_root().join("corpus/fixtures"))
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.path().join("manifest.toml").is_file())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|id| {
+            fixture_manifest(id)
+                .identity
+                .cases
+                .iter()
+                .any(|case| prefixes.iter().any(|prefix| case.starts_with(prefix)))
+        })
+        .collect()
+}
+
 fn expected_page_transforms(
     manifest: &FixtureManifest,
     page_index: usize,
@@ -147,6 +169,17 @@ fn expected_page_transforms(
         }));
     }
     result
+}
+
+fn expected_page_text(manifest: &FixtureManifest, page_index: usize) -> String {
+    let mut blocks = manifest
+        .expected
+        .block
+        .iter()
+        .filter(|block| block.page == page_index)
+        .collect::<Vec<_>>();
+    blocks.sort_by_key(|block| block.draw_order);
+    blocks.iter().map(|block| block.text.as_str()).collect()
 }
 
 fn pdfium_library() -> OsString {
@@ -312,16 +345,27 @@ fn decoded_page_streams(path: &Path, page_number: u32) -> Vec<Vec<u8>> {
     document
         .get_page_contents(page_id)
         .into_iter()
-        .map(|object_id| {
-            document
-                .get_object(object_id)
-                .unwrap()
-                .as_stream()
-                .unwrap()
-                .decompressed_content()
-                .unwrap()
+        .map(|(object, generation)| {
+            let output = Command::new("qpdf")
+                .arg(format!("--show-object={object} {generation} R"))
+                .arg("--filtered-stream-data")
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
         })
         .collect()
+}
+
+fn page_content_ids(path: &Path, page_number: u32) -> Vec<(u32, u16)> {
+    let document = lopdf::Document::load(path).unwrap();
+    let page_id = document.get_pages()[&page_number];
+    document.get_page_contents(page_id)
 }
 
 fn local_page_entry(path: &Path, page_number: u32, key: &[u8]) -> Option<lopdf::Object> {
@@ -772,8 +816,8 @@ fn native_image_text_and_hidden_watermark_continue_as_content_pages() {
     let directory = tempfile::tempdir().unwrap();
     for (id, supported) in [
         ("unit-scan-03-visible-image-text", true),
-        // Two detected baselines remain the ParagraphFind boundary owned by #20.
-        ("unit-scan-05-hidden-watermark", false),
+        // The hidden baseline is an isolated passthrough unit, so the visible text remains usable.
+        ("unit-scan-05-hidden-watermark", true),
     ] {
         let input = fixture_path(id);
         let output_path = directory.path().join(format!("{id}-output.pdf"));
@@ -890,27 +934,284 @@ fn short_output_flag_is_supported() {
 }
 
 #[test]
-fn font_paths_not_yet_implemented_still_fail_closed_without_output() {
+fn paragraph_layout_not_yet_implemented_still_fails_closed_without_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = "unit-base-02-two-column";
+    let translated = directory.path().join(format!("{id}.pdf"));
+    let result = run_none(&fixture_path(id), Some(&translated), false);
+    assert_eq!(
+        result.status.code(),
+        Some(2),
+        "fixture {id}: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("unsupported_pdf"),
+        "fixture {id}: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!translated.exists(), "fixture {id} produced output");
+}
+
+#[test]
+fn supported_font_and_cmap_fixtures_match_manifest_unicode_and_positive_advances() {
     let directory = tempfile::tempdir().unwrap();
     for id in [
-        "unit-base-02-two-column",
+        "unit-font-01-std14-custom-widths",
+        "unit-font-escaped-name",
         "unit-stream-02-type3-d1",
+        "unit-stream-04-type3-d0",
         "unit-cmap-01-identity-no-tounicode",
+        "unit-cmap-02-mixed-codespace",
+        "unit-cmap-embedded-ok",
+        "unit-cmap-identity-alias",
     ] {
-        let translated = directory.path().join(format!("{id}.pdf"));
-        let result = run_none(&fixture_path(id), Some(&translated), false);
-        assert_eq!(
-            result.status.code(),
-            Some(2),
+        let manifest = fixture_manifest(id);
+        let input = fixture_path(id);
+        let inspected = run_inspect(&input, true, None);
+        assert!(
+            inspected.status.success(),
             "fixture {id}: {}",
-            String::from_utf8_lossy(&result.stderr)
+            String::from_utf8_lossy(&inspected.stderr)
+        );
+        let events = parse_events(&inspected.stdout);
+        assert_one_terminal_last(&events, "result");
+        let result = events.last().unwrap();
+
+        for page_index in 0..manifest.page.len() {
+            let expected = expected_page_text(&manifest, page_index);
+            if expected.is_empty() {
+                continue;
+            }
+            let paragraphs = result["il"]["pages"][page_index]["paragraphs"]
+                .as_array()
+                .unwrap();
+            assert!(
+                paragraphs
+                    .iter()
+                    .all(|paragraph| paragraph.get("preserved").is_none()),
+                "fixture {id} unexpectedly preserved a processable paragraph"
+            );
+            let characters = paragraphs
+                .iter()
+                .flat_map(|paragraph| paragraph["text"]["chars"].as_array().unwrap())
+                .collect::<Vec<_>>();
+            let actual = characters
+                .iter()
+                .map(|character| character["unicode"].as_str().unwrap())
+                .collect::<String>();
+            assert_eq!(actual, expected, "fixture {id}");
+            assert_eq!(characters.len(), expected.chars().count(), "fixture {id}");
+            for (character_index, character) in characters.into_iter().enumerate() {
+                let left = character["box"]["left"].as_f64().unwrap();
+                let right = character["box"]["right"].as_f64().unwrap();
+                assert!(
+                    left.is_finite() && right.is_finite() && right > left,
+                    "fixture {id}, character {character_index} has no positive advance box"
+                );
+            }
+        }
+        assert!(
+            !inspected
+                .stdout
+                .windows(b"(cid:".len())
+                .any(|window| window == b"(cid:"),
+            "fixture {id} emitted a CID literal"
+        );
+
+        let translated = directory.path().join(format!("{id}.pdf"));
+        let translation = run_none(&input, Some(&translated), true);
+        assert!(
+            translation.status.success(),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&translation.stderr)
+        );
+        assert_eq!(
+            decoded_page_streams(&translated, 1),
+            decoded_page_streams(&input, 1),
+            "fixture {id}"
         );
         assert!(
-            String::from_utf8_lossy(&result.stderr).contains("unsupported_pdf"),
-            "fixture {id}: {}",
-            String::from_utf8_lossy(&result.stderr)
+            !std::fs::read(&translated)
+                .unwrap()
+                .windows(b"(cid:".len())
+                .any(|window| window == b"(cid:"),
+            "fixture {id} output contains a CID literal"
         );
-        assert!(!translated.exists(), "fixture {id} produced output");
+    }
+}
+
+#[test]
+fn unreliable_font_and_cmap_fixtures_preserve_exact_bytes_with_declared_reasons() {
+    let directory = tempfile::tempdir().unwrap();
+    for id in [
+        "unit-cmap-predefined-gb",
+        "mal-font-missing-resource",
+        "mal-font-no-widths",
+        "mal-font-truncated-fontfile",
+        "mal-font-no-descendant-subtype",
+        "mal-font-type3-no-matrix",
+        "mal-font-type3-degenerate-matrix",
+        "mal-cmap-missing-encoding",
+        "mal-cmap-bfrange-arity",
+        "mal-cmap-bad-differences",
+        "mal-parse-tounicode-not-stream",
+    ] {
+        let manifest = fixture_manifest(id);
+        let expected = manifest
+            .expected
+            .degradation
+            .iter()
+            .filter(|degradation| degradation.scope == "paragraph")
+            .map(|degradation| {
+                serde_json::json!({
+                    "page_index": degradation.page,
+                    "paragraph_index": degradation.paragraph.unwrap(),
+                    "reason": degradation.reason,
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(!expected.is_empty(), "fixture {id}");
+
+        let input = fixture_path(id);
+        let inspected = run_inspect(&input, true, None);
+        assert!(
+            inspected.status.success(),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&inspected.stderr)
+        );
+        let events = parse_events(&inspected.stdout);
+        assert_one_terminal_last(&events, "result");
+        let summary = events
+            .iter()
+            .find(|event| event["event"] == "diagnostic" && event["id"] == "degradation_summary")
+            .unwrap_or_else(|| panic!("fixture {id} has no degradation summary"));
+        assert_eq!(summary["degraded_page_indices"], serde_json::json!([]));
+        assert_eq!(
+            summary["preserved_paragraphs"],
+            serde_json::json!(expected),
+            "fixture {id}"
+        );
+
+        let translated = directory.path().join(format!("{id}.pdf"));
+        let translation = run_none(&input, Some(&translated), true);
+        assert!(
+            translation.status.success(),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&translation.stderr)
+        );
+        assert_eq!(
+            std::fs::read(&translated).unwrap(),
+            std::fs::read(&input).unwrap(),
+            "fixture {id}"
+        );
+        assert!(
+            !std::fs::read(&translated)
+                .unwrap()
+                .windows(b"(cid:".len())
+                .any(|window| window == b"(cid:"),
+            "fixture {id} output contains a CID literal"
+        );
+    }
+}
+
+#[test]
+fn mixed_cmap_document_rewrites_seven_pages_and_preserves_three_independently() {
+    let id = "intg-cmap-mixed-degrade";
+    let manifest = fixture_manifest(id);
+    let input = fixture_path(id);
+    let inspected = run_inspect(&input, true, None);
+    assert!(
+        inspected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let events = parse_events(&inspected.stdout);
+    assert_one_terminal_last(&events, "result");
+    let result = events.last().unwrap();
+
+    for page_index in 0..manifest.page.len() {
+        let paragraphs = result["il"]["pages"][page_index]["paragraphs"]
+            .as_array()
+            .unwrap();
+        let actual = paragraphs
+            .iter()
+            .flat_map(|paragraph| paragraph["text"]["chars"].as_array().unwrap())
+            .map(|character| character["unicode"].as_str().unwrap())
+            .collect::<String>();
+        assert_eq!(actual, expected_page_text(&manifest, page_index));
+        if page_index < 7 {
+            assert!(
+                paragraphs
+                    .iter()
+                    .all(|paragraph| paragraph.get("preserved").is_none()),
+                "page {page_index}"
+            );
+        } else {
+            assert_eq!(paragraphs.len(), 1, "page {page_index}");
+            assert_eq!(paragraphs[0]["preserved"], "unsupported_font");
+        }
+    }
+
+    let expected_preserved = manifest
+        .expected
+        .degradation
+        .iter()
+        .map(|degradation| {
+            serde_json::json!({
+                "page_index": degradation.page,
+                "paragraph_index": degradation.paragraph.unwrap(),
+                "reason": degradation.reason,
+            })
+        })
+        .collect::<Vec<_>>();
+    let summary = events
+        .iter()
+        .find(|event| event["event"] == "diagnostic" && event["id"] == "degradation_summary")
+        .unwrap();
+    assert_eq!(summary["degraded_page_indices"], serde_json::json!([]));
+    assert_eq!(
+        summary["preserved_paragraphs"],
+        serde_json::json!(expected_preserved)
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let translated = directory.path().join("mixed.pdf");
+    let translation = run_none(&input, Some(&translated), true);
+    assert!(
+        translation.status.success(),
+        "{}",
+        String::from_utf8_lossy(&translation.stderr)
+    );
+    let input_bytes = std::fs::read(&input).unwrap();
+    let output_bytes = std::fs::read(&translated).unwrap();
+    assert!(output_bytes.starts_with(&input_bytes));
+    assert!(output_bytes.len() > input_bytes.len());
+    assert!(
+        !output_bytes
+            .windows(b"(cid:".len())
+            .any(|window| window == b"(cid:")
+    );
+
+    for page_number in 1..=10 {
+        assert_eq!(
+            decoded_page_streams(&translated, page_number),
+            decoded_page_streams(&input, page_number),
+            "page {page_number}"
+        );
+        if page_number <= 7 {
+            assert_ne!(
+                page_content_ids(&translated, page_number),
+                page_content_ids(&input, page_number),
+                "page {page_number} was not rewritten"
+            );
+        } else {
+            assert_eq!(
+                page_content_ids(&translated, page_number),
+                page_content_ids(&input, page_number),
+                "page {page_number} was not preserved"
+            );
+        }
     }
 }
 
@@ -934,6 +1235,344 @@ fn structured_and_inline_image_programs_round_trip_without_rebuilding_content() 
             decoded_page_streams(&input, 1),
             "fixture {id}"
         );
+    }
+}
+
+#[test]
+fn parse_stream_and_xobject_fixture_matrix_stays_bounded_and_preserves_streams() {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum OutputExpectation {
+        Rewritten,
+        Exact,
+        Missing,
+    }
+
+    let expected = BTreeMap::from([
+        (
+            "intg-scan-06-blank-middle",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "intg-scan-07-image-middle",
+            (0, OutputExpectation::Rewritten, Some("scan_summary")),
+        ),
+        (
+            "unit-base-01-single-line",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "mal-parse-05-contents-array-string-split",
+            (0, OutputExpectation::Exact, Some("degradation_summary")),
+        ),
+        (
+            "mal-parse-06-deep-nesting",
+            (0, OutputExpectation::Exact, Some("degradation_summary")),
+        ),
+        (
+            "mal-parse-07-parent-cycle",
+            (2, OutputExpectation::Missing, None),
+        ),
+        (
+            "mal-parse-08-broken-objstm",
+            (2, OutputExpectation::Missing, None),
+        ),
+        (
+            "mal-parse-09-outlines-cycle",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "mal-parse-dangling-annots",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "mal-parse-dangling-critical",
+            (2, OutputExpectation::Missing, None),
+        ),
+        ("mal-parse-null-kid", (2, OutputExpectation::Missing, None)),
+        (
+            "mal-parse-tounicode-not-stream",
+            (0, OutputExpectation::Exact, Some("degradation_summary")),
+        ),
+        (
+            "mal-stream-bad-hex",
+            (0, OutputExpectation::Exact, Some("degradation_summary")),
+        ),
+        (
+            "mal-stream-nested-bt",
+            (0, OutputExpectation::Rewritten, Some("content_recovered")),
+        ),
+        (
+            "mal-stream-03-arity-excess",
+            (0, OutputExpectation::Exact, Some("content_recovered")),
+        ),
+        (
+            "mal-stream-04-arity-short",
+            (0, OutputExpectation::Rewritten, Some("content_recovered")),
+        ),
+        (
+            "mal-stream-05-unbalanced-Q",
+            (0, OutputExpectation::Rewritten, Some("content_recovered")),
+        ),
+        (
+            "mal-stream-06-glued-tokens",
+            (0, OutputExpectation::Rewritten, Some("content_recovered")),
+        ),
+        (
+            "mal-stream-07-double-decimal",
+            (0, OutputExpectation::Rewritten, Some("content_recovered")),
+        ),
+        (
+            "mal-stream-08-unknown-outside-bx",
+            (0, OutputExpectation::Rewritten, Some("content_recovered")),
+        ),
+        (
+            "mal-stream-09-orphan-text",
+            (0, OutputExpectation::Rewritten, Some("content_recovered")),
+        ),
+        (
+            "mal-stream-10-unterminated-string",
+            (0, OutputExpectation::Exact, Some("degradation_summary")),
+        ),
+        (
+            "mal-stream-11-tj-array-type",
+            (0, OutputExpectation::Rewritten, Some("content_recovered")),
+        ),
+        (
+            "mal-xobj-01-self-recursive",
+            (0, OutputExpectation::Exact, Some("content_recovered")),
+        ),
+        (
+            "mal-xobj-02-mutual-recursive",
+            (0, OutputExpectation::Exact, Some("content_recovered")),
+        ),
+        (
+            "mal-xobj-03-form-no-bbox",
+            (0, OutputExpectation::Exact, Some("degradation_summary")),
+        ),
+        (
+            "mal-xobj-04-scope-underflow",
+            (0, OutputExpectation::Rewritten, Some("content_recovered")),
+        ),
+        (
+            "mal-xobj-05-scope-tail",
+            (0, OutputExpectation::Rewritten, Some("content_recovered")),
+        ),
+        (
+            "mal-xobj-bad-matrix",
+            (0, OutputExpectation::Exact, Some("degradation_summary")),
+        ),
+        (
+            "mal-xobj-bbox-null",
+            (0, OutputExpectation::Exact, Some("degradation_summary")),
+        ),
+        (
+            "mal-xobj-missing-name",
+            (0, OutputExpectation::Exact, Some("degradation_summary")),
+        ),
+        (
+            "unit-parse-01-ascii85",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-parse-02-cascade",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-parse-03-lzw-earlychange",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-parse-03-lzw-earlychange-1",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-parse-04-contents-array-numeric-split",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-parse-05-contents-array-string-parent",
+            (0, OutputExpectation::Rewritten, Some("content_recovered")),
+        ),
+        (
+            "unit-parse-07-inherited-page-resources",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-parse-11-outline-siblings",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-parse-indirect-filter",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-parse-m1-switchboard",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-parse-midtree-resources",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-stream-00-malformed-parent",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-stream-01-bx-ex-unknown-op",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-stream-02-type3-d1",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-stream-03-unknown-op-outside-bx",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-stream-04-type3-d0",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-stream-08-inline-image-EI-in-data",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-stream-09-inline-image-no-L",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-stream-10-inline-image-length",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-stream-11-inline-image-filtered-fallback",
+            (0, OutputExpectation::Rewritten, Some("content_recovered")),
+        ),
+        (
+            "unit-stream-odd-hex",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-stream-tr7-clip",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-write-04-xobj-in-objstm",
+            (2, OutputExpectation::Missing, None),
+        ),
+        (
+            "unit-xobj-00-recursion-parent",
+            (0, OutputExpectation::Exact, None),
+        ),
+        (
+            "unit-xobj-04-inherited-resources",
+            (2, OutputExpectation::Missing, None),
+        ),
+        (
+            "unit-xobj-05-scope-parent",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-xobj-05-singular-ctm",
+            (0, OutputExpectation::Exact, Some("degradation_summary")),
+        ),
+        (
+            "unit-xobj-depth-overflow",
+            (0, OutputExpectation::Rewritten, Some("content_recovered")),
+        ),
+        (
+            "unit-xobj-m1-switchboard",
+            (0, OutputExpectation::Exact, None),
+        ),
+    ]);
+    let discovered = fixture_ids_with_case_prefixes(&["PARSE-", "STREAM-", "XOBJ-"]);
+    assert_eq!(
+        expected.keys().copied().collect::<BTreeSet<_>>(),
+        discovered
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>()
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    for (id, (exit_code, output_expectation, required_diagnostic)) in expected {
+        let manifest = fixture_manifest(id);
+        let input = fixture_path(id);
+        let inspected = run_inspect(&input, true, None);
+        assert_eq!(inspected.status.code(), Some(exit_code), "fixture {id}");
+        let events = parse_events(&inspected.stdout);
+        assert_one_terminal_last(&events, if exit_code == 0 { "result" } else { "error" });
+        if let Some(required) = required_diagnostic {
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event["event"] == "diagnostic" && event["id"] == required),
+                "fixture {id} has no {required} diagnostic"
+            );
+        }
+        if exit_code == 0 {
+            let result = events.last().unwrap();
+            for page_index in 0..manifest.page.len() {
+                let expected_text = if id == "unit-xobj-depth-overflow" {
+                    "MIMUS".to_string()
+                } else {
+                    expected_page_text(&manifest, page_index)
+                };
+                if expected_text.is_empty() {
+                    continue;
+                }
+                let paragraphs = result["il"]["pages"][page_index]["paragraphs"]
+                    .as_array()
+                    .unwrap();
+                if paragraphs
+                    .iter()
+                    .any(|paragraph| paragraph.get("preserved").is_some())
+                {
+                    continue;
+                }
+                let actual = paragraphs
+                    .iter()
+                    .flat_map(|paragraph| paragraph["text"]["chars"].as_array().unwrap())
+                    .map(|character| character["unicode"].as_str().unwrap())
+                    .collect::<String>();
+                assert_eq!(actual, expected_text, "fixture {id}, page {page_index}");
+            }
+        }
+
+        let translated = directory.path().join(format!("{id}.pdf"));
+        let translation = run_none(&input, Some(&translated), true);
+        assert_eq!(translation.status.code(), Some(exit_code), "fixture {id}");
+        let translation_events = parse_events(&translation.stdout);
+        assert_one_terminal_last(
+            &translation_events,
+            if exit_code == 0 { "result" } else { "error" },
+        );
+        match output_expectation {
+            OutputExpectation::Rewritten => {
+                let input_bytes = std::fs::read(&input).unwrap();
+                let output_bytes = std::fs::read(&translated).unwrap();
+                assert!(output_bytes.starts_with(&input_bytes), "fixture {id}");
+                assert!(output_bytes.len() > input_bytes.len(), "fixture {id}");
+            }
+            OutputExpectation::Exact => assert_eq!(
+                std::fs::read(&translated).unwrap(),
+                std::fs::read(&input).unwrap(),
+                "fixture {id}"
+            ),
+            OutputExpectation::Missing => {
+                assert!(!translated.exists(), "fixture {id} produced output")
+            }
+        }
+        if output_expectation != OutputExpectation::Missing {
+            for page_number in 1..=u32::try_from(manifest.page.len()).unwrap() {
+                assert_eq!(
+                    decoded_page_streams(&translated, page_number),
+                    decoded_page_streams(&input, page_number),
+                    "fixture {id}, page {page_number}"
+                );
+            }
+        }
     }
 }
 

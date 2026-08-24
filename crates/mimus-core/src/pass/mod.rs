@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use lopdf::Document as LopdfDocument;
+use lopdf::{Document as LopdfDocument, Object, ObjectId};
 
 use crate::context::{Document, ExtractedPage, PassContext};
 use crate::engine::{PageCharSnapshot, RgbaImage};
@@ -48,6 +48,7 @@ pub const PIPELINE: [(Stage, Pass); 10] = [
 ];
 
 pub const INSPECT_STAGE_COUNT: usize = 4;
+const MAX_PAGE_TREE_DEPTH: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranslationResult {
@@ -197,7 +198,7 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     if pdf.was_encrypted() || pdf.is_encrypted() {
         return Err(encrypted_pdf_error());
     }
-    let lopdf_pages = pdf.get_pages().into_values().collect::<Vec<_>>();
+    let lopdf_pages = validated_page_ids(&pdf)?;
     let engine_pages = context.engine.page_count(&bytes)?;
     if lopdf_pages.len() != engine_pages {
         return Err(MimusError::input(
@@ -261,6 +262,121 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     document.pdf = Some(pdf);
     document.extracted_pages = extracted_pages;
     Ok(())
+}
+
+fn validated_page_ids(pdf: &LopdfDocument) -> Result<Vec<ObjectId>> {
+    let pages_id = pdf
+        .catalog()
+        .and_then(|catalog| catalog.get(b"Pages"))
+        .and_then(Object::as_reference)
+        .map_err(|error| {
+            MimusError::input(
+                InputReason::PdfParse,
+                format!("document catalog has no valid Pages reference: {error}"),
+            )
+        })?;
+    let mut pages = Vec::new();
+    visit_page_tree(
+        pdf,
+        pages_id,
+        0,
+        &mut BTreeSet::new(),
+        &mut BTreeSet::new(),
+        &mut pages,
+    )?;
+    Ok(pages)
+}
+
+fn visit_page_tree(
+    pdf: &LopdfDocument,
+    object_id: ObjectId,
+    depth: usize,
+    active: &mut BTreeSet<ObjectId>,
+    visited: &mut BTreeSet<ObjectId>,
+    pages: &mut Vec<ObjectId>,
+) -> Result<()> {
+    if depth > MAX_PAGE_TREE_DEPTH {
+        return Err(MimusError::input(
+            InputReason::PdfParse,
+            format!("page tree exceeds {MAX_PAGE_TREE_DEPTH} inherited levels"),
+        ));
+    }
+    if !active.insert(object_id) {
+        return Err(MimusError::input(
+            InputReason::PdfParse,
+            format!("page tree cycle reaches object {}", object_id.0),
+        ));
+    }
+    if !visited.insert(object_id) {
+        active.remove(&object_id);
+        return Err(MimusError::input(
+            InputReason::PdfParse,
+            format!(
+                "page tree object {} is referenced more than once",
+                object_id.0
+            ),
+        ));
+    }
+
+    let result = (|| {
+        let dictionary = pdf.get_dictionary(object_id).map_err(|error| {
+            MimusError::input(
+                InputReason::PdfParse,
+                format!(
+                    "page tree object {} is missing or invalid: {error}",
+                    object_id.0
+                ),
+            )
+        })?;
+        match dictionary.get_type() {
+            Ok(b"Page") => pages.push(object_id),
+            Ok(b"Pages") => {
+                let kids = dictionary
+                    .get_deref(b"Kids", pdf)
+                    .and_then(Object::as_array)
+                    .map_err(|error| {
+                        MimusError::input(
+                            InputReason::PdfParse,
+                            format!("page tree object {} has invalid Kids: {error}", object_id.0),
+                        )
+                    })?;
+                for kid in kids {
+                    let kid_id = kid.as_reference().map_err(|error| {
+                        MimusError::input(
+                            InputReason::PdfParse,
+                            format!(
+                                "page tree object {} has a non-reference Kid: {error}",
+                                object_id.0
+                            ),
+                        )
+                    })?;
+                    visit_page_tree(pdf, kid_id, depth + 1, active, visited, pages)?;
+                }
+            }
+            Ok(other) => {
+                return Err(MimusError::input(
+                    InputReason::PdfParse,
+                    format!(
+                        "page tree object {} has unsupported Type /{}",
+                        object_id.0,
+                        String::from_utf8_lossy(other)
+                    ),
+                ));
+            }
+            Err(error) => {
+                return Err(MimusError::input(
+                    InputReason::PdfParse,
+                    format!(
+                        "page tree object {} has no valid Type: {error}",
+                        object_id.0
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    })();
+    active.remove(&object_id);
+    result
 }
 
 fn validate_input_geometry(
@@ -388,10 +504,21 @@ pub fn layout(document: &mut Document, context: &PassContext<'_>) -> Result<()> 
                 .engine
                 .rasterize_page(&document.original_bytes, page.index)?;
             raster.validate()?;
+            let synthetic_characters =
+                if !page.recoveries.is_empty() || page.engine_characters.is_empty() {
+                    reliable_upright_snapshots(&page.walked_characters)
+                } else {
+                    Vec::new()
+                };
+            let layout_characters = if synthetic_characters.is_empty() {
+                &page.engine_characters
+            } else {
+                &synthetic_characters
+            };
             page.layout_regions =
                 context
                     .layout_detector
-                    .detect(page.geometry, &raster, &page.engine_characters)?;
+                    .detect(page.geometry, &raster, layout_characters)?;
             page.input_raster = Some(raster);
         }
         context.events.emit(Event::new(EventKind::PageProgress {
@@ -401,6 +528,59 @@ pub fn layout(document: &mut Document, context: &PassContext<'_>) -> Result<()> 
         }))?;
     }
     Ok(())
+}
+
+fn reliable_upright_snapshots(walked: &[crate::walk::WalkedChar]) -> Vec<PageCharSnapshot> {
+    walked
+        .iter()
+        .filter(|character| {
+            character.visible
+                && character.locatable
+                && character.text_transform == TextTransform::Upright
+                && character.font_supported
+                && character.unicode.is_some()
+                && character.advance.is_finite()
+                && character.advance > 0.0
+        })
+        .enumerate()
+        .filter_map(|(index, character)| {
+            Some(PageCharSnapshot {
+                index: u32::try_from(index).ok()?,
+                unicode: character.unicode,
+                unicode_value: character.unicode.map_or(0, u32::from),
+                baseline_origin: character.baseline_origin,
+                tight_box: character.metric_box,
+                loose_box: character.metric_box,
+            })
+        })
+        .collect()
+}
+
+fn paragraph_preserved_reason(walked: &[crate::walk::WalkedChar]) -> Option<il::PreservedReason> {
+    let translatable = walked
+        .iter()
+        .filter(|character| character.visible && character.text_transform == TextTransform::Upright)
+        .collect::<Vec<_>>();
+    if translatable
+        .iter()
+        .any(|character| !character.font_supported)
+    {
+        Some(il::PreservedReason::UnsupportedFont)
+    } else if translatable
+        .iter()
+        .any(|character| character.unicode.is_none())
+    {
+        Some(il::PreservedReason::UnreliableUnicode)
+    } else if translatable
+        .iter()
+        .any(|character| !character.advance.is_finite() || character.advance <= 0.0)
+    {
+        Some(il::PreservedReason::NonPositiveAdvance)
+    } else if translatable.iter().any(|character| !character.locatable) {
+        Some(il::PreservedReason::Unlocatable)
+    } else {
+        None
+    }
 }
 
 pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
@@ -414,23 +594,41 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
             });
             continue;
         }
-        let synthetic_unlocatable_region = (extracted.layout_regions.is_empty()
-            && !extracted.walked_characters.is_empty()
-            && extracted
+        if extracted.walked_characters.is_empty() && extracted.layout_regions.is_empty() {
+            pages.push(il::Page {
+                index: extracted.index,
+                geometry: extracted.geometry,
+                paragraphs: Vec::new(),
+            });
+            continue;
+        }
+        let preserved = paragraph_preserved_reason(&extracted.walked_characters);
+        let has_isolated_unit = extracted.walked_characters.iter().any(|character| {
+            !character.visible
+                || !character.locatable
+                || character.text_transform != TextTransform::Upright
+        });
+        let needs_synthetic_region = !extracted.walked_characters.is_empty()
+            && ((extracted.layout_regions.is_empty() && preserved.is_some())
+                || (extracted.layout_regions.len() != 1
+                    && (!extracted.recoveries.is_empty() || has_isolated_unit)));
+        // Recovered streams and isolated units may expose several baselines. Until #20 owns
+        // paragraph grouping, keep their byte spans processable as one bounded M1 paragraph.
+        let synthetic_region = needs_synthetic_region.then(|| {
+            let mut characters = extracted
                 .walked_characters
                 .iter()
-                .all(|character| !character.locatable))
-        .then(|| {
-            let bounds = extracted.walked_characters[1..].iter().fold(
-                extracted.walked_characters[0].metric_box,
-                |bounds, character| bounds.union(character.metric_box),
-            );
+                .filter(|character| character.text_transform == TextTransform::Upright);
+            let first = characters.next().unwrap_or(&extracted.walked_characters[0]);
+            let bounds = characters.fold(first.metric_box, |bounds, character| {
+                bounds.union(character.metric_box)
+            });
             crate::engine::LayoutRegion {
                 bounds,
                 reading_order: 0,
             }
         });
-        if extracted.layout_regions.len() != 1 && synthetic_unlocatable_region.is_none() {
+        if extracted.layout_regions.len() != 1 && synthetic_region.is_none() {
             return Err(MimusError::input(
                 InputReason::UnsupportedPdf,
                 format!(
@@ -440,7 +638,7 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
                 ),
             ));
         }
-        let region = synthetic_unlocatable_region.unwrap_or_else(|| extracted.layout_regions[0]);
+        let region = synthetic_region.unwrap_or_else(|| extracted.layout_regions[0]);
         let engine_boxes_are_aligned = extracted.walked_characters.len()
             == extracted.engine_characters.len()
             && extracted
@@ -448,11 +646,6 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
                 .iter()
                 .zip(&extracted.engine_characters)
                 .all(|(walked, engine)| walked.unicode == engine.unicode);
-        let preserved = extracted
-            .walked_characters
-            .iter()
-            .any(|character| !character.locatable)
-            .then_some(il::PreservedReason::Unlocatable);
         let chars = extracted
             .walked_characters
             .iter()
@@ -926,8 +1119,15 @@ fn validate_character_alignment(
     recovered: bool,
     diagnostics: &mut Diagnostics,
 ) -> Result<()> {
-    let divergence_is_recoverable =
-        recovered || walked.iter().any(|character| !character.locatable);
+    let divergence_is_recoverable = recovered
+        || walked.iter().any(|character| {
+            !character.locatable
+                || !character.font_supported
+                || character.unicode.is_none()
+                || !character.advance.is_finite()
+                || character.advance <= 0.0
+                || character.engine_mismatch_tolerated
+        });
     if walked.len() != engine.len() {
         if divergence_is_recoverable {
             diagnostics.push(Diagnostic::EngineCharacterMismatch {
@@ -1050,6 +1250,28 @@ mod tests {
                 Stage::Write,
             ]
         );
+    }
+
+    #[test]
+    fn page_tree_validation_rejects_missing_and_non_page_kids() {
+        for kid in [Object::Reference((99, 0)), Object::Reference((5, 0))] {
+            let mut pdf = LopdfDocument::load(fixture()).unwrap();
+            pdf.get_object_mut((2, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .get_mut(b"Kids")
+                .unwrap()
+                .as_array_mut()
+                .unwrap()
+                .push(kid);
+
+            let error = validated_page_ids(&pdf).unwrap_err();
+            assert_eq!(
+                error.reason(),
+                crate::error::ErrorReason::Input(InputReason::PdfParse)
+            );
+        }
     }
 
     #[derive(Default)]
@@ -1209,6 +1431,11 @@ mod tests {
     fn singular_form_fixture() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus/fixtures/unit-xobj-05-singular-ctm/unit-xobj-05-singular-ctm.pdf")
+    }
+
+    fn nested_text_fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/fixtures/mal-stream-nested-bt/mal-stream-nested-bt.pdf")
     }
 
     #[test]
@@ -1424,6 +1651,33 @@ mod tests {
             ]
         );
         assert_eq!(snapshots.last().unwrap().2, result.il);
+    }
+
+    #[test]
+    fn recovered_multi_region_page_remains_processable_before_paragraph_grouping() {
+        let mut document = Document::for_inspection(nested_text_fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+
+        inspect(&mut document, &context).unwrap();
+
+        assert_eq!(document.extracted_pages[0].layout_regions.len(), 2);
+        assert_eq!(document.il.pages[0].paragraphs.len(), 1);
+        assert_eq!(document.il.pages[0].paragraphs[0].source_text(), "MIMUS");
+        assert!(
+            document.extracted_pages[0]
+                .recoveries
+                .contains(&RecoveryKind::NestedTextObject)
+        );
     }
 
     #[test]
@@ -1806,8 +2060,11 @@ mod tests {
         run(&mut document, &context).unwrap();
 
         let paragraph = &document.il.pages[0].paragraphs[0];
-        assert_eq!(paragraph.source_text(), "FORMMIMUS");
-        assert_eq!(paragraph.preserved, Some(il::PreservedReason::Unlocatable));
+        assert_eq!(paragraph.source_text(), "MMIMUS");
+        assert_eq!(
+            paragraph.preserved,
+            Some(il::PreservedReason::UnreliableUnicode)
+        );
         assert!(paragraph.translated_text.is_none());
         assert!(
             paragraph
@@ -1834,7 +2091,7 @@ mod tests {
                     } if preserved_paragraphs == &[PreservedParagraph {
                         page_index: 0,
                         paragraph_index: 0,
-                        reason: il::PreservedReason::Unlocatable,
+                        reason: il::PreservedReason::UnreliableUnicode,
                     }]
                 ))
         );

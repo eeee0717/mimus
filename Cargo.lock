@@ -778,6 +778,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "ttf-parser",
 ]
 
 [[package]]
