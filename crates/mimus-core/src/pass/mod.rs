@@ -4,8 +4,10 @@ use lopdf::Document as LopdfDocument;
 
 use crate::context::{Document, ExtractedPage, PassContext};
 use crate::engine::{PageCharSnapshot, RgbaImage};
-use crate::error::{InputReason, InternalReason, IoReason, MimusError, Result};
-use crate::event::{Diagnostic, Diagnostics, Event, EventKind, PreservedParagraph, Stage};
+use crate::error::{ErrorReason, InputReason, InternalReason, IoReason, MimusError, Result};
+use crate::event::{
+    Diagnostic, Diagnostics, Event, EventKind, PageDegradeReason, PreservedParagraph, Stage,
+};
 use crate::il::{
     self, Char, PageGeometry, Paragraph, PassthroughRef, Rect, TextCarrier, TextTransform,
 };
@@ -149,6 +151,20 @@ fn push_degradation_summary(document: &mut Document) {
     });
 }
 
+/// 把一页标成降级并同时记一条诊断。两件事必须一起发生：只置位不报告就是静默
+/// 失败，只报告不置位则后续 pass 仍会尝试改写这一页。
+fn degrade_page(
+    page: &mut ExtractedPage,
+    diagnostics: &mut Diagnostics,
+    reason: PageDegradeReason,
+) {
+    page.degraded = Some(reason);
+    diagnostics.push(Diagnostic::PageDegraded {
+        page_index: page.index,
+        reason,
+    });
+}
+
 pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     let bytes = std::fs::read(document.input_path()).map_err(|error| {
         MimusError::io(
@@ -260,18 +276,30 @@ pub fn scan_detect(document: &mut Document, context: &PassContext<'_>) -> Result
             continue;
         }
         // CONTEXT #32 要求在视觉页框内判定朝向。#14 尚未实现这层坐标变换，
-        // 因此只在会被改写的内容页上 fail-closed；透传页不需要重放坐标。
+        // 因此旋转页降级透传；透传页不需要重放坐标。
         if page.geometry.rotate_degrees != 0 {
-            return Err(MimusError::input(
-                InputReason::UnsupportedPdf,
-                format!(
-                    "M1 does not yet support page /Rotate {}; page {} was not written",
-                    page.geometry.rotate_degrees,
-                    page.index + 1
-                ),
-            ));
+            degrade_page(
+                page,
+                &mut document.diagnostics,
+                PageDegradeReason::UnsupportedRotation,
+            );
+            continue;
         }
-        page.walked_characters = walk_page(pdf, page.page_id)?;
+        match walk_page(pdf, page.page_id) {
+            Ok(characters) => page.walked_characters = characters,
+            // ADR-0013 §3：内容流的语法错误只毁掉它所在的那一页，整篇不该跟着失败。
+            // 能力边界（UnsupportedPdf）仍是文档级失败——那不是这一页坏了，
+            // 而是 M1 还不会处理这类内容，降级会把「没实现」伪装成「文件有问题」。
+            Err(error) if error.reason() == ErrorReason::Input(InputReason::OperatorWalk) => {
+                degrade_page(
+                    page,
+                    &mut document.diagnostics,
+                    PageDegradeReason::ContentStreamSyntax,
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
         page.engine_characters = context
             .engine
             .page_characters(&document.original_bytes, page.index)?;

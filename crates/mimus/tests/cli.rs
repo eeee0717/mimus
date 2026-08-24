@@ -713,7 +713,6 @@ fn unsupported_existing_fixtures_fail_closed_without_output() {
         "unit-base-02-two-column",
         "unit-base-03-structured",
         "unit-stream-08-inline-image-EI-in-data",
-        "unit-geom-01-rotate-90",
     ] {
         let translated = directory.path().join(format!("{id}.pdf"));
         let result = run_none(&fixture_path(id), Some(&translated), false);
@@ -730,6 +729,64 @@ fn unsupported_existing_fixtures_fail_closed_without_output() {
         );
         assert!(!translated.exists(), "fixture {id} produced output");
     }
+}
+
+/// ADR-0013 §2：整篇失败与逐页降级的分界。旋转页 #17 之前还重放不了，但那是
+/// **这一页**的能力缺口——文档其余部分照常翻译，这一页原样透传。
+#[test]
+fn a_rotated_page_degrades_instead_of_failing_the_document() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = fixture_path("unit-geom-01-rotate-90");
+    let translated = directory.path().join("rotated.pdf");
+    let result = run_none(&input, Some(&translated), false);
+
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("warning[page_degraded]: page 1"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("warning[degradation_summary]: 1 of 1 pages kept as-is [1]"),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&translated).unwrap(),
+        std::fs::read(&input).unwrap(),
+        "a degraded page must be republished byte for byte"
+    );
+}
+
+/// `mal-stream-10-unterminated-string` 的 STREAM-08-page-degrades 与
+/// STREAM-08-no-partial-il 两条声明行为，在生产路径上的对应断言。
+#[test]
+fn a_truncated_content_stream_degrades_its_page() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = fixture_path("mal-stream-10-unterminated-string");
+    let translated = directory.path().join("truncated.pdf");
+    let result = run_none(&input, Some(&translated), false);
+
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("warning[page_degraded]: page 1 kept as-is (content stream syntax"),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&translated).unwrap(),
+        std::fs::read(&input).unwrap(),
+        "a page whose tokenizer ran off the end must be republished byte for byte"
+    );
 }
 
 #[test]

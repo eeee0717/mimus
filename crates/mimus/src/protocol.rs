@@ -291,7 +291,7 @@ const fn human_page_degrade_reason(reason: PageDegradeReason) -> &'static str {
         PageDegradeReason::NestingTooDeep => "nesting exceeded the supported depth",
         PageDegradeReason::ContentDecode => "content stream could not be decoded",
         PageDegradeReason::BadPageGeometry => "page boxes could not be parsed",
-        PageDegradeReason::UnsupportedRotation => "/Rotate is not a multiple of 90",
+        PageDegradeReason::UnsupportedRotation => "its /Rotate is not supported yet",
         PageDegradeReason::MissingResource => "a referenced resource is missing",
         PageDegradeReason::BadFormBBox => "a form XObject has an unusable /BBox",
         PageDegradeReason::BadFormMatrix => "a form XObject has an unusable /Matrix",
