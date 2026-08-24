@@ -10,7 +10,7 @@ variable = "The page Contents reference selects a cm operation with seven operan
 [source]
 method = "byte-mutation"
 pdf = "mal-stream-03-arity-excess.pdf"
-pdf_sha256 = "304bbe9b2fa1650f0cf304e55613d7a92178282e816d19ba81148a0259cea2fe"
+pdf_sha256 = "1329798be42605257d3668ce436e5be78ab9201b9b63d1bf61dce7d84d4f1886"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
 [lineage]

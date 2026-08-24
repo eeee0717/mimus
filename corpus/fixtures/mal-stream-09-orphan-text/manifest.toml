@@ -1,0 +1,49 @@
+schema_version = 1
+[identity]
+id = "mal-stream-09-orphan-text"
+name = "Text operators outside BT/ET"
+class = "mal"
+legality = "malformed"
+cases = ["STREAM-05"]
+priority = "M1"
+variable = "The page Contents reference selects the stream whose Tf/Tm/Tj sit outside any text object"
+[source]
+method = "byte-mutation"
+pdf = "mal-stream-09-orphan-text.pdf"
+pdf_sha256 = "9b35ff7e477eabe2bdbca7b2363d5d2423046006ed43420731d08857a3f2c49a"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+[lineage]
+parent = "unit-stream-00-malformed-parent"
+[[lineage.mutations]]
+byte_offset = 210
+original_bytes = [48]
+replacement_bytes = [55]
+description = "change /Contents 10 0 R to 17 0 R, selecting the orphan-text candidate"
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "content-semantics:STREAM-05"
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+[[expected.behaviour]]
+id = "STREAM-05-implicit-bt"
+assertion = "Tf/Tm/Tj outside BT open an implicit text object, so (MIMUS) still lands at (72,120) and no character is dropped"
+observable_via = "production walk character set and origins against the byte-identical parent"
+[[expected.behaviour]]
+id = "STREAM-05-page-consistent"
+assertion = "The implicit-BT recovery is decided once per page, so a page never mixes recovered and dropped orphan runs"
+observable_via = "one warning per page in the machine protocol, not one per orphan operator"
+[oracle]
+checks = ["determinism","legality","page-geometry","render"]
+[[adjudication]]
+date = "2026-08-24"
+issue = "STREAM-05 offers two legal readings: recover with an implicit BT, or drop the orphan run"
+resolution = "Recover, because dropping loses text the renderer does draw; ADR-0013 §3 makes the choice page-consistent and reportable"

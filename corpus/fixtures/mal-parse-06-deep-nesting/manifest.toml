@@ -10,7 +10,7 @@ variable = "The page Contents reference selects a stream containing 512 nested a
 [source]
 method = "byte-mutation"
 pdf = "mal-parse-06-deep-nesting.pdf"
-pdf_sha256 = "767b0e74f443d2900a73f68990c676c12f7fc5dabfbbebf82b50b14998f22a1a"
+pdf_sha256 = "1f0e2a5e8ee3672c8e194454b8e8a48306b44e4e592a047f58cb2bcefb445dbd"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
 [lineage]

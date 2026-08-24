@@ -1016,6 +1016,23 @@ impl Manifest {
                 "declared_failure 的主诊断不在 operator_walk_diagnostics 中",
             )?;
         }
+        if let Some(case) = self
+            .expected
+            .declared_failure
+            .as_deref()
+            .and_then(|failure| failure.strip_prefix("content-semantics:"))
+        {
+            fail_if(
+                case.is_empty(),
+                "§2.8",
+                "content-semantics failure 必须命名它对应的 case",
+            )?;
+            fail_if(
+                self.requires(Check::OperatorWalk),
+                "§2.8",
+                "content-semantics failure 不得交给 operator-walk 裁定——那是冻结 PoC 的命名空间",
+            )?;
+        }
         Ok(())
     }
 
@@ -1473,6 +1490,73 @@ text = "world"
             err.contains("structure、glyphs、embedded-cmap 或 operator-walk"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn content_semantics_failures_stay_out_of_the_frozen_poc_namespace() {
+        fn parse_mal(toml_text: &str) -> Result<Manifest> {
+            let mut m: Manifest = toml::from_str(toml_text)?;
+            m.dir = PathBuf::from("mal-demo-01-sample");
+            m.validate()?;
+            Ok(m)
+        }
+
+        const MALFORMED: &str = r#"
+schema_version = 1
+[identity]
+id = "mal-demo-01-sample"
+name = "示例"
+class = "mal"
+legality = "malformed"
+cases = ["STREAM-05"]
+priority = "M1"
+variable = "示例变量"
+[source]
+method = "byte-mutation"
+pdf = "mal-demo-01-sample.pdf"
+pdf_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+[lineage]
+parent = "unit-demo-00-parent"
+[[lineage.mutations]]
+byte_offset = 210
+original_bytes = [48]
+replacement_bytes = [55]
+description = "select the malformed candidate stream"
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 400.0, 300.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.05
+block = []
+declared_failure = "content-semantics:STREAM-05"
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+[[expected.behaviour]]
+id = "demo"
+assertion = "断言"
+observable_via = "手段"
+[oracle]
+checks = ["determinism", "structure", "render"]
+"#;
+        let malformed = MALFORMED.to_string();
+        parse_mal(&malformed).unwrap();
+
+        let borrowed = malformed.replace(
+            "checks = [\"determinism\", \"structure\", \"render\"]",
+            "checks = [\"determinism\", \"structure\", \"render\", \"operator-walk\"]",
+        );
+        let err = parse_mal(&borrowed).unwrap_err().to_string();
+        assert!(err.contains("冻结 PoC 的命名空间"), "{err}");
+
+        let unnamed = malformed.replace("content-semantics:STREAM-05", "content-semantics:");
+        let err = parse_mal(&unnamed).unwrap_err().to_string();
+        assert!(err.contains("必须命名它对应的 case"), "{err}");
     }
 
     #[test]

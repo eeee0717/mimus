@@ -10,7 +10,7 @@ variable = "The page Contents reference selects 10.5.3 as a numeric sequence"
 [source]
 method = "byte-mutation"
 pdf = "mal-stream-07-double-decimal.pdf"
-pdf_sha256 = "96f4efaf6ade92db0ed9e04aac19670303ed75ee153a44799e84b392112c036f"
+pdf_sha256 = "324b59987cd9e37e393571fb0d041aeb7aa25a77a4b38294e6f45e8cd4cfdc6e"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
 [lineage]

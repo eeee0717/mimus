@@ -10,7 +10,7 @@ variable = "The page Contents reference selects a cm operation with five operand
 [source]
 method = "byte-mutation"
 pdf = "mal-stream-04-arity-short.pdf"
-pdf_sha256 = "430f11ef130317c1dfd5b5df8758cb9527c9ce55709471236ae26f9e9d8e2c5a"
+pdf_sha256 = "976f80b0bcbada0b99941227ecd045ac182c3a9df54009047f8bc9550633ce11"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
 [lineage]

@@ -447,6 +447,12 @@ fn malformed_stream_parent(repo_root: &Path) -> Result<Vec<u8>> {
     nested.extend(std::iter::repeat_n(b']', 512));
     nested.extend_from_slice(b" TJ ET\n");
     pdf.stream(b"", &nested)?;
+    pdf.stream(b"", b"/F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj\n")?;
+    pdf.stream(b"", b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS Tj ET\n")?;
+    pdf.stream(
+        b"",
+        b"BT /F1 12 Tf 1 0 0 1 72 120 Tm [(MIM) /X (US)] TJ ET\n",
+    )?;
     pdf.finish(1)
 }
 

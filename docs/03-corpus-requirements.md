@@ -267,6 +267,18 @@ description = "make /Rotate a non-multiple of 90"
 4. **视觉核验**：独立渲染器出图，人工看一次，并存下参考栅格哈希供回归；
 5. **裁定与记录**：任何不一致按 §2.1 裁定并留痕。
 
+#### 声明失败的三种形态
+
+第 2 步的"声明的方式"分三类，由 `expected.declared_failure` 的前缀选出，因为**容器合法但 content stream 畸形**的 fixture 无法用 qpdf 的失败来定义自己：
+
+| `declared_failure` 形态 | 含义 | qpdf 期望 | 谁来裁定语义 |
+|---|---|---|---|
+| 自由文本（如 `outline cycle`） | 容器本身非法 | 必须失败，且报告含该字符串 | qpdf 报告 |
+| `operator-walk:<诊断 ID>` | 容器合法，畸形在 content stream 里 | 必须能装载 | 冻结的 M0 PoC 走查器（`[oracle] checks` 必须含 `operator-walk`） |
+| `content-semantics:<case 号>` | 同上 | 必须能装载 | `mimus-core` 的生产测试（`[oracle] checks` **不得**含 `operator-walk`） |
+
+第三种是 2026-08-24 随 #18 加入的。`operator-walk:*` 是 M0 PoC 的诊断命名空间且已冻结，新的生产行为不能挤进去；但这类 fixture 与它对 qpdf 的期望完全一致，所以只分叉「谁裁定」这一件事。对应地，这类 fixture 的期望行为写在 `[[expected.behaviour]]` 里，由 `mimus-core` 读 manifest 后断言，`corpus verify` 只负责确定性、容器合法性、页面几何与独立渲染这四项。
+
 #### oracle 自身的性质（2026-08-21 实测，写 fixture 时必须知道）
 
 两个解析器不是等价的两份「正确答案」，它们各自只在某些量上可信。以下五条是写第一批 fixture 时逐条测出来的，每条都改变了门禁的实现或某份 fixture 的检查清单：

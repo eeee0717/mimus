@@ -739,7 +739,13 @@ fn check_legality(manifest: &Manifest, pdf: &Path) -> Result<Outcome> {
                 .declared_failure
                 .as_deref()
                 .context("畸形 fixture 缺少 declared_failure")?;
-            if let Some(error_id) = declared.strip_prefix("operator-walk:") {
+            // 两个前缀都表示「容器合法、畸形只在 content stream 里」。区别只在谁裁定：
+            // `operator-walk:` 交给冻结的 M0 PoC，`content-semantics:` 交给 mimus-core
+            // 的生产测试。qpdf 对这两类的期望是一样的——容器必须能装载。
+            let content_semantic = declared
+                .strip_prefix("operator-walk:")
+                .or_else(|| declared.strip_prefix("content-semantics:"));
+            if let Some(error_id) = content_semantic {
                 let container_loaded =
                     result.passed || result.report.contains("operation succeeded with warnings");
                 return Ok(if container_loaded && !error_id.is_empty() {
@@ -749,7 +755,7 @@ fn check_legality(manifest: &Manifest, pdf: &Path) -> Result<Outcome> {
                         format!("qpdf 完成容器检查；走查器应报告 {error_id}"),
                     )
                 } else if error_id.is_empty() {
-                    Outcome::fail(CHECK, CLAUSE, "operator-walk failure ID 为空")
+                    Outcome::fail(CHECK, CLAUSE, "content 语义 failure ID 为空")
                 } else {
                     Outcome::fail(
                         CHECK,
