@@ -1,0 +1,50 @@
+schema_version = 1
+
+[identity]
+id = "mal-parse-dangling-critical"
+name = "Page Contents is a dangling reference"
+class = "mal"
+legality = "malformed"
+cases = ["PARSE-01"]
+priority = "M1"
+variable = "The page Contents reference changes from object 10 to missing object 99"
+
+[source]
+method = "byte-mutation"
+pdf = "mal-parse-dangling-critical.pdf"
+pdf_sha256 = "f91f9486fd06260923fbfdc4baa10db71b5d556a8e407c3cffdf03cb880573bc"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+
+[lineage]
+parent = "unit-parse-m1-switchboard"
+
+[[lineage.mutations]]
+byte_offset = 213
+original_bytes = [49, 48]
+replacement_bytes = [57, 57]
+description = "change /Contents 10 0 R to missing object 99 0 R"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "content-semantics:PARSE-01"
+
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+
+[[expected.behaviour]]
+id = "PARSE-01-dangling-contents"
+assertion = "A missing critical Contents object fails the document as pdf_parse and no output file is created"
+observable_via = "qpdf diagnostic, CLI error reason and absent output"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "render"]

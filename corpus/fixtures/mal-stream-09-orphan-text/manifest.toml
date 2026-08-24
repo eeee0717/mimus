@@ -10,7 +10,7 @@ variable = "The page Contents reference selects the stream whose Tf/Tm/Tj sit ou
 [source]
 method = "byte-mutation"
 pdf = "mal-stream-09-orphan-text.pdf"
-pdf_sha256 = "9b35ff7e477eabe2bdbca7b2363d5d2423046006ed43420731d08857a3f2c49a"
+pdf_sha256 = "66a3480ecc071a9b91b3efbb4971cd256d44958a42d967dcc393aae6ccd6736b"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
 [lineage]

@@ -10,7 +10,7 @@ variable = "The page Contents reference selects 12Tf and 120Td without separator
 [source]
 method = "byte-mutation"
 pdf = "mal-stream-06-glued-tokens.pdf"
-pdf_sha256 = "2d8604edc9708e3d6047569da21331431b1dc9549baba468913143840cdcfca0"
+pdf_sha256 = "d71c59f9c9af9de5d6297a066d02bb0498c4f07d243711ee45b9884255e8603d"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
 [lineage]

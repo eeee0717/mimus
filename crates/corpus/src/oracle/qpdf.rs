@@ -176,7 +176,11 @@ impl Document {
         if path.is_empty() {
             bail!("object value path must not be empty");
         }
-        let Some(mut value) = self.dictionary(object)?.get(&path[0]) else {
+        let dictionary = match self.dictionary(object) {
+            Ok(dictionary) => dictionary,
+            Err(_) => self.stream_dictionary(object)?,
+        };
+        let Some(mut value) = dictionary.get(&path[0]) else {
             return Ok(None);
         };
         for part in &path[1..] {
@@ -217,6 +221,34 @@ impl Document {
             .and_then(|stream| stream.get("dict"))
             .and_then(Value::as_object)
             .with_context(|| format!("object {object} is not a stream"))
+    }
+
+    pub fn stream_filters(&self, object: u32) -> Result<Vec<String>> {
+        let Some(value) = self.stream_dictionary(object)?.get("/Filter") else {
+            return Ok(Vec::new());
+        };
+        self.filter_names(value, 0)
+    }
+
+    fn filter_names(&self, value: &Value, depth: usize) -> Result<Vec<String>> {
+        if depth >= 32 {
+            bail!("stream filter reference exceeds 32 levels");
+        }
+        if let Some(name) = value.as_str().and_then(|text| text.strip_prefix('/')) {
+            return Ok(vec![name.to_string()]);
+        }
+        if let Some(values) = value.as_array() {
+            let mut names = Vec::with_capacity(values.len());
+            for value in values {
+                names.extend(self.filter_names(value, depth + 1)?);
+            }
+            return Ok(names);
+        }
+        let resolved = self.resolve_value(value)?;
+        if std::ptr::eq(resolved, value) {
+            bail!("stream filter is neither a name, array, nor indirect reference");
+        }
+        self.filter_names(resolved, depth + 1)
     }
 
     pub fn object_numbers(&self) -> Result<Vec<u32>> {

@@ -10,7 +10,7 @@ variable = "The page Contents reference selects the stream whose TJ array holds 
 [source]
 method = "byte-mutation"
 pdf = "mal-stream-11-tj-array-type.pdf"
-pdf_sha256 = "8a9bb902fa9f0440ce731271bd333d2fb0a407feb8d84978b749656a6035dbf2"
+pdf_sha256 = "cc35590495c63571d8c033327b5db20cec56d711711e3238c537a13364ab93f8"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
 [lineage]

@@ -1,0 +1,55 @@
+schema_version = 1
+
+[identity]
+id = "mal-stream-bad-hex"
+name = "Hexadecimal string contains a non-hexadecimal digit"
+class = "mal"
+legality = "malformed"
+cases = ["STREAM-07"]
+priority = "M1"
+variable = "The page Contents reference selects the dormant stream containing the byte sequence <4G>"
+
+[source]
+method = "byte-mutation"
+pdf = "mal-stream-bad-hex.pdf"
+pdf_sha256 = "fdb06298a0e4ddb4f00889ee8a4592f43c241154644cff39966985f7acf8821c"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+
+[lineage]
+parent = "unit-stream-00-malformed-parent"
+
+[[lineage.mutations]]
+byte_offset = 209
+original_bytes = [49, 48]
+replacement_bytes = [50, 49]
+description = "change /Contents 10 0 R to 21 0 R, selecting the bad-hex candidate"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "content-semantics:STREAM-07"
+
+[[expected.degradation]]
+scope = "page"
+page = 0
+reason = "content_stream_syntax"
+
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+
+[[expected.behaviour]]
+id = "STREAM-07-bad-hex"
+assertion = "The non-hexadecimal G token degrades only page 0 as content_stream_syntax; translation exits 0 and preserves the original bytes"
+observable_via = "degradation_summary, output byte equality, and bounded completion"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "render"]

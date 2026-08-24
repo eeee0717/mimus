@@ -1,0 +1,99 @@
+schema_version = 1
+
+[identity]
+id = "unit-xobj-depth-overflow"
+name = "Sixty-fifth nested Form exceeds the production depth bound"
+class = "unit"
+legality = "legal"
+cases = ["XOBJ-03"]
+priority = "M1"
+variable = "A legal chain contains 65 Form XObjects while the page also carries direct visible text"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-xobj-depth-overflow.pdf"
+pdf_sha256 = "4f231a9393795343bb333465fed46864f22237ef574a75abf9cbdfd2231982c1"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+renderer_diagnostic = "exception stack overflow!"
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d786f626a2d64657074682d"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 2
+columns = 1
+
+[[expected.block]]
+key = "PAGE"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+mutool_extractable = false
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.168, 112.656, 131.136]
+visual_bbox = [73.177734, 119.830078, 111.985219, 128.90625]
+
+[[expected.block]]
+key = "DEPTH65"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "MIMUS"
+mutool_extractable = false
+baseline_origin = [72.0, 80.0]
+metric_box = [72.0, 77.168, 112.656, 91.136]
+visual_bbox = [73.177734, 79.830078, 111.985219, 88.90625]
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET
+q /X0 Do Q
+"""
+
+[[expected.content_stream]]
+object = 74
+compressed = false
+bytes = """BT /F1 12 Tf 1 0 0 1 72 80 Tm (MIMUS) Tj ET
+"""
+
+[[expected.reference]]
+from_object = 4
+path = ["/XObject", "/X0"]
+to_object = 10
+
+[[expected.behaviour]]
+id = "XOBJ-03-depth-64"
+assertion = "Poppler executes all 65 Forms, MuPDF reaches its own exception-stack bound, and production executes objects 10 through 73, reports form_depth_exceeded once, and skips object 74"
+observable_via = "exact object chain, Poppler text geometry, stable MuPDF diagnostic, production character set, and content_recovered diagnostic"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render-diagnostic"]
+
+[[adjudication]]
+date = "2026-08-24"
+issue = "The safety bound differs at level 65, and MuPDF reaches its own exception-stack bound before producing text or raster output"
+resolution = "Keep both legal text blocks in the manifest, use Poppler geometry plus the stable MuPDF diagnostic as independent evidence, and assert the production skip separately"

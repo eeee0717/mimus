@@ -1,0 +1,47 @@
+schema_version = 1
+[identity]
+id = "mal-font-no-widths"
+name = "Simple font without Widths"
+class = "mal"
+legality = "malformed"
+cases = ["FONT-03"]
+priority = "M1"
+variable = "The simple font Widths key is renamed so the required width array is absent"
+[source]
+method = "byte-mutation"
+pdf = "mal-font-no-widths.pdf"
+pdf_sha256 = "10960b5204408fc721a294b5d718cc1413f378160c816bcb98dbdb2313693752"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+[lineage]
+parent = "unit-base-01-single-line"
+[[lineage.mutations]]
+byte_offset = 367
+original_bytes = [87]
+replacement_bytes = [88]
+description = "rename /Widths to /Xidths without changing the object or file length"
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+block = []
+declared_failure = "content-semantics:FONT-03"
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+[[expected.degradation]]
+scope = "paragraph"
+page = 0
+paragraph = 0
+reason = "unsupported_font"
+[[expected.behaviour]]
+id = "FONT-03-no-widths"
+assertion = "M1 preserves the paragraph because no file Widths array exists; PDFium glyph width is not used as an unbound fallback"
+observable_via = "single-byte lineage, qpdf font dictionary and production degradation summary"
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "render"]

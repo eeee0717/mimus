@@ -10,7 +10,7 @@ variable = "The page Contents reference selects the stream whose literal string 
 [source]
 method = "byte-mutation"
 pdf = "mal-stream-10-unterminated-string.pdf"
-pdf_sha256 = "f4512550557b197898d0503991a8d2a103c7f2dabe1d54b5ce3b29f33512f677"
+pdf_sha256 = "9c59961f8256cb0f8f8e93cb11ece6ed01b4d2d6863737ecc329beaeb0a4a04d"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
 [lineage]

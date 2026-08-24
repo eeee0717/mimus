@@ -1,0 +1,61 @@
+schema_version = 1
+
+[identity]
+id = "mal-parse-dangling-annots"
+name = "Page annotation is a dangling non-critical reference"
+class = "mal"
+legality = "malformed"
+cases = ["PARSE-01"]
+priority = "M1"
+variable = "The sole Annots entry changes from object 11 to missing object 99"
+
+[source]
+method = "byte-mutation"
+pdf = "mal-parse-dangling-annots.pdf"
+pdf_sha256 = "ad5e16ffa44e5fc49722544d50273b109eb091aaa4b17d2de37992a26fbba3be"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+
+[lineage]
+parent = "unit-parse-m1-switchboard"
+
+[[lineage.mutations]]
+byte_offset = 229
+original_bytes = [49, 49]
+replacement_bytes = [57, 57]
+description = "change /Annots [11 0 R] to missing object 99 0 R"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+declared_failure = "content-semantics:PARSE-01"
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "TEXT"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.168, 112.656, 131.136]
+visual_bbox = [73.177734, 119.830078, 111.985219, 128.90625]
+
+[[expected.behaviour]]
+id = "PARSE-01-dangling-annots"
+assertion = "The non-critical dangling annotation is preserved in the incremental prefix while page text remains processable"
+observable_via = "qpdf container load, production IL text, output prefix equality, and unchanged page content"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "render"]

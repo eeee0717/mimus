@@ -1,0 +1,99 @@
+schema_version = 1
+
+[identity]
+id = "unit-stream-tr7-clip"
+name = "Clip-only text remains isolated from visible text"
+class = "unit"
+legality = "legal"
+cases = ["STREAM-10"]
+priority = "M1"
+variable = "The first text object uses rendering mode 7 while the second returns to rendering mode 0"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-stream-tr7-clip.pdf"
+pdf_sha256 = "c003b7a301fd0d346077e1fdcc41d6ad1cb2dff1bbe201cbed79dbd6cb134b26"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d73747265616d2d7472372d"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 2
+columns = 1
+
+[[expected.block]]
+key = "CLIP"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+visible = false
+mutool_extractable = false
+baseline_origin = [72.0, 150.0]
+metric_box = [72.0, 147.168, 112.656, 161.136]
+visual_bbox = [73.177734, 149.830078, 111.985219, 158.90625]
+
+[[expected.block]]
+key = "VISIBLE"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "MIMUS"
+baseline_origin = [72.0, 50.0]
+metric_box = [72.0, 47.168, 112.656, 61.136]
+visual_bbox = [73.177734, 49.830078, 111.985219, 58.90625]
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """q
+BT
+/F1 12 Tf
+1 0 0 1 72 150 Tm
+7 Tr
+(MIMUS) Tj
+ET
+Q
+BT
+/F1 12 Tf
+1 0 0 1 72 50 Tm
+0 Tr
+(MIMUS) Tj
+ET
+"""
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 9
+
+[[expected.behaviour]]
+id = "STREAM-10-tr7-isolation"
+assertion = "The first MIMUS advances text state but is marked invisible and never enters a replacement span; the second MIMUS remains visible and translatable"
+observable_via = "production IL visibility flags, span replacements, decoded output bytes, and renderer output"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]

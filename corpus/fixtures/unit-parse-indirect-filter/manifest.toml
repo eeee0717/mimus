@@ -1,0 +1,85 @@
+schema_version = 1
+
+[identity]
+id = "unit-parse-indirect-filter"
+name = "Content stream Filter is an indirect name"
+class = "unit"
+legality = "legal"
+cases = ["PARSE-05"]
+priority = "M1"
+variable = "The content stream Filter value is an indirect reference to ASCIIHexDecode"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-parse-indirect-filter.pdf"
+pdf_sha256 = "3cd87bc3520275f5450d24d1024619c95d5b76cb4db33e4ce7288acc5cb8bf8e"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9,10]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d70617273652d696e646972"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "FILTER"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.168, 112.656, 131.136]
+visual_bbox = [73.177734, 119.830078, 111.985219, 128.90625]
+
+[[expected.content_stream]]
+object = 9
+compressed = true
+bytes = """42540A2F46312031322054660A312030203020312037322031323020546D0A284D494D55532920546A0A45540A>
+"""
+decoded_bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 120 Tm
+(MIMUS) Tj
+ET
+"""
+filters = ["ASCIIHexDecode"]
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 9
+
+[[expected.reference]]
+from_object = 9
+path = ["/Filter"]
+to_object = 10
+
+[[expected.behaviour]]
+id = "PARSE-05-indirect-filter"
+assertion = "Resolving object 10 yields ASCIIHexDecode and the decoded stream equals the hand-written MIMUS program byte for byte"
+observable_via = "qpdf raw and filtered stream output, exact object reference, independent parsers, and production IL"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]

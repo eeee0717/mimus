@@ -10,7 +10,7 @@ variable = "The page Contents reference selects two unmatched Q operators"
 [source]
 method = "byte-mutation"
 pdf = "mal-stream-05-unbalanced-Q.pdf"
-pdf_sha256 = "8d54ed4411ee294059235e955e732ab078d37a2003bb8feec64c0662c3d14eb5"
+pdf_sha256 = "bc743b3fffde53cbb6f0d504b3effbba4cd0d76254c4447c3b508dd9fb229ac2"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
 [lineage]

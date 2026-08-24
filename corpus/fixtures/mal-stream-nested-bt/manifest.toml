@@ -1,0 +1,55 @@
+schema_version = 1
+
+[identity]
+id = "mal-stream-nested-bt"
+name = "Nested text object resets the text matrices"
+class = "mal"
+legality = "malformed"
+cases = ["STREAM-05"]
+priority = "M1"
+variable = "The page Contents reference selects the dormant stream containing a nested BT"
+
+[source]
+method = "byte-mutation"
+pdf = "mal-stream-nested-bt.pdf"
+pdf_sha256 = "0681d5fb8ea3c391e44ded2d1fb33b61d9d19d8305fed0f1ddbe30a51a479e56"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+
+[lineage]
+parent = "unit-stream-00-malformed-parent"
+
+[[lineage.mutations]]
+byte_offset = 209
+original_bytes = [49, 48]
+replacement_bytes = [50, 48]
+description = "change /Contents 10 0 R to 20 0 R, selecting the nested-BT candidate"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "content-semantics:STREAM-05"
+
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+
+[[expected.behaviour]]
+id = "STREAM-05-nested-bt"
+assertion = "The second BT resets Tm, so MI begins at (72,120), MUS begins at (100,80), and one NestedTextObject recovery is reported"
+observable_via = "production walk character origins and the page-scoped content_recovered diagnostic"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "render"]
+
+[[adjudication]]
+date = "2026-08-24"
+issue = "A nested BT is malformed but common in concatenated content streams"
+resolution = "Reset both text matrices at the inner BT and continue without leaking the earlier position"

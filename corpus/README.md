@@ -57,5 +57,13 @@ MuPDF baseline、MuPDF SVG 字形轮廓和两个独立渲染器反向验收。�
 
 后续畸形 fixture 使用 `method = "byte-mutation"`，并在 `[lineage]` 中记录合法父本
 fixture ID。唯一一条 `[[lineage.mutations]]` 必须同时记录 `byte_offset`、
-`original_byte`、`replacement_byte` 和变异语义。派生 API 会检查父本偏移处的旧值，
-生成后再逐字节核对父子文件只在该偏移不同，防止一份 fixture 顺带改变第二个变量。
+`original_bytes`、`replacement_bytes` 和变异语义。派生 API 会检查父本偏移处的旧值，
+生成后再逐字节核对父子文件只在该连续区间不同，防止一份 fixture 顺带改变第二个变量。
+
+## 独立解析器的已知边界
+
+MuPDF 1.28.2 与 Poppler 26.08.0 都不识别 Adobe Distiller 使用的合法
+`DLIdent-H` / `DLIdent-V` Identity CMap 别名，因此无法为这类 fixture 提供文字或
+字形几何。`CMAP-02` 的别名 fixture 改由原始对象图、content bytes、CID 序列和钉死
+TrueType cmap 的静态组合证明裁定；生产路径测试另行断言别名识别和段落行为。此例外
+只适用于该已知别名，不放宽普通 Identity 或嵌入 CMap fixture 的双解析器门禁。

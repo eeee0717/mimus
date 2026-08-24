@@ -538,6 +538,10 @@ pub struct Block {
     /// 是否实际着墨。`Tr 3` / `Tr 7` 文字没有可供渲染 oracle 核对的轮廓。
     #[serde(default = "visible_by_default")]
     pub visible: bool,
+    /// MuPDF 的文本/轮廓 oracle 是否能观察该块。剪裁专用的 `Tr 7`
+    /// 不出现在 stext 中；超过 MuPDF 自身递归上限的页面也无法提供该信号。
+    #[serde(default = "visible_by_default")]
+    pub mutool_extractable: bool,
     /// 手写几何（`geometry_source = "hand-written"` 时必填）。
     #[serde(default)]
     pub baseline_origin: Option<[f64; 2]>,
@@ -1282,7 +1286,6 @@ impl Manifest {
             (Check::PageGeometry, "page-geometry"),
             (Check::PdfBytes, "pdf-bytes"),
             (Check::PdfStructure, "pdf-structure"),
-            (Check::Render, "render"),
         ] {
             fail_if(
                 !self.requires(check),
@@ -1290,6 +1293,11 @@ impl Manifest {
                 &format!("exact-writer fixture 必须启用 {name} 门禁"),
             )?;
         }
+        fail_if(
+            !self.requires(Check::Render) && !self.requires(Check::RenderDiagnostic),
+            "§2.8",
+            "exact-writer fixture 必须启用 render 或 render-diagnostic 门禁",
+        )?;
         if self.has_text_expectations() {
             fail_if(
                 !self.requires(Check::Structure) && !self.requires(Check::EmbeddedCmap),
@@ -1372,7 +1380,11 @@ impl Manifest {
             "§2.5",
             "exact-writer fixture 必须手写至少一个 content stream",
         )?;
-        let allows_exact_filters = self.identity.cases.iter().any(|case| case == "PARSE-03");
+        let allows_exact_filters = self
+            .identity
+            .cases
+            .iter()
+            .any(|case| matches!(case.as_str(), "PARSE-03" | "PARSE-05"));
         for stream in &self.expected.content_stream {
             fail_if(
                 !pdf.object_numbers.contains(&stream.object),
