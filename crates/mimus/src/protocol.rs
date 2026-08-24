@@ -4,8 +4,8 @@ use std::sync::Mutex;
 
 use mimus_core::error::{ErrorReason, InternalReason, IoReason, MimusError, Result};
 use mimus_core::event::{
-    DiagnosticEvent, Event, EventKind, EventSink, MINIMAL_SERIALIZATION_ERROR_LINE, ResultPayload,
-    Stage, serialize_line,
+    DiagnosticEvent, Event, EventKind, EventSink, MINIMAL_SERIALIZATION_ERROR_LINE,
+    PageDegradeReason, ResultPayload, Stage, serialize_line,
 };
 
 type Serializer = fn(&Event) -> Result<Vec<u8>>;
@@ -251,12 +251,51 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 "warning[scan_summary]: {scanned_pages} of {content_pages} content pages are scanned; page indices: {scanned_page_indices:?}"
             );
         }
+        DiagnosticEvent::PageDegraded { page_index, reason } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[page_degraded]: page {} kept as-is ({})",
+                page_index + 1,
+                human_page_degrade_reason(reason)
+            );
+        }
+        DiagnosticEvent::DegradationSummary {
+            degraded_page_indices,
+            degraded_pages,
+            preserved_paragraphs,
+            total_pages,
+        } => {
+            let pages = degraded_page_indices
+                .iter()
+                .map(|index| (index + 1).to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[degradation_summary]: {degraded_pages} of {total_pages} pages kept as-is [{pages}]; {} paragraphs kept as source text",
+                preserved_paragraphs.len()
+            );
+        }
         DiagnosticEvent::DroppedDiagnostics { count } => {
             let _ = writeln!(
                 std::io::stderr().lock(),
                 "warning[dropped_diagnostics]: {count} additional diagnostics dropped"
             );
         }
+    }
+}
+
+const fn human_page_degrade_reason(reason: PageDegradeReason) -> &'static str {
+    match reason {
+        PageDegradeReason::ContentStreamSyntax => "content stream syntax could not be recovered",
+        PageDegradeReason::NestingTooDeep => "nesting exceeded the supported depth",
+        PageDegradeReason::ContentDecode => "content stream could not be decoded",
+        PageDegradeReason::BadPageGeometry => "page boxes could not be parsed",
+        PageDegradeReason::UnsupportedRotation => "/Rotate is not a multiple of 90",
+        PageDegradeReason::MissingResource => "a referenced resource is missing",
+        PageDegradeReason::BadFormBBox => "a form XObject has an unusable /BBox",
+        PageDegradeReason::BadFormMatrix => "a form XObject has an unusable /Matrix",
+        PageDegradeReason::XObjectNotAStream => "an XObject is not a stream",
     }
 }
 

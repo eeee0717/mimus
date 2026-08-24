@@ -4,7 +4,7 @@ use lopdf::Document as LopdfDocument;
 
 use crate::engine::{LayoutDetector, LayoutRegion, PageCharSnapshot, PdfEngine, RgbaImage};
 use crate::error::Result;
-use crate::event::{Diagnostics, EventSink, Stage};
+use crate::event::{Diagnostics, EventSink, PageDegradeReason, Stage};
 use crate::il;
 use crate::scan::{PageClass, PageEvidence};
 use crate::translate::Translator;
@@ -110,8 +110,17 @@ pub(crate) struct ExtractedPage {
     pub geometry: il::PageGeometry,
     pub evidence: PageEvidence,
     pub class: Option<PageClass>,
+    // ADR-0013 §2: 页级降级标记。置位后该页不再进入后续 pass，也不产生 rewrite。
+    pub degraded: Option<PageDegradeReason>,
     pub walked_characters: Vec<WalkedChar>,
     pub engine_characters: Vec<PageCharSnapshot>,
     pub layout_regions: Vec<LayoutRegion>,
     pub input_raster: Option<RgbaImage>,
+}
+
+impl ExtractedPage {
+    /// 只有未降级的内容页会被翻译改写；其余（空白页、扫描页、降级页）一律整页透传。
+    pub(crate) fn is_translatable(&self) -> bool {
+        self.class == Some(PageClass::Content) && self.degraded.is_none()
+    }
 }

@@ -167,7 +167,42 @@ impl EventSink for RecordingEventSink {
 pub enum DiagnosticId {
     EngineBaselineMismatch,
     ScanSummary,
+    PageDegraded,
+    DegradationSummary,
     DroppedDiagnostics,
+}
+
+/// 页级降级的原因（ADR-0013 §2）。降级页不产生 `PageRewrite`，
+/// 增量写回因此逐字节保留它的原 content stream。
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PageDegradeReason {
+    /// content stream 的 token 语法无法有界恢复（未闭合字符串/数组/十六进制串等）。
+    ContentStreamSyntax,
+    /// 复合结构嵌套超过上限。
+    NestingTooDeep,
+    /// content stream 无法解码，或超过单流字节上限。
+    ContentDecode,
+    /// 页面框（MediaBox/CropBox）不可解析或退化。
+    BadPageGeometry,
+    /// `/Rotate` 不是 90 的整数倍。
+    UnsupportedRotation,
+    /// content stream 引用了资源字典里不存在的名字。
+    MissingResource,
+    /// Form XObject 的 `/BBox` 缺失或不可用。
+    BadFormBBox,
+    /// Form XObject 的 `/Matrix` 元素数不是 6 或含非数值。
+    BadFormMatrix,
+    /// XObject 不是流对象。
+    XObjectNotAStream,
+}
+
+/// 汇总事件里的一条段级保留记录。
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct PreservedParagraph {
+    pub page_index: usize,
+    pub paragraph_index: usize,
+    pub reason: il::PreservedReason,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -186,6 +221,16 @@ pub enum Diagnostic {
         content_pages: usize,
         total_pages: usize,
     },
+    PageDegraded {
+        page_index: usize,
+        reason: PageDegradeReason,
+    },
+    DegradationSummary {
+        degraded_page_indices: Vec<usize>,
+        degraded_pages: usize,
+        preserved_paragraphs: Vec<PreservedParagraph>,
+        total_pages: usize,
+    },
 }
 
 impl Diagnostic {
@@ -194,7 +239,19 @@ impl Diagnostic {
         match self {
             Self::EngineBaselineMismatch { .. } => DiagnosticId::EngineBaselineMismatch,
             Self::ScanSummary { .. } => DiagnosticId::ScanSummary,
+            Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
+            Self::DegradationSummary { .. } => DiagnosticId::DegradationSummary,
         }
+    }
+
+    /// 汇总类诊断无条件入库且不占 `MAX_DIAGNOSTICS` 名额——逐页/逐段的明细可能被
+    /// 截断，但「哪些页被降级」这个总账必须完整到达消费者（ADR-0012 §5、ADR-0013 §5）。
+    #[must_use]
+    const fn is_summary(&self) -> bool {
+        matches!(
+            self,
+            Self::ScanSummary { .. } | Self::DegradationSummary { .. }
+        )
     }
 }
 
@@ -214,6 +271,16 @@ pub enum DiagnosticEvent {
         content_pages: usize,
         total_pages: usize,
     },
+    PageDegraded {
+        page_index: usize,
+        reason: PageDegradeReason,
+    },
+    DegradationSummary {
+        degraded_page_indices: Vec<usize>,
+        degraded_pages: usize,
+        preserved_paragraphs: Vec<PreservedParagraph>,
+        total_pages: usize,
+    },
     DroppedDiagnostics {
         count: usize,
     },
@@ -225,6 +292,8 @@ impl DiagnosticEvent {
         match self {
             Self::EngineBaselineMismatch { .. } => DiagnosticId::EngineBaselineMismatch,
             Self::ScanSummary { .. } => DiagnosticId::ScanSummary,
+            Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
+            Self::DegradationSummary { .. } => DiagnosticId::DegradationSummary,
             Self::DroppedDiagnostics { .. } => DiagnosticId::DroppedDiagnostics,
         }
     }
@@ -257,6 +326,21 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 content_pages: *content_pages,
                 total_pages: *total_pages,
             },
+            Diagnostic::PageDegraded { page_index, reason } => Self::PageDegraded {
+                page_index: *page_index,
+                reason: *reason,
+            },
+            Diagnostic::DegradationSummary {
+                degraded_page_indices,
+                degraded_pages,
+                preserved_paragraphs,
+                total_pages,
+            } => Self::DegradationSummary {
+                degraded_page_indices: degraded_page_indices.clone(),
+                degraded_pages: *degraded_pages,
+                preserved_paragraphs: preserved_paragraphs.clone(),
+                total_pages: *total_pages,
+            },
         }
     }
 }
@@ -269,11 +353,11 @@ pub struct Diagnostics {
 
 impl Diagnostics {
     pub fn push(&mut self, diagnostic: Diagnostic) {
-        if matches!(diagnostic, Diagnostic::ScanSummary { .. })
+        if diagnostic.is_summary()
             || self
                 .entries
                 .iter()
-                .filter(|value| !matches!(value, Diagnostic::ScanSummary { .. }))
+                .filter(|value| !value.is_summary())
                 .count()
                 < MAX_DIAGNOSTICS
         {
@@ -398,6 +482,63 @@ mod tests {
                 total_pages: 9,
             } if scanned_page_indices == &[1, 3]
         )));
+    }
+
+    #[test]
+    fn degradation_summary_shares_the_scan_summary_privilege() {
+        let mut diagnostics = Diagnostics::default();
+        for index in 0..(MAX_DIAGNOSTICS + 3) {
+            diagnostics.push(baseline(index));
+        }
+        diagnostics.push(Diagnostic::PageDegraded {
+            page_index: 2,
+            reason: PageDegradeReason::ContentStreamSyntax,
+        });
+        diagnostics.push(Diagnostic::DegradationSummary {
+            degraded_page_indices: vec![2],
+            degraded_pages: 1,
+            preserved_paragraphs: vec![PreservedParagraph {
+                page_index: 4,
+                paragraph_index: 0,
+                reason: il::PreservedReason::UnreliableUnicode,
+            }],
+            total_pages: 6,
+        });
+
+        // 逐页明细吃上限（被丢弃），汇总仍然完整到达。
+        assert_eq!(diagnostics.entries().len(), MAX_DIAGNOSTICS + 1);
+        assert_eq!(diagnostics.dropped(), 4);
+        let events = diagnostics.events();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DiagnosticEvent::DegradationSummary {
+                degraded_page_indices,
+                degraded_pages: 1,
+                total_pages: 6,
+                preserved_paragraphs,
+            } if degraded_page_indices == &[2] && preserved_paragraphs.len() == 1
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(DiagnosticEvent::DroppedDiagnostics { count: 4 })
+        ));
+    }
+
+    #[test]
+    fn degradation_diagnostics_serialize_with_snake_case_reasons() {
+        let line = serialize_line(&Event::new(EventKind::Diagnostic {
+            diagnostic: DiagnosticEvent::from(&Diagnostic::PageDegraded {
+                page_index: 3,
+                reason: PageDegradeReason::UnsupportedRotation,
+            }),
+        }))
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(value["schema_version"], 2);
+        assert_eq!(value["event"], "diagnostic");
+        assert_eq!(value["id"], "page_degraded");
+        assert_eq!(value["page_index"], 3);
+        assert_eq!(value["reason"], "unsupported_rotation");
     }
 
     #[test]

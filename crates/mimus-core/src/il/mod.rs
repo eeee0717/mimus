@@ -56,6 +56,24 @@ pub struct Paragraph {
     pub bounds: Rect,
     pub text: TextCarrier,
     pub translated_text: Option<String>,
+    // ADR-0013 §2: 段级保留的载体。additive 可选字段，IL schema 仍为 1；
+    // 未保留的段落序列化结果与加字段之前逐字节相同。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserved: Option<PreservedReason>,
+}
+
+/// 段级保留的原因（ADR-0014 §4）。保留段的 `translated_text` 恒为 `None`。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PreservedReason {
+    /// 段内存在无法可信解码为 Unicode 的字符。
+    UnreliableUnicode,
+    /// 字体对象不可解析，或超出 M1 支持面。
+    UnsupportedFont,
+    /// 字符 advance 不为正或非有限。
+    NonPositiveAdvance,
+    /// 文本矩阵退化，字符不可定位。
+    Unlocatable,
 }
 
 impl Paragraph {
@@ -166,6 +184,7 @@ mod tests {
                     bounds: Rect::default(),
                     text: TextCarrier::Chars { chars: Vec::new() },
                     translated_text: None,
+                    preserved: None,
                 }],
             }],
         };
@@ -174,5 +193,31 @@ mod tests {
         assert_eq!(value["pages"][0]["paragraphs"][0]["text"]["kind"], "chars");
         let canonical = canonical_json(&document).unwrap();
         assert!(canonical.ends_with(b"\n"));
+    }
+
+    #[test]
+    fn preserved_is_additive_and_absent_until_a_paragraph_is_preserved() {
+        let mut paragraph = Paragraph {
+            reading_order: 0,
+            bounds: Rect::default(),
+            text: TextCarrier::Chars { chars: Vec::new() },
+            translated_text: None,
+            preserved: None,
+        };
+
+        // 未保留的段落不写出该键——既有 IL 消费者看到的字节不变。
+        let value = serde_json::to_value(&paragraph).unwrap();
+        assert!(value.get("preserved").is_none());
+
+        paragraph.preserved = Some(PreservedReason::UnreliableUnicode);
+        let value = serde_json::to_value(&paragraph).unwrap();
+        assert_eq!(value["preserved"], "unreliable_unicode");
+
+        // 缺该键的旧快照仍可读回，反序列化得到 None。
+        let restored: Paragraph = serde_json::from_str(
+            r#"{"reading_order":0,"bounds":{"left":0.0,"bottom":0.0,"right":0.0,"top":0.0},"text":{"kind":"chars","chars":[]},"translated_text":null}"#,
+        )
+        .unwrap();
+        assert_eq!(restored.preserved, None);
     }
 }

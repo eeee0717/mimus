@@ -5,7 +5,7 @@ use lopdf::Document as LopdfDocument;
 use crate::context::{Document, ExtractedPage, PassContext};
 use crate::engine::{PageCharSnapshot, RgbaImage};
 use crate::error::{InputReason, InternalReason, IoReason, MimusError, Result};
-use crate::event::{Diagnostic, Diagnostics, Event, EventKind, Stage};
+use crate::event::{Diagnostic, Diagnostics, Event, EventKind, PreservedParagraph, Stage};
 use crate::il::{
     self, Char, PageGeometry, Paragraph, PassthroughRef, Rect, TextCarrier, TextTransform,
 };
@@ -108,7 +108,45 @@ fn run_stages(
             .events
             .emit(Event::new(EventKind::StageFinished { stage }))?;
     }
+    push_degradation_summary(document);
     Ok(())
+}
+
+/// ADR-0013 §5：受影响页与保留段的总账走单条汇总 diagnostic，不进 `result`
+/// （ADR-0011 §2 规定 result 只保留 warnings 总数，不重复诊断内容）。
+fn push_degradation_summary(document: &mut Document) {
+    let degraded_page_indices = document
+        .extracted_pages
+        .iter()
+        .filter(|page| page.degraded.is_some())
+        .map(|page| page.index)
+        .collect::<Vec<_>>();
+    let preserved_paragraphs = document
+        .il
+        .pages
+        .iter()
+        .flat_map(|page| {
+            page.paragraphs
+                .iter()
+                .enumerate()
+                .filter_map(move |(paragraph_index, paragraph)| {
+                    paragraph.preserved.map(|reason| PreservedParagraph {
+                        page_index: page.index,
+                        paragraph_index,
+                        reason,
+                    })
+                })
+        })
+        .collect::<Vec<_>>();
+    if degraded_page_indices.is_empty() && preserved_paragraphs.is_empty() {
+        return;
+    }
+    document.diagnostics.push(Diagnostic::DegradationSummary {
+        degraded_pages: degraded_page_indices.len(),
+        degraded_page_indices,
+        preserved_paragraphs,
+        total_pages: document.extracted_pages.len(),
+    });
 }
 
 pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
@@ -160,6 +198,7 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
             geometry,
             evidence,
             class: None,
+            degraded: None,
             walked_characters: Vec::new(),
             engine_characters: Vec::new(),
             layout_regions: Vec::new(),
@@ -217,7 +256,7 @@ pub fn scan_detect(document: &mut Document, context: &PassContext<'_>) -> Result
         )
     })?;
     for page in &mut document.extracted_pages {
-        if page.class != Some(PageClass::Content) {
+        if !page.is_translatable() {
             continue;
         }
         // CONTEXT #32 要求在视觉页框内判定朝向。#14 尚未实现这层坐标变换，
@@ -250,7 +289,7 @@ pub fn scan_detect(document: &mut Document, context: &PassContext<'_>) -> Result
 pub fn layout(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     let total_pages = document.extracted_pages.len();
     for page in &mut document.extracted_pages {
-        if page.class == Some(PageClass::Content) {
+        if page.is_translatable() {
             let raster = context
                 .engine
                 .rasterize_page(&document.original_bytes, page.index)?;
@@ -273,7 +312,7 @@ pub fn layout(document: &mut Document, context: &PassContext<'_>) -> Result<()> 
 pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
     let mut pages = Vec::with_capacity(document.extracted_pages.len());
     for extracted in &document.extracted_pages {
-        if extracted.class != Some(PageClass::Content) {
+        if !extracted.is_translatable() {
             pages.push(il::Page {
                 index: extracted.index,
                 geometry: extracted.geometry,
@@ -321,6 +360,7 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
                 bounds: region.bounds,
                 text: TextCarrier::Chars { chars },
                 translated_text: None,
+                preserved: None,
             }],
         });
     }
@@ -725,7 +765,7 @@ mod tests {
         LayoutDetector, LayoutRegion, PageCharSnapshot, PdfInspector, Rasterizer, RgbaImage,
         SingleLineLayoutDetector,
     };
-    use crate::event::{EventKind, RecordingEventSink};
+    use crate::event::{DiagnosticId, EventKind, PageDegradeReason, RecordingEventSink};
     use crate::il::{PageGeometry, Point, Rect};
     use crate::translate::Translator;
 
@@ -1253,5 +1293,104 @@ mod tests {
             error.reason(),
             crate::error::ErrorReason::Input(InputReason::UnsupportedPdf)
         );
+    }
+
+    #[test]
+    fn a_degraded_page_is_preserved_byte_for_byte_and_reported() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("degraded.pdf");
+        let mut document = Document::new(fixture(), &output);
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+
+        parse(&mut document, &context).unwrap();
+        scan_detect(&mut document, &context).unwrap();
+        // 真正的触发点在走查（#18）与几何解析（#17）里；此处注入以单独锁住骨架的行为。
+        document.extracted_pages[0].degraded = Some(PageDegradeReason::ContentStreamSyntax);
+        document.diagnostics.push(Diagnostic::PageDegraded {
+            page_index: 0,
+            reason: PageDegradeReason::ContentStreamSyntax,
+        });
+        for &(_, pass) in &PIPELINE[2..] {
+            pass(&mut document, &context).unwrap();
+        }
+        push_degradation_summary(&mut document);
+
+        // 降级页不进 rewrites，增量写回因此原样复制输入。
+        assert!(document.rewrites.is_empty());
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            std::fs::read(fixture()).unwrap()
+        );
+        assert_eq!(document.write_report.as_ref().unwrap().appended_bytes, 0);
+        // 降级页不再进入光栅化与翻译。
+        assert_eq!(engine.raster_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 0);
+        assert!(document.il.pages[0].paragraphs.is_empty());
+
+        let ids = document
+            .diagnostics
+            .entries()
+            .iter()
+            .map(Diagnostic::id)
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&DiagnosticId::PageDegraded));
+        assert!(document.diagnostics.entries().iter().any(|entry| matches!(
+            entry,
+            Diagnostic::DegradationSummary {
+                degraded_page_indices,
+                degraded_pages: 1,
+                total_pages: 1,
+                preserved_paragraphs,
+            } if degraded_page_indices == &[0] && preserved_paragraphs.is_empty()
+        )));
+    }
+
+    #[test]
+    fn preserved_paragraphs_are_listed_in_the_degradation_summary() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+
+        inspect(&mut document, &context).unwrap();
+        // 干净文档不产生汇总。
+        assert!(document.diagnostics.entries().is_empty());
+
+        document.il.pages[0].paragraphs[0].preserved = Some(il::PreservedReason::UnreliableUnicode);
+        push_degradation_summary(&mut document);
+
+        assert!(document.diagnostics.entries().iter().any(|entry| matches!(
+            entry,
+            Diagnostic::DegradationSummary {
+                degraded_page_indices,
+                degraded_pages: 0,
+                preserved_paragraphs,
+                ..
+            } if degraded_page_indices.is_empty()
+                && preserved_paragraphs
+                    == &[PreservedParagraph {
+                        page_index: 0,
+                        paragraph_index: 0,
+                        reason: il::PreservedReason::UnreliableUnicode,
+                    }]
+        )));
     }
 }
