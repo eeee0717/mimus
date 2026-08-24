@@ -160,12 +160,15 @@ pub struct Lineage {
     pub mutations: Vec<Mutation>,
 }
 
+/// 一处连续字节区间的替换。区间长度可以大于 1（§2.5），但替换前后**必须等长**：
+/// 改变文件长度会让 xref 偏移集体失效，畸形档就会以「xref 坏了」而不是以声明的
+/// 那种方式失败。
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Mutation {
     pub byte_offset: u64,
-    pub original_byte: u8,
-    pub replacement_byte: u8,
+    pub original_bytes: Vec<u8>,
+    pub replacement_bytes: Vec<u8>,
     pub description: String,
 }
 
@@ -689,13 +692,23 @@ impl Manifest {
             fail_if(
                 lineage.mutations.len() != 1,
                 "§2.4/§2.5",
-                "畸形派生必须且只能声明一处字节变异",
+                "畸形派生必须且只能声明一处字节区间变异",
             )?;
             let mutation = &lineage.mutations[0];
             fail_if(
-                mutation.original_byte == mutation.replacement_byte,
+                mutation.original_bytes.is_empty(),
+                "§2.5",
+                "变异区间不得为空",
+            )?;
+            fail_if(
+                mutation.original_bytes.len() != mutation.replacement_bytes.len(),
+                "§2.5",
+                "变异前后区间必须等长——改变文件长度会让 xref 偏移失效",
+            )?;
+            fail_if(
+                mutation.original_bytes == mutation.replacement_bytes,
                 "§2.4",
-                "变异前后 byte 必须不同",
+                "变异前后字节必须不同",
             )?;
             fail_if(
                 mutation.description.trim().is_empty(),

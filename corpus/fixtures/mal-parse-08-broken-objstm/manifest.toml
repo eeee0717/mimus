@@ -21,8 +21,8 @@ parent = "unit-write-04-xobj-in-objstm"
 
 [[lineage.mutations]]
 byte_offset = 3403
-original_byte = 49
-replacement_byte = 50
+original_bytes = [49]
+replacement_bytes = [50]
 description = "change the ObjStm /N 1 declaration to /N 2 without changing stream bytes"
 
 [[page]]

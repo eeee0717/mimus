@@ -17,8 +17,8 @@ fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f
 parent = "unit-stream-03-unknown-op-outside-bx"
 [[lineage.mutations]]
 byte_offset = 3335
-original_byte = 66
-replacement_byte = 37
+original_bytes = [66]
+replacement_bytes = [37]
 description = "change BX to %X so the opener becomes a comment and SomeVendorOp executes outside compatibility mode"
 [[page]]
 index = 0

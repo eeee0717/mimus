@@ -120,7 +120,7 @@ fixture 分两类：
 |---|---|---|
 | **精确几何 fixture** | 手写 content stream + 自研确定性对象 writer（裸字节） | 需要逐字节可控、可读、可 diff；任何库都会带来不受控的对象重排与默认值 |
 | **现实排版 fixture** | 固定版本的 Typst 或 LaTeX（pdfTeX / XeTeX / LuaTeX） | 需要真实排版引擎的产物特征（字体嵌入方式、CMap 风格、断行痕迹），手写造不出来 |
-| **畸形 fixture** | 从**一个合法最小 PDF** 做**单变量字节级变异** | 每个畸形 fixture 必须有可追溯的合法父本 + 一处明确变异，才能断言"是这处变异导致了这个行为" |
+| **畸形 fixture** | 从**一个合法最小 PDF** 做**单变量字节级变异**（一处连续等长区间，见 §2.5） | 每个畸形 fixture 必须有可追溯的合法父本 + 一处明确变异，才能断言"是这处变异导致了这个行为" |
 | **工具生成入库 fixture** | 固定版本外部工具一次性生成，记录结构化 argv 与入库二进制 SHA-256 | 仅用于加密等工具自身引入随机字节、且被测行为不要求往返重现的输入；不得伪装成确定性生成 |
 
 **禁止事项**：
@@ -141,12 +141,20 @@ indirect object、经典 xref、trailer、`startxref` 和 EOF；字典项与 con
 或替换失败时不得留下半成品，也不得破坏既有目标。`corpus build` 负责复现提交的
 PDF，`corpus determinism` 对同一配方连续生成两次并比较 SHA-256。
 
-#### 单字节畸形派生接口
+#### 畸形派生接口：一处等长字节区间
 
 畸形 fixture 的 manifest 必须记录合法父本 fixture ID，并且恰好包含一条变异记录：
-唯一字节偏移、原字节、替换字节和变异语义。派生时先核对父本在该偏移的原字节，产出
-后再比较完整父子字节串，要求长度不变且差异集合严格等于该唯一偏移。这样后续畸形
-fixture 可以复用同一 API，同时仍满足 §2.4 的单变量原则。
+起始字节偏移、原字节序列、替换字节序列和变异语义。派生时先核对父本在该区间的原
+字节，产出后再比较完整父子字节串，要求**长度不变**且区间之外没有任何差异。
+
+区间可以长于一个字节。本文档钉死的若干畸形取值——`/Rotate 45`（GEOM-04）、退化
+矩阵 `0 0 0 0 100 700 Tm`（DOC-04）、含 `null` 分量的 MediaBox（GEOM-01）——单个
+字节表达不出来；就近改成单字节可达的值会让 fixture 与需求文档永久错位。**等长**
+这条不放宽：改变文件长度会让其后所有 xref 偏移失效，畸形档就会以「xref 坏了」
+而不是以声明的那种方式失败。必要时在父本里预留等宽的字面量（例如让被替换的数字
+与 `null` 同宽）。
+
+一条记录、一处连续区间、一个语义变量——§2.4 的单变量原则不变。
 
 现实排版引擎的选择（全部已装并钉死版本，见 `corpus/toolchain.toml`）：
 
@@ -222,9 +230,19 @@ parent = "unit-base-01-single-line"
 
 [[lineage.mutations]]
 byte_offset = 123
-original_byte = 84
-replacement_byte = 81
+original_bytes = [84]
+replacement_bytes = [81]
 description = "replace the selected T operator byte with Q"
+```
+
+多字节区间同形，两个数组等长即可：
+
+```toml
+[[lineage.mutations]]
+byte_offset = 210
+original_bytes = [57, 48]        # "90"
+replacement_bytes = [52, 53]     # "45"
+description = "make /Rotate a non-multiple of 90"
 ```
 
 ### 2.8 独立验收
@@ -1495,7 +1513,7 @@ BabelDOC 的输出**不得作为唯一正确性 oracle**。它是参考实现而
 | `unit-geom-03-nonzero-origin-raster` | GEOM-05 | MediaBox 原点非零且无 CropBox |
 | `unit-geom-04-oversized-page` | GEOM-05 | 接近规范上限的超大页面 |
 
-`mal-geom-02-rotate-45` **推迟到实验 2**：按 §2.5 它必须从合法父本做字节级变异，而字节级变异要等自建的确定性 writer 就绪。
+`mal-geom-02-rotate-45` **推迟到实验 2**：按 §2.5 它必须从合法父本做字节级变异，而字节级变异要等自建的确定性 writer 就绪。（2026-08-24 补记：writer 早已就绪，真正卡住它的是当时「恰一个字节」的派生接口——`90` → `45` 要改两个字节。§2.5 扩展为一处等长区间后，本 fixture 在 #17 落地。）
 
 #### 实验 1 · 红利清单验证批（§3.10 的 D1–D12）
 

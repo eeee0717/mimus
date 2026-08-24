@@ -17,8 +17,8 @@ fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f
 parent = "unit-stream-00-malformed-parent"
 [[lineage.mutations]]
 byte_offset = 210
-original_byte = 48
-replacement_byte = 54
+original_bytes = [48]
+replacement_bytes = [54]
 description = "change /Contents 10 0 R to 16 0 R, selecting the 512-level nested-array candidate"
 [[page]]
 index = 0

@@ -232,18 +232,21 @@ fn check_lineage(manifest: &Manifest, all: &[Manifest]) -> Outcome {
                 parent_fixture_id: &lineage.parent,
                 byte_offset: usize::try_from(mutation.byte_offset)
                     .context("mutation offset exceeds usize")?,
-                expected_byte: mutation.original_byte,
-                replacement_byte: mutation.replacement_byte,
+                expected_bytes: &mutation.original_bytes,
+                replacement_bytes: &mutation.replacement_bytes,
                 semantics: &mutation.description,
             },
         )?;
         mutation::verify(&parent_bytes, &child_bytes, &derived.record)?;
         if derived.bytes != child_bytes {
-            bail!("child bytes do not equal the single-byte derivation");
+            bail!("child bytes do not equal the declared derivation");
         }
         Ok(format!(
-            "父本 `{}`，唯一偏移 {}：{}",
-            lineage.parent, mutation.byte_offset, mutation.description
+            "父本 `{}`，唯一区间 {}..{}：{}",
+            lineage.parent,
+            mutation.byte_offset,
+            mutation.byte_offset + mutation.original_bytes.len() as u64,
+            mutation.description
         ))
     })();
 
@@ -544,9 +547,10 @@ fn check_pins(manifest: &Manifest) -> Result<Outcome> {
     if let Some(lineage) = &manifest.lineage {
         let size = std::fs::metadata(manifest.pdf_path())?.len();
         for mutation in &lineage.mutations {
-            if mutation.byte_offset >= size {
+            let end = mutation.byte_offset + mutation.original_bytes.len() as u64;
+            if end > size {
                 problems.push(format!(
-                    "变异偏移 {} 超出 PDF 长度 {size}（描述：{}）",
+                    "变异区间 {}..{end} 超出 PDF 长度 {size}（描述：{}）",
                     mutation.byte_offset, mutation.description
                 ));
             }
@@ -677,8 +681,8 @@ fn regenerate_mutation(manifest: &Manifest, repo_root: &Path) -> Result<Vec<u8>>
             parent_fixture_id: &lineage.parent,
             byte_offset: usize::try_from(mutation.byte_offset)
                 .context("mutation offset exceeds usize")?,
-            expected_byte: mutation.original_byte,
-            replacement_byte: mutation.replacement_byte,
+            expected_bytes: &mutation.original_bytes,
+            replacement_bytes: &mutation.replacement_bytes,
             semantics: &mutation.description,
         },
     )?
@@ -2930,8 +2934,8 @@ pub fn build(
                         parent_fixture_id: &lineage.parent,
                         byte_offset: usize::try_from(mutation.byte_offset)
                             .context("mutation offset exceeds usize")?,
-                        expected_byte: mutation.original_byte,
-                        replacement_byte: mutation.replacement_byte,
+                        expected_bytes: &mutation.original_bytes,
+                        replacement_bytes: &mutation.replacement_bytes,
                         semantics: &mutation.description,
                     },
                 )?;
