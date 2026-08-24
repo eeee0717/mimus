@@ -288,10 +288,16 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
         DiagnosticEvent::ContentRecovered {
             page_index,
             recovery,
+            form_cycle_paths,
         } => {
+            let paths = if form_cycle_paths.is_empty() {
+                String::new()
+            } else {
+                format!("; object paths: {form_cycle_paths:?}")
+            };
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "warning[content_recovered]: page {} translated after recovering from malformed content ({})",
+                "warning[content_recovered]: page {} translated after recovering from malformed content ({}{paths})",
                 page_index + 1,
                 human_recovery_kind(recovery)
             );
@@ -341,6 +347,13 @@ const fn human_recovery_kind(recovery: RecoveryKind) -> &'static str {
         RecoveryKind::SkippedTjElement => "an illegal element inside a TJ array",
         RecoveryKind::InlineImageEiScan => "a bounded EI scan for an inline image",
         RecoveryKind::DanglingOperands => "operands left at the end of content",
+        RecoveryKind::SelfRecursiveForm => "a self-recursive Form XObject",
+        RecoveryKind::MutuallyRecursiveForm => "mutually recursive Form XObjects",
+        RecoveryKind::FormDepthExceeded => "a Form XObject nesting chain deeper than 64",
+        RecoveryKind::ScopedGraphicsStateUnclosed => {
+            "an unclosed q graphics-state scope inside a Form XObject"
+        }
+        RecoveryKind::ScopedDanglingOperands => "operands left at the end of a Form XObject",
     }
 }
 

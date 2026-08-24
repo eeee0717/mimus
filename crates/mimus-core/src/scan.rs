@@ -4,7 +4,7 @@ use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 
 const MAX_CONTENT_BYTES: usize = 16 * 1024 * 1024;
-const MAX_FORM_DEPTH: usize = 32;
+const MAX_FORM_DEPTH: usize = 64;
 const MAX_PAGE_TREE_DEPTH: usize = 128;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

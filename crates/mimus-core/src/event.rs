@@ -214,6 +214,16 @@ pub enum RecoveryKind {
     InlineImageEiScan,
     /// 页尾有未被任何操作符消费的操作数，被丢弃。
     DanglingOperands,
+    /// Form 直接再次调用自身；按对象 ID active path 截断。
+    SelfRecursiveForm,
+    /// Form 调用路径回到更早的祖先对象；按对象 ID active path 截断。
+    MutuallyRecursiveForm,
+    /// Form 调用链超过 64 层，当前 `Do` 被原子跳过。
+    FormDepthExceeded,
+    /// Form 退出时仍有未闭合的 `q`，仅丢弃子作用域的栈。
+    ScopedGraphicsStateUnclosed,
+    /// Form 退出时仍有操作数，仅丢弃子作用域的尾部。
+    ScopedDanglingOperands,
 }
 
 /// 页级降级的原因（ADR-0013 §2）。降级页不产生 `PageRewrite`，
@@ -280,6 +290,8 @@ pub enum Diagnostic {
     ContentRecovered {
         page_index: usize,
         recovery: RecoveryKind,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        form_cycle_paths: Vec<Vec<u32>>,
     },
     DegradationSummary {
         degraded_page_indices: Vec<usize>,
@@ -344,6 +356,8 @@ pub enum DiagnosticEvent {
     ContentRecovered {
         page_index: usize,
         recovery: RecoveryKind,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        form_cycle_paths: Vec<Vec<u32>>,
     },
     DegradationSummary {
         degraded_page_indices: Vec<usize>,
@@ -420,9 +434,11 @@ impl From<&Diagnostic> for DiagnosticEvent {
             Diagnostic::ContentRecovered {
                 page_index,
                 recovery,
+                form_cycle_paths,
             } => Self::ContentRecovered {
                 page_index: *page_index,
                 recovery: *recovery,
+                form_cycle_paths: form_cycle_paths.clone(),
             },
             Diagnostic::DegradationSummary {
                 degraded_page_indices,
@@ -572,6 +588,31 @@ mod tests {
         assert_eq!(value["engine_character_count"], 7);
         assert_eq!(value["walked_unicode"], "M");
         assert!(value["engine_unicode"].is_null());
+    }
+
+    #[test]
+    fn recursive_form_recovery_exposes_indirect_object_paths() {
+        let event = DiagnosticEvent::from(&Diagnostic::ContentRecovered {
+            page_index: 0,
+            recovery: RecoveryKind::MutuallyRecursiveForm,
+            form_cycle_paths: vec![vec![12, 13, 12]],
+        });
+        let line =
+            serialize_line(&Event::new(EventKind::Diagnostic { diagnostic: event })).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
+
+        assert_eq!(value["id"], "content_recovered");
+        assert_eq!(value["recovery"], "mutually_recursive_form");
+        assert_eq!(value["form_cycle_paths"], serde_json::json!([[12, 13, 12]]));
+
+        let event = DiagnosticEvent::from(&Diagnostic::ContentRecovered {
+            page_index: 0,
+            recovery: RecoveryKind::UnknownOperator,
+            form_cycle_paths: Vec::new(),
+        });
+        let value =
+            serde_json::to_value(Event::new(EventKind::Diagnostic { diagnostic: event })).unwrap();
+        assert!(value.get("form_cycle_paths").is_none());
     }
 
     #[test]

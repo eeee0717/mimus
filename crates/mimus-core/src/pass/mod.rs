@@ -6,7 +6,8 @@ use crate::context::{Document, ExtractedPage, PassContext};
 use crate::engine::{PageCharSnapshot, RgbaImage};
 use crate::error::{InputReason, InternalReason, IoReason, MimusError, Result};
 use crate::event::{
-    Diagnostic, Diagnostics, Event, EventKind, PageDegradeReason, PreservedParagraph, Stage,
+    Diagnostic, Diagnostics, Event, EventKind, PageDegradeReason, PreservedParagraph, RecoveryKind,
+    Stage,
 };
 use crate::il::{
     self, Char, PageGeometry, Paragraph, PassthroughRef, Rect, TextCarrier, TextTransform,
@@ -293,9 +294,22 @@ pub fn scan_detect(document: &mut Document, context: &PassContext<'_>) -> Result
             Ok(walked) => {
                 page.recoveries = walked.recoveries;
                 for &recovery in &page.recoveries {
+                    let form_cycle_paths = walked
+                        .form_cycles
+                        .iter()
+                        .filter(|path| {
+                            let is_self_cycle =
+                                path.len() >= 2 && path[path.len() - 1] == path[path.len() - 2];
+                            matches!(recovery, RecoveryKind::SelfRecursiveForm) && is_self_cycle
+                                || matches!(recovery, RecoveryKind::MutuallyRecursiveForm)
+                                    && !is_self_cycle
+                        })
+                        .map(|path| path.iter().map(|object_id| object_id.0).collect())
+                        .collect();
                     document.diagnostics.push(Diagnostic::ContentRecovered {
                         page_index: page.index,
                         recovery,
+                        form_cycle_paths,
                     });
                 }
                 page.walked_characters = walked.characters;
@@ -369,11 +383,23 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
             ));
         }
         let region = extracted.layout_regions[0];
+        let engine_boxes_are_aligned = extracted.walked_characters.len()
+            == extracted.engine_characters.len()
+            && extracted
+                .walked_characters
+                .iter()
+                .zip(&extracted.engine_characters)
+                .all(|(walked, engine)| walked.unicode == engine.unicode);
+        let preserved = extracted
+            .walked_characters
+            .iter()
+            .any(|character| !character.locatable)
+            .then_some(il::PreservedReason::Unlocatable);
         let chars = extracted
             .walked_characters
             .iter()
-            .zip(&extracted.engine_characters)
-            .map(|(walked, engine)| Char {
+            .enumerate()
+            .map(|(index, walked)| Char {
                 unicode: walked.unicode,
                 code: walked.code,
                 visible: walked.visible,
@@ -381,7 +407,11 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
                 font_size: walked.font_size,
                 baseline_origin: walked.baseline_origin,
                 r#box: walked.metric_box,
-                visual_bbox: engine.tight_box,
+                visual_bbox: if engine_boxes_are_aligned && walked.locatable {
+                    extracted.engine_characters[index].tight_box
+                } else {
+                    walked.metric_box
+                },
                 text_transform: walked.text_transform,
                 passthrough: PassthroughRef {
                     content_object: walked.content_object.0,
@@ -399,7 +429,7 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
                 bounds: region.bounds,
                 text: TextCarrier::Chars { chars },
                 translated_text: None,
-                preserved: None,
+                preserved,
             }],
         });
     }
@@ -489,17 +519,24 @@ pub fn typeset(document: &mut Document, _context: &PassContext<'_>) -> Result<()
                     .copied()
                     .filter(|object_id| object_id.0 == character.passthrough.content_object)
                     .collect::<Vec<_>>();
-                let [content_object] = matching_streams.as_slice() else {
-                    return Err(MimusError::internal(
-                        InternalReason::InvariantViolation,
-                        format!(
-                            "character references ambiguous or missing content object {}",
-                            character.passthrough.content_object
-                        ),
-                    ));
+                let content_object = match matching_streams.as_slice() {
+                    // Characters painted inside a Form XObject are walkable, but M1 does not yet
+                    // copy-on-write the Form stream. Keeping them out of the page replacement set
+                    // preserves the invocation and the shared Form object byte-for-byte.
+                    [] => continue,
+                    [content_object] => *content_object,
+                    _ => {
+                        return Err(MimusError::internal(
+                            InternalReason::InvariantViolation,
+                            format!(
+                                "character references ambiguous content object {}",
+                                character.passthrough.content_object
+                            ),
+                        ));
+                    }
                 };
                 let key = (
-                    *content_object,
+                    content_object,
                     character.passthrough.byte_start,
                     character.passthrough.byte_end,
                 );
@@ -784,8 +821,10 @@ fn validate_character_alignment(
     recovered: bool,
     diagnostics: &mut Diagnostics,
 ) -> Result<()> {
+    let divergence_is_recoverable =
+        recovered || walked.iter().any(|character| !character.locatable);
     if walked.len() != engine.len() {
-        if recovered {
+        if divergence_is_recoverable {
             diagnostics.push(Diagnostic::EngineCharacterMismatch {
                 page_index,
                 character_index: None,
@@ -808,7 +847,7 @@ fn validate_character_alignment(
     }
     for (index, (walked_character, engine_character)) in walked.iter().zip(engine).enumerate() {
         if walked_character.unicode != engine_character.unicode {
-            if recovered {
+            if divergence_is_recoverable {
                 diagnostics.push(Diagnostic::EngineCharacterMismatch {
                     page_index,
                     character_index: Some(index),
@@ -827,6 +866,9 @@ fn validate_character_alignment(
                     ),
                 ));
             }
+        }
+        if !walked_character.locatable {
+            continue;
         }
         let delta_x =
             (walked_character.baseline_origin.x - engine_character.baseline_origin.x).abs();
@@ -1039,6 +1081,17 @@ mod tests {
     fn scan_fixture() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus/fixtures/unit-scan-01-image-only/unit-scan-01-image-only.pdf")
+    }
+
+    fn form_fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "../../corpus/fixtures/unit-xobj-00-recursion-parent/unit-xobj-00-recursion-parent.pdf",
+        )
+    }
+
+    fn singular_form_fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/fixtures/unit-xobj-05-singular-ctm/unit-xobj-05-singular-ctm.pdf")
     }
 
     #[test]
@@ -1457,6 +1510,29 @@ mod tests {
     }
 
     #[test]
+    fn unlocatable_walked_characters_downgrade_engine_count_divergence() {
+        let pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        let mut walked = walk_page(&pdf, page_id).unwrap().characters;
+        walked[0].locatable = false;
+        let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap();
+        engine.pop();
+        let mut diagnostics = Diagnostics::default();
+
+        validate_character_alignment(0, &walked, &engine, 0.001, false, &mut diagnostics).unwrap();
+
+        assert!(matches!(
+            diagnostics.entries(),
+            [Diagnostic::EngineCharacterMismatch {
+                character_index: None,
+                walked_character_count: 5,
+                engine_character_count: 4,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
     fn clean_pages_still_fail_on_engine_character_differences() {
         let pdf = LopdfDocument::load(fixture()).unwrap();
         let page_id = pdf.get_pages()[&1];
@@ -1473,6 +1549,88 @@ mod tests {
             crate::error::ErrorReason::Input(InputReason::EngineMismatch)
         );
         assert!(diagnostics.entries().is_empty());
+    }
+
+    #[test]
+    fn form_origin_characters_remain_passthrough_in_the_full_pipeline() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("form-output.pdf");
+        let mut document = Document::new(form_fixture(), &output);
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+
+        run(&mut document, &context).unwrap();
+
+        assert_eq!(document.il.pages[0].paragraphs[0].source_text(), "MIMUS");
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 1);
+        assert!(document.rewrites.is_empty());
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            std::fs::read(form_fixture()).unwrap()
+        );
+    }
+
+    #[test]
+    fn singular_form_preserves_the_walker_authoritative_paragraph() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("singular-form-output.pdf");
+        let mut document = Document::new(singular_form_fixture(), &output);
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+
+        run(&mut document, &context).unwrap();
+
+        let paragraph = &document.il.pages[0].paragraphs[0];
+        assert_eq!(paragraph.source_text(), "FORMMIMUS");
+        assert_eq!(paragraph.preserved, Some(il::PreservedReason::Unlocatable));
+        assert!(paragraph.translated_text.is_none());
+        assert!(
+            paragraph
+                .chars()
+                .iter()
+                .all(|character| character.visual_bbox == character.r#box)
+        );
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 0);
+        assert!(document.rewrites.is_empty());
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            std::fs::read(singular_form_fixture()).unwrap()
+        );
+        assert!(
+            document
+                .diagnostics
+                .entries()
+                .iter()
+                .any(|diagnostic| matches!(
+                    diagnostic,
+                    Diagnostic::DegradationSummary {
+                        preserved_paragraphs,
+                        ..
+                    } if preserved_paragraphs == &[PreservedParagraph {
+                        page_index: 0,
+                        paragraph_index: 0,
+                        reason: il::PreservedReason::Unlocatable,
+                    }]
+                ))
+        );
     }
 
     #[test]

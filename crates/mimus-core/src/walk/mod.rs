@@ -10,12 +10,14 @@ use crate::il::{FontRef, Point, Rect, TextTransform};
 use tokenizer::{CompositeDelimiter, InlineImageLengthSource, Token, TokenKind, tokenize};
 
 pub(crate) const MAX_STREAM_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_FORM_DEPTH: usize = 64;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WalkedChar {
     pub unicode: Option<char>,
     pub code: u32,
     pub visible: bool,
+    pub locatable: bool,
     pub encoded: Vec<u8>,
     pub font: FontRef,
     pub font_size: f64,
@@ -62,6 +64,11 @@ impl Matrix {
             x: a * x + c * y + e,
             y: b * x + d * y + f,
         }
+    }
+
+    fn is_singular(self) -> bool {
+        let [a, b, c, d, _, _] = self.0;
+        (a * d - b * c).abs() <= 1e-12
     }
 }
 
@@ -117,6 +124,19 @@ struct Walker<'a> {
     graphics_stack: Vec<GraphicsState>,
     compatibility_depth: usize,
     text_object_is_implicit: bool,
+    active_forms: Vec<ObjectId>,
+    form_cycles: Vec<Vec<ObjectId>>,
+    degradation: Option<PageDegradeReason>,
+}
+
+struct ScopeSnapshot {
+    resources: Dictionary,
+    state: GraphicsState,
+    operands: Vec<Token>,
+    graphics_stack: Vec<GraphicsState>,
+    compatibility_depth: usize,
+    text_object_is_implicit: bool,
+    content_object: ObjectId,
 }
 
 /// 一页走查的结果。`recoveries` 用集合而非计数：ADR-0013 §3 要求恢复决定
@@ -126,6 +146,7 @@ struct Walker<'a> {
 pub struct PageWalk {
     pub characters: Vec<WalkedChar>,
     pub recoveries: BTreeSet<RecoveryKind>,
+    pub form_cycles: Vec<Vec<ObjectId>>,
     pub(crate) content_streams: Vec<WalkedContentStream>,
 }
 
@@ -173,6 +194,9 @@ pub(crate) fn walk_page_detailed(
         graphics_stack: Vec::new(),
         compatibility_depth: 0,
         text_object_is_implicit: false,
+        active_forms: Vec::new(),
+        form_cycles: Vec::new(),
+        degradation: None,
     };
     let mut content_streams = Vec::with_capacity(content_objects.len());
     for object_id in content_objects {
@@ -202,26 +226,18 @@ pub(crate) fn walk_page_detailed(
             reason: failure.reason,
             source: failure.into_mimus_error(),
         })?;
-        walker.walk(tokens).map_err(classify_walk_error)?;
+        if let Err(error) = walker.walk(tokens) {
+            return Err(walker.classify_error(error));
+        }
         content_streams.push(WalkedContentStream { object_id, decoded });
     }
     walker.finish();
     Ok(PageWalk {
         characters: walker.characters,
         recoveries: walker.recoveries,
+        form_cycles: walker.form_cycles,
         content_streams,
     })
-}
-
-fn classify_walk_error(error: MimusError) -> PageWalkError {
-    if error.reason() == ErrorReason::Input(InputReason::OperatorWalk) {
-        PageWalkError::Degraded {
-            reason: PageDegradeReason::ContentStreamSyntax,
-            source: error,
-        }
-    } else {
-        PageWalkError::Fatal(error)
-    }
 }
 
 impl Walker<'_> {
@@ -347,6 +363,7 @@ impl Walker<'_> {
                 self.apply_operator(b"Tj", operands)?;
             }
             b"\"" => self.show_text_with_spacing(operands)?,
+            b"Do" => self.execute_xobject(operands)?,
             _ if is_known_operator(operator) => {}
             _ if self.compatibility_depth > 0 => {}
             _ => {
@@ -354,6 +371,278 @@ impl Walker<'_> {
             }
         }
         Ok(())
+    }
+
+    fn execute_xobject(&mut self, operands: &[Token]) -> Result<()> {
+        let Some(tail) = self.operand_tail(operands, 1) else {
+            return Ok(());
+        };
+        let TokenKind::Name(name) = &tail[0].kind else {
+            self.recoveries.insert(RecoveryKind::InvalidOperands);
+            return Ok(());
+        };
+        let xobjects = match self
+            .resources
+            .get_deref(b"XObject", self.document)
+            .and_then(Object::as_dict)
+        {
+            Ok(value) => value.clone(),
+            Err(error) => {
+                return Err(self.degrade_error(
+                    PageDegradeReason::MissingResource,
+                    format!(
+                        "XObject /{} has no usable resource dictionary: {error}",
+                        display_pdf_name(name)
+                    ),
+                ));
+            }
+        };
+        let object_id = match xobjects.get(name) {
+            Ok(value) => match value.as_reference() {
+                Ok(object_id) => object_id,
+                Err(_) => {
+                    return Err(self.degrade_error(
+                        PageDegradeReason::XObjectNotAStream,
+                        format!(
+                            "XObject /{} is not an indirect stream",
+                            display_pdf_name(name)
+                        ),
+                    ));
+                }
+            },
+            Err(error) => {
+                return Err(self.degrade_error(
+                    PageDegradeReason::MissingResource,
+                    format!("XObject /{} is missing: {error}", display_pdf_name(name)),
+                ));
+            }
+        };
+        let stream = match self.document.get_object(object_id) {
+            Ok(value) => match value.as_stream() {
+                Ok(stream) => stream.clone(),
+                Err(error) => {
+                    return Err(self.degrade_error(
+                        PageDegradeReason::XObjectNotAStream,
+                        format!(
+                            "XObject /{} object {} is not a stream: {error}",
+                            display_pdf_name(name),
+                            object_id.0
+                        ),
+                    ));
+                }
+            },
+            Err(error) => {
+                return Err(self.degrade_error(
+                    PageDegradeReason::MissingResource,
+                    format!(
+                        "XObject /{} object {} is missing: {error}",
+                        display_pdf_name(name),
+                        object_id.0
+                    ),
+                ));
+            }
+        };
+        let subtype = stream.dict.get(b"Subtype").and_then(Object::as_name).ok();
+        match subtype {
+            Some(b"Image") => Ok(()),
+            Some(b"Form") => self.execute_form(name, object_id, &stream),
+            _ => Err(self.degrade_error(
+                PageDegradeReason::MissingResource,
+                format!(
+                    "XObject /{} object {} has no supported Subtype",
+                    display_pdf_name(name),
+                    object_id.0
+                ),
+            )),
+        }
+    }
+
+    fn execute_form(
+        &mut self,
+        name: &[u8],
+        object_id: ObjectId,
+        stream: &lopdf::Stream,
+    ) -> Result<()> {
+        if self.active_forms.contains(&object_id) {
+            let recovery = if self.active_forms.last() == Some(&object_id) {
+                RecoveryKind::SelfRecursiveForm
+            } else {
+                RecoveryKind::MutuallyRecursiveForm
+            };
+            self.recoveries.insert(recovery);
+            let mut path = self.active_forms.clone();
+            path.push(object_id);
+            if !self.form_cycles.contains(&path) {
+                self.form_cycles.push(path);
+            }
+            return Ok(());
+        }
+        if self.active_forms.len() >= MAX_FORM_DEPTH {
+            self.recoveries.insert(RecoveryKind::FormDepthExceeded);
+            return Ok(());
+        }
+
+        let bbox = match numeric_array(self.document, &stream.dict, b"BBox", 4) {
+            Ok(Some(values))
+                if values[2] > values[0]
+                    && values[3] > values[1]
+                    && values.iter().all(|value| value.is_finite()) =>
+            {
+                values
+            }
+            Ok(_) | Err(_) => {
+                return Err(self.degrade_error(
+                    PageDegradeReason::BadFormBBox,
+                    format!(
+                        "Form XObject /{} object {} has no usable BBox",
+                        display_pdf_name(name),
+                        object_id.0
+                    ),
+                ));
+            }
+        };
+        debug_assert_eq!(bbox.len(), 4);
+        let matrix = match numeric_array(self.document, &stream.dict, b"Matrix", 6) {
+            Ok(Some(values)) if values.iter().all(|value| value.is_finite()) => {
+                Matrix::from_values(&values)
+            }
+            Ok(None) => Matrix::IDENTITY,
+            Ok(Some(_)) | Err(_) => {
+                return Err(self.degrade_error(
+                    PageDegradeReason::BadFormMatrix,
+                    format!(
+                        "Form XObject /{} object {} has no usable Matrix",
+                        display_pdf_name(name),
+                        object_id.0
+                    ),
+                ));
+            }
+        };
+        let resources = match stream.dict.get(b"Resources") {
+            Ok(value) => match self
+                .document
+                .dereference(value)
+                .and_then(|(_, value)| value.as_dict())
+            {
+                Ok(resources) => resources.clone(),
+                Err(error) => {
+                    return Err(self.degrade_error(
+                        PageDegradeReason::MissingResource,
+                        format!(
+                            "Form XObject /{} object {} has invalid Resources: {error}",
+                            display_pdf_name(name),
+                            object_id.0
+                        ),
+                    ));
+                }
+            },
+            Err(_) => self.resources.clone(),
+        };
+        let decoded = match stream.decompressed_content_with_limit(MAX_STREAM_BYTES) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                return Err(self.degrade_error(
+                    PageDegradeReason::ContentDecode,
+                    format!(
+                        "could not decode Form XObject /{} object {}: {error}",
+                        display_pdf_name(name),
+                        object_id.0
+                    ),
+                ));
+            }
+        };
+
+        self.active_forms.push(object_id);
+        let snapshot = self.enter_scope(resources, matrix, object_id);
+        let result = match tokenize(&decoded) {
+            Ok(tokens) => self.walk(tokens).map(|()| self.finish_scoped()),
+            Err(failure) => {
+                self.degradation.get_or_insert(failure.reason);
+                Err(failure.into_mimus_error())
+            }
+        };
+        self.restore_scope(snapshot);
+        let popped = self.active_forms.pop();
+        debug_assert_eq!(popped, Some(object_id));
+        result
+    }
+
+    fn enter_scope(
+        &mut self,
+        resources: Dictionary,
+        matrix: Matrix,
+        content_object: ObjectId,
+    ) -> ScopeSnapshot {
+        let mut child_state = self.state.clone();
+        child_state.ctm = child_state.ctm.then(matrix);
+        child_state.text_matrix = Matrix::IDENTITY;
+        child_state.line_matrix = Matrix::IDENTITY;
+        child_state.phase = TextPhase::Outside;
+        ScopeSnapshot {
+            resources: std::mem::replace(&mut self.resources, resources),
+            state: std::mem::replace(&mut self.state, child_state),
+            operands: std::mem::take(&mut self.operands),
+            graphics_stack: std::mem::take(&mut self.graphics_stack),
+            compatibility_depth: std::mem::replace(&mut self.compatibility_depth, 0),
+            text_object_is_implicit: std::mem::replace(&mut self.text_object_is_implicit, false),
+            content_object: std::mem::replace(&mut self.content_object, content_object),
+        }
+    }
+
+    fn restore_scope(&mut self, snapshot: ScopeSnapshot) {
+        self.resources = snapshot.resources;
+        self.state = snapshot.state;
+        self.operands = snapshot.operands;
+        self.graphics_stack = snapshot.graphics_stack;
+        self.compatibility_depth = snapshot.compatibility_depth;
+        self.text_object_is_implicit = snapshot.text_object_is_implicit;
+        self.content_object = snapshot.content_object;
+    }
+
+    fn finish_scoped(&mut self) {
+        if !self.operands.is_empty() {
+            self.recoveries.insert(RecoveryKind::ScopedDanglingOperands);
+            self.operands.clear();
+        }
+        if !self.graphics_stack.is_empty() {
+            self.recoveries
+                .insert(RecoveryKind::ScopedGraphicsStateUnclosed);
+            self.graphics_stack.clear();
+        }
+        if self.compatibility_depth != 0 {
+            self.recoveries.insert(RecoveryKind::CompatibilityUnclosed);
+            self.compatibility_depth = 0;
+        }
+        if self.state.phase == TextPhase::Inside && !self.text_object_is_implicit {
+            self.recoveries.insert(RecoveryKind::TextObjectUnclosed);
+        }
+        self.state.phase = TextPhase::Outside;
+        self.text_object_is_implicit = false;
+    }
+
+    fn classify_error(&mut self, error: MimusError) -> PageWalkError {
+        if let Some(reason) = self.degradation.take() {
+            PageWalkError::Degraded {
+                reason,
+                source: error,
+            }
+        } else if error.reason() == ErrorReason::Input(InputReason::OperatorWalk) {
+            PageWalkError::Degraded {
+                reason: PageDegradeReason::ContentStreamSyntax,
+                source: error,
+            }
+        } else {
+            PageWalkError::Fatal(error)
+        }
+    }
+
+    fn degrade_error(
+        &mut self,
+        reason: PageDegradeReason,
+        message: impl Into<String>,
+    ) -> MimusError {
+        self.degradation.get_or_insert(reason);
+        walk_error(message)
     }
 
     fn finish(&mut self) {
@@ -479,6 +768,7 @@ impl Walker<'_> {
         let font = resolve_simple_font(self.document, &self.resources, &self.state.font_name)?;
         for byte in bytes {
             let transform = self.state.ctm.then(self.state.text_matrix);
+            let locatable = !transform.is_singular();
             let baseline = transform.point(0.0, self.state.rise);
             let width = font.width(*byte).ok_or_else(|| {
                 unsupported_error(format!(
@@ -505,6 +795,7 @@ impl Walker<'_> {
                 unicode: decode_win_ansi(*byte),
                 code: u32::from(*byte),
                 visible: !matches!(self.state.rendering_mode, 3 | 7),
+                locatable,
                 encoded: vec![*byte],
                 font: font.reference.clone(),
                 font_size: self.state.font_size,
@@ -851,6 +1142,51 @@ fn object_number(object: &Object) -> Option<f64> {
     }
 }
 
+fn numeric_array(
+    document: &Document,
+    dictionary: &Dictionary,
+    key: &[u8],
+    arity: usize,
+) -> Result<Option<Vec<f64>>> {
+    if !dictionary.has(key) {
+        return Ok(None);
+    }
+    let values = dictionary
+        .get_deref(key, document)
+        .and_then(Object::as_array)
+        .map_err(|error| {
+            walk_error(format!(
+                "/{} must be an array: {error}",
+                display_pdf_name(key)
+            ))
+        })?;
+    if values.len() != arity {
+        return Err(walk_error(format!(
+            "/{} must contain exactly {arity} values, found {}",
+            display_pdf_name(key),
+            values.len()
+        )));
+    }
+    values
+        .iter()
+        .map(|value| {
+            let (_, value) = document.dereference(value).map_err(|error| {
+                walk_error(format!(
+                    "/{} contains an invalid reference: {error}",
+                    display_pdf_name(key)
+                ))
+            })?;
+            object_number(value).ok_or_else(|| {
+                walk_error(format!(
+                    "/{} contains a non-numeric value",
+                    display_pdf_name(key)
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
 fn is_standard_14_name(name: &[u8]) -> bool {
     const NAMES: [&[u8]; 14] = [
         b"Times-Roman",
@@ -960,6 +1296,8 @@ fn display_pdf_name(name: &[u8]) -> String {
 mod tests {
     use std::path::PathBuf;
 
+    use lopdf::dictionary;
+
     use crate::error::ErrorReason;
 
     use super::*;
@@ -1001,6 +1339,48 @@ mod tests {
         let page_id = document.get_pages()[&1];
         walk_page(&document, page_id)
             .unwrap_or_else(|error| panic!("fixture {id} should be walked: {error}"))
+    }
+
+    fn walk_form_chain(depth: usize) -> PageWalk {
+        assert!(depth > 0);
+        let mut document = Document::load(fixture()).unwrap();
+        let mut next = None;
+        for _ in 0..depth {
+            let mut resources = Dictionary::new();
+            resources.set("Font", lopdf::dictionary! { "F1" => (5, 0) });
+            let content = if let Some(next) = next {
+                resources.set("XObject", lopdf::dictionary! { "Next" => next });
+                b"/Next Do\n".to_vec()
+            } else {
+                b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET\n".to_vec()
+            };
+            next = Some(document.add_object(lopdf::Stream::new(
+                lopdf::dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 300.into(), 200.into()],
+                    "Resources" => resources,
+                },
+                content,
+            )));
+        }
+        document
+            .get_object_mut((4, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set(
+                "XObject",
+                lopdf::dictionary! { "Root" => next.expect("non-empty Form chain") },
+            );
+        document
+            .get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(b"/Root Do\n".to_vec());
+        let page_id = document.get_pages()[&1];
+        walk_page(&document, page_id).unwrap()
     }
 
     #[test]
@@ -1399,6 +1779,149 @@ mod tests {
         assert_eq!(multiple.characters.len(), 10);
         assert_eq!(multiple.characters[0].baseline_origin.y, 120.0);
         assert_eq!(multiple.characters[5].baseline_origin.y, 80.0);
+    }
+
+    #[test]
+    fn production_walk_executes_nested_forms_with_inherited_resources_and_ctms() {
+        let mut document =
+            Document::load(fixture_path("unit-xobj-04-inherited-resources")).unwrap();
+        // The fixture intentionally uses Standard-14 fonts without explicit metrics, which remain
+        // outside M1. Rebind only the two font objects to its pinned explicit-metrics font so this
+        // test isolates Form resource inheritance and matrix composition.
+        let explicit_font = document.get_object((5, 0)).unwrap().clone();
+        document.objects.insert((9, 0), explicit_font.clone());
+        document.objects.insert((13, 0), explicit_font);
+
+        let page_id = document.get_pages()[&1];
+        let walked = walk_page(&document, page_id).unwrap();
+
+        assert_eq!(text_of(&walked), "IIIIIIH");
+        assert_eq!(
+            walked.characters[0].baseline_origin,
+            Point { x: 110.0, y: 176.0 }
+        );
+        assert_eq!(
+            walked.characters[3].baseline_origin,
+            Point { x: 72.0, y: 80.0 }
+        );
+        assert!(walked.recoveries.is_empty());
+    }
+
+    #[test]
+    fn production_walk_reports_form_cycles_by_indirect_object_path() {
+        for (id, recovery, path) in [
+            (
+                "mal-xobj-01-self-recursive",
+                RecoveryKind::SelfRecursiveForm,
+                vec![(11, 0), (11, 0)],
+            ),
+            (
+                "mal-xobj-02-mutual-recursive",
+                RecoveryKind::MutuallyRecursiveForm,
+                vec![(12, 0), (13, 0), (12, 0)],
+            ),
+        ] {
+            let walked = walk_fixture(id);
+            assert!(walked.characters.is_empty(), "fixture {id}");
+            assert_eq!(
+                walked.recoveries,
+                BTreeSet::from([recovery]),
+                "fixture {id}"
+            );
+            assert_eq!(walked.form_cycles, vec![path], "fixture {id}");
+        }
+    }
+
+    #[test]
+    fn production_walk_degrades_forms_with_bad_required_geometry() {
+        let document = Document::load(fixture_path("mal-xobj-03-form-no-bbox")).unwrap();
+        let page_id = document.get_pages()[&1];
+        assert!(matches!(
+            walk_page_detailed(&document, page_id),
+            Err(PageWalkError::Degraded {
+                reason: PageDegradeReason::BadFormBBox,
+                ..
+            })
+        ));
+
+        let mut document = Document::load(fixture_path("unit-xobj-00-recursion-parent")).unwrap();
+        document
+            .get_object_mut((10, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Matrix", vec![1.into(), 0.into(), 0.into()]);
+        let page_id = document.get_pages()[&1];
+        assert!(matches!(
+            walk_page_detailed(&document, page_id),
+            Err(PageWalkError::Degraded {
+                reason: PageDegradeReason::BadFormMatrix,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn form_scopes_cannot_pop_or_leak_caller_state() {
+        let underflow = walk_fixture("mal-xobj-04-scope-underflow");
+        assert_eq!(text_of(&underflow), "MIMUS");
+        assert_eq!(
+            underflow.characters[0].baseline_origin,
+            Point { x: 72.0, y: 120.0 }
+        );
+        assert_eq!(
+            underflow.recoveries,
+            BTreeSet::from([RecoveryKind::GraphicsStateUnderflow])
+        );
+
+        let tail = walk_fixture("mal-xobj-05-scope-tail");
+        assert_eq!(text_of(&tail), "MIMUS");
+        assert_eq!(
+            tail.characters[0].baseline_origin,
+            Point { x: 72.0, y: 120.0 }
+        );
+        assert_eq!(
+            tail.recoveries,
+            BTreeSet::from([
+                RecoveryKind::ScopedDanglingOperands,
+                RecoveryKind::ScopedGraphicsStateUnclosed,
+            ])
+        );
+    }
+
+    #[test]
+    fn singular_form_characters_are_unlocatable_without_poisoning_the_page() {
+        let walked = walk_fixture("unit-xobj-05-singular-ctm");
+        assert_eq!(text_of(&walked), "FORMMIMUS");
+        assert!(
+            walked.characters[..4]
+                .iter()
+                .all(|character| !character.locatable)
+        );
+        assert!(
+            walked.characters[4..]
+                .iter()
+                .all(|character| character.locatable)
+        );
+        assert_eq!(
+            walked.characters[4].baseline_origin,
+            Point { x: 100.0, y: 100.0 }
+        );
+    }
+
+    #[test]
+    fn form_depth_limit_allows_64_levels_and_skips_the_65th() {
+        let accepted = walk_form_chain(MAX_FORM_DEPTH);
+        assert_eq!(text_of(&accepted), "MIMUS");
+        assert!(accepted.recoveries.is_empty());
+
+        let skipped = walk_form_chain(MAX_FORM_DEPTH + 1);
+        assert!(skipped.characters.is_empty());
+        assert_eq!(
+            skipped.recoveries,
+            BTreeSet::from([RecoveryKind::FormDepthExceeded])
+        );
     }
 
     #[test]
