@@ -166,6 +166,7 @@ impl EventSink for RecordingEventSink {
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticId {
     EngineBaselineMismatch,
+    EngineCharacterMismatch,
     ScanSummary,
     PageDegraded,
     ContentRecovered,
@@ -179,10 +180,40 @@ pub enum DiagnosticId {
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryKind {
+    /// 操作符前有多余操作数；仅消费尾部 arity，其余在该边界丢弃。
+    ArityExcess,
+    /// 操作符缺少所需操作数，原子跳过且不改变状态。
+    ArityShort,
+    /// 操作数数量足够但类型不符，原子跳过且不改变状态。
+    InvalidOperands,
+    /// 数字与状态操作符粘连（如 `12Tf`），按最长白名单后缀拆开。
+    GluedToken,
+    /// 双小数点数字（如 `10.5.3`）在第二个小数点处分成两个操作数。
+    DoubleDecimal,
+    /// 未知操作符出现在 `BX`/`EX` 之外，被跳过。
+    UnknownOperator,
+    /// `EX` 没有对应的 `BX`，兼容深度保持在零。
+    CompatibilityUnderflow,
+    /// 页尾仍有未闭合的 `BX`，局部状态被丢弃。
+    CompatibilityUnclosed,
+    /// `Q` 没有对应的 `q`，保持 base graphics state。
+    GraphicsStateUnderflow,
+    /// 页尾仍有未闭合的 `q`，不影响此前已产出的字符。
+    GraphicsStateUnclosed,
     /// 文本操作符出现在任何 `BT` 之前，按隐式 `BT`（`Tm` 为单位阵）处理（STREAM-05）。
     ImplicitTextObject,
+    /// 文本对象内部再次出现 `BT`，按规范重置文本矩阵。
+    NestedTextObject,
+    /// `ET` 出现在文本对象之外，被原子跳过。
+    UnexpectedTextEnd,
+    /// 页尾仍处于显式文本对象内，隐式闭合。
+    TextObjectUnclosed,
     /// `TJ` 数组里既非字符串也非数字的元素被跳过，字距按 0 计（STREAM-11）。
     SkippedTjElement,
+    /// 过滤后的 inline image 没有编码长度，只能有界扫描 `EI`。
+    InlineImageEiScan,
+    /// 页尾有未被任何操作符消费的操作数，被丢弃。
+    DanglingOperands,
 }
 
 /// 页级降级的原因（ADR-0013 §2）。降级页不产生 `PageRewrite`，
@@ -227,6 +258,14 @@ pub enum Diagnostic {
         delta_x_pt: f64,
         delta_y_pt: f64,
     },
+    EngineCharacterMismatch {
+        page_index: usize,
+        character_index: Option<usize>,
+        walked_character_count: usize,
+        engine_character_count: usize,
+        walked_unicode: Option<char>,
+        engine_unicode: Option<char>,
+    },
     ScanSummary {
         scanned_page_indices: Vec<usize>,
         scanned_pages: usize,
@@ -255,6 +294,7 @@ impl Diagnostic {
     pub const fn id(&self) -> DiagnosticId {
         match self {
             Self::EngineBaselineMismatch { .. } => DiagnosticId::EngineBaselineMismatch,
+            Self::EngineCharacterMismatch { .. } => DiagnosticId::EngineCharacterMismatch,
             Self::ScanSummary { .. } => DiagnosticId::ScanSummary,
             Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
             Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
@@ -281,6 +321,14 @@ pub enum DiagnosticEvent {
         character_index: usize,
         delta_x_pt: f64,
         delta_y_pt: f64,
+    },
+    EngineCharacterMismatch {
+        page_index: usize,
+        character_index: Option<usize>,
+        walked_character_count: usize,
+        engine_character_count: usize,
+        walked_unicode: Option<char>,
+        engine_unicode: Option<char>,
     },
     ScanSummary {
         scanned_page_indices: Vec<usize>,
@@ -313,6 +361,7 @@ impl DiagnosticEvent {
     pub const fn id(&self) -> DiagnosticId {
         match self {
             Self::EngineBaselineMismatch { .. } => DiagnosticId::EngineBaselineMismatch,
+            Self::EngineCharacterMismatch { .. } => DiagnosticId::EngineCharacterMismatch,
             Self::ScanSummary { .. } => DiagnosticId::ScanSummary,
             Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
             Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
@@ -335,6 +384,21 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 character_index: *character_index,
                 delta_x_pt: *delta_x_pt,
                 delta_y_pt: *delta_y_pt,
+            },
+            Diagnostic::EngineCharacterMismatch {
+                page_index,
+                character_index,
+                walked_character_count,
+                engine_character_count,
+                walked_unicode,
+                engine_unicode,
+            } => Self::EngineCharacterMismatch {
+                page_index: *page_index,
+                character_index: *character_index,
+                walked_character_count: *walked_character_count,
+                engine_character_count: *engine_character_count,
+                walked_unicode: *walked_unicode,
+                engine_unicode: *engine_unicode,
             },
             Diagnostic::ScanSummary {
                 scanned_page_indices,
@@ -483,6 +547,31 @@ mod tests {
         assert_eq!(value["id"], "engine_baseline_mismatch");
         assert_eq!(value["page_index"], 0);
         assert_eq!(value["character_index"], 0);
+    }
+
+    #[test]
+    fn recovered_character_mismatches_have_a_typed_additive_wire_shape() {
+        let diagnostic = Diagnostic::EngineCharacterMismatch {
+            page_index: 2,
+            character_index: Some(4),
+            walked_character_count: 7,
+            engine_character_count: 7,
+            walked_unicode: Some('M'),
+            engine_unicode: None,
+        };
+        let event = DiagnosticEvent::from(&diagnostic);
+        assert_eq!(event.id(), DiagnosticId::EngineCharacterMismatch);
+
+        let line =
+            serialize_line(&Event::new(EventKind::Diagnostic { diagnostic: event })).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(value["id"], "engine_character_mismatch");
+        assert_eq!(value["page_index"], 2);
+        assert_eq!(value["character_index"], 4);
+        assert_eq!(value["walked_character_count"], 7);
+        assert_eq!(value["engine_character_count"], 7);
+        assert_eq!(value["walked_unicode"], "M");
+        assert!(value["engine_unicode"].is_null());
     }
 
     #[test]

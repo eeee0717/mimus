@@ -4,7 +4,7 @@ use lopdf::Document as LopdfDocument;
 
 use crate::context::{Document, ExtractedPage, PassContext};
 use crate::engine::{PageCharSnapshot, RgbaImage};
-use crate::error::{ErrorReason, InputReason, InternalReason, IoReason, MimusError, Result};
+use crate::error::{InputReason, InternalReason, IoReason, MimusError, Result};
 use crate::event::{
     Diagnostic, Diagnostics, Event, EventKind, PageDegradeReason, PreservedParagraph, Stage,
 };
@@ -12,7 +12,9 @@ use crate::il::{
     self, Char, PageGeometry, Paragraph, PassthroughRef, Rect, TextCarrier, TextTransform,
 };
 use crate::scan::{PageClass, prescan_page};
+#[cfg(test)]
 use crate::walk::walk_page;
+use crate::walk::{PageWalkError, walk_page_detailed};
 use crate::write::{ContentSpanReplacement, PageRewrite, build_incremental, publish};
 
 pub const ORDER: [Stage; 10] = [
@@ -215,6 +217,7 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
             evidence,
             class: None,
             degraded: None,
+            recoveries: BTreeSet::new(),
             walked_characters: Vec::new(),
             content_streams: Vec::new(),
             engine_characters: Vec::new(),
@@ -286,9 +289,10 @@ pub fn scan_detect(document: &mut Document, context: &PassContext<'_>) -> Result
             );
             continue;
         }
-        match walk_page(pdf, page.page_id) {
+        match walk_page_detailed(pdf, page.page_id) {
             Ok(walked) => {
-                for recovery in walked.recoveries {
+                page.recoveries = walked.recoveries;
+                for &recovery in &page.recoveries {
                     document.diagnostics.push(Diagnostic::ContentRecovered {
                         page_index: page.index,
                         recovery,
@@ -297,18 +301,13 @@ pub fn scan_detect(document: &mut Document, context: &PassContext<'_>) -> Result
                 page.walked_characters = walked.characters;
                 page.content_streams = walked.content_streams;
             }
-            // ADR-0013 §3：内容流的语法错误只毁掉它所在的那一页，整篇不该跟着失败。
-            // 能力边界（UnsupportedPdf）仍是文档级失败——那不是这一页坏了，
-            // 而是 M1 还不会处理这类内容，降级会把「没实现」伪装成「文件有问题」。
-            Err(error) if error.reason() == ErrorReason::Input(InputReason::OperatorWalk) => {
-                degrade_page(
-                    page,
-                    &mut document.diagnostics,
-                    PageDegradeReason::ContentStreamSyntax,
-                );
+            Err(PageWalkError::Degraded { reason, .. }) => {
+                degrade_page(page, &mut document.diagnostics, reason);
                 continue;
             }
-            Err(error) => return Err(error),
+            // 能力边界（UnsupportedPdf）仍是文档级失败——那不是这一页坏了，
+            // 而是 M1 还不会处理这类内容，降级会把「没实现」伪装成「文件有问题」。
+            Err(PageWalkError::Fatal(error)) => return Err(error),
         }
         page.engine_characters = context
             .engine
@@ -318,6 +317,7 @@ pub fn scan_detect(document: &mut Document, context: &PassContext<'_>) -> Result
             &page.walked_characters,
             &page.engine_characters,
             context.config.baseline_tolerance_pt,
+            !page.recoveries.is_empty(),
             &mut document.diagnostics,
         )?;
     }
@@ -376,6 +376,7 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
             .map(|(walked, engine)| Char {
                 unicode: walked.unicode,
                 code: walked.code,
+                visible: walked.visible,
                 font: walked.font.clone(),
                 font_size: walked.font_size,
                 baseline_origin: walked.baseline_origin,
@@ -505,9 +506,12 @@ pub fn typeset(document: &mut Document, _context: &PassContext<'_>) -> Result<()
                 span_is_replaceable
                     .entry(key)
                     .and_modify(|replaceable| {
-                        *replaceable &= character.text_transform == TextTransform::Upright;
+                        *replaceable &=
+                            character.visible && character.text_transform == TextTransform::Upright;
                     })
-                    .or_insert(character.text_transform == TextTransform::Upright);
+                    .or_insert(
+                        character.visible && character.text_transform == TextTransform::Upright,
+                    );
             }
         }
         let replaceable_spans = span_is_replaceable
@@ -777,9 +781,21 @@ fn validate_character_alignment(
     walked: &[crate::walk::WalkedChar],
     engine: &[crate::engine::PageCharSnapshot],
     tolerance: f64,
+    recovered: bool,
     diagnostics: &mut Diagnostics,
 ) -> Result<()> {
     if walked.len() != engine.len() {
+        if recovered {
+            diagnostics.push(Diagnostic::EngineCharacterMismatch {
+                page_index,
+                character_index: None,
+                walked_character_count: walked.len(),
+                engine_character_count: engine.len(),
+                walked_unicode: None,
+                engine_unicode: None,
+            });
+            return Ok(());
+        }
         return Err(MimusError::input(
             InputReason::EngineMismatch,
             format!(
@@ -790,23 +806,36 @@ fn validate_character_alignment(
             ),
         ));
     }
-    for (index, (walked, engine)) in walked.iter().zip(engine).enumerate() {
-        if walked.unicode != engine.unicode {
-            return Err(MimusError::input(
-                InputReason::EngineMismatch,
-                format!(
-                    "page {} character {} differs between operator walk and PDFium",
-                    page_index + 1,
-                    index
-                ),
-            ));
+    for (index, (walked_character, engine_character)) in walked.iter().zip(engine).enumerate() {
+        if walked_character.unicode != engine_character.unicode {
+            if recovered {
+                diagnostics.push(Diagnostic::EngineCharacterMismatch {
+                    page_index,
+                    character_index: Some(index),
+                    walked_character_count: walked.len(),
+                    engine_character_count: engine.len(),
+                    walked_unicode: walked_character.unicode,
+                    engine_unicode: engine_character.unicode,
+                });
+            } else {
+                return Err(MimusError::input(
+                    InputReason::EngineMismatch,
+                    format!(
+                        "page {} character {} differs between operator walk and PDFium",
+                        page_index + 1,
+                        index
+                    ),
+                ));
+            }
         }
-        let delta_x = (walked.baseline_origin.x - engine.baseline_origin.x).abs();
-        let delta_y = (walked.baseline_origin.y - engine.baseline_origin.y).abs();
-        if !walked.baseline_origin.x.is_finite()
-            || !walked.baseline_origin.y.is_finite()
-            || !engine.baseline_origin.x.is_finite()
-            || !engine.baseline_origin.y.is_finite()
+        let delta_x =
+            (walked_character.baseline_origin.x - engine_character.baseline_origin.x).abs();
+        let delta_y =
+            (walked_character.baseline_origin.y - engine_character.baseline_origin.y).abs();
+        if !walked_character.baseline_origin.x.is_finite()
+            || !walked_character.baseline_origin.y.is_finite()
+            || !engine_character.baseline_origin.x.is_finite()
+            || !engine_character.baseline_origin.y.is_finite()
             || !tolerance.is_finite()
             || tolerance < 0.0
         {
@@ -1366,7 +1395,7 @@ mod tests {
         engine[0].baseline_origin.y -= 0.02;
         let mut diagnostics = Diagnostics::default();
 
-        validate_character_alignment(0, &walked, &engine, 0.001, &mut diagnostics).unwrap();
+        validate_character_alignment(0, &walked, &engine, 0.001, false, &mut diagnostics).unwrap();
         assert_eq!(diagnostics.entries().len(), 1);
         let Diagnostic::EngineBaselineMismatch {
             page_index,
@@ -1386,8 +1415,64 @@ mod tests {
 
         engine[0].baseline_origin.x = f64::NAN;
         assert!(
-            validate_character_alignment(0, &walked, &engine, 0.001, &mut diagnostics).is_err()
+            validate_character_alignment(0, &walked, &engine, 0.001, false, &mut diagnostics)
+                .is_err()
         );
+    }
+
+    #[test]
+    fn recovered_pages_report_engine_character_differences_without_failing() {
+        let pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        let walked = walk_page(&pdf, page_id).unwrap().characters;
+        let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap();
+        engine[0].unicode = Some('X');
+        let mut diagnostics = Diagnostics::default();
+
+        validate_character_alignment(0, &walked, &engine, 0.001, true, &mut diagnostics).unwrap();
+        assert!(matches!(
+            diagnostics.entries(),
+            [Diagnostic::EngineCharacterMismatch {
+                page_index: 0,
+                character_index: Some(0),
+                walked_character_count: 5,
+                engine_character_count: 5,
+                walked_unicode: Some('M'),
+                engine_unicode: Some('X'),
+            }]
+        ));
+
+        diagnostics = Diagnostics::default();
+        engine.pop();
+        validate_character_alignment(0, &walked, &engine, 0.001, true, &mut diagnostics).unwrap();
+        assert!(matches!(
+            diagnostics.entries(),
+            [Diagnostic::EngineCharacterMismatch {
+                character_index: None,
+                walked_character_count: 5,
+                engine_character_count: 4,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn clean_pages_still_fail_on_engine_character_differences() {
+        let pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        let walked = walk_page(&pdf, page_id).unwrap().characters;
+        let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap();
+        engine[0].unicode = Some('X');
+        let mut diagnostics = Diagnostics::default();
+
+        let error =
+            validate_character_alignment(0, &walked, &engine, 0.001, false, &mut diagnostics)
+                .unwrap_err();
+        assert_eq!(
+            error.reason(),
+            crate::error::ErrorReason::Input(InputReason::EngineMismatch)
+        );
+        assert!(diagnostics.entries().is_empty());
     }
 
     #[test]

@@ -1,10 +1,11 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use lopdf::Document as LopdfDocument;
 
 use crate::engine::{LayoutDetector, LayoutRegion, PageCharSnapshot, PdfEngine, RgbaImage};
 use crate::error::Result;
-use crate::event::{Diagnostics, EventSink, PageDegradeReason, Stage};
+use crate::event::{Diagnostics, EventSink, PageDegradeReason, RecoveryKind, Stage};
 use crate::il;
 use crate::scan::{PageClass, PageEvidence};
 use crate::translate::Translator;
@@ -112,6 +113,7 @@ pub(crate) struct ExtractedPage {
     pub class: Option<PageClass>,
     // ADR-0013 §2: 页级降级标记。置位后该页不再进入后续 pass，也不产生 rewrite。
     pub degraded: Option<PageDegradeReason>,
+    pub recoveries: BTreeSet<RecoveryKind>,
     pub walked_characters: Vec<WalkedChar>,
     pub content_streams: Vec<WalkedContentStream>,
     pub engine_characters: Vec<PageCharSnapshot>,

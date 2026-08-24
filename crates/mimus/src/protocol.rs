@@ -240,6 +240,32 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 page_index + 1
             );
         }
+        DiagnosticEvent::EngineCharacterMismatch {
+            page_index,
+            character_index,
+            walked_character_count,
+            engine_character_count,
+            walked_unicode,
+            engine_unicode,
+        } => {
+            let detail = character_index.map_or_else(
+                || {
+                    format!(
+                        "character count walk={walked_character_count}, engine={engine_character_count}"
+                    )
+                },
+                |index| {
+                    format!(
+                        "character {index} unicode walk={walked_unicode:?}, engine={engine_unicode:?}"
+                    )
+                },
+            );
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[engine_character_mismatch]: page {} {detail}",
+                page_index + 1
+            );
+        }
         DiagnosticEvent::ScanSummary {
             scanned_page_indices,
             scanned_pages,
@@ -298,8 +324,23 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
 
 const fn human_recovery_kind(recovery: RecoveryKind) -> &'static str {
     match recovery {
+        RecoveryKind::ArityExcess => "excess operator operands",
+        RecoveryKind::ArityShort => "missing operator operands",
+        RecoveryKind::InvalidOperands => "invalid operator operand types",
+        RecoveryKind::GluedToken => "a number glued to an operator",
+        RecoveryKind::DoubleDecimal => "a number containing two decimal points",
+        RecoveryKind::UnknownOperator => "an unknown operator outside BX/EX",
+        RecoveryKind::CompatibilityUnderflow => "an EX without a matching BX",
+        RecoveryKind::CompatibilityUnclosed => "an unclosed BX compatibility section",
+        RecoveryKind::GraphicsStateUnderflow => "a Q without a matching q",
+        RecoveryKind::GraphicsStateUnclosed => "an unclosed q graphics-state scope",
         RecoveryKind::ImplicitTextObject => "text operators outside BT/ET",
+        RecoveryKind::NestedTextObject => "a nested BT text object",
+        RecoveryKind::UnexpectedTextEnd => "an ET outside a text object",
+        RecoveryKind::TextObjectUnclosed => "a text object without ET",
         RecoveryKind::SkippedTjElement => "an illegal element inside a TJ array",
+        RecoveryKind::InlineImageEiScan => "a bounded EI scan for an inline image",
+        RecoveryKind::DanglingOperands => "operands left at the end of content",
     }
 }
 

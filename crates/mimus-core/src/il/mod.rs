@@ -104,6 +104,8 @@ pub enum TextCarrier {
 pub struct Char {
     pub unicode: Option<char>,
     pub code: u32,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub visible: bool,
     pub font: FontRef,
     pub font_size: f64,
     pub baseline_origin: Point,
@@ -111,6 +113,14 @@ pub struct Char {
     pub visual_bbox: Rect,
     pub text_transform: TextTransform,
     pub passthrough: PassthroughRef,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+const fn is_true(value: &bool) -> bool {
+    *value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

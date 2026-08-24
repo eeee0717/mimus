@@ -4,10 +4,10 @@ use std::collections::BTreeSet;
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
 
-use crate::error::{InputReason, MimusError, Result};
-use crate::event::RecoveryKind;
+use crate::error::{ErrorReason, InputReason, MimusError, Result};
+use crate::event::{PageDegradeReason, RecoveryKind};
 use crate::il::{FontRef, Point, Rect, TextTransform};
-use tokenizer::{Token, TokenKind, tokenize};
+use tokenizer::{CompositeDelimiter, InlineImageLengthSource, Token, TokenKind, tokenize};
 
 pub(crate) const MAX_STREAM_BYTES: usize = 16 * 1024 * 1024;
 
@@ -15,6 +15,7 @@ pub(crate) const MAX_STREAM_BYTES: usize = 16 * 1024 * 1024;
 pub struct WalkedChar {
     pub unicode: Option<char>,
     pub code: u32,
+    pub visible: bool,
     pub encoded: Vec<u8>,
     pub font: FontRef,
     pub font_size: f64,
@@ -55,14 +56,6 @@ impl Matrix {
         self.then(Self([1.0, 0.0, 0.0, 1.0, x, y]))
     }
 
-    fn has_identity_linear_part(self) -> bool {
-        let [a, b, c, d, _, _] = self.0;
-        (a - 1.0).abs() <= f64::EPSILON
-            && b.abs() <= f64::EPSILON
-            && c.abs() <= f64::EPSILON
-            && (d - 1.0).abs() <= f64::EPSILON
-    }
-
     fn point(self, x: f64, y: f64) -> Point {
         let [a, b, c, d, e, f] = self.0;
         Point {
@@ -74,28 +67,43 @@ impl Matrix {
 
 #[derive(Debug, Clone)]
 struct GraphicsState {
+    ctm: Matrix,
     text_matrix: Matrix,
+    line_matrix: Matrix,
     font_name: Vec<u8>,
     font_size: f64,
+    character_spacing: f64,
+    word_spacing: f64,
+    horizontal_scale: f64,
+    leading: f64,
+    rendering_mode: i32,
+    rise: f64,
     phase: TextPhase,
 }
 
 impl Default for GraphicsState {
     fn default() -> Self {
         Self {
+            ctm: Matrix::IDENTITY,
             text_matrix: Matrix::IDENTITY,
+            line_matrix: Matrix::IDENTITY,
             font_name: Vec::new(),
             font_size: 0.0,
-            phase: TextPhase::Before,
+            character_spacing: 0.0,
+            word_spacing: 0.0,
+            horizontal_scale: 1.0,
+            leading: 0.0,
+            rendering_mode: 0,
+            rise: 0.0,
+            phase: TextPhase::Outside,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TextPhase {
-    Before,
+    Outside,
     Inside,
-    After,
 }
 
 struct Walker<'a> {
@@ -105,8 +113,9 @@ struct Walker<'a> {
     operands: Vec<Token>,
     characters: Vec<WalkedChar>,
     content_object: ObjectId,
-    text_show_count: usize,
     recoveries: BTreeSet<RecoveryKind>,
+    graphics_stack: Vec<GraphicsState>,
+    compatibility_depth: usize,
     text_object_is_implicit: bool,
 }
 
@@ -127,13 +136,32 @@ pub(crate) struct WalkedContentStream {
 }
 
 pub fn walk_page(document: &Document, page_id: ObjectId) -> Result<PageWalk> {
-    let resources = inherited_page_resources(document, page_id)?;
-    let content_objects = document.get_page_contents(page_id);
-    if content_objects.len() > 1 {
-        return Err(unsupported_error(
-            "M1 supports exactly one content stream per page",
-        ));
+    walk_page_detailed(document, page_id).map_err(PageWalkError::into_source)
+}
+
+#[derive(Debug)]
+pub(crate) enum PageWalkError {
+    Degraded {
+        reason: PageDegradeReason,
+        source: MimusError,
+    },
+    Fatal(MimusError),
+}
+
+impl PageWalkError {
+    fn into_source(self) -> MimusError {
+        match self {
+            Self::Degraded { source, .. } | Self::Fatal(source) => source,
+        }
     }
+}
+
+pub(crate) fn walk_page_detailed(
+    document: &Document,
+    page_id: ObjectId,
+) -> std::result::Result<PageWalk, PageWalkError> {
+    let resources = inherited_page_resources(document, page_id).map_err(PageWalkError::Fatal)?;
+    let content_objects = document.get_page_contents(page_id);
     let mut walker = Walker {
         document,
         resources,
@@ -141,35 +169,43 @@ pub fn walk_page(document: &Document, page_id: ObjectId) -> Result<PageWalk> {
         operands: Vec::new(),
         characters: Vec::new(),
         content_object: (0, 0),
-        text_show_count: 0,
         recoveries: BTreeSet::new(),
+        graphics_stack: Vec::new(),
+        compatibility_depth: 0,
         text_object_is_implicit: false,
     };
     let mut content_streams = Vec::with_capacity(content_objects.len());
     for object_id in content_objects {
-        let stream = document
-            .get_object(object_id)
-            .and_then(Object::as_stream)
-            .map_err(|error| {
-                walk_error(format!(
+        let content = document.get_object(object_id).map_err(|error| {
+            PageWalkError::Fatal(walk_error(format!(
+                "page content {} is missing: {error}",
+                object_id.0
+            )))
+        })?;
+        let stream = content
+            .as_stream()
+            .map_err(|error| PageWalkError::Degraded {
+                reason: PageDegradeReason::ContentDecode,
+                source: walk_error(format!(
                     "page content {} is not a stream: {error}",
                     object_id.0
-                ))
+                )),
             })?;
         let decoded = stream
             .decompressed_content_with_limit(MAX_STREAM_BYTES)
-            .map_err(|error| {
-                walk_error(format!("could not decode content {}: {error}", object_id.0))
+            .map_err(|error| PageWalkError::Degraded {
+                reason: PageDegradeReason::ContentDecode,
+                source: walk_error(format!("could not decode content {}: {error}", object_id.0)),
             })?;
         walker.content_object = object_id;
-        walker.walk(tokenize(&decoded)?)?;
+        let tokens = tokenize(&decoded).map_err(|failure| PageWalkError::Degraded {
+            reason: failure.reason,
+            source: failure.into_mimus_error(),
+        })?;
+        walker.walk(tokens).map_err(classify_walk_error)?;
         content_streams.push(WalkedContentStream { object_id, decoded });
     }
-    // 显式 `BT` 没等到 `ET` 是流被截断的信号，仍然报错；隐式打开的文本对象本来就
-    // 没有对应的 `ET`，在流尾隐式闭合。
-    if walker.state.phase == TextPhase::Inside && !walker.text_object_is_implicit {
-        return Err(walk_error("content stream ended before ET"));
-    }
+    walker.finish();
     Ok(PageWalk {
         characters: walker.characters,
         recoveries: walker.recoveries,
@@ -177,94 +213,263 @@ pub fn walk_page(document: &Document, page_id: ObjectId) -> Result<PageWalk> {
     })
 }
 
+fn classify_walk_error(error: MimusError) -> PageWalkError {
+    if error.reason() == ErrorReason::Input(InputReason::OperatorWalk) {
+        PageWalkError::Degraded {
+            reason: PageDegradeReason::ContentStreamSyntax,
+            source: error,
+        }
+    } else {
+        PageWalkError::Fatal(error)
+    }
+}
+
 impl Walker<'_> {
     fn walk(&mut self, tokens: Vec<Token>) -> Result<()> {
         for token in tokens {
-            if !matches!(token.kind, TokenKind::Operator(_)) {
-                self.operands.push(token);
-                continue;
+            match &token.kind {
+                TokenKind::InlineImage { length_source, .. } => {
+                    if !self.operands.is_empty() {
+                        self.recoveries.insert(RecoveryKind::ArityExcess);
+                        self.operands.clear();
+                    }
+                    if *length_source == InlineImageLengthSource::EiScan {
+                        self.recoveries.insert(RecoveryKind::InlineImageEiScan);
+                    }
+                }
+                TokenKind::Operator(operator) => {
+                    if let Some((first, second)) = split_double_decimal(operator) {
+                        self.operands.push(number_token(first, token.span.clone()));
+                        self.operands.push(number_token(second, token.span.clone()));
+                        self.recoveries.insert(RecoveryKind::DoubleDecimal);
+                        continue;
+                    }
+                    if let Some((number, recovered_operator)) = split_glued_operator(operator) {
+                        self.operands.push(number_token(number, token.span.clone()));
+                        let operands = std::mem::take(&mut self.operands);
+                        self.apply_operator(recovered_operator, &operands)?;
+                        self.recoveries.insert(RecoveryKind::GluedToken);
+                        continue;
+                    }
+                    let operands = std::mem::take(&mut self.operands);
+                    self.apply_operator(operator, &operands)?;
+                }
+                _ => self.operands.push(token),
             }
-            let TokenKind::Operator(operator) = &token.kind else {
-                unreachable!();
-            };
-            let operands = std::mem::take(&mut self.operands);
-            match operator.as_slice() {
-                b"BT" => {
-                    operand_tail(&operands, 0, "BT")?;
-                    if self.state.phase != TextPhase::Before {
-                        return Err(unsupported_error(
-                            "M1 supports exactly one text object per page",
-                        ));
-                    }
-                    self.state.text_matrix = Matrix::IDENTITY;
-                    self.state.phase = TextPhase::Inside;
-                }
-                b"ET" => {
-                    operand_tail(&operands, 0, "ET")?;
-                    if self.state.phase != TextPhase::Inside {
-                        return Err(walk_error("ET appeared outside a text object"));
-                    }
-                    if self.text_show_count != 1 {
-                        return Err(unsupported_error(
-                            "M1 requires exactly one text-show operation per page",
-                        ));
-                    }
-                    self.state.phase = TextPhase::After;
-                }
-                b"Tf" => {
-                    self.enter_text_phase("Tf")?;
-                    let tail = operand_tail(&operands, 2, "Tf")?;
-                    let TokenKind::Name(name) = &tail[0].kind else {
-                        return Err(walk_error("Tf font operand is not a name"));
-                    };
-                    let TokenKind::Number(size) = tail[1].kind else {
-                        return Err(walk_error("Tf size operand is not a number"));
-                    };
-                    if size <= 0.0 {
-                        return Err(unsupported_error(format!(
-                            "M1 cannot faithfully re-emit non-positive Tf font size {size}"
-                        )));
-                    }
-                    self.state.font_name.clone_from(name);
-                    self.state.font_size = size;
-                }
-                b"Tm" => {
-                    self.enter_text_phase("Tm")?;
-                    let values = numeric_tail(&operands, 6, "Tm")?;
-                    let matrix = Matrix::from_values(&values);
-                    if !matrix.has_identity_linear_part() {
-                        return Err(unsupported_error(
-                            "M1 cannot faithfully re-emit scaled, rotated, mirrored, or skewed text matrices",
-                        ));
-                    }
-                    self.state.text_matrix = matrix;
-                }
-                b"Tj" => {
-                    self.enter_text_phase("Tj")?;
-                    self.begin_text_show()?;
-                    let tail = operand_tail(&operands, 1, "Tj")?;
-                    let TokenKind::Bytes(bytes) = &tail[0].kind else {
-                        return Err(walk_error("Tj operand is not a string"));
-                    };
-                    self.show_text(bytes, tail[0].span.start, tail[0].span.end)?;
-                }
-                b"TJ" => {
-                    self.enter_text_phase("TJ")?;
-                    self.begin_text_show()?;
-                    self.show_text_array(&operands)?;
-                }
-                _ => {
-                    return Err(unsupported_error(format!(
-                        "M1 cannot faithfully re-emit operator {}",
-                        display_operator(operator)
-                    )));
-                }
-            }
-        }
-        if !self.operands.is_empty() {
-            return Err(walk_error("content stream ended with unused operands"));
         }
         Ok(())
+    }
+
+    fn apply_operator(&mut self, operator: &[u8], operands: &[Token]) -> Result<()> {
+        match operator {
+            b"BX" => self.compatibility_depth = self.compatibility_depth.saturating_add(1),
+            b"EX" => {
+                if self.compatibility_depth == 0 {
+                    self.recoveries.insert(RecoveryKind::CompatibilityUnderflow);
+                } else {
+                    self.compatibility_depth -= 1;
+                }
+            }
+            b"q" => self.graphics_stack.push(self.state.clone()),
+            b"Q" => self.restore_graphics_state(),
+            b"cm" => {
+                if let Some(values) = self.numeric_tail(operands, 6) {
+                    self.state.ctm = self.state.ctm.then(Matrix::from_values(&values));
+                }
+            }
+            b"BT" => self.begin_text_object(),
+            b"ET" => self.end_text_object(),
+            b"Tf" => {
+                self.enter_text_phase();
+                if let Some(tail) = self.operand_tail(operands, 2) {
+                    if let (TokenKind::Name(name), TokenKind::Number(size)) =
+                        (&tail[0].kind, &tail[1].kind)
+                    {
+                        self.state.font_name.clone_from(name);
+                        self.state.font_size = *size;
+                    } else {
+                        self.recoveries.insert(RecoveryKind::InvalidOperands);
+                    }
+                }
+            }
+            b"Tm" => {
+                self.enter_text_phase();
+                if let Some(values) = self.numeric_tail(operands, 6) {
+                    let matrix = Matrix::from_values(&values);
+                    self.state.text_matrix = matrix;
+                    self.state.line_matrix = matrix;
+                }
+            }
+            b"Td" => self.move_text_position(operands, false),
+            b"TD" => self.move_text_position(operands, true),
+            b"T*" => {
+                self.enter_text_phase();
+                if self.operand_tail(operands, 0).is_some() {
+                    self.state.line_matrix =
+                        self.state.line_matrix.translate(0.0, -self.state.leading);
+                    self.state.text_matrix = self.state.line_matrix;
+                }
+            }
+            b"Tc" => self.set_text_number(operands, |state, value| {
+                state.character_spacing = value;
+            }),
+            b"Tw" => self.set_text_number(operands, |state, value| {
+                state.word_spacing = value;
+            }),
+            b"Tz" => self.set_text_number(operands, |state, value| {
+                state.horizontal_scale = value / 100.0;
+            }),
+            b"TL" => self.set_text_number(operands, |state, value| {
+                state.leading = value;
+            }),
+            b"Tr" => self.set_text_number(operands, |state, value| {
+                state.rendering_mode = value as i32;
+            }),
+            b"Ts" => self.set_text_number(operands, |state, value| {
+                state.rise = value;
+            }),
+            b"Tj" => {
+                self.enter_text_phase();
+                if let Some(tail) = self.operand_tail(operands, 1) {
+                    if let TokenKind::Bytes(bytes) = &tail[0].kind {
+                        self.show_text(bytes, tail[0].span.start, tail[0].span.end)?;
+                    } else {
+                        self.recoveries.insert(RecoveryKind::InvalidOperands);
+                    }
+                }
+            }
+            b"TJ" => {
+                self.enter_text_phase();
+                self.show_text_array(operands)?;
+            }
+            b"'" => {
+                self.apply_operator(b"T*", &[])?;
+                self.apply_operator(b"Tj", operands)?;
+            }
+            b"\"" => self.show_text_with_spacing(operands)?,
+            _ if is_known_operator(operator) => {}
+            _ if self.compatibility_depth > 0 => {}
+            _ => {
+                self.recoveries.insert(RecoveryKind::UnknownOperator);
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) {
+        if !self.operands.is_empty() {
+            self.recoveries.insert(RecoveryKind::DanglingOperands);
+            self.operands.clear();
+        }
+        if !self.graphics_stack.is_empty() {
+            self.recoveries.insert(RecoveryKind::GraphicsStateUnclosed);
+            self.graphics_stack.clear();
+        }
+        if self.compatibility_depth != 0 {
+            self.recoveries.insert(RecoveryKind::CompatibilityUnclosed);
+            self.compatibility_depth = 0;
+        }
+        if self.state.phase == TextPhase::Inside && !self.text_object_is_implicit {
+            self.recoveries.insert(RecoveryKind::TextObjectUnclosed);
+        }
+        self.state.phase = TextPhase::Outside;
+        self.text_object_is_implicit = false;
+    }
+
+    fn restore_graphics_state(&mut self) {
+        let Some(mut restored) = self.graphics_stack.pop() else {
+            self.recoveries.insert(RecoveryKind::GraphicsStateUnderflow);
+            return;
+        };
+        // PDF q/Q 保存 graphics/text state 参数，但不保存 text/line matrix。
+        restored.text_matrix = self.state.text_matrix;
+        restored.line_matrix = self.state.line_matrix;
+        restored.phase = self.state.phase;
+        self.state = restored;
+    }
+
+    fn begin_text_object(&mut self) {
+        if self.state.phase == TextPhase::Inside {
+            self.recoveries.insert(RecoveryKind::NestedTextObject);
+        }
+        self.state.text_matrix = Matrix::IDENTITY;
+        self.state.line_matrix = Matrix::IDENTITY;
+        self.state.phase = TextPhase::Inside;
+        self.text_object_is_implicit = false;
+    }
+
+    fn end_text_object(&mut self) {
+        if self.state.phase == TextPhase::Outside {
+            self.recoveries.insert(RecoveryKind::UnexpectedTextEnd);
+            return;
+        }
+        self.state.phase = TextPhase::Outside;
+        self.text_object_is_implicit = false;
+    }
+
+    fn move_text_position(&mut self, operands: &[Token], set_leading: bool) {
+        self.enter_text_phase();
+        if let Some(values) = self.numeric_tail(operands, 2) {
+            if set_leading {
+                self.state.leading = -values[1];
+            }
+            self.state.line_matrix = self.state.line_matrix.translate(values[0], values[1]);
+            self.state.text_matrix = self.state.line_matrix;
+        }
+    }
+
+    fn set_text_number(
+        &mut self,
+        operands: &[Token],
+        update: impl FnOnce(&mut GraphicsState, f64),
+    ) {
+        self.enter_text_phase();
+        if let Some(values) = self.numeric_tail(operands, 1) {
+            update(&mut self.state, values[0]);
+        }
+    }
+
+    fn show_text_with_spacing(&mut self, operands: &[Token]) -> Result<()> {
+        self.enter_text_phase();
+        let Some(tail) = self.operand_tail(operands, 3) else {
+            return Ok(());
+        };
+        let (TokenKind::Number(word), TokenKind::Number(character), TokenKind::Bytes(bytes)) =
+            (&tail[0].kind, &tail[1].kind, &tail[2].kind)
+        else {
+            self.recoveries.insert(RecoveryKind::InvalidOperands);
+            return Ok(());
+        };
+        self.state.word_spacing = *word;
+        self.state.character_spacing = *character;
+        self.apply_operator(b"T*", &[])?;
+        self.show_text(bytes, tail[2].span.start, tail[2].span.end)
+    }
+
+    fn operand_tail<'a>(&mut self, operands: &'a [Token], count: usize) -> Option<&'a [Token]> {
+        if operands.len() < count {
+            self.recoveries.insert(RecoveryKind::ArityShort);
+            return None;
+        }
+        if operands.len() > count {
+            self.recoveries.insert(RecoveryKind::ArityExcess);
+        }
+        Some(&operands[operands.len() - count..])
+    }
+
+    fn numeric_tail(&mut self, operands: &[Token], count: usize) -> Option<Vec<f64>> {
+        let tail = self.operand_tail(operands, count)?;
+        let values = tail
+            .iter()
+            .map(|token| match token.kind {
+                TokenKind::Number(value) => Some(value),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>();
+        if values.is_none() {
+            self.recoveries.insert(RecoveryKind::InvalidOperands);
+        }
+        values
     }
 
     fn show_text(&mut self, bytes: &[u8], byte_start: usize, byte_end: usize) -> Result<()> {
@@ -273,8 +478,8 @@ impl Walker<'_> {
         }
         let font = resolve_simple_font(self.document, &self.resources, &self.state.font_name)?;
         for byte in bytes {
-            let transform = self.state.text_matrix;
-            let baseline = transform.point(0.0, 0.0);
+            let transform = self.state.ctm.then(self.state.text_matrix);
+            let baseline = transform.point(0.0, self.state.rise);
             let width = font.width(*byte).ok_or_else(|| {
                 unsupported_error(format!(
                     "font /{} has no width for character code {byte}",
@@ -282,16 +487,24 @@ impl Walker<'_> {
                 ))
             })?;
             let glyph_width = width * self.state.font_size / 1000.0;
+            let word_spacing = if *byte == b' ' {
+                self.state.word_spacing
+            } else {
+                0.0
+            };
+            let advance = (glyph_width + self.state.character_spacing + word_spacing)
+                * self.state.horizontal_scale;
             let metric_box = transformed_box(
                 transform,
                 0.0,
-                font.descent * self.state.font_size / 1000.0,
-                glyph_width,
-                font.ascent * self.state.font_size / 1000.0,
+                font.descent * self.state.font_size / 1000.0 + self.state.rise,
+                glyph_width * self.state.horizontal_scale,
+                font.ascent * self.state.font_size / 1000.0 + self.state.rise,
             );
             self.characters.push(WalkedChar {
                 unicode: decode_win_ansi(*byte),
                 code: u32::from(*byte),
+                visible: !matches!(self.state.rendering_mode, 3 | 7),
                 encoded: vec![*byte],
                 font: font.reference.clone(),
                 font_size: self.state.font_size,
@@ -302,70 +515,85 @@ impl Walker<'_> {
                 byte_start,
                 byte_end,
             });
-            self.state.text_matrix = self.state.text_matrix.translate(glyph_width, 0.0);
+            self.state.text_matrix = self.state.text_matrix.translate(advance, 0.0);
         }
         Ok(())
     }
 
-    /// STREAM-05：`BT` 之前出现的文本操作符按隐式 `BT` 处理——渲染器确实会画出
-    /// 这些字，丢掉它们就是丢正文。`ET` 之后再出现则是第二个文本对象，
-    /// 与 M1 的单文本对象边界撞车，仍然拒绝。
-    fn enter_text_phase(&mut self, operator: &str) -> Result<()> {
-        match self.state.phase {
-            TextPhase::Inside => Ok(()),
-            TextPhase::Before => {
-                self.state.text_matrix = Matrix::IDENTITY;
-                self.state.phase = TextPhase::Inside;
-                self.text_object_is_implicit = true;
-                self.recoveries.insert(RecoveryKind::ImplicitTextObject);
-                Ok(())
-            }
-            TextPhase::After => Err(unsupported_error(format!(
-                "M1 supports exactly one text object per page; {operator} appeared after ET"
-            ))),
+    /// STREAM-05：文本状态/显示操作符出现在 `BT` 外时按隐式 `BT` 处理。每次只在
+    /// 页级集合里记录一种恢复，避免 warning 数随字符数量漂移。
+    fn enter_text_phase(&mut self) {
+        if self.state.phase == TextPhase::Outside {
+            self.state.text_matrix = Matrix::IDENTITY;
+            self.state.line_matrix = Matrix::IDENTITY;
+            self.state.phase = TextPhase::Inside;
+            self.text_object_is_implicit = true;
+            self.recoveries.insert(RecoveryKind::ImplicitTextObject);
         }
-    }
-
-    fn begin_text_show(&mut self) -> Result<()> {
-        if self.text_show_count != 0 {
-            return Err(unsupported_error(
-                "M1 supports exactly one text-show operation per page",
-            ));
-        }
-        self.text_show_count += 1;
-        Ok(())
     }
 
     /// STREAM-11：`TJ` 数组里合法的元素只有字符串与数字。别的类型跳过并记一次
     /// 恢复，字距按 0 计——规范没有给出别的可推断值，而整条 `TJ` 一起丢会连带
     /// 丢掉渲染器确实画出来的字符。
     fn show_text_array(&mut self, operands: &[Token]) -> Result<()> {
-        let (Some(first), Some(last)) = (operands.first(), operands.last()) else {
-            return Err(walk_error("TJ requires an array operand"));
+        let Some(last) = operands.last() else {
+            self.recoveries.insert(RecoveryKind::ArityShort);
+            return Ok(());
         };
-        if !matches!(first.kind, TokenKind::CompositeDelimiter)
-            || !matches!(last.kind, TokenKind::CompositeDelimiter)
-            || operands.len() < 2
-        {
-            return Err(walk_error("TJ operand is not a bracketed array"));
+        if !matches!(
+            last.kind,
+            TokenKind::CompositeDelimiter(CompositeDelimiter::ArrayEnd)
+        ) {
+            self.recoveries.insert(RecoveryKind::InvalidOperands);
+            return Ok(());
         }
-        for element in &operands[1..operands.len() - 1] {
+        let mut depth = 0usize;
+        let mut start = None;
+        for (index, token) in operands.iter().enumerate().rev() {
+            match token.kind {
+                TokenKind::CompositeDelimiter(CompositeDelimiter::ArrayEnd) => depth += 1,
+                TokenKind::CompositeDelimiter(CompositeDelimiter::ArrayStart) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        start = Some(index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(start) = start else {
+            self.recoveries.insert(RecoveryKind::InvalidOperands);
+            return Ok(());
+        };
+        if start != 0 {
+            self.recoveries.insert(RecoveryKind::ArityExcess);
+        }
+        let elements = &operands[start + 1..operands.len() - 1];
+        if elements.iter().any(|element| {
+            matches!(
+                element.kind,
+                TokenKind::CompositeDelimiter(CompositeDelimiter::ArrayStart)
+                    | TokenKind::CompositeDelimiter(CompositeDelimiter::ArrayEnd)
+            )
+        }) {
+            self.recoveries.insert(RecoveryKind::SkippedTjElement);
+            return Ok(());
+        }
+        for element in elements {
             match &element.kind {
                 TokenKind::Bytes(bytes) => {
                     self.show_text(bytes, element.span.start, element.span.end)?;
                 }
                 TokenKind::Number(adjustment) => {
-                    let shift = -adjustment * self.state.font_size / 1000.0;
+                    let shift =
+                        -adjustment * self.state.font_size / 1000.0 * self.state.horizontal_scale;
                     self.state.text_matrix = self.state.text_matrix.translate(shift, 0.0);
                 }
-                // 扁平 token 流里嵌套数组只表现为一个多余的分隔符。把它当成可跳过的
-                // 元素会把内层的数字悄悄当成字距，位置就错了——那不是恢复，是编造。
-                TokenKind::CompositeDelimiter => {
-                    return Err(unsupported_error(
-                        "M1 does not yet handle arrays nested inside TJ",
-                    ));
-                }
-                TokenKind::Name(_) | TokenKind::Operator(_) => {
+                TokenKind::Name(_)
+                | TokenKind::Operator(_)
+                | TokenKind::InlineImage { .. }
+                | TokenKind::CompositeDelimiter(_) => {
                     self.recoveries.insert(RecoveryKind::SkippedTjElement);
                 }
             }
@@ -520,24 +748,99 @@ fn inherited_page_resources(document: &Document, page_id: ObjectId) -> Result<Di
     Err(walk_error("page resource inheritance exceeds 128 levels"))
 }
 
-fn operand_tail<'a>(operands: &'a [Token], count: usize, operator: &str) -> Result<&'a [Token]> {
-    if operands.len() != count {
-        return Err(walk_error(format!(
-            "{operator} requires exactly {count} operands, got {}",
-            operands.len()
-        )));
+fn number_token(value: f64, span: std::ops::Range<usize>) -> Token {
+    Token {
+        kind: TokenKind::Number(value),
+        span,
     }
-    Ok(operands)
 }
 
-fn numeric_tail(operands: &[Token], count: usize, operator: &str) -> Result<Vec<f64>> {
-    operand_tail(operands, count, operator)?
+fn split_double_decimal(operator: &[u8]) -> Option<(f64, f64)> {
+    let dots = operator
         .iter()
-        .map(|token| match token.kind {
-            TokenKind::Number(value) => Ok(value),
-            _ => Err(walk_error(format!("{operator} requires numeric operands"))),
-        })
-        .collect()
+        .enumerate()
+        .filter_map(|(index, byte)| (*byte == b'.').then_some(index))
+        .collect::<Vec<_>>();
+    let [_, split] = dots.as_slice() else {
+        return None;
+    };
+    let first = std::str::from_utf8(&operator[..*split])
+        .ok()?
+        .parse::<f64>()
+        .ok()?;
+    let second = std::str::from_utf8(&operator[*split..])
+        .ok()?
+        .parse::<f64>()
+        .ok()?;
+    (first.is_finite() && second.is_finite()).then_some((first, second))
+}
+
+fn split_glued_operator(value: &[u8]) -> Option<(f64, &'static [u8])> {
+    const SUFFIXES: [&[u8]; 8] = [b"Tm", b"Td", b"Tf", b"Tc", b"Tw", b"Tz", b"Ts", b"cm"];
+    SUFFIXES.iter().find_map(|suffix| {
+        if !value.ends_with(suffix) {
+            return None;
+        }
+        let prefix = &value[..value.len() - suffix.len()];
+        if prefix.is_empty() {
+            return None;
+        }
+        let number = std::str::from_utf8(prefix).ok()?.parse::<f64>().ok()?;
+        number.is_finite().then_some((number, *suffix))
+    })
+}
+
+fn is_known_operator(operator: &[u8]) -> bool {
+    matches!(
+        operator,
+        b"w" | b"J"
+            | b"j"
+            | b"M"
+            | b"d"
+            | b"ri"
+            | b"i"
+            | b"gs"
+            | b"m"
+            | b"l"
+            | b"c"
+            | b"v"
+            | b"y"
+            | b"h"
+            | b"re"
+            | b"S"
+            | b"s"
+            | b"f"
+            | b"F"
+            | b"f*"
+            | b"B"
+            | b"B*"
+            | b"b"
+            | b"b*"
+            | b"n"
+            | b"W"
+            | b"W*"
+            | b"CS"
+            | b"cs"
+            | b"SC"
+            | b"SCN"
+            | b"sc"
+            | b"scn"
+            | b"G"
+            | b"g"
+            | b"RG"
+            | b"rg"
+            | b"K"
+            | b"k"
+            | b"sh"
+            | b"MP"
+            | b"DP"
+            | b"BMC"
+            | b"BDC"
+            | b"EMC"
+            | b"Do"
+            | b"d0"
+            | b"d1"
+    )
 }
 
 fn object_number(object: &Object) -> Option<f64> {
@@ -641,19 +944,6 @@ fn unsupported_error(message: impl Into<String>) -> MimusError {
     MimusError::input(InputReason::UnsupportedPdf, message)
 }
 
-fn display_operator(operator: &[u8]) -> String {
-    operator
-        .iter()
-        .map(|byte| {
-            if byte.is_ascii_graphic() {
-                char::from(*byte).to_string()
-            } else {
-                format!("\\x{byte:02X}")
-            }
-        })
-        .collect()
-}
-
 fn display_pdf_name(name: &[u8]) -> String {
     name.iter()
         .map(|byte| {
@@ -704,6 +994,13 @@ mod tests {
             .iter()
             .filter_map(|character| character.unicode)
             .collect()
+    }
+
+    fn walk_fixture(id: &str) -> PageWalk {
+        let document = Document::load(fixture_path(id)).unwrap();
+        let page_id = document.get_pages()[&1];
+        walk_page(&document, page_id)
+            .unwrap_or_else(|error| panic!("fixture {id} should be walked: {error}"))
     }
 
     #[test]
@@ -758,23 +1055,159 @@ mod tests {
     }
 
     #[test]
-    fn production_walk_rejects_experiment_2_content_it_cannot_reemit() {
+    fn production_walk_keeps_contents_streams_separate_and_carries_state_between_them() {
+        let id = "unit-parse-04-contents-array-numeric-split";
+        let document = Document::load(fixture_path(id)).unwrap();
+        let page_id = document.get_pages()[&1];
+        let walked = walk_page(&document, page_id).unwrap();
+
+        assert_eq!(text_of(&walked), "MIMUS");
+        assert_eq!(
+            walked.characters[0].baseline_origin,
+            Point { x: 82.0, y: 140.0 }
+        );
+        assert_eq!(
+            walked
+                .content_streams
+                .iter()
+                .map(|stream| stream.object_id)
+                .collect::<Vec<_>>(),
+            vec![(9, 0), (10, 0)]
+        );
+        assert!(walked.recoveries.is_empty());
+    }
+
+    #[test]
+    fn production_walk_matches_the_stream_recovery_fixture_matrix() {
+        let cases: &[(&str, Point, &[RecoveryKind])] = &[
+            (
+                "mal-stream-03-arity-excess",
+                Point { x: 630.0, y: 823.0 },
+                &[RecoveryKind::ArityExcess],
+            ),
+            (
+                "mal-stream-04-arity-short",
+                Point { x: 72.0, y: 120.0 },
+                &[RecoveryKind::ArityShort],
+            ),
+            (
+                "mal-stream-05-unbalanced-Q",
+                Point { x: 72.0, y: 120.0 },
+                &[RecoveryKind::GraphicsStateUnderflow],
+            ),
+            (
+                "mal-stream-06-glued-tokens",
+                Point { x: 100.0, y: 120.0 },
+                &[RecoveryKind::GluedToken],
+            ),
+            (
+                "mal-stream-07-double-decimal",
+                Point { x: 72.0, y: 120.0 },
+                &[RecoveryKind::ArityExcess, RecoveryKind::DoubleDecimal],
+            ),
+            (
+                "mal-stream-08-unknown-outside-bx",
+                Point { x: 72.0, y: 120.0 },
+                &[
+                    RecoveryKind::UnknownOperator,
+                    RecoveryKind::CompatibilityUnderflow,
+                ],
+            ),
+            (
+                "mal-stream-09-orphan-text",
+                Point { x: 72.0, y: 120.0 },
+                &[RecoveryKind::ImplicitTextObject],
+            ),
+        ];
+
+        for (id, baseline, recoveries) in cases {
+            let walked = walk_fixture(id);
+            assert_eq!(text_of(&walked), "MIMUS", "fixture {id}");
+            assert_eq!(
+                walked.characters[0].baseline_origin, *baseline,
+                "fixture {id}"
+            );
+            assert_eq!(
+                walked.recoveries,
+                recoveries.iter().copied().collect(),
+                "fixture {id}"
+            );
+        }
+
         for id in [
-            "unit-parse-04-contents-array-numeric-split",
             "unit-stream-01-bx-ex-unknown-op",
-            "unit-stream-02-type3-d1",
             "unit-stream-03-unknown-op-outside-bx",
-            "unit-stream-08-inline-image-EI-in-data",
-            "unit-xobj-00-recursion-parent",
-            "unit-xobj-04-inherited-resources",
+        ] {
+            let walked = walk_fixture(id);
+            assert_eq!(text_of(&walked), "MIMUS", "fixture {id}");
+            assert!(walked.recoveries.is_empty(), "fixture {id}");
+        }
+    }
+
+    #[test]
+    fn production_walk_uses_all_three_bounded_inline_image_length_paths() {
+        for (id, recoveries) in [
+            ("unit-stream-08-inline-image-EI-in-data", &[][..]),
+            ("unit-stream-09-inline-image-no-L", &[][..]),
+            ("unit-stream-10-inline-image-length", &[][..]),
+            (
+                "unit-stream-11-inline-image-filtered-fallback",
+                &[RecoveryKind::InlineImageEiScan][..],
+            ),
+        ] {
+            let walked = walk_fixture(id);
+            assert_eq!(text_of(&walked), "MIMUS", "fixture {id}");
+            assert_eq!(
+                walked.characters[0].baseline_origin,
+                Point { x: 72.0, y: 120.0 },
+                "fixture {id}"
+            );
+            assert_eq!(
+                walked.recoveries,
+                recoveries.iter().copied().collect(),
+                "fixture {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn detailed_walk_failures_distinguish_syntax_nesting_and_decode_degradation() {
+        for (id, expected) in [
+            (
+                "mal-stream-10-unterminated-string",
+                PageDegradeReason::ContentStreamSyntax,
+            ),
+            (
+                "mal-parse-06-deep-nesting",
+                PageDegradeReason::NestingTooDeep,
+            ),
         ] {
             let document = Document::load(fixture_path(id)).unwrap();
             let page_id = document.get_pages()[&1];
-            let result = walk_page(&document, page_id);
-            assert!(result.is_err(), "{id} must fail closed");
-            let error = result.unwrap_err();
-            assert_eq!(error.category().code(), 2, "fixture {id}: {error}");
+            let error = walk_page_detailed(&document, page_id).unwrap_err();
+            assert!(
+                matches!(error, PageWalkError::Degraded { reason, .. } if reason == expected),
+                "fixture {id}"
+            );
         }
+
+        let mut document = Document::load(fixture()).unwrap();
+        document
+            .get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Filter", Object::Name(b"UnsupportedFilter".to_vec()));
+        let page_id = document.get_pages()[&1];
+        let error = walk_page_detailed(&document, page_id).unwrap_err();
+        assert!(matches!(
+            error,
+            PageWalkError::Degraded {
+                reason: PageDegradeReason::ContentDecode,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -800,46 +1233,30 @@ mod tests {
     }
 
     #[test]
-    fn production_walk_classifies_non_positive_tf_as_unsupported() {
+    fn production_walk_retains_non_positive_tf_for_later_font_reliability_checks() {
         for size in ["-12", "0"] {
-            let mut document = Document::load(fixture()).unwrap();
-            document
-                .get_object_mut((9, 0))
-                .unwrap()
-                .as_stream_mut()
-                .unwrap()
-                .set_plain_content(
-                    format!("BT /F1 {size} Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET").into_bytes(),
-                );
-            let page_id = document.get_pages()[&1];
-            let error = walk_page(&document, page_id).unwrap_err();
-            assert_eq!(
-                error.reason(),
-                ErrorReason::Input(InputReason::UnsupportedPdf)
-            );
+            let walked = walk_program(
+                format!("BT /F1 {size} Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET").as_bytes(),
+            )
+            .unwrap();
+            assert_eq!(text_of(&walked), "MIMUS");
             assert!(
-                error.to_string().contains("non-positive Tf font size"),
-                "Tf size {size}: {error}"
+                walked
+                    .characters
+                    .iter()
+                    .all(|character| character.font_size <= 0.0)
             );
+            assert!(walked.recoveries.is_empty());
         }
     }
 
     #[test]
     fn production_walk_attributes_composite_operands_to_their_operator() {
-        for id in ["unit-base-02-two-column", "unit-form-01-display"] {
-            let document = Document::load(fixture_path(id)).unwrap();
-            let page_id = document.get_pages()[&1];
-            let error = walk_page(&document, page_id).unwrap_err();
-            assert_eq!(
-                error.reason(),
-                ErrorReason::Input(InputReason::UnsupportedPdf)
-            );
-            assert!(
-                error.to_string().contains("operator BDC"),
-                "fixture {id}: {error}"
-            );
-            assert!(!error.to_string().contains("operator <<"));
-        }
+        let marked =
+            walk_program(b"/Span <</MCID 0>> BDC BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET EMC")
+                .unwrap();
+        assert_eq!(text_of(&marked), "MIMUS");
+        assert!(marked.recoveries.is_empty());
 
         // `[` 与 `]` 是操作数分隔符，不是操作符——`TJ` 必须拿到它们之间的元素。
         let walked = walk_program(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm [(MIMUS)] TJ ET").unwrap();
@@ -915,45 +1332,73 @@ mod tests {
         assert!(intact.recoveries.is_empty());
     }
 
-    /// 隐式 `BT` 在流尾隐式闭合，但显式 `BT` 少了 `ET` 依旧是截断信号。
+    /// 缺失 `ET` 不会抹掉此前已经完整产出的字符，但恢复决定必须按页报告。
     #[test]
-    fn an_explicit_text_object_still_needs_its_et() {
-        let error = walk_program(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj").unwrap_err();
+    fn an_explicit_text_object_without_et_is_recovered_at_page_end() {
+        let walked = walk_program(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj").unwrap();
+        assert_eq!(text_of(&walked), "MIMUS");
         assert_eq!(
-            error.reason(),
-            ErrorReason::Input(InputReason::OperatorWalk)
+            walked.recoveries,
+            BTreeSet::from([RecoveryKind::TextObjectUnclosed])
         );
-        assert!(error.to_string().contains("ended before ET"), "{error}");
     }
 
     #[test]
-    fn production_walk_rejects_unreplayed_state_and_multiple_text_shows() {
-        let programs: &[&[u8]] = &[
-            b"0.5 0 0 0.5 0 0 cm\nBT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
-            b"BT /F1 12 Tf 2 Tc 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
-            b"BT /F1 12 Tf 2 Tw 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
-            b"BT /F1 12 Tf 50 Tz 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
-            b"BT /F1 12 Tf 2 Ts 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
-            b"BT /F1 12 Tf 3 Tr 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
-            b"BT /F1 12 Tf 0.5 0 0 0.5 72 120 Tm (MIMUS) Tj ET",
-            b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj 1 0 0 1 72 80 Tm (MIMUS) Tj ET",
-            b"0 0 10 10 re f BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
+    fn production_walk_tracks_graphics_text_state_and_multiple_text_shows() {
+        let programs: &[(&[u8], &str)] = &[
+            (
+                b"0.5 0 0 0.5 0 0 cm\nBT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
+                "MIMUS",
+            ),
+            (
+                b"BT /F1 12 Tf 2 Tc 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
+                "MIMUS",
+            ),
+            (
+                b"BT /F1 12 Tf 2 Tw 1 0 0 1 72 120 Tm (MI MUS) Tj ET",
+                "MI MUS",
+            ),
+            (
+                b"BT /F1 12 Tf 50 Tz 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
+                "MIMUS",
+            ),
+            (
+                b"BT /F1 12 Tf 2 Ts 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
+                "MIMUS",
+            ),
+            (
+                b"BT /F1 12 Tf 3 Tr 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
+                "MIMUS",
+            ),
+            (b"BT /F1 12 Tf 0.5 0 0 0.5 72 120 Tm (MIMUS) Tj ET", "MIMUS"),
+            (
+                b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj 1 0 0 1 72 80 Tm (MIMUS) Tj ET",
+                "MIMUSMIMUS",
+            ),
+            (
+                b"0 0 10 10 re f BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET",
+                "MIMUS",
+            ),
         ];
-        for program in programs {
-            let mut document = Document::load(fixture()).unwrap();
-            document
-                .get_object_mut((9, 0))
-                .unwrap()
-                .as_stream_mut()
-                .unwrap()
-                .set_plain_content(program.to_vec());
-            let page_id = document.get_pages()[&1];
-            let error = walk_page(&document, page_id).unwrap_err();
-            assert_eq!(
-                error.reason(),
-                ErrorReason::Input(InputReason::UnsupportedPdf)
-            );
+        for (program, expected_text) in programs {
+            let walked = walk_program(program).unwrap();
+            assert_eq!(text_of(&walked), *expected_text);
+            assert!(walked.recoveries.is_empty(), "program {program:?}");
         }
+
+        let scaled = walk_program(programs[0].0).unwrap();
+        assert_eq!(
+            scaled.characters[0].baseline_origin,
+            Point { x: 36.0, y: 60.0 }
+        );
+
+        let hidden = walk_program(programs[5].0).unwrap();
+        assert!(hidden.characters.iter().all(|character| !character.visible));
+
+        let multiple = walk_program(programs[7].0).unwrap();
+        assert_eq!(multiple.characters.len(), 10);
+        assert_eq!(multiple.characters[0].baseline_origin.y, 120.0);
+        assert_eq!(multiple.characters[5].baseline_origin.y, 80.0);
     }
 
     #[test]

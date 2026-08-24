@@ -167,6 +167,24 @@ fn write_program_pdf(directory: &Path, name: &str, program: &[u8]) -> PathBuf {
     path
 }
 
+fn decoded_page_streams(path: &Path, page_number: u32) -> Vec<Vec<u8>> {
+    let document = lopdf::Document::load(path).unwrap();
+    let page_id = document.get_pages()[&page_number];
+    document
+        .get_page_contents(page_id)
+        .into_iter()
+        .map(|object_id| {
+            document
+                .get_object(object_id)
+                .unwrap()
+                .as_stream()
+                .unwrap()
+                .decompressed_content()
+                .unwrap()
+        })
+        .collect()
+}
+
 #[test]
 fn version_flag_reports_the_core_version() {
     let out = Command::new(BIN).arg("--version").output().unwrap();
@@ -598,11 +616,12 @@ fn scan_continuation_matrix_preserves_passthrough_pages() {
 }
 
 #[test]
-fn native_image_text_and_hidden_watermark_remain_unsupported_not_scanned() {
+fn native_image_text_and_hidden_watermark_continue_as_content_pages() {
     let directory = tempfile::tempdir().unwrap();
-    for id in [
-        "unit-scan-03-visible-image-text",
-        "unit-scan-05-hidden-watermark",
+    for (id, supported) in [
+        ("unit-scan-03-visible-image-text", true),
+        // Two detected baselines remain the ParagraphFind boundary owned by #20.
+        ("unit-scan-05-hidden-watermark", false),
     ] {
         let input = fixture_path(id);
         let output_path = directory.path().join(format!("{id}-output.pdf"));
@@ -610,16 +629,28 @@ fn native_image_text_and_hidden_watermark_remain_unsupported_not_scanned() {
             run_inspect(&input, true, None),
             run_none(&input, Some(&output_path), true),
         ] {
-            assert_eq!(command.status.code(), Some(2), "fixture {id}");
+            assert_eq!(
+                command.status.code(),
+                Some(if supported { 0 } else { 2 }),
+                "fixture {id}"
+            );
             let events = parse_events(&command.stdout);
-            assert_one_terminal_last(&events, "error");
+            assert_one_terminal_last(&events, if supported { "result" } else { "error" });
             assert!(scan_summary(&events).is_none());
-            let error = events.last().unwrap();
-            assert_eq!(error["reason"], "unsupported_pdf");
-            assert!(error.get("scanned_pages").is_none());
-            assert!(error.get("total_pages").is_none());
+            if !supported {
+                assert_eq!(events.last().unwrap()["reason"], "unsupported_pdf");
+            }
         }
-        assert!(!output_path.exists());
+        if supported {
+            assert!(output_path.exists());
+            assert_eq!(
+                decoded_page_streams(&output_path, 1),
+                decoded_page_streams(&input, 1),
+                "fixture {id}"
+            );
+        } else {
+            assert!(!output_path.exists());
+        }
     }
 }
 
@@ -707,12 +738,12 @@ fn short_output_flag_is_supported() {
 }
 
 #[test]
-fn unsupported_existing_fixtures_fail_closed_without_output() {
+fn font_paths_not_yet_implemented_still_fail_closed_without_output() {
     let directory = tempfile::tempdir().unwrap();
     for id in [
         "unit-base-02-two-column",
-        "unit-base-03-structured",
-        "unit-stream-08-inline-image-EI-in-data",
+        "unit-stream-02-type3-d1",
+        "unit-cmap-01-identity-no-tounicode",
     ] {
         let translated = directory.path().join(format!("{id}.pdf"));
         let result = run_none(&fixture_path(id), Some(&translated), false);
@@ -728,6 +759,29 @@ fn unsupported_existing_fixtures_fail_closed_without_output() {
             String::from_utf8_lossy(&result.stderr)
         );
         assert!(!translated.exists(), "fixture {id} produced output");
+    }
+}
+
+#[test]
+fn structured_and_inline_image_programs_round_trip_without_rebuilding_content() {
+    let directory = tempfile::tempdir().unwrap();
+    for id in [
+        "unit-base-03-structured",
+        "unit-stream-08-inline-image-EI-in-data",
+    ] {
+        let input = fixture_path(id);
+        let translated = directory.path().join(format!("{id}.pdf"));
+        let result = run_none(&input, Some(&translated), false);
+        assert!(
+            result.status.success(),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            decoded_page_streams(&translated, 1),
+            decoded_page_streams(&input, 1),
+            "fixture {id}"
+        );
     }
 }
 
@@ -836,7 +890,7 @@ fn malformed_content_streams_are_recovered_and_reported_once_per_page() {
 }
 
 #[test]
-fn unreplayed_state_graphics_and_multiple_lines_fail_closed() {
+fn graphics_text_state_and_multiple_lines_round_trip_without_content_loss() {
     let directory = tempfile::tempdir().unwrap();
     let programs: &[(&str, &[u8])] = &[
         (
@@ -864,13 +918,22 @@ fn unreplayed_state_graphics_and_multiple_lines_fail_closed() {
         let input = write_program_pdf(directory.path(), name, program);
         let translated = directory.path().join(format!("out-{name}"));
         let result = run_none(&input, Some(&translated), false);
-        assert_eq!(
-            result.status.code(),
-            Some(2),
+        if *name == "two-lines.pdf" {
+            assert_eq!(result.status.code(), Some(2));
+            assert!(String::from_utf8_lossy(&result.stderr).contains("unsupported_pdf"));
+            assert!(!translated.exists());
+            continue;
+        }
+        assert!(
+            result.status.success(),
             "input {name}: {}",
             String::from_utf8_lossy(&result.stderr)
         );
-        assert!(!translated.exists(), "input {name} produced output");
+        assert_eq!(
+            decoded_page_streams(&translated, 1),
+            decoded_page_streams(&input, 1),
+            "input {name}"
+        );
     }
 }
 
