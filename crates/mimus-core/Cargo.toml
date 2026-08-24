@@ -15,5 +15,6 @@ serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 ttf-parser = "0.25"
+subsetter.workspace = true
 
 [dev-dependencies]

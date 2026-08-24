@@ -74,6 +74,8 @@ pub enum PreservedReason {
     NonPositiveAdvance,
     /// 文本矩阵退化，字符不可定位。
     Unlocatable,
+    /// 译文在最低可读字号下仍无法容纳于原段落框。
+    TypesetOverflow,
 }
 
 impl Paragraph {
