@@ -1,16 +1,26 @@
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-use lopdf::{Dictionary, Document, IncrementalDocument, Object, ObjectId, Stream};
+use lopdf::{Document, IncrementalDocument, Object, ObjectId, Stream};
 
 use crate::error::{InternalReason, IoReason, MimusError, Result};
 use crate::il::FontRef;
+use crate::walk::MAX_STREAM_BYTES;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContentSpanReplacement {
+    pub content_object: ObjectId,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub replacement: Vec<u8>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PageRewrite {
     pub page_index: usize,
-    pub content: Vec<u8>,
+    pub replacements: Vec<ContentSpanReplacement>,
     pub reused_fonts: Vec<FontRef>,
     pub needs_new_font: bool,
 }
@@ -51,9 +61,19 @@ pub(crate) fn build_incremental(
     let mut incremental =
         IncrementalDocument::create_from(original_bytes.to_vec(), original.clone());
     incremental.new_document.max_id = object_ceiling;
-    let mut content_objects = Vec::with_capacity(rewrites.len());
+    let mut content_objects = Vec::new();
+    let mut rewritten_pages = BTreeSet::new();
 
     for rewrite in rewrites {
+        if !rewritten_pages.insert(rewrite.page_index) {
+            return Err(MimusError::internal(
+                InternalReason::OutputBuild,
+                format!(
+                    "output contains duplicate rewrites for page {}",
+                    rewrite.page_index
+                ),
+            ));
+        }
         let page_id = pages.get(rewrite.page_index).copied().ok_or_else(|| {
             MimusError::internal(
                 InternalReason::OutputBuild,
@@ -66,25 +86,83 @@ pub(crate) fn build_incremental(
         incremental
             .opt_clone_object_to_new_document(page_id)
             .map_err(output_build_error)?;
-        let content_id = incremental
-            .new_document
-            .add_object(Stream::new(Dictionary::new(), rewrite.content.clone()));
-        if content_id.0 <= object_ceiling {
+        let source_content_ids = original.get_page_contents(page_id);
+        if source_content_ids.is_empty() {
             return Err(MimusError::internal(
                 InternalReason::OutputBuild,
                 format!(
-                    "incremental object {} did not exceed input ceiling {object_ceiling}",
-                    content_id.0
+                    "output rewrite references page {} with no content streams",
+                    rewrite.page_index
                 ),
             ));
         }
+        if let Some(replacement) = rewrite
+            .replacements
+            .iter()
+            .find(|replacement| !source_content_ids.contains(&replacement.content_object))
+        {
+            return Err(MimusError::internal(
+                InternalReason::OutputBuild,
+                format!(
+                    "page {} replacement references content object {} outside that page",
+                    rewrite.page_index, replacement.content_object.0
+                ),
+            ));
+        }
+
+        let mut page_content_objects = Vec::with_capacity(source_content_ids.len());
+        for source_id in source_content_ids {
+            let source = original
+                .get_object(source_id)
+                .and_then(Object::as_stream)
+                .map_err(output_build_error)?;
+            let decoded = source
+                .decompressed_content_with_limit(MAX_STREAM_BYTES)
+                .map_err(output_build_error)?;
+            let content = apply_span_replacements(
+                &decoded,
+                rewrite
+                    .replacements
+                    .iter()
+                    .filter(|replacement| replacement.content_object == source_id),
+            )?;
+            let mut dictionary = source.dict.clone();
+            dictionary.remove(b"Length");
+            dictionary.remove(b"Filter");
+            dictionary.remove(b"DecodeParms");
+            let content_id = incremental
+                .new_document
+                .add_object(Stream::new(dictionary, content).with_compression(false));
+            if content_id.0 <= object_ceiling {
+                return Err(MimusError::internal(
+                    InternalReason::OutputBuild,
+                    format!(
+                        "incremental object {} did not exceed input ceiling {object_ceiling}",
+                        content_id.0
+                    ),
+                ));
+            }
+            page_content_objects.push(content_id);
+            content_objects.push(content_id);
+        }
+
+        let contents = if let [content_id] = page_content_objects.as_slice() {
+            Object::Reference(*content_id)
+        } else {
+            Object::Array(
+                page_content_objects
+                    .iter()
+                    .copied()
+                    .map(Object::Reference)
+                    .collect(),
+            )
+        };
         incremental
             .new_document
             .get_object_mut(page_id)
             .and_then(Object::as_dict_mut)
             .map_err(output_build_error)?
-            .set("Contents", content_id);
-        content_objects.push(content_id);
+            .set("Contents", contents);
     }
 
     let mut output = Vec::new();
@@ -106,6 +184,45 @@ pub(crate) fn build_incremental(
         content_objects,
     };
     Ok((output, report))
+}
+
+fn apply_span_replacements<'a>(
+    source: &[u8],
+    replacements: impl Iterator<Item = &'a ContentSpanReplacement>,
+) -> Result<Vec<u8>> {
+    let mut replacements = replacements.collect::<Vec<_>>();
+    replacements.sort_by_key(|replacement| (replacement.byte_start, replacement.byte_end));
+
+    let mut output = Vec::with_capacity(source.len());
+    let mut cursor = 0usize;
+    for replacement in replacements {
+        if replacement.byte_start > replacement.byte_end || replacement.byte_end > source.len() {
+            return Err(MimusError::internal(
+                InternalReason::OutputBuild,
+                format!(
+                    "content object {} replacement {}..{} is outside decoded length {}",
+                    replacement.content_object.0,
+                    replacement.byte_start,
+                    replacement.byte_end,
+                    source.len()
+                ),
+            ));
+        }
+        if replacement.byte_start < cursor {
+            return Err(MimusError::internal(
+                InternalReason::OutputBuild,
+                format!(
+                    "content object {} has overlapping replacement at {}..{}",
+                    replacement.content_object.0, replacement.byte_start, replacement.byte_end
+                ),
+            ));
+        }
+        output.extend_from_slice(&source[cursor..replacement.byte_start]);
+        output.extend_from_slice(&replacement.replacement);
+        cursor = replacement.byte_end;
+    }
+    output.extend_from_slice(&source[cursor..]);
+    Ok(output)
 }
 
 pub(crate) fn publish(output: &Path, bytes: &[u8]) -> Result<()> {
@@ -179,10 +296,21 @@ mod tests {
             .join("../../corpus/fixtures/unit-base-01-single-line/unit-base-01-single-line.pdf")
     }
 
+    fn multiple_contents_fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "../../corpus/fixtures/unit-parse-05-contents-array-string-parent/unit-parse-05-contents-array-string-parent.pdf",
+        )
+    }
+
     fn rewrite() -> PageRewrite {
         PageRewrite {
             page_index: 0,
-            content: b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n".to_vec(),
+            replacements: vec![ContentSpanReplacement {
+                content_object: (9, 0),
+                byte_start: 31,
+                byte_end: 38,
+                replacement: b"(MIMUS)".to_vec(),
+            }],
             reused_fonts: vec![FontRef {
                 resource_name: "F1".to_owned(),
                 object_number: 5,
@@ -233,6 +361,113 @@ mod tests {
         assert_eq!(report.input_bytes, report.output_bytes);
         assert_eq!(report.appended_bytes, 0);
         assert!(report.content_objects.is_empty());
+    }
+
+    #[test]
+    fn span_replacement_preserves_every_byte_outside_the_operand() {
+        let replacement = ContentSpanReplacement {
+            content_object: (9, 0),
+            byte_start: 7,
+            byte_end: 12,
+            replacement: b"(new)".to_vec(),
+        };
+
+        let output =
+            apply_span_replacements(b"q 1 0 0(old) Tj Q", std::iter::once(&replacement)).unwrap();
+
+        assert_eq!(output, b"q 1 0 0(new) Tj Q");
+    }
+
+    #[test]
+    fn overlapping_span_replacements_are_rejected() {
+        let replacements = [
+            ContentSpanReplacement {
+                content_object: (9, 0),
+                byte_start: 1,
+                byte_end: 4,
+                replacement: Vec::new(),
+            },
+            ContentSpanReplacement {
+                content_object: (9, 0),
+                byte_start: 3,
+                byte_end: 5,
+                replacement: Vec::new(),
+            },
+        ];
+
+        assert!(apply_span_replacements(b"abcdef", replacements.iter()).is_err());
+    }
+
+    #[test]
+    fn writer_preserves_multiple_contents_as_separate_ordered_streams() {
+        let input = std::fs::read(multiple_contents_fixture()).unwrap();
+        let document = Document::load_mem(&input).unwrap();
+        let page_id = document.get_pages()[&1];
+        let source_ids = document.get_page_contents(page_id);
+        assert_eq!(source_ids.len(), 2);
+        let source_contents = source_ids
+            .iter()
+            .map(|object_id| {
+                document
+                    .get_object(*object_id)
+                    .unwrap()
+                    .as_stream()
+                    .unwrap()
+                    .decompressed_content()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let rewrite = PageRewrite {
+            page_index: 0,
+            replacements: vec![ContentSpanReplacement {
+                content_object: source_ids[0],
+                byte_start: 0,
+                byte_end: 1,
+                replacement: source_contents[0][..1].to_vec(),
+            }],
+            reused_fonts: Vec::new(),
+            needs_new_font: false,
+        };
+
+        let (output, report) = build_incremental(&input, &document, &[rewrite]).unwrap();
+        let reloaded = Document::load_mem(&output).unwrap();
+        let output_page_id = reloaded.get_pages()[&1];
+        let output_page = reloaded
+            .get_object(output_page_id)
+            .unwrap()
+            .as_dict()
+            .unwrap();
+        assert_eq!(
+            output_page
+                .get(b"Contents")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let output_ids = reloaded.get_page_contents(output_page_id);
+        let output_contents = output_ids
+            .iter()
+            .map(|object_id| {
+                reloaded
+                    .get_object(*object_id)
+                    .unwrap()
+                    .as_stream()
+                    .unwrap()
+                    .decompressed_content()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(output_contents, source_contents);
+        assert_eq!(report.content_objects, output_ids);
+        assert!(
+            report
+                .content_objects
+                .iter()
+                .all(|object_id| object_id.0 > document.max_id)
+        );
     }
 
     #[test]

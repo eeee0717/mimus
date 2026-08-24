@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lopdf::Document as LopdfDocument;
 
@@ -13,7 +13,7 @@ use crate::il::{
 };
 use crate::scan::{PageClass, prescan_page};
 use crate::walk::walk_page;
-use crate::write::{PageRewrite, build_incremental, publish};
+use crate::write::{ContentSpanReplacement, PageRewrite, build_incremental, publish};
 
 pub const ORDER: [Stage; 10] = [
     Stage::Parse,
@@ -216,6 +216,7 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
             class: None,
             degraded: None,
             walked_characters: Vec::new(),
+            content_streams: Vec::new(),
             engine_characters: Vec::new(),
             layout_regions: Vec::new(),
             input_raster: None,
@@ -294,6 +295,7 @@ pub fn scan_detect(document: &mut Document, context: &PassContext<'_>) -> Result
                     });
                 }
                 page.walked_characters = walked.characters;
+                page.content_streams = walked.content_streams;
             }
             // ADR-0013 §3：内容流的语法错误只毁掉它所在的那一页，整篇不该跟着失败。
             // 能力边界（UnsupportedPdf）仍是文档级失败——那不是这一页坏了，
@@ -418,6 +420,10 @@ pub fn extract_terms(_document: &mut Document, _context: &PassContext<'_>) -> Re
 pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     for page in &mut document.il.pages {
         for paragraph in &mut page.paragraphs {
+            if paragraph.preserved.is_some() {
+                paragraph.translated_text = None;
+                continue;
+            }
             let source = paragraph.source_text();
             paragraph.translated_text = Some(context.translator.translate(&source)?);
         }
@@ -431,9 +437,37 @@ pub fn typeset(document: &mut Document, _context: &PassContext<'_>) -> Result<()
         if page.paragraphs.is_empty() {
             continue;
         }
-        let mut content = Vec::new();
-        let mut fonts = BTreeSet::new();
+        let extracted = document.extracted_pages.get(page.index).ok_or_else(|| {
+            MimusError::internal(
+                InternalReason::InvariantViolation,
+                format!("Typeset could not find extracted page {}", page.index),
+            )
+        })?;
+        if extracted.index != page.index {
+            return Err(MimusError::internal(
+                InternalReason::InvariantViolation,
+                format!(
+                    "Typeset page index {} points at extracted page {}",
+                    page.index, extracted.index
+                ),
+            ));
+        }
+        let streams = extracted
+            .content_streams
+            .iter()
+            .map(|stream| (stream.object_id, stream.decoded.as_slice()))
+            .collect::<BTreeMap<_, _>>();
+        let mut span_is_replaceable = BTreeMap::<(lopdf::ObjectId, usize, usize), bool>::new();
         for paragraph in &page.paragraphs {
+            if paragraph.preserved.is_some() {
+                if paragraph.translated_text.is_some() {
+                    return Err(MimusError::internal(
+                        InternalReason::InvariantViolation,
+                        "a preserved paragraph has translated text",
+                    ));
+                }
+                continue;
+            }
             let source = paragraph.source_text();
             if paragraph.translated_text.as_deref() != Some(source.as_str()) {
                 return Err(MimusError::input(
@@ -442,37 +476,91 @@ pub fn typeset(document: &mut Document, _context: &PassContext<'_>) -> Result<()
                 ));
             }
             let chars = paragraph.chars();
-            let first = chars.first().ok_or_else(|| {
-                MimusError::input(InputReason::UnsupportedPdf, "cannot typeset an empty line")
-            })?;
-            if chars.iter().any(|value| {
-                value.font != first.font
-                    || (value.font_size - first.font_size).abs() > f64::EPSILON
-                    || value.text_transform != TextTransform::Upright
-            }) {
+            if chars.is_empty() {
                 return Err(MimusError::input(
                     InputReason::UnsupportedPdf,
-                    "M1 single-line typesetting requires one upright font run",
+                    "cannot typeset an empty line",
                 ));
             }
-            fonts.insert(first.font.clone());
-            let encoded = chars
-                .iter()
-                .flat_map(|value| value.passthrough.encoded.iter().copied())
-                .collect::<Vec<_>>();
-            let program = format!(
-                "BT\n/{} {} Tf\n1 0 0 1 {} {} Tm\n({}) Tj\nET\n",
-                pdf_name(&first.font.resource_name),
-                pdf_number(first.font_size),
-                pdf_number(first.baseline_origin.x),
-                pdf_number(first.baseline_origin.y),
-                pdf_literal(&encoded),
-            );
-            content.extend_from_slice(program.as_bytes());
+            for character in chars {
+                let matching_streams = streams
+                    .keys()
+                    .copied()
+                    .filter(|object_id| object_id.0 == character.passthrough.content_object)
+                    .collect::<Vec<_>>();
+                let [content_object] = matching_streams.as_slice() else {
+                    return Err(MimusError::internal(
+                        InternalReason::InvariantViolation,
+                        format!(
+                            "character references ambiguous or missing content object {}",
+                            character.passthrough.content_object
+                        ),
+                    ));
+                };
+                let key = (
+                    *content_object,
+                    character.passthrough.byte_start,
+                    character.passthrough.byte_end,
+                );
+                span_is_replaceable
+                    .entry(key)
+                    .and_modify(|replaceable| {
+                        *replaceable &= character.text_transform == TextTransform::Upright;
+                    })
+                    .or_insert(character.text_transform == TextTransform::Upright);
+            }
         }
+        let replaceable_spans = span_is_replaceable
+            .iter()
+            .filter_map(|(key, replaceable)| replaceable.then_some(*key))
+            .collect::<BTreeSet<_>>();
+        if replaceable_spans.is_empty() {
+            continue;
+        }
+        let mut fonts = BTreeSet::new();
+        for paragraph in &page.paragraphs {
+            for character in paragraph.chars() {
+                if streams
+                    .keys()
+                    .copied()
+                    .find(|object_id| object_id.0 == character.passthrough.content_object)
+                    .is_some_and(|content_object| {
+                        replaceable_spans.contains(&(
+                            content_object,
+                            character.passthrough.byte_start,
+                            character.passthrough.byte_end,
+                        ))
+                    })
+                {
+                    fonts.insert(character.font.clone());
+                }
+            }
+        }
+        let replacements = replaceable_spans
+            .into_iter()
+            .map(|(content_object, byte_start, byte_end)| {
+                let source = streams[&content_object];
+                let replacement = source.get(byte_start..byte_end).ok_or_else(|| {
+                    MimusError::internal(
+                        InternalReason::InvariantViolation,
+                        format!(
+                            "content object {} span {byte_start}..{byte_end} exceeds {} bytes",
+                            content_object.0,
+                            source.len()
+                        ),
+                    )
+                })?;
+                Ok(ContentSpanReplacement {
+                    content_object,
+                    byte_start,
+                    byte_end,
+                    replacement: replacement.to_vec(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         rewrites.push(PageRewrite {
             page_index: page.index,
-            content,
+            replacements,
             reused_fonts: fonts.into_iter().collect(),
             needs_new_font: false,
         });
@@ -753,44 +841,6 @@ fn encrypted_pdf_error() -> MimusError {
     .with_hint("decrypt the input with qpdf, then retry")
 }
 
-fn pdf_number(value: f64) -> String {
-    if value.fract().abs() < 1e-9 {
-        return format!("{value:.0}");
-    }
-    let mut value = format!("{value:.6}");
-    while value.ends_with('0') {
-        value.pop();
-    }
-    value
-}
-
-fn pdf_name(value: &str) -> String {
-    let mut output = String::new();
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') {
-            output.push(char::from(byte));
-        } else {
-            output.push_str(&format!("#{byte:02X}"));
-        }
-    }
-    output
-}
-
-fn pdf_literal(value: &[u8]) -> String {
-    let mut output = String::new();
-    for byte in value {
-        match byte {
-            b'(' | b')' | b'\\' => {
-                output.push('\\');
-                output.push(char::from(*byte));
-            }
-            0..=31 | 127..=255 => output.push_str(&format!("\\{:03o}", byte)),
-            _ => output.push(char::from(*byte)),
-        }
-    }
-    output
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1002,6 +1052,51 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(started, ORDER);
         assert!(events.iter().all(|event| !event.kind.is_terminal()));
+    }
+
+    #[test]
+    fn span_typeset_preserves_the_original_content_program_byte_for_byte() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("formatted-input.pdf");
+        let output = directory.path().join("formatted-output.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        let original_program =
+            b"% keep this comment\nBT /F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS)Tj\nET\n";
+        pdf.get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(original_program.to_vec());
+        pdf.save(&input).unwrap();
+        let mut document = Document::new(&input, &output);
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+
+        run(&mut document, &context).unwrap();
+
+        let output_pdf = LopdfDocument::load(&output).unwrap();
+        let page_id = output_pdf.get_pages()[&1];
+        let content_ids = output_pdf.get_page_contents(page_id);
+        let [content_id] = content_ids.as_slice() else {
+            panic!("expected exactly one output content stream");
+        };
+        let output_program = output_pdf
+            .get_object(*content_id)
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .decompressed_content()
+            .unwrap();
+        assert_eq!(output_program, original_program);
     }
 
     #[test]
@@ -1311,7 +1406,7 @@ mod tests {
         let mut document = Document::new(fixture(), "unused.pdf");
         document.rewrites = vec![PageRewrite {
             page_index: 0,
-            content: Vec::new(),
+            replacements: Vec::new(),
             reused_fonts: Vec::new(),
             needs_new_font: true,
         }];

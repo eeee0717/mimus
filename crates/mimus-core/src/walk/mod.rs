@@ -9,7 +9,7 @@ use crate::event::RecoveryKind;
 use crate::il::{FontRef, Point, Rect, TextTransform};
 use tokenizer::{Token, TokenKind, tokenize};
 
-const MAX_STREAM_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_STREAM_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WalkedChar {
@@ -117,6 +117,13 @@ struct Walker<'a> {
 pub struct PageWalk {
     pub characters: Vec<WalkedChar>,
     pub recoveries: BTreeSet<RecoveryKind>,
+    pub(crate) content_streams: Vec<WalkedContentStream>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WalkedContentStream {
+    pub object_id: ObjectId,
+    pub decoded: Vec<u8>,
 }
 
 pub fn walk_page(document: &Document, page_id: ObjectId) -> Result<PageWalk> {
@@ -138,6 +145,7 @@ pub fn walk_page(document: &Document, page_id: ObjectId) -> Result<PageWalk> {
         recoveries: BTreeSet::new(),
         text_object_is_implicit: false,
     };
+    let mut content_streams = Vec::with_capacity(content_objects.len());
     for object_id in content_objects {
         let stream = document
             .get_object(object_id)
@@ -155,6 +163,7 @@ pub fn walk_page(document: &Document, page_id: ObjectId) -> Result<PageWalk> {
             })?;
         walker.content_object = object_id;
         walker.walk(tokenize(&decoded)?)?;
+        content_streams.push(WalkedContentStream { object_id, decoded });
     }
     // 显式 `BT` 没等到 `ET` 是流被截断的信号，仍然报错；隐式打开的文本对象本来就
     // 没有对应的 `ET`，在流尾隐式闭合。
@@ -164,6 +173,7 @@ pub fn walk_page(document: &Document, page_id: ObjectId) -> Result<PageWalk> {
     Ok(PageWalk {
         characters: walker.characters,
         recoveries: walker.recoveries,
+        content_streams,
     })
 }
 

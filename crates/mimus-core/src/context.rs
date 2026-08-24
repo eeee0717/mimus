@@ -8,7 +8,7 @@ use crate::event::{Diagnostics, EventSink, PageDegradeReason, Stage};
 use crate::il;
 use crate::scan::{PageClass, PageEvidence};
 use crate::translate::Translator;
-use crate::walk::WalkedChar;
+use crate::walk::{WalkedChar, WalkedContentStream};
 use crate::write::{PageRewrite, WriteReport};
 
 #[derive(Debug, Clone, Copy)]
@@ -113,6 +113,7 @@ pub(crate) struct ExtractedPage {
     // ADR-0013 §2: 页级降级标记。置位后该页不再进入后续 pass，也不产生 rewrite。
     pub degraded: Option<PageDegradeReason>,
     pub walked_characters: Vec<WalkedChar>,
+    pub content_streams: Vec<WalkedContentStream>,
     pub engine_characters: Vec<PageCharSnapshot>,
     pub layout_regions: Vec<LayoutRegion>,
     pub input_raster: Option<RgbaImage>,
