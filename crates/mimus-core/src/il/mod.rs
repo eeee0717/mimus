@@ -112,7 +112,102 @@ pub struct Char {
     pub r#box: Rect,
     pub visual_bbox: Rect,
     pub text_transform: TextTransform,
+    /// Layout ownership is additive in IL v1. Characters without a trustworthy
+    /// assignment remain passthrough instead of being promoted to body text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<LayoutAssignment>,
     pub passthrough: PassthroughRef,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct LayoutAssignment {
+    pub label: LayoutLabel,
+    pub reading_order: usize,
+    pub bounds: Rect,
+    pub source: LayoutSource,
+    pub policy: TranslationPolicy,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutSource {
+    Model,
+    FallbackLine,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslationPolicy {
+    Translate,
+    Passthrough,
+}
+
+/// PP-DocLayoutV3's fixed 25-class vocabulary plus the local fallback_line
+/// marker. The marker is normalized to its enclosing semantic label before it
+/// reaches IL whenever a model region owns it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutLabel {
+    Abstract,
+    Algorithm,
+    AsideText,
+    Chart,
+    Content,
+    DisplayFormula,
+    DocTitle,
+    FigureTitle,
+    Footer,
+    FooterImage,
+    Footnote,
+    FormulaNumber,
+    Header,
+    HeaderImage,
+    Image,
+    InlineFormula,
+    Number,
+    ParagraphTitle,
+    Reference,
+    ReferenceContent,
+    Seal,
+    Table,
+    Text,
+    VerticalText,
+    VisionFootnote,
+    FallbackLine,
+}
+
+impl LayoutLabel {
+    #[must_use]
+    pub const fn translation_policy(self) -> TranslationPolicy {
+        match self {
+            Self::Abstract
+            | Self::AsideText
+            | Self::Content
+            | Self::DocTitle
+            | Self::FigureTitle
+            | Self::Footnote
+            | Self::ParagraphTitle
+            | Self::Text
+            | Self::VisionFootnote
+            | Self::FallbackLine => TranslationPolicy::Translate,
+            Self::Algorithm
+            | Self::Chart
+            | Self::DisplayFormula
+            | Self::Footer
+            | Self::FooterImage
+            | Self::FormulaNumber
+            | Self::Header
+            | Self::HeaderImage
+            | Self::Image
+            | Self::InlineFormula
+            | Self::Number
+            | Self::Reference
+            | Self::ReferenceContent
+            | Self::Seal
+            | Self::Table
+            | Self::VerticalText => TranslationPolicy::Passthrough,
+        }
+    }
 }
 
 const fn default_true() -> bool {

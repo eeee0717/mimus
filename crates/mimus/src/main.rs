@@ -11,8 +11,8 @@ use std::process::ExitCode;
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use debug::DebugArtifacts;
-use mimus_core::engine::SingleLineLayoutDetector;
 use mimus_core::engine::pdfium::PdfiumEngine;
+use mimus_core::engine::{LayoutDetector, RecordedLayoutDetector, SingleLineLayoutDetector};
 use mimus_core::error::{ErrorReason, InternalReason, IoReason, MimusError, Result, UsageReason};
 use mimus_core::event::ResultPayload;
 use mimus_core::pass;
@@ -55,6 +55,9 @@ struct TranslateArgs {
     /// New directory for per-pass IL snapshots and diagnostics.
     #[arg(long, value_name = "NEW_DIR")]
     debug: Option<PathBuf>,
+    /// Deterministic detector recording used by Corpus and explicit local validation.
+    #[arg(long, value_name = "JSON", hide = true)]
+    layout_replay: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -64,6 +67,9 @@ struct InspectArgs {
     /// New directory for per-pass IL snapshots and diagnostics.
     #[arg(long, value_name = "NEW_DIR")]
     debug: Option<PathBuf>,
+    /// Deterministic detector recording used by Corpus and explicit local validation.
+    #[arg(long, value_name = "JSON", hide = true)]
+    layout_replay: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -140,10 +146,13 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         Err(error) => return session.finish_error(error),
     };
     let translator = NoneTranslator;
-    let layout_detector = SingleLineLayoutDetector;
+    let layout_detector = match create_layout_detector(args.layout_replay.as_deref()) {
+        Ok(value) => value,
+        Err(error) => return session.finish_error(error),
+    };
     let context = PassContext {
         engine: &engine,
-        layout_detector: &layout_detector,
+        layout_detector: layout_detector.as_ref(),
         translator: &translator,
         events: session,
         snapshots: debug.as_ref().map(|value| value as &dyn PassSnapshotSink),
@@ -170,10 +179,13 @@ fn run_inspect(args: InspectArgs, session: &ProtocolSession) -> ExitCode {
         Err(error) => return session.finish_error(error),
     };
     let translator = NoneTranslator;
-    let layout_detector = SingleLineLayoutDetector;
+    let layout_detector = match create_layout_detector(args.layout_replay.as_deref()) {
+        Ok(value) => value,
+        Err(error) => return session.finish_error(error),
+    };
     let context = PassContext {
         engine: &engine,
-        layout_detector: &layout_detector,
+        layout_detector: layout_detector.as_ref(),
         translator: &translator,
         events: session,
         snapshots: debug.as_ref().map(|value| value as &dyn PassSnapshotSink),
@@ -218,6 +230,22 @@ fn finish_command(
 
 fn create_debug(path: Option<PathBuf>) -> Result<Option<DebugArtifacts>> {
     path.map(DebugArtifacts::create).transpose()
+}
+
+fn create_layout_detector(path: Option<&Path>) -> Result<Box<dyn LayoutDetector>> {
+    let Some(path) = path else {
+        return Ok(Box::new(SingleLineLayoutDetector));
+    };
+    let bytes = std::fs::read(path).map_err(|error| {
+        MimusError::io(
+            IoReason::InputRead,
+            format!(
+                "could not read layout recording {}: {error}",
+                path.display()
+            ),
+        )
+    })?;
+    Ok(Box::new(RecordedLayoutDetector::from_bytes(&bytes)?))
 }
 
 fn is_protocol_failure(error: &MimusError) -> bool {

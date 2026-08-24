@@ -812,43 +812,53 @@ impl Walker<'_> {
                 )
             })?;
         for glyph in font.decode(bytes) {
-            let transform = self.state.ctm.then(self.state.text_matrix);
-            let locatable = !transform.is_singular();
-            let baseline = transform.point(0.0, self.state.rise);
             let glyph_width = glyph.advance_em * self.state.font_size;
             let word_spacing = if glyph.encoded.as_slice() == b" " {
                 self.state.word_spacing
             } else {
                 0.0
             };
-            let advance = (glyph_width + self.state.character_spacing + word_spacing)
+            let total_advance = (glyph_width + self.state.character_spacing + word_spacing)
                 * self.state.horizontal_scale;
-            let metric_box = transformed_box(
-                transform,
-                0.0,
-                font.descent_em * self.state.font_size + self.state.rise,
-                glyph_width * self.state.horizontal_scale,
-                font.ascent_em * self.state.font_size + self.state.rise,
-            );
-            self.characters.push(WalkedChar {
-                unicode: glyph.unicode,
-                code: glyph.code,
-                visible: !matches!(self.state.rendering_mode, 3 | 7),
-                locatable,
-                encoded: glyph.encoded,
-                font: font.reference.clone(),
-                font_size: self.state.font_size,
-                advance: glyph_width * self.state.horizontal_scale,
-                font_supported: glyph.font_supported,
-                engine_mismatch_tolerated: font.engine_mismatch_tolerated,
-                baseline_origin: baseline,
-                metric_box,
-                text_transform: classify_transform(self.visual_rotation.then(transform)),
-                content_object: self.content_object,
-                byte_start,
-                byte_end,
-            });
-            self.state.text_matrix = self.state.text_matrix.translate(advance, 0.0);
+            let unicode = if glyph.unicode.is_empty() {
+                vec![None]
+            } else {
+                glyph.unicode.into_iter().map(Some).collect::<Vec<_>>()
+            };
+            let parts = unicode.len() as f64;
+            let part_width = glyph_width / parts;
+            let part_advance = total_advance / parts;
+            for unicode in unicode {
+                let transform = self.state.ctm.then(self.state.text_matrix);
+                let locatable = !transform.is_singular();
+                let baseline = transform.point(0.0, self.state.rise);
+                let metric_box = transformed_box(
+                    transform,
+                    0.0,
+                    font.descent_em * self.state.font_size + self.state.rise,
+                    part_width * self.state.horizontal_scale,
+                    font.ascent_em * self.state.font_size + self.state.rise,
+                );
+                self.characters.push(WalkedChar {
+                    unicode,
+                    code: glyph.code,
+                    visible: !matches!(self.state.rendering_mode, 3 | 7),
+                    locatable,
+                    encoded: glyph.encoded.clone(),
+                    font: font.reference.clone(),
+                    font_size: self.state.font_size,
+                    advance: part_width * self.state.horizontal_scale,
+                    font_supported: glyph.font_supported,
+                    engine_mismatch_tolerated: font.engine_mismatch_tolerated,
+                    baseline_origin: baseline,
+                    metric_box,
+                    text_transform: classify_transform(self.visual_rotation.then(transform)),
+                    content_object: self.content_object,
+                    byte_start,
+                    byte_end,
+                });
+                self.state.text_matrix = self.state.text_matrix.translate(part_advance, 0.0);
+            }
         }
         Ok(())
     }

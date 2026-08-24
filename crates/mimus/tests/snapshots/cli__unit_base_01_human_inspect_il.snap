@@ -1,5 +1,6 @@
 ---
 source: crates/mimus/tests/cli.rs
+assertion_line: 545
 expression: "String::from_utf8(human.stdout.clone()).unwrap()"
 ---
 {
@@ -52,6 +53,18 @@ expression: "String::from_utf8(human.stdout.clone()).unwrap()"
                 "text_transform": {
                   "kind": "upright"
                 },
+                "layout": {
+                  "label": "text",
+                  "reading_order": 0,
+                  "bounds": {
+                    "left": 73.1760025024414,
+                    "bottom": 119.84400177001953,
+                    "right": 111.98400115966797,
+                    "top": 128.9040069580078
+                  },
+                  "source": "fallback_line",
+                  "policy": "translate"
+                },
                 "passthrough": {
                   "content_object": 9,
                   "byte_start": 31,
@@ -88,6 +101,18 @@ expression: "String::from_utf8(human.stdout.clone()).unwrap()"
                 },
                 "text_transform": {
                   "kind": "upright"
+                },
+                "layout": {
+                  "label": "text",
+                  "reading_order": 0,
+                  "bounds": {
+                    "left": 73.1760025024414,
+                    "bottom": 119.84400177001953,
+                    "right": 111.98400115966797,
+                    "top": 128.9040069580078
+                  },
+                  "source": "fallback_line",
+                  "policy": "translate"
                 },
                 "passthrough": {
                   "content_object": 9,
@@ -126,6 +151,18 @@ expression: "String::from_utf8(human.stdout.clone()).unwrap()"
                 "text_transform": {
                   "kind": "upright"
                 },
+                "layout": {
+                  "label": "text",
+                  "reading_order": 0,
+                  "bounds": {
+                    "left": 73.1760025024414,
+                    "bottom": 119.84400177001953,
+                    "right": 111.98400115966797,
+                    "top": 128.9040069580078
+                  },
+                  "source": "fallback_line",
+                  "policy": "translate"
+                },
                 "passthrough": {
                   "content_object": 9,
                   "byte_start": 31,
@@ -163,6 +200,18 @@ expression: "String::from_utf8(human.stdout.clone()).unwrap()"
                 "text_transform": {
                   "kind": "upright"
                 },
+                "layout": {
+                  "label": "text",
+                  "reading_order": 0,
+                  "bounds": {
+                    "left": 73.1760025024414,
+                    "bottom": 119.84400177001953,
+                    "right": 111.98400115966797,
+                    "top": 128.9040069580078
+                  },
+                  "source": "fallback_line",
+                  "policy": "translate"
+                },
                 "passthrough": {
                   "content_object": 9,
                   "byte_start": 31,
@@ -199,6 +248,18 @@ expression: "String::from_utf8(human.stdout.clone()).unwrap()"
                 },
                 "text_transform": {
                   "kind": "upright"
+                },
+                "layout": {
+                  "label": "text",
+                  "reading_order": 0,
+                  "bounds": {
+                    "left": 73.1760025024414,
+                    "bottom": 119.84400177001953,
+                    "right": 111.98400115966797,
+                    "top": 128.9040069580078
+                  },
+                  "source": "fallback_line",
+                  "policy": "translate"
                 },
                 "passthrough": {
                   "content_object": 9,

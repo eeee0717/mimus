@@ -32,6 +32,12 @@ fn manifest_path(id: &str) -> PathBuf {
         .join("manifest.toml")
 }
 
+fn layout_recording_path(id: &str) -> PathBuf {
+    repo_root()
+        .join("corpus/layout-recordings")
+        .join(format!("{id}.json"))
+}
+
 #[derive(Debug, Deserialize)]
 struct FixtureManifest {
     identity: ManifestIdentity,
@@ -225,6 +231,17 @@ fn run_inspect(input: &Path, json: bool, debug: Option<&Path>) -> Output {
         command.arg("--debug").arg(debug);
     }
     command.arg(input).output().unwrap()
+}
+
+fn run_inspect_with_layout(id: &str) -> Output {
+    let mut command = Command::new(BIN);
+    command.env(PDFIUM_ENV, pdfium_library());
+    command
+        .args(["--json", "inspect", "--layout-replay"])
+        .arg(layout_recording_path(id))
+        .arg(fixture_path(id))
+        .output()
+        .unwrap()
 }
 
 fn run_none_with_debug(input: &Path, output: &Path, debug: &Path, json: bool) -> Output {
@@ -934,23 +951,111 @@ fn short_output_flag_is_supported() {
 }
 
 #[test]
-fn paragraph_layout_not_yet_implemented_still_fails_closed_without_output() {
+fn multi_region_none_roundtrip_remains_bounded_before_paragraph_reconstruction() {
     let directory = tempfile::tempdir().unwrap();
     let id = "unit-base-02-two-column";
     let translated = directory.path().join(format!("{id}.pdf"));
     let result = run_none(&fixture_path(id), Some(&translated), false);
-    assert_eq!(
-        result.status.code(),
-        Some(2),
-        "fixture {id}: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
     assert!(
-        String::from_utf8_lossy(&result.stderr).contains("unsupported_pdf"),
+        result.status.success(),
         "fixture {id}: {}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert!(!translated.exists(), "fixture {id} produced output");
+    assert_eq!(
+        decoded_page_streams(&translated, 1),
+        decoded_page_streams(&fixture_path(id), 1)
+    );
+}
+
+#[test]
+fn recorded_layout_policy_drives_production_il_candidates_and_passthrough() {
+    let expected = BTreeMap::from([
+        (
+            "unit-layout-01-nested-boxes",
+            (
+                "Body text ends here, two points shy of the frame.".to_owned(),
+                "Table 1. Throughput measured over ten runs.".to_owned(),
+            ),
+        ),
+        (
+            "unit-layout-07-policy-zones",
+            (
+                concat!(
+                    "The first body paragraph is the only kind of text on this page that a ",
+                    "translator should ever see. Everything around it belongs to a policy zone.",
+                    "The second body paragraph is likewise ordinary prose. Between them the page ",
+                    "carries a running head, a folio, a reference entry and a seal."
+                )
+                .to_owned(),
+                concat!(
+                    "Journal of Reproducible Layout, Vol. 3",
+                    "[1] Smith et al. Layout preservation in machine translation. 2024.",
+                    "APPROVED",
+                    "17"
+                )
+                .to_owned(),
+            ),
+        ),
+        (
+            "unit-layout-02-table-only",
+            (
+                String::new(),
+                "RunThroughputLatencyfirst1204 ops8.1 mssecond1198 ops8.3 ms".to_owned(),
+            ),
+        ),
+        (
+            "unit-layout-08-narrow-gutter",
+            (
+                String::new(),
+                expected_page_text(&fixture_manifest("unit-layout-08-narrow-gutter"), 0),
+            ),
+        ),
+    ]);
+
+    for (id, (expected_translate, expected_passthrough)) in expected {
+        let output = run_inspect_with_layout(id);
+        assert!(
+            output.status.success(),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let events = parse_events(&output.stdout);
+        assert_one_terminal_last(&events, "result");
+        let chars = events.last().unwrap()["il"]["pages"][0]["paragraphs"][0]["text"]["chars"]
+            .as_array()
+            .unwrap();
+        let collect_policy = |policy: &str| {
+            chars
+                .iter()
+                .filter(|character| character["layout"]["policy"] == policy)
+                .filter_map(|character| character["unicode"].as_str())
+                .collect::<String>()
+        };
+        assert_eq!(
+            collect_policy("translate"),
+            expected_translate,
+            "fixture {id}"
+        );
+        assert_eq!(
+            collect_policy("passthrough"),
+            expected_passthrough,
+            "fixture {id}"
+        );
+    }
+
+    let policy = run_inspect_with_layout("unit-layout-07-policy-zones");
+    let events = parse_events(&policy.stdout);
+    let chars = events.last().unwrap()["il"]["pages"][0]["paragraphs"][0]["text"]["chars"]
+        .as_array()
+        .unwrap();
+    let labels = chars
+        .iter()
+        .filter_map(|character| character["layout"]["label"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(labels.contains("header"));
+    assert!(labels.contains("reference_content"));
+    assert!(labels.contains("seal"));
+    assert!(labels.contains("number"));
 }
 
 #[test]
@@ -1459,7 +1564,7 @@ fn parse_stream_and_xobject_fixture_matrix_stays_bounded_and_preserves_streams()
         ),
         (
             "unit-write-04-xobj-in-objstm",
-            (2, OutputExpectation::Missing, None),
+            (0, OutputExpectation::Exact, None),
         ),
         (
             "unit-xobj-00-recursion-parent",
@@ -1467,7 +1572,7 @@ fn parse_stream_and_xobject_fixture_matrix_stays_bounded_and_preserves_streams()
         ),
         (
             "unit-xobj-04-inherited-resources",
-            (2, OutputExpectation::Missing, None),
+            (0, OutputExpectation::Exact, None),
         ),
         (
             "unit-xobj-05-scope-parent",
@@ -1926,12 +2031,6 @@ fn graphics_text_state_and_multiple_lines_round_trip_without_content_loss() {
         let input = write_program_pdf(directory.path(), name, program);
         let translated = directory.path().join(format!("out-{name}"));
         let result = run_none(&input, Some(&translated), false);
-        if *name == "two-lines.pdf" {
-            assert_eq!(result.status.code(), Some(2));
-            assert!(String::from_utf8_lossy(&result.stderr).contains("unsupported_pdf"));
-            assert!(!translated.exists());
-            continue;
-        }
         assert!(
             result.status.success(),
             "input {name}: {}",

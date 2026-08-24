@@ -11,7 +11,8 @@ use crate::event::{
 };
 use crate::geometry::{PageFrame, PageGeometryResolveError};
 use crate::il::{
-    self, Char, PageGeometry, Paragraph, PassthroughRef, Rect, TextCarrier, TextTransform,
+    self, Char, LayoutAssignment, LayoutLabel, LayoutSource, PageGeometry, Paragraph,
+    PassthroughRef, Rect, TextCarrier, TextTransform, TranslationPolicy,
 };
 use crate::scan::{PageClass, prescan_page};
 #[cfg(test)]
@@ -49,6 +50,7 @@ pub const PIPELINE: [(Stage, Pass); 10] = [
 
 pub const INSPECT_STAGE_COUNT: usize = 4;
 const MAX_PAGE_TREE_DEPTH: usize = 128;
+const MAX_OBJECT_STREAM_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranslationResult {
@@ -198,6 +200,7 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     if pdf.was_encrypted() || pdf.is_encrypted() {
         return Err(encrypted_pdf_error());
     }
+    validate_object_streams(&pdf)?;
     let lopdf_pages = validated_page_ids(&pdf)?;
     let engine_pages = context.engine.page_count(&bytes)?;
     if lopdf_pages.len() != engine_pages {
@@ -261,6 +264,77 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     document.original_bytes = bytes;
     document.pdf = Some(pdf);
     document.extracted_pages = extracted_pages;
+    Ok(())
+}
+
+fn validate_object_streams(pdf: &LopdfDocument) -> Result<()> {
+    for (&object_id, object) in &pdf.objects {
+        let Object::Stream(stream) = object else {
+            continue;
+        };
+        if stream.dict.get(b"Type").and_then(Object::as_name).ok() != Some(b"ObjStm") {
+            continue;
+        }
+        let count = stream
+            .dict
+            .get(b"N")
+            .and_then(Object::as_i64)
+            .ok()
+            .and_then(|value| usize::try_from(value).ok());
+        let first = stream
+            .dict
+            .get(b"First")
+            .and_then(Object::as_i64)
+            .ok()
+            .and_then(|value| usize::try_from(value).ok());
+        let decoded = crate::pdf_stream::decode(pdf, stream, MAX_OBJECT_STREAM_BYTES).ok();
+        let valid =
+            count
+                .zip(first)
+                .zip(decoded.as_deref())
+                .is_some_and(|((count, first), decoded)| {
+                    let Some(header) = decoded.get(..first) else {
+                        return false;
+                    };
+                    let integers = header
+                        .split(u8::is_ascii_whitespace)
+                        .filter(|token| !token.is_empty())
+                        .map(|token| {
+                            std::str::from_utf8(token)
+                                .ok()
+                                .and_then(|token| token.parse::<usize>().ok())
+                        })
+                        .collect::<Option<Vec<_>>>();
+                    let Some(integers) = integers else {
+                        return false;
+                    };
+                    if integers.len() != count.saturating_mul(2) {
+                        return false;
+                    }
+                    let body_len = decoded.len() - first;
+                    let mut object_numbers = BTreeSet::new();
+                    let mut previous_offset = None;
+                    integers.chunks_exact(2).all(|pair| {
+                        let object_number = pair[0];
+                        let offset = pair[1];
+                        let ordered = previous_offset.is_none_or(|previous| offset >= previous);
+                        previous_offset = Some(offset);
+                        object_number > 0
+                            && object_numbers.insert(object_number)
+                            && offset <= body_len
+                            && ordered
+                    })
+                });
+        if !valid {
+            return Err(MimusError::input(
+                InputReason::PdfParse,
+                format!(
+                    "object stream {} {} R has an invalid header",
+                    object_id.0, object_id.1
+                ),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -515,10 +589,19 @@ pub fn layout(document: &mut Document, context: &PassContext<'_>) -> Result<()> 
             } else {
                 &synthetic_characters
             };
-            page.layout_regions =
-                context
-                    .layout_detector
-                    .detect(page.geometry, &raster, layout_characters)?;
+            page.layout_regions = context.layout_detector.detect(
+                page.index,
+                page.geometry,
+                &raster,
+                layout_characters,
+            )?;
+            add_fallback_regions(&mut page.layout_regions, &page.walked_characters);
+            inherit_fallback_semantics(&mut page.layout_regions);
+            apply_policy_overrides(
+                page.geometry,
+                &mut page.layout_regions,
+                &page.walked_characters,
+            );
             page.input_raster = Some(raster);
         }
         context.events.emit(Event::new(EventKind::PageProgress {
@@ -528,6 +611,237 @@ pub fn layout(document: &mut Document, context: &PassContext<'_>) -> Result<()> 
         }))?;
     }
     Ok(())
+}
+
+fn add_fallback_regions(
+    regions: &mut Vec<crate::engine::LayoutRegion>,
+    walked: &[crate::walk::WalkedChar],
+) {
+    let mut candidates = walked
+        .iter()
+        .filter(|character| {
+            character.visible
+                && character.locatable
+                && character.text_transform == TextTransform::Upright
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .baseline_origin
+            .y
+            .total_cmp(&left.baseline_origin.y)
+            .then_with(|| left.baseline_origin.x.total_cmp(&right.baseline_origin.x))
+            .then_with(|| left.byte_start.cmp(&right.byte_start))
+    });
+
+    let mut lines = Vec::<(Rect, f64, f64, f64, bool)>::new();
+    for character in candidates {
+        let baseline = character.baseline_origin.y;
+        let max_baseline_delta = (character.font_size * 0.25).max(1.0);
+        let max_gap = (character.font_size * 2.0).max(12.0);
+        let center = crate::il::Point {
+            x: (character.metric_box.left + character.metric_box.right) / 2.0,
+            y: (character.metric_box.bottom + character.metric_box.top) / 2.0,
+        };
+        let uncovered = !regions
+            .iter()
+            .any(|region| point_in_rect(center, region.bounds));
+        if let Some((bounds, line_baseline, right_edge, line_font_size, has_uncovered)) =
+            lines.last_mut()
+            && (baseline - *line_baseline).abs() <= max_baseline_delta.max(*line_font_size * 0.25)
+            && character.metric_box.left - *right_edge <= max_gap.max(*line_font_size * 2.0)
+        {
+            *bounds = bounds.union(character.metric_box);
+            *right_edge = (*right_edge).max(character.metric_box.right);
+            *line_font_size = (*line_font_size).max(character.font_size);
+            *has_uncovered |= uncovered;
+        } else {
+            lines.push((
+                character.metric_box,
+                baseline,
+                character.metric_box.right,
+                character.font_size,
+                uncovered,
+            ));
+        }
+    }
+
+    let mut next_order = regions
+        .iter()
+        .map(|region| region.reading_order)
+        .max()
+        .map_or(0, |order| order.saturating_add(1));
+    for (bounds, _, _, _, has_uncovered) in lines {
+        if !has_uncovered {
+            continue;
+        }
+        regions.push(crate::engine::LayoutRegion {
+            bounds,
+            reading_order: next_order,
+            label: LayoutLabel::FallbackLine,
+            source: LayoutSource::FallbackLine,
+            confidence: 1.0,
+        });
+        next_order = next_order.saturating_add(1);
+    }
+}
+
+fn apply_policy_overrides(
+    geometry: PageGeometry,
+    regions: &mut [crate::engine::LayoutRegion],
+    walked: &[crate::walk::WalkedChar],
+) {
+    for region in regions
+        .iter_mut()
+        .filter(|region| region.label.translation_policy() == TranslationPolicy::Translate)
+    {
+        let text = walked
+            .iter()
+            .filter(|character| {
+                character.visible
+                    && character.locatable
+                    && point_in_rect(character.baseline_origin, region.bounds)
+            })
+            .filter_map(|character| character.unicode)
+            .collect::<String>();
+        let trimmed = text.trim();
+        let top_ratio = region.bounds.top / geometry.height;
+        let bottom_ratio = region.bounds.bottom / geometry.height;
+        if region.source == LayoutSource::Model && top_ratio >= 0.88 {
+            region.label = LayoutLabel::Header;
+        } else if region.source == LayoutSource::Model && bottom_ratio <= 0.12 {
+            region.label = LayoutLabel::Footer;
+        } else if looks_like_reference_entry(trimmed) {
+            region.label = LayoutLabel::ReferenceContent;
+        } else if region.bounds.top < geometry.height * 0.5 && looks_like_seal(trimmed) {
+            region.label = LayoutLabel::Seal;
+        }
+    }
+}
+
+fn looks_like_reference_entry(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix('[') else {
+        return false;
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && rest.as_bytes().get(digits) == Some(&b']')
+}
+
+fn looks_like_seal(text: &str) -> bool {
+    let mut letters = 0;
+    for character in text.chars() {
+        if character.is_alphabetic() {
+            letters += 1;
+            if !character.is_uppercase() {
+                return false;
+            }
+        } else if !character.is_whitespace() && !character.is_ascii_punctuation() {
+            return false;
+        }
+    }
+    (3..=32).contains(&letters)
+}
+
+fn inherit_fallback_semantics(regions: &mut [crate::engine::LayoutRegion]) {
+    let semantic_regions = regions.to_vec();
+    for fallback in regions
+        .iter_mut()
+        .filter(|region| region.label == LayoutLabel::FallbackLine)
+    {
+        let center = crate::il::Point {
+            x: (fallback.bounds.left + fallback.bounds.right) / 2.0,
+            y: (fallback.bounds.bottom + fallback.bounds.top) / 2.0,
+        };
+        let owner = semantic_regions
+            .iter()
+            .filter(|region| {
+                region.label != LayoutLabel::FallbackLine && point_in_rect(center, region.bounds)
+            })
+            .min_by(|left, right| {
+                rect_area(left.bounds)
+                    .total_cmp(&rect_area(right.bounds))
+                    .then_with(|| left.reading_order.cmp(&right.reading_order))
+            });
+        if let Some(owner) = owner {
+            fallback.label = owner.label;
+        }
+    }
+}
+
+fn point_in_rect(point: crate::il::Point, bounds: Rect) -> bool {
+    point.x >= bounds.left
+        && point.x <= bounds.right
+        && point.y >= bounds.bottom
+        && point.y <= bounds.top
+}
+
+fn rect_area(bounds: Rect) -> f64 {
+    (bounds.right - bounds.left).max(0.0) * (bounds.top - bounds.bottom).max(0.0)
+}
+
+fn intersection_area(left: Rect, right: Rect) -> f64 {
+    (left.right.min(right.right) - left.left.max(right.left)).max(0.0)
+        * (left.top.min(right.top) - left.bottom.max(right.bottom)).max(0.0)
+}
+
+fn layout_assignment(
+    regions: &[crate::engine::LayoutRegion],
+    bounds: Rect,
+) -> Option<LayoutAssignment> {
+    let char_area = rect_area(bounds);
+    regions
+        .iter()
+        .filter_map(|region| {
+            let overlap = intersection_area(bounds, region.bounds);
+            let center = crate::il::Point {
+                x: (bounds.left + bounds.right) / 2.0,
+                y: (bounds.bottom + bounds.top) / 2.0,
+            };
+            if overlap <= 0.0 && !point_in_rect(center, region.bounds) {
+                return None;
+            }
+            let coverage = if char_area > 0.0 {
+                overlap / char_area
+            } else {
+                0.0
+            };
+            Some((region, coverage))
+        })
+        .max_by(|(left, left_coverage), (right, right_coverage)| {
+            layout_assignment_priority(left, regions, bounds)
+                .cmp(&layout_assignment_priority(right, regions, bounds))
+                .then_with(|| left_coverage.total_cmp(right_coverage))
+                .then_with(|| rect_area(right.bounds).total_cmp(&rect_area(left.bounds)))
+                .then_with(|| left.confidence.total_cmp(&right.confidence))
+                .then_with(|| right.reading_order.cmp(&left.reading_order))
+        })
+        .map(|(region, _)| LayoutAssignment {
+            label: region.label,
+            reading_order: region.reading_order,
+            bounds: region.bounds,
+            source: region.source,
+            policy: region.label.translation_policy(),
+        })
+}
+
+fn layout_assignment_priority(
+    region: &crate::engine::LayoutRegion,
+    regions: &[crate::engine::LayoutRegion],
+    bounds: Rect,
+) -> u8 {
+    match region.source {
+        LayoutSource::FallbackLine => 1,
+        LayoutSource::Model
+            if regions.iter().any(|fallback| {
+                fallback.source == LayoutSource::FallbackLine
+                    && fallback.label == region.label
+                    && intersection_area(bounds, fallback.bounds) > 0.0
+            }) =>
+        {
+            2
+        }
+        LayoutSource::Model => 0,
+    }
 }
 
 fn reliable_upright_snapshots(walked: &[crate::walk::WalkedChar]) -> Vec<PageCharSnapshot> {
@@ -626,19 +940,21 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
             crate::engine::LayoutRegion {
                 bounds,
                 reading_order: 0,
+                label: LayoutLabel::Text,
+                source: LayoutSource::FallbackLine,
+                confidence: 1.0,
             }
         });
-        if extracted.layout_regions.len() != 1 && synthetic_region.is_none() {
-            return Err(MimusError::input(
-                InputReason::UnsupportedPdf,
-                format!(
-                    "M1 supports exactly one detected line per page; page {} has {} regions",
-                    extracted.index + 1,
-                    extracted.layout_regions.len()
-                ),
-            ));
-        }
-        let region = synthetic_region.unwrap_or_else(|| extracted.layout_regions[0]);
+        let region = synthetic_region.unwrap_or_else(|| {
+            let first = extracted.layout_regions[0];
+            extracted.layout_regions[1..]
+                .iter()
+                .fold(first, |mut aggregate, region| {
+                    aggregate.bounds = aggregate.bounds.union(region.bounds);
+                    aggregate.reading_order = aggregate.reading_order.min(region.reading_order);
+                    aggregate
+                })
+        });
         let engine_boxes_are_aligned = extracted.walked_characters.len()
             == extracted.engine_characters.len()
             && extracted
@@ -664,6 +980,7 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
                     walked.metric_box
                 },
                 text_transform: walked.text_transform,
+                layout: layout_assignment(&extracted.layout_regions, walked.metric_box),
                 passthrough: PassthroughRef {
                     content_object: walked.content_object.0,
                     byte_start: walked.byte_start,
@@ -754,6 +1071,9 @@ fn character_is_translatable(character: &Char, content_objects: &BTreeSet<u32>) 
     character.unicode.is_some()
         && character.visible
         && character.text_transform == TextTransform::Upright
+        && character
+            .layout
+            .is_some_and(|layout| layout.policy == TranslationPolicy::Translate)
         && content_objects.contains(&character.passthrough.content_object)
 }
 
@@ -1274,6 +1594,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_validation_rejects_a_wrong_object_stream_count() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "../../corpus/fixtures/mal-parse-08-broken-objstm/mal-parse-08-broken-objstm.pdf",
+        );
+        let pdf = LopdfDocument::load(path).unwrap();
+        let error = validate_object_streams(&pdf).unwrap_err();
+        assert_eq!(
+            error.reason(),
+            crate::error::ErrorReason::Input(InputReason::PdfParse)
+        );
+    }
+
     #[derive(Default)]
     struct FakeEngine {
         raster_calls: AtomicUsize,
@@ -1401,6 +1734,7 @@ mod tests {
     impl LayoutDetector for FailingLayoutDetector {
         fn detect(
             &self,
+            _page_index: usize,
             _geometry: PageGeometry,
             _raster: &RgbaImage,
             _characters: &[PageCharSnapshot],
@@ -1678,6 +2012,152 @@ mod tests {
                 .recoveries
                 .contains(&RecoveryKind::NestedTextObject)
         );
+    }
+
+    #[test]
+    fn recorded_fallback_inside_table_stays_passthrough_through_translation() {
+        let recording = br#"{
+            "schema_version": 1,
+            "pages": [{
+                "page_index": 0,
+                "geometry": {"width": 300.0, "height": 200.0, "rotate_degrees": 0},
+                "regions": [
+                    {
+                        "bounds": {"left": 0.0, "bottom": 100.0, "right": 300.0, "top": 150.0},
+                        "reading_order": 0,
+                        "label": "table",
+                        "source": "model",
+                        "confidence": 0.99
+                    },
+                    {
+                        "bounds": {"left": 70.0, "bottom": 118.0, "right": 112.0, "top": 132.0},
+                        "reading_order": 1,
+                        "label": "fallback_line",
+                        "source": "fallback_line",
+                        "confidence": 1.0
+                    }
+                ]
+            }]
+        }"#;
+        let detector = crate::engine::RecordedLayoutDetector::from_bytes(recording).unwrap();
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = WrappingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &detector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+
+        inspect(&mut document, &context).unwrap();
+        translate(&mut document, &context).unwrap();
+
+        let paragraph = &document.il.pages[0].paragraphs[0];
+        assert_eq!(paragraph.translated_text.as_deref(), Some("MIMUS"));
+        assert!(translator.inputs.lock().unwrap().is_empty());
+        let assignments = paragraph
+            .chars()
+            .iter()
+            .map(|character| character.layout)
+            .collect::<Vec<_>>();
+        assert!(
+            paragraph.chars().iter().all(|character| {
+                character.layout.is_some_and(|layout| {
+                    layout.label == LayoutLabel::Table
+                        && layout.source == LayoutSource::Model
+                        && layout.reading_order == 0
+                        && layout.policy == TranslationPolicy::Passthrough
+                })
+            }),
+            "{assignments:#?}"
+        );
+    }
+
+    #[test]
+    fn positional_policy_repairs_model_regions_without_relabeling_fallback_lines() {
+        let bounds = Rect {
+            left: 20.0,
+            bottom: 180.0,
+            right: 180.0,
+            top: 195.0,
+        };
+        let mut regions = [
+            crate::engine::LayoutRegion {
+                bounds,
+                reading_order: 0,
+                label: LayoutLabel::Text,
+                source: LayoutSource::Model,
+                confidence: 0.8,
+            },
+            crate::engine::LayoutRegion {
+                bounds,
+                reading_order: 1,
+                label: LayoutLabel::FallbackLine,
+                source: LayoutSource::FallbackLine,
+                confidence: 1.0,
+            },
+        ];
+
+        apply_policy_overrides(
+            PageGeometry {
+                width: 200.0,
+                height: 200.0,
+                rotate_degrees: 0,
+            },
+            &mut regions,
+            &[],
+        );
+
+        assert_eq!(regions[0].label, LayoutLabel::Header);
+        assert_eq!(regions[1].label, LayoutLabel::FallbackLine);
+    }
+
+    #[test]
+    fn model_ownership_requires_matching_fallback_line_semantics() {
+        let bounds = Rect {
+            left: 8.0,
+            bottom: 10.0,
+            right: 9.0,
+            top: 12.0,
+        };
+        let model = crate::engine::LayoutRegion {
+            bounds: Rect {
+                left: 5.0,
+                bottom: 0.0,
+                right: 20.0,
+                top: 20.0,
+            },
+            reading_order: 3,
+            label: LayoutLabel::Table,
+            source: LayoutSource::Model,
+            confidence: 0.9,
+        };
+        let mut fallback = crate::engine::LayoutRegion {
+            bounds: Rect {
+                left: 0.0,
+                bottom: 9.0,
+                right: 10.0,
+                top: 13.0,
+            },
+            reading_order: 4,
+            label: LayoutLabel::Text,
+            source: LayoutSource::FallbackLine,
+            confidence: 1.0,
+        };
+
+        let assignment = layout_assignment(&[model, fallback], bounds).unwrap();
+        assert_eq!(assignment.label, LayoutLabel::Text);
+        assert_eq!(assignment.source, LayoutSource::FallbackLine);
+
+        fallback.label = LayoutLabel::Table;
+        let assignment = layout_assignment(&[model, fallback], bounds).unwrap();
+        assert_eq!(assignment.label, LayoutLabel::Table);
+        assert_eq!(assignment.source, LayoutSource::Model);
+        assert_eq!(assignment.reading_order, 3);
     }
 
     #[test]
