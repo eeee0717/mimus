@@ -2286,6 +2286,85 @@ fn independent_tools_open_the_output_and_preserve_manifest_geometry() {
     assert_close(200.0 - number(&character, "y"), 120.0, 0.001);
 }
 
+#[test]
+fn writeback_fixture_matrix_preserves_prefix_structure_and_resource_identity() {
+    for id in [
+        "unit-write-01-bookmarks-rich",
+        "unit-write-02-shared-resources",
+        "unit-write-03-resources-gen-nonzero",
+        "unit-write-04-xobj-in-objstm",
+        "unit-write-05-indirect-resources-objstm",
+        "unit-write-06-free-object-slot",
+    ] {
+        let input = fixture_path(id);
+        let directory = tempfile::tempdir().unwrap();
+        let translated = directory.path().join(format!("{id}.pdf"));
+        let result = run_none(&input, Some(&translated), false);
+        assert!(
+            result.status.success(),
+            "{id}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let input_bytes = std::fs::read(&input).unwrap();
+        let output_bytes = std::fs::read(&translated).unwrap();
+        assert!(output_bytes.starts_with(&input_bytes), "{id}");
+        let qpdf = Command::new("qpdf")
+            .arg("--check")
+            .arg(&translated)
+            .output()
+            .unwrap();
+        assert!(
+            qpdf.status.success(),
+            "{id}: {}",
+            String::from_utf8_lossy(&qpdf.stderr)
+        );
+        let poppler = Command::new("pdftotext")
+            .arg(&translated)
+            .arg("-")
+            .output()
+            .unwrap();
+        let mupdf = Command::new("mutool")
+            .args(["draw", "-F", "txt"])
+            .arg(&translated)
+            .output()
+            .unwrap();
+        assert!(poppler.status.success(), "{id}");
+        assert!(mupdf.status.success(), "{id}");
+        assert!(!poppler.stdout.is_empty(), "{id}");
+        assert!(!mupdf.stdout.is_empty(), "{id}");
+    }
+
+    let input = fixture_path("unit-write-01-bookmarks-rich");
+    let directory = tempfile::tempdir().unwrap();
+    let translated = directory.path().join("rich.pdf");
+    assert!(run_none(&input, Some(&translated), false).status.success());
+    for object in [1, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] {
+        assert_eq!(
+            qpdf_object(&translated, &object.to_string()),
+            qpdf_object(&input, &object.to_string()),
+            "rich structure object {object} changed"
+        );
+    }
+
+    let input = fixture_path("unit-write-03-resources-gen-nonzero");
+    let translated = directory.path().join("generation.pdf");
+    assert!(run_none(&input, Some(&translated), false).status.success());
+    assert!(
+        String::from_utf8(qpdf_object(&translated, "3"))
+            .unwrap()
+            .contains("/Resources 4 7 R")
+    );
+
+    let input = fixture_path("unit-write-06-free-object-slot");
+    let translated = directory.path().join("free-slot.pdf");
+    assert!(run_none(&input, Some(&translated), false).status.success());
+    assert!(
+        page_content_ids(&translated, 1)
+            .iter()
+            .all(|(object, _)| *object > 10)
+    );
+}
+
 fn first_element_attributes(xml: &[u8], name: &[u8]) -> BTreeMap<String, String> {
     let mut reader = Reader::from_reader(xml);
     loop {
