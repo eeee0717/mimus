@@ -127,6 +127,15 @@ impl<W: Write + Send> ProtocolSession<W> {
 
     fn emit_human(&self, event: Event, state: &mut SessionState<W>) -> Result<()> {
         match event.kind {
+            EventKind::ConfigurationResolved {
+                translate_table: true,
+                ..
+            } => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "experimental table translation: enabled"
+                );
+            }
             EventKind::ConfigurationResolved { .. } => {}
             EventKind::TranslationCache { .. } => {}
             EventKind::StageStarted { stage } => {
@@ -148,7 +157,7 @@ impl<W: Write + Send> ProtocolSession<W> {
             EventKind::Diagnostic { diagnostic } => render_diagnostic(diagnostic),
             EventKind::Result { result, .. } => {
                 let bytes = match result {
-                    ResultPayload::Translate { output } => format!("{output}\n").into_bytes(),
+                    ResultPayload::Translate { output, .. } => format!("{output}\n").into_bytes(),
                     ResultPayload::Inspect { il } => mimus_core::il::canonical_json(&il)?,
                 };
                 write_bytes(state, &bytes)?;
@@ -600,6 +609,7 @@ mod tests {
     fn result() -> ResultPayload {
         ResultPayload::Translate {
             output: "paper.zh.pdf".to_owned(),
+            translate_table: false,
         }
     }
 

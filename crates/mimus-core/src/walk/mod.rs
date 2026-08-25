@@ -32,6 +32,7 @@ pub struct WalkedChar {
     pub baseline_origin: Point,
     pub metric_box: Rect,
     pub text_transform: TextTransform,
+    pub content_transform: [f64; 6],
     pub content_object: ObjectId,
     pub byte_start: usize,
     pub byte_end: usize,
@@ -863,6 +864,7 @@ impl Walker<'_> {
                     baseline_origin: baseline,
                     metric_box,
                     text_transform: classify_transform(self.visual_rotation.then(transform)),
+                    content_transform: self.state.ctm.0,
                     content_object: self.content_object,
                     byte_start,
                     byte_end,
@@ -922,6 +924,8 @@ impl Walker<'_> {
         if start != 0 {
             self.recoveries.insert(RecoveryKind::ArityExcess);
         }
+        let array_start = operands[start].span.start;
+        let array_end = last.span.end;
         let elements = &operands[start + 1..operands.len() - 1];
         if elements.iter().any(|element| {
             matches!(
@@ -936,7 +940,7 @@ impl Walker<'_> {
         for element in elements {
             match &element.kind {
                 TokenKind::Bytes(bytes) => {
-                    self.show_text(bytes, element.span.start, element.span.end)?;
+                    self.show_text(bytes, array_start, array_end)?;
                 }
                 TokenKind::Number(adjustment) => {
                     let shift =
@@ -1708,12 +1712,18 @@ mod tests {
         assert!(marked.recoveries.is_empty());
 
         // `[` 与 `]` 是操作数分隔符，不是操作符——`TJ` 必须拿到它们之间的元素。
-        let walked = walk_program(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm [(MIMUS)] TJ ET").unwrap();
+        let program = b"BT /F1 12 Tf 1 0 0 1 72 120 Tm [(MIMUS)] TJ ET";
+        let walked = walk_program(program).unwrap();
         assert_eq!(text_of(&walked), "MIMUS");
         assert_eq!(
             walked.characters[0].baseline_origin,
             Point { x: 72.0, y: 120.0 }
         );
+        let array_start = program.iter().position(|byte| *byte == b'[').unwrap();
+        let array_end = program.iter().position(|byte| *byte == b']').unwrap() + 1;
+        assert!(walked.characters.iter().all(|character| {
+            character.byte_start == array_start && character.byte_end == array_end
+        }));
         assert!(walked.recoveries.is_empty());
     }
 

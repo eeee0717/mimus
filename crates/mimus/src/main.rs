@@ -94,6 +94,9 @@ struct TranslateArgs {
     /// Fail without publishing output when any page or paragraph is preserved.
     #[arg(long)]
     strict: bool,
+    /// Experimental: translate text within recognized table-cell boundaries.
+    #[arg(long)]
+    translate_table: bool,
     /// New directory for per-pass IL snapshots and diagnostics.
     #[arg(long, value_name = "NEW_DIR")]
     debug: Option<PathBuf>,
@@ -185,6 +188,7 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         no_cache: args.no_cache,
         concurrency: args.concurrency,
         strict: args.strict,
+        translate_table: args.translate_table,
     }) {
         Ok(value) => value,
         Err(error) => return session.finish_error(error),
@@ -217,6 +221,7 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         .map(|path| path.to_string_lossy().into_owned());
     let max_concurrency = resolved.max_concurrency;
     let strict = resolved.strict;
+    let translate_table = resolved.translate_table;
     let translator = match resolved.take_translator() {
         Ok(value) => value,
         Err(error) => return session.finish_error(error),
@@ -236,6 +241,7 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         cache_path: cache_path_display,
         concurrency: max_concurrency,
         strict,
+        translate_table,
     })) {
         return session.finish_error(error);
     }
@@ -266,6 +272,7 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
             cache_path,
             max_concurrency,
             strict,
+            translate_table,
             ..PipelineConfig::default()
         },
     };
@@ -273,6 +280,7 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
     let outcome = pass::run(&mut document, &context).map(|result| CommandOutcome {
         result: ResultPayload::Translate {
             output: result.output,
+            translate_table,
         },
         pages: result.pages,
         warnings: result.warnings,

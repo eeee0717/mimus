@@ -857,6 +857,7 @@ fn intersection_area(left: Rect, right: Rect) -> f64 {
 fn layout_assignment(
     regions: &[crate::engine::LayoutRegion],
     bounds: Rect,
+    translate_table: bool,
 ) -> Option<LayoutAssignment> {
     let char_area = rect_area(bounds);
     regions
@@ -885,12 +886,19 @@ fn layout_assignment(
                 .then_with(|| left.confidence.total_cmp(&right.confidence))
                 .then_with(|| right.reading_order.cmp(&left.reading_order))
         })
-        .map(|(region, _)| LayoutAssignment {
-            label: region.label,
-            reading_order: region.reading_order,
-            bounds: region.bounds,
-            source: region.source,
-            policy: region.label.translation_policy(),
+        .map(|(region, _)| {
+            let policy = if translate_table && region.label == LayoutLabel::Table {
+                TranslationPolicy::Translate
+            } else {
+                region.label.translation_policy()
+            };
+            LayoutAssignment {
+                label: region.label,
+                reading_order: region.reading_order,
+                bounds: region.bounds,
+                source: region.source,
+                policy,
+            }
         })
 }
 
@@ -1007,7 +1015,7 @@ struct ParagraphDraft {
     lines: Vec<TextLine>,
 }
 
-pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
+pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     let mut pages = Vec::with_capacity(document.extracted_pages.len());
     for extracted in &document.extracted_pages {
         if !extracted.is_translatable() {
@@ -1052,7 +1060,11 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
                         .map_or(walked.metric_box, |engine| engine.tight_box),
                     text_transform: walked.text_transform,
                     implicit_space_before: false,
-                    layout: layout_assignment(&extracted.layout_regions, walked.metric_box),
+                    layout: layout_assignment(
+                        &extracted.layout_regions,
+                        walked.metric_box,
+                        context.config.translate_table,
+                    ),
                     passthrough: PassthroughRef {
                         content_object: walked.content_object.0,
                         byte_start: walked.byte_start,
@@ -1433,6 +1445,10 @@ fn split_natural_paragraphs(mut lines: Vec<TextLine>, label: LayoutLabel) -> Vec
             .count()
             * 5
             >= lines.len() * 4;
+    if label == LayoutLabel::Table {
+        infer_table_cell_bounds(&mut lines);
+        return lines.into_iter().map(|line| vec![line]).collect();
+    }
     if label == LayoutLabel::Content || toc_like {
         return lines.into_iter().map(|line| vec![line]).collect();
     }
@@ -1464,6 +1480,86 @@ fn split_natural_paragraphs(mut lines: Vec<TextLine>, label: LayoutLabel) -> Vec
         }
     }
     paragraphs
+}
+
+fn infer_table_cell_bounds(lines: &mut [TextLine]) {
+    let Some(table_bounds) = lines
+        .iter()
+        .flat_map(|line| &line.chars)
+        .find_map(|character| {
+            character
+                .character
+                .layout
+                .filter(|layout| layout.label == LayoutLabel::Table)
+                .map(|layout| layout.bounds)
+        })
+    else {
+        return;
+    };
+    let original = lines.iter().map(|line| line.bounds).collect::<Vec<_>>();
+    let mut rows = Vec::<Vec<usize>>::new();
+    for index in 0..lines.len() {
+        let belongs = rows.last().is_some_and(|row| {
+            let anchor = row[0];
+            (lines[anchor].baseline - lines[index].baseline).abs()
+                <= lines[anchor].font_size.max(lines[index].font_size) * 0.35
+        });
+        if belongs {
+            rows.last_mut().unwrap().push(index);
+        } else {
+            rows.push(vec![index]);
+        }
+    }
+    for row in &mut rows {
+        row.sort_by(|left, right| original[*left].left.total_cmp(&original[*right].left));
+    }
+    let row_text_bounds = rows
+        .iter()
+        .map(|row| {
+            row[1..].iter().fold(original[row[0]], |bounds, index| {
+                bounds.union(original[*index])
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for (row_index, row) in rows.iter().enumerate() {
+        let top = if row_index == 0 {
+            table_bounds.top
+        } else {
+            (row_text_bounds[row_index - 1].bottom + row_text_bounds[row_index].top) / 2.0
+        };
+        let bottom = if row_index + 1 == rows.len() {
+            table_bounds.bottom
+        } else {
+            (row_text_bounds[row_index].bottom + row_text_bounds[row_index + 1].top) / 2.0
+        };
+        for (column_index, &line_index) in row.iter().enumerate() {
+            let left = if column_index == 0 {
+                table_bounds.left
+            } else {
+                (original[row[column_index - 1]].right + original[line_index].left) / 2.0
+            };
+            let right = if column_index + 1 == row.len() {
+                table_bounds.right
+            } else {
+                (original[line_index].right + original[row[column_index + 1]].left) / 2.0
+            };
+            if left.is_finite()
+                && bottom.is_finite()
+                && right.is_finite()
+                && top.is_finite()
+                && left < right
+                && bottom < top
+            {
+                lines[line_index].bounds = Rect {
+                    left,
+                    bottom,
+                    right,
+                    top,
+                };
+            }
+        }
+    }
 }
 
 fn lines_bounds(lines: &[TextLine]) -> Rect {
@@ -1532,6 +1628,13 @@ fn paragraph_from_lines(
     let mut positioned = Vec::new();
     for line in lines {
         positioned.extend(line.chars);
+    }
+    for positioned in &mut positioned {
+        if let Some(layout) = &mut positioned.character.layout
+            && layout.label == LayoutLabel::Table
+        {
+            layout.bounds = bounds;
+        }
     }
     let preserved = paragraph_preserved_reason(
         positioned
@@ -2085,6 +2188,20 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
             .map(|stream| (stream.object_id, stream.decoded.as_slice()))
             .collect::<BTreeMap<_, _>>();
         let content_objects = streams.keys().copied().collect::<BTreeSet<_>>();
+        let content_transforms = extracted
+            .walked_characters
+            .iter()
+            .map(|character| {
+                (
+                    (
+                        character.content_object,
+                        character.byte_start,
+                        character.byte_end,
+                    ),
+                    character.content_transform,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         let mut replacements = BTreeMap::<(lopdf::ObjectId, usize, usize), Vec<u8>>::new();
         let mut reused_fonts = BTreeSet::new();
         let mut plans = Vec::new();
@@ -2114,6 +2231,12 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
             }
             if translated == source {
                 for character in chars {
+                    if character.layout.is_some_and(|layout| {
+                        layout.label == LayoutLabel::Table
+                            && layout.policy == TranslationPolicy::Passthrough
+                    }) {
+                        continue;
+                    }
                     let Some(content_object) = unique_page_content(character, &content_objects)?
                     else {
                         continue;
@@ -2203,7 +2326,13 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
             output_fonts.insert(bold, BuiltOutputFont { font, cids });
         }
         for plan in &plans {
-            install_typeset_replacements(plan, &output_fonts, &mut replacements)?;
+            install_typeset_replacements(
+                plan,
+                &output_fonts,
+                &streams,
+                &content_transforms,
+                &mut replacements,
+            )?;
             typeset_characters.extend(planned_characters(plan, &output_fonts));
         }
         let embedded_fonts = output_fonts
@@ -2623,23 +2752,56 @@ fn subset_tag(used: &BTreeSet<char>, bold: bool) -> String {
 fn install_typeset_replacements(
     plan: &TypesetPlan,
     fonts: &BTreeMap<bool, BuiltOutputFont>,
+    streams: &BTreeMap<lopdf::ObjectId, &[u8]>,
+    content_transforms: &BTreeMap<SpanKey, [f64; 6]>,
     replacements: &mut BTreeMap<SpanKey, Vec<u8>>,
 ) -> Result<()> {
+    let empty_operand = |span: SpanKey| -> Result<Vec<u8>> {
+        let source = streams
+            .get(&span.0)
+            .and_then(|stream| stream.get(span.1..span.2))
+            .ok_or_else(|| span_out_of_bounds(span.0, span.1, span.2, 0))?;
+        Ok(if source.starts_with(b"[") && source.ends_with(b"]") {
+            b"[]".to_vec()
+        } else {
+            b"()".to_vec()
+        })
+    };
     if plan.lines.is_empty() {
-        replacements.insert(plan.spans[0], Vec::new());
-        for span in &plan.spans[1..] {
-            replacements.insert(*span, Vec::new());
+        for span in &plan.spans {
+            let empty = empty_operand(*span)?;
+            replacements.entry(*span).or_insert(empty);
         }
         return Ok(());
     }
+    let content_transform = content_transforms.get(&plan.spans[0]).ok_or_else(|| {
+        MimusError::internal(
+            InternalReason::InvariantViolation,
+            "typeset span has no active content transform",
+        )
+    })?;
     let mut command = String::new();
     let mut emitted_run = false;
     for (index, line) in plan.lines.iter().enumerate() {
         let (x, y) = plan.baselines[index];
+        let matrix = content_relative_text_matrix(*content_transform, x, y).ok_or_else(|| {
+            MimusError::internal(
+                InternalReason::InvariantViolation,
+                "typeset span has a singular content transform",
+            )
+        })?;
         if emitted_run {
             command.push_str(" Tj\n");
         }
-        command.push_str(&format!("1 0 0 1 {} {} Tm ", pdf_number(x), pdf_number(y)));
+        command.push_str(&format!(
+            "{} {} {} {} {} {} Tm ",
+            pdf_number(matrix[0]),
+            pdf_number(matrix[1]),
+            pdf_number(matrix[2]),
+            pdf_number(matrix[3]),
+            pdf_number(matrix[4]),
+            pdf_number(matrix[5])
+        ));
         let mut run_start = 0;
         while run_start < line.len() {
             let bold = line[run_start].bold;
@@ -2675,11 +2837,62 @@ fn install_typeset_replacements(
             run_start = run_end;
         }
     }
-    replacements.insert(plan.spans[0], command.into_bytes());
+    let first = plan.spans[0];
+    let first_source = streams
+        .get(&first.0)
+        .and_then(|stream| stream.get(first.1..first.2))
+        .ok_or_else(|| span_out_of_bounds(first.0, first.1, first.2, 0))?;
+    let terminal = empty_operand(first)?;
+    let original_operator = if first_source.starts_with(b"[") && first_source.ends_with(b"]") {
+        b" TJ\n".as_slice()
+    } else {
+        b" Tj\n".as_slice()
+    };
+    let replacement = replacements.entry(first).or_default();
+    if replacement.is_empty() || replacement.as_slice() == terminal.as_slice() {
+        replacement.clear();
+        replacement.extend_from_slice(&terminal);
+        replacement.extend_from_slice(original_operator);
+    } else if replacement.ends_with(&terminal) {
+        replacement.truncate(replacement.len() - terminal.len());
+    } else {
+        return Err(MimusError::internal(
+            InternalReason::InvariantViolation,
+            "typeset span has an incompatible existing replacement",
+        ));
+    }
+    replacement.extend_from_slice(command.as_bytes());
+    replacement.extend_from_slice(b" Tj\n");
+    replacement.extend_from_slice(&terminal);
     for span in &plan.spans[1..] {
-        replacements.insert(*span, Vec::new());
+        let empty = empty_operand(*span)?;
+        replacements.entry(*span).or_insert(empty);
     }
     Ok(())
+}
+
+fn content_relative_text_matrix(content: [f64; 6], x: f64, y: f64) -> Option<[f64; 6]> {
+    let [a, b, c, d, e, f] = content;
+    let determinant = a.mul_add(d, -(b * c));
+    if !determinant.is_finite() || determinant.abs() <= 1e-12 {
+        return None;
+    }
+    let inverse = [
+        d / determinant,
+        -b / determinant,
+        -c / determinant,
+        a / determinant,
+        (c * f - d * e) / determinant,
+        (b * e - a * f) / determinant,
+    ];
+    Some([
+        inverse[0],
+        inverse[1],
+        inverse[2],
+        inverse[3],
+        inverse[0].mul_add(x, inverse[2].mul_add(y, inverse[4])),
+        inverse[1].mul_add(x, inverse[3].mul_add(y, inverse[5])),
+    ])
 }
 
 fn planned_characters(
@@ -4550,15 +4763,20 @@ mod tests {
             confidence: 1.0,
         };
 
-        let assignment = layout_assignment(&[model, fallback], bounds).unwrap();
+        let assignment = layout_assignment(&[model, fallback], bounds, false).unwrap();
         assert_eq!(assignment.label, LayoutLabel::Text);
         assert_eq!(assignment.source, LayoutSource::FallbackLine);
 
         fallback.label = LayoutLabel::Table;
-        let assignment = layout_assignment(&[model, fallback], bounds).unwrap();
+        let assignment = layout_assignment(&[model, fallback], bounds, false).unwrap();
         assert_eq!(assignment.label, LayoutLabel::Table);
         assert_eq!(assignment.source, LayoutSource::Model);
         assert_eq!(assignment.reading_order, 3);
+        assert_eq!(assignment.policy, TranslationPolicy::Passthrough);
+
+        let assignment = layout_assignment(&[model, fallback], bounds, true).unwrap();
+        assert_eq!(assignment.label, LayoutLabel::Table);
+        assert_eq!(assignment.policy, TranslationPolicy::Translate);
     }
 
     #[test]
@@ -5040,6 +5258,56 @@ mod tests {
         inherit_pdfium_utf16_surrogate_owners(&walked, &engine, &mut owners);
 
         assert_eq!(owners, [Some(0), Some(0)]);
+    }
+
+    #[test]
+    fn typeset_matrix_compensates_for_the_active_content_transform() {
+        let matrix =
+            content_relative_text_matrix([1.0, 0.0, 0.0, -1.0, 30.0, 117.0], 25.0, 100.0).unwrap();
+
+        assert_eq!(matrix, [1.0, 0.0, 0.0, -1.0, -5.0, 17.0]);
+        assert!(content_relative_text_matrix([1.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn typeset_replacement_closes_a_tj_array_before_emitting_text_operators() {
+        let span = ((1, 0), 0, 8);
+        let source = b"[<0041>]";
+        let streams = BTreeMap::from([((1, 0), source.as_slice())]);
+        let transforms = BTreeMap::from([(span, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0])]);
+        let output_fonts = test_output_fonts();
+        let (font, cids) =
+            build_embedded_font(&BTreeSet::from(['中']), &output_fonts.regular, false).unwrap();
+        let fonts = BTreeMap::from([(false, BuiltOutputFont { font, cids })]);
+        let plan = TypesetPlan {
+            spans: vec![span],
+            lines: vec![vec![crate::translate::StyledCharacter {
+                value: '中',
+                bold: false,
+            }]],
+            baselines: vec![(25.0, 100.0)],
+            font_size: 8.0,
+        };
+        let mut replacements = BTreeMap::new();
+
+        install_typeset_replacements(&plan, &fonts, &streams, &transforms, &mut replacements)
+            .unwrap();
+        install_typeset_replacements(
+            &TypesetPlan {
+                baselines: vec![(75.0, 100.0)],
+                ..plan
+            },
+            &fonts,
+            &streams,
+            &transforms,
+            &mut replacements,
+        )
+        .unwrap();
+
+        let replacement = std::str::from_utf8(&replacements[&span]).unwrap();
+        assert!(replacement.starts_with("[] TJ\n"), "{replacement}");
+        assert!(replacement.contains(" Tm "), "{replacement}");
+        assert_eq!(replacement.matches("/MimusR").count(), 2, "{replacement}");
     }
 
     #[test]

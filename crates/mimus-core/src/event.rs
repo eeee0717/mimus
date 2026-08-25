@@ -59,6 +59,7 @@ pub enum EventKind {
         cache_path: Option<String>,
         concurrency: usize,
         strict: bool,
+        translate_table: bool,
     },
     TranslationCache {
         page_index: usize,
@@ -132,8 +133,13 @@ impl EventKind {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum ResultPayload {
-    Translate { output: String },
-    Inspect { il: il::Document },
+    Translate {
+        output: String,
+        translate_table: bool,
+    },
+    Inspect {
+        il: il::Document,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
