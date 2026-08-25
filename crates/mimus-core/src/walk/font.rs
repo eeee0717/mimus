@@ -2,13 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
 
-use super::{MAX_STREAM_BYTES, object_number};
+use super::{MAX_STREAM_BYTES, UnicodeProvenance, object_number};
 use crate::il::FontRef;
 use crate::pdf_stream;
 
 #[derive(Debug, Clone)]
 pub(super) struct DecodedGlyph {
     pub unicode: Vec<char>,
+    pub unicode_provenance: UnicodeProvenance,
     pub code: u32,
     pub encoded: Vec<u8>,
     pub advance_em: f64,
@@ -403,7 +404,7 @@ impl ResolvedFont {
                 .iter()
                 .map(|code| {
                     let encoded = vec![*code];
-                    let unicode = self.unicode_for(&encoded, || {
+                    let (unicode, unicode_provenance) = self.unicode_for(&encoded, || {
                         let candidate = font.encoding.unicode[usize::from(*code)];
                         match &font.embedded_unicode {
                             EmbeddedUnicode::Absent => candidate,
@@ -412,6 +413,7 @@ impl ResolvedFont {
                             }
                             EmbeddedUnicode::Invalid => None,
                         }
+                        .map(|character| (character, UnicodeProvenance::SimpleEncoding))
                     });
                     let width = font.widths.as_ref().and_then(|widths| {
                         usize::try_from(i64::from(*code) - font.first_char)
@@ -421,6 +423,7 @@ impl ResolvedFont {
                     });
                     DecodedGlyph {
                         unicode,
+                        unicode_provenance,
                         code: u32::from(*code),
                         encoded,
                         advance_em: width.or(font.missing_width).unwrap_or(0.0) / 1000.0,
@@ -436,10 +439,15 @@ impl ResolvedFont {
                         let fallback = || {
                             let cid = cid?;
                             let gid = font.cid_to_gid.gid(cid)?;
-                            font.gid_to_unicode.get(&gid).copied()
+                            font.gid_to_unicode
+                                .get(&gid)
+                                .copied()
+                                .map(|character| (character, UnicodeProvenance::EmbeddedFontCmap))
                         };
+                        let (unicode, unicode_provenance) = self.unicode_for(&encoded, fallback);
                         DecodedGlyph {
-                            unicode: self.unicode_for(&encoded, fallback),
+                            unicode,
+                            unicode_provenance,
                             code: cid.unwrap_or_else(|| bytes_to_u32(&encoded).unwrap_or(0)),
                             advance_em: cid
                                 .map(|value| font.widths.width(value) / 1000.0)
@@ -456,9 +464,13 @@ impl ResolvedFont {
                     let encoded = vec![*code];
                     let name = font.encoding.glyph_names[usize::from(*code)].as_ref();
                     let glyph = name.and_then(|name| font.glyphs.get(name));
+                    let (unicode, unicode_provenance) = self.unicode_for(&encoded, || {
+                        font.encoding.unicode[usize::from(*code)]
+                            .map(|character| (character, UnicodeProvenance::SimpleEncoding))
+                    });
                     DecodedGlyph {
-                        unicode: self
-                            .unicode_for(&encoded, || font.encoding.unicode[usize::from(*code)]),
+                        unicode,
+                        unicode_provenance,
                         code: u32::from(*code),
                         encoded,
                         advance_em: glyph.map_or(0.0, |glyph| glyph.advance_em),
@@ -470,6 +482,7 @@ impl ResolvedFont {
                 .iter()
                 .map(|code| DecodedGlyph {
                     unicode: Vec::new(),
+                    unicode_provenance: UnicodeProvenance::Unresolved,
                     code: u32::from(*code),
                     encoded: vec![*code],
                     advance_em: 0.0,
@@ -479,11 +492,21 @@ impl ResolvedFont {
         }
     }
 
-    fn unicode_for(&self, encoded: &[u8], fallback: impl FnOnce() -> Option<char>) -> Vec<char> {
+    fn unicode_for(
+        &self,
+        encoded: &[u8],
+        fallback: impl FnOnce() -> Option<(char, UnicodeProvenance)>,
+    ) -> (Vec<char>, UnicodeProvenance) {
         match &self.unicode {
-            UnicodeSource::Absent => fallback().into_iter().collect(),
-            UnicodeSource::Valid(map) => map.chars.get(encoded).cloned().unwrap_or_default(),
-            UnicodeSource::Invalid => Vec::new(),
+            UnicodeSource::Absent => fallback().map_or_else(
+                || (Vec::new(), UnicodeProvenance::Unresolved),
+                |(character, provenance)| (vec![character], provenance),
+            ),
+            UnicodeSource::Valid(map) => map.chars.get(encoded).map_or_else(
+                || (Vec::new(), UnicodeProvenance::Unresolved),
+                |characters| (characters.clone(), UnicodeProvenance::ToUnicode),
+            ),
+            UnicodeSource::Invalid => (Vec::new(), UnicodeProvenance::Unresolved),
         }
     }
 }

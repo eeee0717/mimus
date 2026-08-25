@@ -13,6 +13,8 @@ pub struct PageCharSnapshot {
     pub unicode: Option<char>,
     /// `FPDFText_GetUnicode` 原值；PDF 源字符码必须来自 operator walk，不能与此字段混用。
     pub unicode_value: u32,
+    /// `FPDFText_IsHyphen` 的提取语义标志；`None` 表示普通生产路径没有查询该诊断 API。
+    pub is_hyphen: Option<bool>,
     pub baseline_origin: Point,
     pub tight_box: Rect,
     pub loose_box: Rect,
@@ -289,6 +291,7 @@ mod tests {
                 index: 0,
                 unicode: Some('M'),
                 unicode_value: u32::from('M'),
+                is_hyphen: None,
                 baseline_origin: Point { x: 72.0, y: 120.0 },
                 tight_box: Rect {
                     left: 73.0,
@@ -302,6 +305,7 @@ mod tests {
                 index: 1,
                 unicode: Some('I'),
                 unicode_value: u32::from('I'),
+                is_hyphen: None,
                 baseline_origin: Point { x: 80.0, y: 120.0 },
                 tight_box: Rect {
                     left: 81.0,
@@ -334,6 +338,7 @@ mod tests {
             index: 0,
             unicode: Some('M'),
             unicode_value: u32::from('M'),
+            is_hyphen: None,
             baseline_origin: Point { x: 72.0, y: 120.0 },
             tight_box: Rect::default(),
             loose_box: Rect::default(),
@@ -342,6 +347,7 @@ mod tests {
             index: 1,
             unicode: Some('I'),
             unicode_value: u32::from('I'),
+            is_hyphen: None,
             baseline_origin: Point { x: 72.0, y: 80.0 },
             tight_box: Rect::default(),
             loose_box: Rect::default(),
