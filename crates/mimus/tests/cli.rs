@@ -540,21 +540,133 @@ fn json_usage_errors_are_one_terminal_event_and_metadata_stays_clap_text() {
 }
 
 #[test]
-fn default_openai_backend_is_a_clear_unimplemented_error() {
+fn default_openai_backend_requires_a_key_without_exposing_a_key_flag() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("paper.pdf");
     std::fs::copy(fixture(), &input).unwrap();
     let output = Command::new(BIN)
         .env_remove(PDFIUM_ENV)
+        .env("MIMUS_CONFIG_FILE", directory.path().join("missing.toml"))
+        .env("API_KEY", "")
+        .env_remove("MIMUS_OPENAI_API_KEY")
+        .env_remove("OPENAI_API_KEY")
         .args(["translate", input.to_str().unwrap()])
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("backend_not_implemented"));
-    assert!(stderr.contains("--backend none"));
+    assert!(stderr.contains("invalid_arguments"));
+    assert!(stderr.contains("API_KEY"));
+    assert!(!stderr.contains("--api-key"));
     assert!(!directory.path().join("paper.zh.pdf").exists());
+}
+
+#[test]
+fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "backend = 'none'\nbase_url = 'https://file.invalid'\nmodel = 'file-model'\ntarget_language = 'file-language'\n",
+    )
+    .unwrap();
+    let output_path = directory.path().join("translated.pdf");
+    let output = Command::new(BIN)
+        .env(PDFIUM_ENV, pdfium_library())
+        .env("MIMUS_CONFIG_FILE", &config)
+        .env("BASE_URL", "https://env.invalid")
+        .env("MODEL_ID", "env-model")
+        .env("TARGET_LANGUAGE", "env-language")
+        .env("MIMUS_BACKEND", "invalid-but-overridden")
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "none",
+            "--endpoint",
+            "http://flag.invalid",
+            "--model",
+            "flag-model",
+            "--target-language",
+            "flag-language",
+            "--output",
+        ])
+        .arg(&output_path)
+        .arg(fixture())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = parse_events(&output.stdout);
+    let resolved = events
+        .iter()
+        .find(|event| event["event"] == "configuration_resolved")
+        .unwrap();
+    assert_eq!(resolved["backend"], "none");
+    assert_eq!(resolved["endpoint"], "http://flag.invalid");
+    assert_eq!(resolved["model"], "flag-model");
+    assert_eq!(resolved["target_language"], "flag-language");
+    assert!(events.iter().all(|event| event.get("api_key").is_none()));
+}
+
+#[test]
+fn secret_bearing_endpoints_are_rejected_before_configuration_is_emitted() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_canary = "endpoint-secret-canary";
+    let endpoint =
+        format!("https://user:{endpoint_canary}@example.test/v1?token={endpoint_canary}");
+    let output = Command::new(BIN)
+        .current_dir(directory.path())
+        .env("API_KEY", "api-key-canary")
+        .env_remove("MIMUS_OPENAI_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .args(["--json", "translate", "--endpoint", &endpoint])
+        .arg(fixture())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!rendered.contains(endpoint_canary));
+    let events = parse_events(&output.stdout);
+    assert_one_terminal_last(&events, "error");
+    assert!(
+        events
+            .iter()
+            .all(|event| event["event"] != "configuration_resolved")
+    );
+}
+
+#[test]
+fn empty_secret_alias_falls_through_to_the_next_nonempty_alias() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = Command::new(BIN)
+        .current_dir(directory.path())
+        .env_remove(PDFIUM_ENV)
+        .env("MIMUS_OPENAI_API_KEY", "")
+        .env_remove("OPENAI_API_KEY")
+        .env("API_KEY", "fallback-secret-canary")
+        .env("BASE_URL", "http://127.0.0.1:9")
+        .env("MODEL_ID", "test-model")
+        .args(["--json", "translate"])
+        .arg(fixture())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!rendered.contains("fallback-secret-canary"));
+    assert!(!rendered.contains("API key is required"));
 }
 
 #[test]

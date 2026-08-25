@@ -126,6 +126,7 @@ impl<W: Write + Send> ProtocolSession<W> {
 
     fn emit_human(&self, event: Event, state: &mut SessionState<W>) -> Result<()> {
         match event.kind {
+            EventKind::ConfigurationResolved { .. } => {}
             EventKind::StageStarted { stage } => {
                 let _ = writeln!(std::io::stderr().lock(), "{}...", human_stage_name(stage));
             }

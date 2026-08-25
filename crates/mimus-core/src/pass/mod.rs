@@ -1555,7 +1555,12 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                 }
                 let source = request_text(&chars[start..end]);
                 if should_translate && !source.is_empty() {
-                    translated.push_str(&context.translator.translate(&source)?);
+                    translated.push_str(&context.translator.translate(
+                        &crate::translate::TranslationRequest {
+                            text: &source,
+                            target_language: &context.config.target_language,
+                        },
+                    )?);
                 } else {
                     translated.push_str(&source);
                 }
@@ -2919,9 +2924,9 @@ mod tests {
     }
 
     impl Translator for CountingTranslator {
-        fn translate(&self, text: &str) -> Result<String> {
+        fn translate(&self, request: &crate::translate::TranslationRequest<'_>) -> Result<String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(text.to_owned())
+            Ok(request.text.to_owned())
         }
     }
 
@@ -2931,24 +2936,24 @@ mod tests {
     }
 
     impl Translator for WrappingTranslator {
-        fn translate(&self, text: &str) -> Result<String> {
-            self.inputs.lock().unwrap().push(text.to_owned());
-            Ok(format!("[{text}]"))
+        fn translate(&self, request: &crate::translate::TranslationRequest<'_>) -> Result<String> {
+            self.inputs.lock().unwrap().push(request.text.to_owned());
+            Ok(format!("[{}]", request.text))
         }
     }
 
     struct NonIdentityTranslator;
 
     impl Translator for NonIdentityTranslator {
-        fn translate(&self, text: &str) -> Result<String> {
-            Ok(format!("{text}!"))
+        fn translate(&self, request: &crate::translate::TranslationRequest<'_>) -> Result<String> {
+            Ok(format!("{}!", request.text))
         }
     }
 
     struct CjkTranslator;
 
     impl Translator for CjkTranslator {
-        fn translate(&self, _text: &str) -> Result<String> {
+        fn translate(&self, _request: &crate::translate::TranslationRequest<'_>) -> Result<String> {
             Ok("MIMUS中文测试".to_owned())
         }
     }

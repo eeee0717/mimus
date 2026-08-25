@@ -13,15 +13,17 @@ use crate::translate::Translator;
 use crate::walk::{WalkedChar, WalkedContentStream};
 use crate::write::{PageRewrite, WriteReport};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PipelineConfig {
     pub baseline_tolerance_pt: f64,
+    pub target_language: String,
 }
 
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
             baseline_tolerance_pt: 0.001,
+            target_language: "zh-CN".to_owned(),
         }
     }
 }

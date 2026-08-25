@@ -30,6 +30,12 @@ impl Event {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum EventKind {
+    ConfigurationResolved {
+        backend: String,
+        endpoint: Option<String>,
+        model: Option<String>,
+        target_language: String,
+    },
     StageStarted {
         stage: Stage,
     },
