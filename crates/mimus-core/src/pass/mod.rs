@@ -870,9 +870,11 @@ fn reliable_upright_snapshots(walked: &[crate::walk::WalkedChar]) -> Vec<PageCha
         .collect()
 }
 
-fn paragraph_preserved_reason(walked: &[crate::walk::WalkedChar]) -> Option<il::PreservedReason> {
+fn paragraph_preserved_reason<'a>(
+    walked: impl IntoIterator<Item = &'a crate::walk::WalkedChar>,
+) -> Option<il::PreservedReason> {
     let translatable = walked
-        .iter()
+        .into_iter()
         .filter(|character| character.visible && character.text_transform == TextTransform::Upright)
         .collect::<Vec<_>>();
     if translatable
@@ -897,6 +899,38 @@ fn paragraph_preserved_reason(walked: &[crate::walk::WalkedChar]) -> Option<il::
     }
 }
 
+#[derive(Debug, Clone)]
+struct PositionedChar {
+    walked_index: usize,
+    locatable: bool,
+    character: Char,
+    force_no_space_before: bool,
+}
+
+#[derive(Debug, Clone)]
+struct TextLine {
+    chars: Vec<PositionedChar>,
+    bounds: Rect,
+    baseline: f64,
+    font_size: f64,
+    numeric_apparatus: bool,
+}
+
+#[derive(Debug)]
+struct ModelGroup {
+    assignment: LayoutAssignment,
+    chars: Vec<PositionedChar>,
+}
+
+#[derive(Debug)]
+struct ParagraphDraft {
+    model_order: Option<usize>,
+    apparatus: bool,
+    column_left: f64,
+    top: f64,
+    lines: Vec<TextLine>,
+}
+
 pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
     let mut pages = Vec::with_capacity(document.extracted_pages.len());
     for extracted in &document.extracted_pages {
@@ -916,45 +950,6 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
             });
             continue;
         }
-        let preserved = paragraph_preserved_reason(&extracted.walked_characters);
-        let has_isolated_unit = extracted.walked_characters.iter().any(|character| {
-            !character.visible
-                || !character.locatable
-                || character.text_transform != TextTransform::Upright
-        });
-        let needs_synthetic_region = !extracted.walked_characters.is_empty()
-            && ((extracted.layout_regions.is_empty() && preserved.is_some())
-                || (extracted.layout_regions.len() != 1
-                    && (!extracted.recoveries.is_empty() || has_isolated_unit)));
-        // Recovered streams and isolated units may expose several baselines. Until #20 owns
-        // paragraph grouping, keep their byte spans processable as one bounded M1 paragraph.
-        let synthetic_region = needs_synthetic_region.then(|| {
-            let mut characters = extracted
-                .walked_characters
-                .iter()
-                .filter(|character| character.text_transform == TextTransform::Upright);
-            let first = characters.next().unwrap_or(&extracted.walked_characters[0]);
-            let bounds = characters.fold(first.metric_box, |bounds, character| {
-                bounds.union(character.metric_box)
-            });
-            crate::engine::LayoutRegion {
-                bounds,
-                reading_order: 0,
-                label: LayoutLabel::Text,
-                source: LayoutSource::FallbackLine,
-                confidence: 1.0,
-            }
-        });
-        let region = synthetic_region.unwrap_or_else(|| {
-            let first = extracted.layout_regions[0];
-            extracted.layout_regions[1..]
-                .iter()
-                .fold(first, |mut aggregate, region| {
-                    aggregate.bounds = aggregate.bounds.union(region.bounds);
-                    aggregate.reading_order = aggregate.reading_order.min(region.reading_order);
-                    aggregate
-                })
-        });
         let engine_boxes_are_aligned = extracted.walked_characters.len()
             == extracted.engine_characters.len()
             && extracted
@@ -962,43 +957,138 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
                 .iter()
                 .zip(&extracted.engine_characters)
                 .all(|(walked, engine)| walked.unicode == engine.unicode);
-        let chars = extracted
+        let positioned = extracted
             .walked_characters
             .iter()
             .enumerate()
-            .map(|(index, walked)| Char {
-                unicode: walked.unicode,
-                code: walked.code,
-                visible: walked.visible,
-                font: walked.font.clone(),
-                font_size: walked.font_size,
-                baseline_origin: walked.baseline_origin,
-                r#box: walked.metric_box,
-                visual_bbox: if engine_boxes_are_aligned && walked.locatable {
-                    extracted.engine_characters[index].tight_box
+            .map(|(index, walked)| PositionedChar {
+                walked_index: index,
+                locatable: walked.locatable,
+                force_no_space_before: false,
+                character: Char {
+                    unicode: walked.unicode,
+                    code: walked.code,
+                    visible: walked.visible,
+                    font: walked.font.clone(),
+                    font_size: walked.font_size,
+                    baseline_origin: walked.baseline_origin,
+                    r#box: walked.metric_box,
+                    visual_bbox: if engine_boxes_are_aligned && walked.locatable {
+                        extracted.engine_characters[index].tight_box
+                    } else {
+                        walked.metric_box
+                    },
+                    text_transform: walked.text_transform,
+                    implicit_space_before: false,
+                    layout: layout_assignment(&extracted.layout_regions, walked.metric_box),
+                    passthrough: PassthroughRef {
+                        content_object: walked.content_object.0,
+                        byte_start: walked.byte_start,
+                        byte_end: walked.byte_end,
+                        encoded: walked.encoded.clone(),
+                    },
+                },
+            })
+            .collect::<Vec<_>>();
+
+        let mut model_groups = Vec::<ModelGroup>::new();
+        let mut fallback = Vec::new();
+        let mut isolated = Vec::new();
+        for positioned in positioned {
+            if !positioned.locatable {
+                isolated.push(positioned);
+                continue;
+            }
+            let model_assignment = positioned
+                .character
+                .layout
+                .filter(|assignment| assignment.source == LayoutSource::Model);
+            if let Some(assignment) = model_assignment {
+                if let Some(group) = model_groups
+                    .iter_mut()
+                    .find(|group| group.assignment == assignment)
+                {
+                    group.chars.push(positioned);
                 } else {
-                    walked.metric_box
-                },
-                text_transform: walked.text_transform,
-                layout: layout_assignment(&extracted.layout_regions, walked.metric_box),
-                passthrough: PassthroughRef {
-                    content_object: walked.content_object.0,
-                    byte_start: walked.byte_start,
-                    byte_end: walked.byte_end,
-                    encoded: walked.encoded.clone(),
-                },
+                    model_groups.push(ModelGroup {
+                        assignment,
+                        chars: vec![positioned],
+                    });
+                }
+            } else {
+                fallback.push(positioned);
+            }
+        }
+
+        model_groups.sort_by_key(|group| group.assignment.reading_order);
+        let mut drafts = Vec::new();
+        for mut group in model_groups {
+            if group.assignment.label == LayoutLabel::AsideText
+                && chars_are_narrow_number(&group.chars)
+            {
+                mark_chars_as_number(&mut group.chars);
+            }
+            let mut lines = build_text_lines(group.chars);
+            merge_toc_page_numbers(&mut lines);
+            for paragraph_lines in split_natural_paragraphs(lines, group.assignment.label) {
+                let bounds = lines_bounds(&paragraph_lines);
+                drafts.push(ParagraphDraft {
+                    model_order: Some(group.assignment.reading_order),
+                    apparatus: paragraph_lines.iter().all(line_is_number),
+                    column_left: bounds.left,
+                    top: bounds.top,
+                    lines: paragraph_lines,
+                });
+            }
+        }
+
+        let mut fallback_lines = build_text_lines(fallback);
+        merge_toc_page_numbers(&mut fallback_lines);
+        mark_numeric_apparatus(&mut fallback_lines);
+        for column in group_lines_into_columns(fallback_lines) {
+            for paragraph_lines in split_natural_paragraphs(column, LayoutLabel::FallbackLine) {
+                let bounds = lines_bounds(&paragraph_lines);
+                drafts.push(ParagraphDraft {
+                    model_order: None,
+                    apparatus: paragraph_lines.iter().all(|line| line.numeric_apparatus),
+                    column_left: bounds.left,
+                    top: bounds.top,
+                    lines: paragraph_lines,
+                });
+            }
+        }
+        attach_isolated_chars(&mut drafts, isolated);
+
+        drafts.sort_by(|left, right| match (left.model_order, right.model_order) {
+            (Some(left_order), Some(right_order)) => left_order
+                .cmp(&right_order)
+                .then_with(|| right.top.total_cmp(&left.top))
+                .then_with(|| left.column_left.total_cmp(&right.column_left)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => right
+                .apparatus
+                .cmp(&left.apparatus)
+                .then_with(|| {
+                    if left.apparatus && right.apparatus {
+                        right.top.total_cmp(&left.top)
+                    } else {
+                        left.column_left.total_cmp(&right.column_left)
+                    }
+                })
+                .then_with(|| right.top.total_cmp(&left.top)),
+        });
+        let paragraphs = drafts
+            .into_iter()
+            .enumerate()
+            .map(|(reading_order, draft)| {
+                paragraph_from_lines(reading_order, draft.lines, &extracted.walked_characters)
             })
             .collect();
         pages.push(il::Page {
             index: extracted.index,
             geometry: extracted.geometry,
-            paragraphs: vec![Paragraph {
-                reading_order: region.reading_order,
-                bounds: region.bounds,
-                text: TextCarrier::Chars { chars },
-                translated_text: None,
-                preserved,
-            }],
+            paragraphs,
         });
     }
     document.il = il::Document {
@@ -1006,6 +1096,407 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
         pages,
     };
     Ok(())
+}
+
+fn build_text_lines(mut chars: Vec<PositionedChar>) -> Vec<TextLine> {
+    chars.sort_by(|left, right| {
+        right
+            .character
+            .baseline_origin
+            .y
+            .total_cmp(&left.character.baseline_origin.y)
+            .then_with(|| {
+                left.character
+                    .baseline_origin
+                    .x
+                    .total_cmp(&right.character.baseline_origin.x)
+            })
+            .then_with(|| left.walked_index.cmp(&right.walked_index))
+    });
+    let mut rows = Vec::<Vec<PositionedChar>>::new();
+    for character in chars {
+        let belongs = rows.last().is_some_and(|row| {
+            let first = &row[0].character;
+            (first.baseline_origin.y - character.character.baseline_origin.y).abs()
+                <= first.font_size.max(character.character.font_size) * 0.35
+        });
+        if belongs {
+            rows.last_mut().unwrap().push(character);
+        } else {
+            rows.push(vec![character]);
+        }
+    }
+
+    let mut lines = Vec::new();
+    for mut row in rows {
+        row.sort_by(|left, right| {
+            left.character
+                .baseline_origin
+                .x
+                .total_cmp(&right.character.baseline_origin.x)
+                .then_with(|| left.walked_index.cmp(&right.walked_index))
+        });
+        let mut segment = Vec::new();
+        for character in row {
+            let split = segment.last().is_some_and(|previous: &PositionedChar| {
+                let gap = character.character.r#box.left - previous.character.r#box.right;
+                let font_size = previous
+                    .character
+                    .font_size
+                    .max(character.character.font_size);
+                let leading_number = !segment.is_empty()
+                    && segment.iter().all(|value: &PositionedChar| {
+                        value
+                            .character
+                            .unicode
+                            .is_some_and(|unicode| unicode.is_ascii_digit())
+                    });
+                gap > font_size * 1.8 || (leading_number && gap > font_size * 0.8)
+            });
+            if split {
+                lines.push(text_line(std::mem::take(&mut segment)));
+            }
+            segment.push(character);
+        }
+        if !segment.is_empty() {
+            lines.push(text_line(segment));
+        }
+    }
+    lines
+}
+
+fn text_line(chars: Vec<PositionedChar>) -> TextLine {
+    let first = &chars[0].character;
+    TextLine {
+        bounds: chars[1..].iter().fold(first.r#box, |bounds, character| {
+            bounds.union(character.character.r#box)
+        }),
+        baseline: chars
+            .iter()
+            .map(|character| character.character.baseline_origin.y)
+            .sum::<f64>()
+            / chars.len() as f64,
+        font_size: chars
+            .iter()
+            .map(|character| character.character.font_size)
+            .fold(0.0, f64::max),
+        chars,
+        numeric_apparatus: false,
+    }
+}
+
+fn line_text(line: &TextLine) -> String {
+    line.chars
+        .iter()
+        .filter_map(|character| character.character.unicode)
+        .collect()
+}
+
+fn line_is_number(line: &TextLine) -> bool {
+    let text = line_text(line);
+    !text.is_empty() && text.chars().all(|character| character.is_ascii_digit())
+}
+
+fn merge_toc_page_numbers(lines: &mut Vec<TextLine>) {
+    let pairs = lines
+        .iter()
+        .filter(|number| {
+            line_is_number(number)
+                && lines.iter().any(|text| {
+                    !line_is_number(text)
+                        && text.bounds.right < number.bounds.left
+                        && (text.baseline - number.baseline).abs()
+                            <= text.font_size.max(number.font_size) * 0.35
+                })
+        })
+        .count();
+    if pairs < 2 {
+        return;
+    }
+
+    let mut number_indices = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| line_is_number(line).then_some(index))
+        .collect::<Vec<_>>();
+    number_indices.sort_unstable_by(|left, right| right.cmp(left));
+    for number_index in number_indices {
+        let number = lines.remove(number_index);
+        let owner = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, text)| {
+                !line_is_number(text)
+                    && text.bounds.right < number.bounds.left
+                    && (text.baseline - number.baseline).abs()
+                        <= text.font_size.max(number.font_size) * 0.35
+            })
+            .max_by(|(_, left), (_, right)| left.bounds.right.total_cmp(&right.bounds.right))
+            .map(|(index, _)| index);
+        if let Some(owner) = owner {
+            let mut number_chars = number.chars;
+            if let Some(first) = number_chars.first_mut() {
+                first.force_no_space_before = true;
+            }
+            let mut chars = std::mem::take(&mut lines[owner].chars);
+            chars.extend(number_chars);
+            chars.sort_by(|left, right| {
+                left.character
+                    .baseline_origin
+                    .x
+                    .total_cmp(&right.character.baseline_origin.x)
+            });
+            lines[owner] = text_line(chars);
+        } else {
+            lines.push(number);
+        }
+    }
+}
+
+fn chars_are_narrow_number(chars: &[PositionedChar]) -> bool {
+    let mut text = String::new();
+    let mut bounds = None;
+    let mut font_size = 0.0_f64;
+    for character in chars {
+        if let Some(unicode) = character.character.unicode {
+            text.push(unicode);
+        }
+        bounds = Some(bounds.map_or(character.character.r#box, |value: Rect| {
+            value.union(character.character.r#box)
+        }));
+        font_size = font_size.max(character.character.font_size);
+    }
+    !text.is_empty()
+        && text.chars().all(|character| character.is_ascii_digit())
+        && bounds.is_some_and(|bounds| bounds.right - bounds.left <= font_size * 4.0)
+}
+
+fn mark_chars_as_number(chars: &mut [PositionedChar]) {
+    for positioned in chars {
+        if let Some(layout) = &mut positioned.character.layout {
+            layout.label = LayoutLabel::Number;
+            layout.policy = TranslationPolicy::Passthrough;
+        }
+    }
+}
+
+fn mark_numeric_apparatus(lines: &mut [TextLine]) {
+    let apparatus = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| {
+            (line_is_number(candidate)
+                && candidate.bounds.right - candidate.bounds.left <= candidate.font_size * 4.0
+                && lines.iter().any(|body| {
+                    !line_is_number(body)
+                        && body.bounds.left > candidate.bounds.right
+                        && (body.baseline - candidate.baseline).abs()
+                            <= body.font_size.max(candidate.font_size) * 0.35
+                }))
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    for index in apparatus {
+        lines[index].numeric_apparatus = true;
+        mark_chars_as_number(&mut lines[index].chars);
+    }
+}
+
+fn group_lines_into_columns(mut lines: Vec<TextLine>) -> Vec<Vec<TextLine>> {
+    lines.sort_by(|left, right| {
+        left.bounds
+            .left
+            .total_cmp(&right.bounds.left)
+            .then_with(|| right.bounds.top.total_cmp(&left.bounds.top))
+    });
+    let mut columns = Vec::<Vec<TextLine>>::new();
+    for line in lines {
+        let owner = columns.iter().position(|column| {
+            let anchor = &column[0];
+            anchor.numeric_apparatus == line.numeric_apparatus
+                && (anchor.bounds.left - line.bounds.left).abs()
+                    <= anchor.font_size.max(line.font_size) * 2.5
+        });
+        if let Some(owner) = owner {
+            columns[owner].push(line);
+        } else {
+            columns.push(vec![line]);
+        }
+    }
+    columns.sort_by(|left, right| left[0].bounds.left.total_cmp(&right[0].bounds.left));
+    for column in &mut columns {
+        column.sort_by(|left, right| {
+            right
+                .baseline
+                .total_cmp(&left.baseline)
+                .then_with(|| left.bounds.left.total_cmp(&right.bounds.left))
+        });
+    }
+    columns
+}
+
+fn split_natural_paragraphs(mut lines: Vec<TextLine>, label: LayoutLabel) -> Vec<Vec<TextLine>> {
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    lines.sort_by(|left, right| {
+        right
+            .baseline
+            .total_cmp(&left.baseline)
+            .then_with(|| left.bounds.left.total_cmp(&right.bounds.left))
+    });
+    let toc_like = lines.len() >= 3
+        && lines
+            .iter()
+            .filter(|line| {
+                line_text(line)
+                    .trim_end()
+                    .ends_with(|character: char| character.is_ascii_digit())
+            })
+            .count()
+            * 5
+            >= lines.len() * 4;
+    if label == LayoutLabel::Content || toc_like {
+        return lines.into_iter().map(|line| vec![line]).collect();
+    }
+
+    let mut steps = lines
+        .windows(2)
+        .filter_map(|pair| {
+            let step = pair[0].baseline - pair[1].baseline;
+            let font_size = pair[0].font_size.max(pair[1].font_size);
+            (step >= font_size * 0.5 && step <= font_size * 2.0).then_some(step)
+        })
+        .collect::<Vec<_>>();
+    steps.sort_by(f64::total_cmp);
+    let typical = steps
+        .get(steps.len() / 2)
+        .copied()
+        .unwrap_or(lines[0].font_size * 1.2);
+    let mut paragraphs = vec![vec![lines.remove(0)]];
+    for line in lines {
+        let previous = paragraphs.last().unwrap().last().unwrap();
+        let gap = previous.baseline - line.baseline;
+        let previous_width = previous.bounds.right - previous.bounds.left;
+        let indented = line.bounds.left - previous.bounds.left > line.font_size * 1.2
+            && previous_width < line.bounds.right - line.bounds.left;
+        if gap > typical * 1.55 || indented {
+            paragraphs.push(vec![line]);
+        } else {
+            paragraphs.last_mut().unwrap().push(line);
+        }
+    }
+    paragraphs
+}
+
+fn lines_bounds(lines: &[TextLine]) -> Rect {
+    lines[1..]
+        .iter()
+        .fold(lines[0].bounds, |bounds, line| bounds.union(line.bounds))
+}
+
+fn attach_isolated_chars(drafts: &mut Vec<ParagraphDraft>, isolated: Vec<PositionedChar>) {
+    for isolated in isolated {
+        if drafts.is_empty() {
+            let line = text_line(vec![isolated]);
+            drafts.push(ParagraphDraft {
+                model_order: None,
+                apparatus: false,
+                column_left: line.bounds.left,
+                top: line.bounds.top,
+                lines: vec![line],
+            });
+            continue;
+        }
+        let owner = drafts
+            .iter()
+            .enumerate()
+            .flat_map(|(draft_index, draft)| {
+                draft
+                    .lines
+                    .iter()
+                    .enumerate()
+                    .flat_map(move |(line_index, line)| {
+                        line.chars
+                            .iter()
+                            .enumerate()
+                            .map(move |(char_index, value)| {
+                                (
+                                    draft_index,
+                                    line_index,
+                                    char_index,
+                                    value.walked_index.abs_diff(isolated.walked_index),
+                                )
+                            })
+                    })
+            })
+            .min_by_key(|(_, _, _, distance)| *distance)
+            .map(|(draft, line, character, _)| (draft, line, character))
+            .unwrap();
+        let line = &mut drafts[owner.0].lines[owner.1];
+        let insert_at = if isolated.walked_index < line.chars[owner.2].walked_index {
+            owner.2
+        } else {
+            owner.2 + 1
+        };
+        line.chars.insert(insert_at, isolated);
+        let chars = std::mem::take(&mut line.chars);
+        *line = text_line(chars);
+    }
+}
+
+fn paragraph_from_lines(
+    reading_order: usize,
+    lines: Vec<TextLine>,
+    walked: &[crate::walk::WalkedChar],
+) -> Paragraph {
+    let bounds = lines_bounds(&lines);
+    let mut positioned = Vec::new();
+    for line in lines {
+        positioned.extend(line.chars);
+    }
+    let preserved = paragraph_preserved_reason(
+        positioned
+            .iter()
+            .map(|positioned| &walked[positioned.walked_index]),
+    );
+    let mut chars = Vec::with_capacity(positioned.len());
+    let mut previous_locatable = None;
+    for mut positioned in positioned {
+        let new_line = chars.last().is_some_and(|previous: &Char| {
+            previous_locatable == Some(true)
+                && positioned.locatable
+                && (previous.baseline_origin.y - positioned.character.baseline_origin.y).abs()
+                    > previous.font_size.max(positioned.character.font_size) * 0.35
+        });
+        let horizontal_gap = chars.last().map_or(0.0, |previous| {
+            positioned.character.r#box.left - previous.r#box.right
+        });
+        let implicit_space = chars.last().is_some_and(|previous| {
+            previous_locatable == Some(true)
+                && positioned.locatable
+                && previous.unicode.is_some_and(|value| !value.is_whitespace())
+                && positioned
+                    .character
+                    .unicode
+                    .is_some_and(|value| !value.is_whitespace())
+                && previous.unicode != Some('-')
+                && (new_line
+                    || horizontal_gap
+                        > previous.font_size.max(positioned.character.font_size) * 0.18)
+        });
+        positioned.character.implicit_space_before =
+            implicit_space && !positioned.force_no_space_before;
+        previous_locatable = Some(positioned.locatable);
+        chars.push(positioned.character);
+    }
+    Paragraph {
+        reading_order,
+        bounds,
+        text: TextCarrier::Chars { chars },
+        translated_text: None,
+        preserved,
+    }
 }
 
 pub fn styles_and_formulas(_document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
@@ -1050,10 +1541,7 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                 {
                     end += 1;
                 }
-                let source = chars[start..end]
-                    .iter()
-                    .filter_map(|character| character.unicode)
-                    .collect::<String>();
+                let source = request_text(&chars[start..end]);
                 if should_translate && !source.is_empty() {
                     translated.push_str(&context.translator.translate(&source)?);
                 } else {
@@ -1065,6 +1553,23 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
         }
     }
     Ok(())
+}
+
+fn request_text(chars: &[Char]) -> String {
+    let mut output = String::new();
+    for character in chars {
+        let Some(unicode) = character.unicode else {
+            continue;
+        };
+        if character.implicit_space_before
+            && !output.ends_with(char::is_whitespace)
+            && !unicode.is_whitespace()
+        {
+            output.push(' ');
+        }
+        output.push(unicode);
+    }
+    output
 }
 
 fn character_is_translatable(character: &Char, content_objects: &BTreeSet<u32>) -> bool {
@@ -1097,6 +1602,19 @@ pub fn typeset(document: &mut Document, _context: &PassContext<'_>) -> Result<()
                     page.index, extracted.index
                 ),
             ));
+        }
+        let has_preserved = page
+            .paragraphs
+            .iter()
+            .any(|paragraph| paragraph.preserved.is_some());
+        let processable_output_is_identity = page.paragraphs.iter().all(|paragraph| {
+            paragraph.preserved.is_some()
+                || paragraph.translated_text.as_deref() == Some(paragraph.source_text().as_str())
+        });
+        if has_preserved && processable_output_is_identity {
+            // Avoid an incremental update when the only changed units are identity output and
+            // another paragraph on the page must remain byte-exact (for example a shared Form).
+            continue;
         }
         let streams = extracted
             .content_streams
@@ -1988,7 +2506,7 @@ mod tests {
     }
 
     #[test]
-    fn recovered_multi_region_page_remains_processable_before_paragraph_grouping() {
+    fn recovered_multi_region_page_remains_processable_after_paragraph_grouping() {
         let mut document = Document::for_inspection(nested_text_fixture());
         let engine = FakeEngine::default();
         let translator = CountingTranslator::default();
@@ -2005,8 +2523,15 @@ mod tests {
         inspect(&mut document, &context).unwrap();
 
         assert_eq!(document.extracted_pages[0].layout_regions.len(), 2);
-        assert_eq!(document.il.pages[0].paragraphs.len(), 1);
-        assert_eq!(document.il.pages[0].paragraphs[0].source_text(), "MIMUS");
+        assert_eq!(document.il.pages[0].paragraphs.len(), 2);
+        assert_eq!(
+            document.il.pages[0]
+                .paragraphs
+                .iter()
+                .map(Paragraph::source_text)
+                .collect::<String>(),
+            "MIMUS"
+        );
         assert!(
             document.extracted_pages[0]
                 .recoveries
@@ -2158,6 +2683,57 @@ mod tests {
         assert_eq!(assignment.label, LayoutLabel::Table);
         assert_eq!(assignment.source, LayoutSource::Model);
         assert_eq!(assignment.reading_order, 3);
+    }
+
+    #[test]
+    fn paragraph_order_prefers_model_order_over_geometry() {
+        let recording = br#"{
+            "schema_version": 1,
+            "pages": [{
+                "page_index": 0,
+                "geometry": {"width": 300.0, "height": 200.0, "rotate_degrees": 0},
+                "regions": [
+                    {
+                        "bounds": {"left": 71.0, "bottom": 115.0, "right": 96.251, "top": 133.0},
+                        "reading_order": 1,
+                        "label": "text",
+                        "source": "model",
+                        "confidence": 0.99
+                    },
+                    {
+                        "bounds": {"left": 96.252, "bottom": 115.0, "right": 114.0, "top": 133.0},
+                        "reading_order": 0,
+                        "label": "text",
+                        "source": "model",
+                        "confidence": 0.99
+                    }
+                ]
+            }]
+        }"#;
+        let detector = crate::engine::RecordedLayoutDetector::from_bytes(recording).unwrap();
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &detector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+
+        inspect(&mut document, &context).unwrap();
+
+        assert_eq!(
+            document.il.pages[0]
+                .paragraphs
+                .iter()
+                .map(Paragraph::source_text)
+                .collect::<Vec<_>>(),
+            ["US".to_owned(), "MIM".to_owned()]
+        );
     }
 
     #[test]

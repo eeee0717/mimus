@@ -81,7 +81,20 @@ impl Paragraph {
     pub fn source_text(&self) -> String {
         match &self.text {
             TextCarrier::Chars { chars } => {
-                chars.iter().filter_map(|value| value.unicode).collect()
+                let mut output = String::new();
+                for character in chars {
+                    let Some(unicode) = character.unicode else {
+                        continue;
+                    };
+                    if character.implicit_space_before
+                        && !output.ends_with(char::is_whitespace)
+                        && !unicode.is_whitespace()
+                    {
+                        output.push(' ');
+                    }
+                    output.push(unicode);
+                }
+                output
             }
         }
     }
@@ -112,6 +125,11 @@ pub struct Char {
     pub r#box: Rect,
     pub visual_bbox: Rect,
     pub text_transform: TextTransform,
+    /// Geometry proves a word boundary even though the PDF encoded no space
+    /// glyph (including a soft line wrap). The character remains tied to its
+    /// original byte span; this flag affects request text only.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub implicit_space_before: bool,
     /// Layout ownership is additive in IL v1. Characters without a trustworthy
     /// assignment remain passthrough instead of being promoted to body text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -212,6 +230,10 @@ impl LayoutLabel {
 
 const fn default_true() -> bool {
     true
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 const fn is_true(value: &bool) -> bool {

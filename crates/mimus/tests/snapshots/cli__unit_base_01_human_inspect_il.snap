@@ -1,6 +1,5 @@
 ---
 source: crates/mimus/tests/cli.rs
-assertion_line: 545
 expression: "String::from_utf8(human.stdout.clone()).unwrap()"
 ---
 {
@@ -17,10 +16,10 @@ expression: "String::from_utf8(human.stdout.clone()).unwrap()"
         {
           "reading_order": 0,
           "bounds": {
-            "left": 73.1760025024414,
-            "bottom": 119.84400177001953,
-            "right": 111.98400115966797,
-            "top": 128.9040069580078
+            "left": 72.0,
+            "bottom": 117.168,
+            "right": 112.656,
+            "top": 131.136
           },
           "text": {
             "kind": "chars",

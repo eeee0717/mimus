@@ -98,6 +98,7 @@ struct ManifestBlock {
     key: String,
     page: usize,
     draw_order: usize,
+    reading_order: usize,
     text: String,
 }
 
@@ -186,6 +187,23 @@ fn expected_page_text(manifest: &FixtureManifest, page_index: usize) -> String {
         .collect::<Vec<_>>();
     blocks.sort_by_key(|block| block.draw_order);
     blocks.iter().map(|block| block.text.as_str()).collect()
+}
+
+fn il_paragraph_text(paragraph: &serde_json::Value) -> String {
+    let mut output = String::new();
+    for character in paragraph["text"]["chars"].as_array().unwrap() {
+        let Some(unicode) = character["unicode"].as_str() else {
+            continue;
+        };
+        if character["implicit_space_before"] == true
+            && !output.ends_with(char::is_whitespace)
+            && !unicode.starts_with(char::is_whitespace)
+        {
+            output.push(' ');
+        }
+        output.push_str(unicode);
+    }
+    output
 }
 
 fn pdfium_library() -> OsString {
@@ -1021,13 +1039,26 @@ fn recorded_layout_policy_drives_production_il_candidates_and_passthrough() {
         );
         let events = parse_events(&output.stdout);
         assert_one_terminal_last(&events, "result");
-        let chars = events.last().unwrap()["il"]["pages"][0]["paragraphs"][0]["text"]["chars"]
+        let chars = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
             .as_array()
-            .unwrap();
+            .unwrap()
+            .iter()
+            .flat_map(|paragraph| paragraph["text"]["chars"].as_array().unwrap())
+            .collect::<Vec<_>>();
         let collect_policy = |policy: &str| {
-            chars
+            let mut selected = chars
                 .iter()
                 .filter(|character| character["layout"]["policy"] == policy)
+                .collect::<Vec<_>>();
+            selected.sort_by_key(|character| {
+                (
+                    character["passthrough"]["content_object"].as_u64(),
+                    character["passthrough"]["byte_start"].as_u64(),
+                    character["passthrough"]["byte_end"].as_u64(),
+                )
+            });
+            selected
+                .into_iter()
                 .filter_map(|character| character["unicode"].as_str())
                 .collect::<String>()
         };
@@ -1045,9 +1076,12 @@ fn recorded_layout_policy_drives_production_il_candidates_and_passthrough() {
 
     let policy = run_inspect_with_layout("unit-layout-07-policy-zones");
     let events = parse_events(&policy.stdout);
-    let chars = events.last().unwrap()["il"]["pages"][0]["paragraphs"][0]["text"]["chars"]
+    let chars = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
         .as_array()
-        .unwrap();
+        .unwrap()
+        .iter()
+        .flat_map(|paragraph| paragraph["text"]["chars"].as_array().unwrap())
+        .collect::<Vec<_>>();
     let labels = chars
         .iter()
         .filter_map(|character| character["layout"]["label"].as_str())
@@ -1056,6 +1090,105 @@ fn recorded_layout_policy_drives_production_il_candidates_and_passthrough() {
     assert!(labels.contains("reference_content"));
     assert!(labels.contains("seal"));
     assert!(labels.contains("number"));
+}
+
+#[test]
+fn paragraph_reconstruction_matches_manifest_order_and_candidate_text() {
+    for id in [
+        "unit-base-02-two-column",
+        "unit-order-01-natural",
+        "unit-order-02-reversed",
+        "unit-order-03-interleaved",
+        "unit-order-04-column-continuation",
+        "unit-order-05-false-jump",
+        "unit-order-06-cross-page",
+        "unit-para-07-line-numbers",
+    ] {
+        let manifest = fixture_manifest(id);
+        let output = run_inspect(&fixture_path(id), true, None);
+        assert!(
+            output.status.success(),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let events = parse_events(&output.stdout);
+        let pages = events.last().unwrap()["il"]["pages"].as_array().unwrap();
+        for (page_index, page) in pages.iter().enumerate() {
+            let mut expected = manifest
+                .expected
+                .block
+                .iter()
+                .filter(|block| block.page == page_index)
+                .collect::<Vec<_>>();
+            expected.sort_by_key(|block| block.reading_order);
+            let actual = page["paragraphs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(il_paragraph_text)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                actual,
+                expected
+                    .iter()
+                    .map(|block| block.text.clone())
+                    .collect::<Vec<_>>(),
+                "fixture {id}, page {page_index}"
+            );
+            assert_eq!(
+                page["paragraphs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|paragraph| paragraph["reading_order"].as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+                (0..u64::try_from(expected.len()).unwrap()).collect::<Vec<_>>(),
+                "fixture {id}, page {page_index}"
+            );
+        }
+    }
+
+    let id = "unit-para-04-toc";
+    let expected = [
+        "1 Introduction........................................3",
+        "1.1 Background........7",
+        "2 Method⋯⋯⋯⋯⋯⋯⋯⋯12",
+        "2.1 Setup18",
+        "3 Results············24",
+        "4 Conclusion31",
+    ];
+    let manifest = fixture_manifest(id);
+    assert_eq!(expected.join(" "), manifest.expected.block[0].text);
+    let output = run_inspect(&fixture_path(id), true, None);
+    assert!(output.status.success());
+    let events = parse_events(&output.stdout);
+    let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        paragraphs.iter().map(il_paragraph_text).collect::<Vec<_>>(),
+        expected,
+    );
+
+    let id = "unit-para-07-line-numbers";
+    let manifest = fixture_manifest(id);
+    let output = run_inspect(&fixture_path(id), true, None);
+    let events = parse_events(&output.stdout);
+    let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap();
+    let candidates = paragraphs
+        .iter()
+        .filter(|paragraph| {
+            paragraph["text"]["chars"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|character| character["layout"]["policy"] == "translate")
+        })
+        .map(il_paragraph_text)
+        .collect::<Vec<_>>();
+    assert_eq!(candidates, [manifest.expected.block[4].text.clone()]);
 }
 
 #[test]
