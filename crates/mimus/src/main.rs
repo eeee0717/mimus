@@ -88,6 +88,9 @@ struct TranslateArgs {
     /// Bypass translation cache reads and writes.
     #[arg(long)]
     no_cache: bool,
+    /// Maximum number of paragraph translation requests in flight.
+    #[arg(long, value_name = "COUNT")]
+    concurrency: Option<usize>,
     /// New directory for per-pass IL snapshots and diagnostics.
     #[arg(long, value_name = "NEW_DIR")]
     debug: Option<PathBuf>,
@@ -177,6 +180,7 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         no_auto_terms: args.no_auto_terms,
         cache: args.cache,
         no_cache: args.no_cache,
+        concurrency: args.concurrency,
     }) {
         Ok(value) => value,
         Err(error) => return session.finish_error(error),
@@ -207,6 +211,7 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
     let cache_path_display = cache_path
         .as_ref()
         .map(|path| path.to_string_lossy().into_owned());
+    let max_concurrency = resolved.max_concurrency;
     let translator = match resolved.take_translator() {
         Ok(value) => value,
         Err(error) => return session.finish_error(error),
@@ -224,6 +229,7 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         glossary_fingerprint,
         cache_enabled,
         cache_path: cache_path_display,
+        concurrency: max_concurrency,
     })) {
         return session.finish_error(error);
     }
@@ -252,6 +258,7 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
             auto_terms,
             dump_glossary,
             cache_path,
+            max_concurrency,
             ..PipelineConfig::default()
         },
     };

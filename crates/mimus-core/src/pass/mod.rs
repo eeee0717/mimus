@@ -1,13 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use lopdf::{Document as LopdfDocument, Object, ObjectId};
+use rayon::prelude::*;
 
 use crate::context::{CharacterAlignment, Document, ExtractedPage, OutputFont, PassContext};
 use crate::engine::{PageCharSnapshot, RgbaImage};
-use crate::error::{AssetReason, InputReason, InternalReason, IoReason, MimusError, Result};
+use crate::error::{
+    AssetReason, InputReason, InternalReason, IoReason, MimusError, Result, UsageReason,
+};
 use crate::event::{
-    CacheStatus, Diagnostic, Diagnostics, Event, EventKind, PageDegradeReason, PreservedParagraph,
-    RecoveryKind, Stage,
+    Diagnostic, Diagnostics, Event, EventKind, PageDegradeReason, PreservedParagraph, RecoveryKind,
+    Stage,
 };
 use crate::geometry::{PageFrame, PageGeometryResolveError};
 use crate::il::{
@@ -1575,6 +1578,182 @@ pub fn extract_terms(document: &mut Document, context: &PassContext<'_>) -> Resu
 }
 
 pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
+    if document.prepared_translations.is_empty() {
+        prepare_translations(document)?;
+    }
+    document.placeholder_violations.clear();
+    let model_id = context.translator.model_id();
+    if model_id == "none" {
+        return translate_none(document, context);
+    }
+    if context.config.max_concurrency == 0 {
+        return Err(MimusError::usage(
+            UsageReason::InvalidArguments,
+            "translation concurrency must be at least 1",
+        ));
+    }
+    let cache = context
+        .config
+        .cache_path
+        .as_deref()
+        .map(crate::translate::cache::TranslationCache::open)
+        .transpose()?;
+    let glossary_fingerprint = document.glossary.fingerprint();
+    let mut jobs = Vec::new();
+    let mut prose_paragraph_count = 0;
+    for (page_position, page) in document.il.pages.iter_mut().enumerate() {
+        for (paragraph_index, paragraph) in page.paragraphs.iter_mut().enumerate() {
+            if paragraph.preserved.is_some() {
+                paragraph.translated_text = None;
+                continue;
+            }
+            let key = (page.index, paragraph.reading_order);
+            let prepared = document
+                .prepared_translations
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| {
+                    MimusError::internal(
+                        InternalReason::InvariantViolation,
+                        format!("Translate could not find prepared paragraph {key:?}"),
+                    )
+                })?;
+            if prepared.request_text().is_empty() {
+                paragraph.translated_text = Some(paragraph.source_text());
+                continue;
+            }
+            let prose_shaped = translation_request_is_prose_shaped(prepared.request_text());
+            prose_paragraph_count += usize::from(prose_shaped);
+            jobs.push(RemoteTranslationJob {
+                page_position,
+                page_index: page.index,
+                paragraph_index,
+                cache_key: crate::translate::cache::TranslationCacheKey::new(
+                    prepared.request_text(),
+                    model_id,
+                    &context.config.target_language,
+                    crate::translate::PARAGRAPH_PROMPT_VERSION,
+                    &glossary_fingerprint,
+                ),
+                prepared,
+                prose_shaped,
+            });
+        }
+    }
+    if jobs.is_empty() {
+        return Ok(());
+    }
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(context.config.max_concurrency.min(jobs.len()))
+        .thread_name(|index| format!("mimus-translate-{index}"))
+        .build()
+        .map_err(|_| {
+            MimusError::internal(
+                InternalReason::InvariantViolation,
+                "could not create translation worker pool",
+            )
+        })?;
+    let executions = pool.install(|| {
+        jobs.par_iter()
+            .map(|job| {
+                crate::translate::executor::execute(
+                    context.translator,
+                    cache.as_ref(),
+                    context.config.sleeper.as_ref(),
+                    crate::translate::executor::ExecutionRequest {
+                        prepared: &job.prepared,
+                        target_language: &context.config.target_language,
+                        glossary: &document.glossary,
+                        cache_key: &job.cache_key,
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    let mut prose_identity_count = 0;
+    for (job, execution) in jobs.into_iter().zip(executions) {
+        if let Some(status) = execution.cache_status {
+            context
+                .events
+                .emit(Event::new(EventKind::TranslationCache {
+                    page_index: job.page_index,
+                    paragraph_index: job.paragraph_index,
+                    status,
+                }))?;
+        }
+        for retry in execution.retries {
+            document.diagnostics.push(Diagnostic::TranslationRetry {
+                page_index: job.page_index,
+                paragraph_index: job.paragraph_index,
+                attempt: retry.attempt,
+                delay_ms: retry.delay_ms,
+                reason: retry.reason,
+            });
+        }
+        let paragraph = document
+            .il
+            .pages
+            .get_mut(job.page_position)
+            .and_then(|page| page.paragraphs.get_mut(job.paragraph_index))
+            .ok_or_else(|| {
+                MimusError::internal(
+                    InternalReason::InvariantViolation,
+                    "translation result no longer owns a paragraph",
+                )
+            })?;
+        match execution.outcome? {
+            crate::translate::executor::TranslationOutcome::Translated(restored) => {
+                paragraph.translated_text = Some(restored.plain_text());
+                document
+                    .restored_translations
+                    .insert((job.page_index, paragraph.reading_order), restored);
+            }
+            crate::translate::executor::TranslationOutcome::Identity => {
+                paragraph.translated_text = Some(paragraph.source_text());
+                prose_identity_count += usize::from(job.prose_shaped);
+                document.diagnostics.push(Diagnostic::TranslationIdentity {
+                    page_index: job.page_index,
+                    paragraph_index: job.paragraph_index,
+                    request_characters: job.prepared.request_text().chars().count(),
+                });
+            }
+            crate::translate::executor::TranslationOutcome::PlaceholderViolation {
+                violation,
+                profile,
+            } => {
+                preserve_placeholder_violation(
+                    paragraph,
+                    &mut document.diagnostics,
+                    &mut document.placeholder_violations,
+                    job.page_index,
+                    job.paragraph_index,
+                    violation,
+                    profile,
+                );
+            }
+        }
+    }
+    if prose_paragraph_count > 0 && prose_identity_count * 2 > prose_paragraph_count {
+        document
+            .diagnostics
+            .push(Diagnostic::SuspiciousTranslationEchoRate {
+                identity_count: prose_identity_count,
+                prose_paragraph_count,
+            });
+    }
+    Ok(())
+}
+
+struct RemoteTranslationJob {
+    page_position: usize,
+    page_index: usize,
+    paragraph_index: usize,
+    prepared: crate::translate::PreparedTranslation,
+    cache_key: crate::translate::cache::TranslationCacheKey,
+    prose_shaped: bool,
+}
+
+fn translate_none(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     let page_content_objects = document
         .extracted_pages
         .iter()
@@ -1585,24 +1764,6 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                 .collect::<BTreeSet<_>>()
         })
         .collect::<Vec<_>>();
-    if document.prepared_translations.is_empty() {
-        prepare_translations(document)?;
-    }
-    document.placeholder_violations.clear();
-    let mut prose_paragraph_count = 0;
-    let mut prose_identity_count = 0;
-    let model_id = context.translator.model_id();
-    let cache = if model_id == "none" {
-        None
-    } else {
-        context
-            .config
-            .cache_path
-            .as_deref()
-            .map(crate::translate::cache::TranslationCache::open)
-            .transpose()?
-    };
-    let glossary_fingerprint = document.glossary.fingerprint();
     for page in &mut document.il.pages {
         let content_objects = page_content_objects.get(page.index).ok_or_else(|| {
             MimusError::internal(
@@ -1610,129 +1771,9 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                 format!("Translate could not find extracted page {}", page.index),
             )
         })?;
-        for (paragraph_index, paragraph) in page.paragraphs.iter_mut().enumerate() {
+        for paragraph in &mut page.paragraphs {
             if paragraph.preserved.is_some() {
                 paragraph.translated_text = None;
-                continue;
-            }
-            if model_id != "none" {
-                let key = (page.index, paragraph.reading_order);
-                let prepared = document.prepared_translations.get(&key).ok_or_else(|| {
-                    MimusError::internal(
-                        InternalReason::InvariantViolation,
-                        format!("Translate could not find prepared paragraph {key:?}"),
-                    )
-                })?;
-                if prepared.request_text().is_empty() {
-                    paragraph.translated_text = Some(paragraph.source_text());
-                    continue;
-                }
-                let prose_shaped = translation_request_is_prose_shaped(prepared.request_text());
-                prose_paragraph_count += usize::from(prose_shaped);
-                let cache_key = crate::translate::cache::TranslationCacheKey::new(
-                    prepared.request_text(),
-                    model_id,
-                    &context.config.target_language,
-                    crate::translate::PARAGRAPH_PROMPT_VERSION,
-                    &glossary_fingerprint,
-                );
-                if let Some(cache) = &cache {
-                    if let Some(cached) = cache.get(&cache_key)? {
-                        match cached {
-                            crate::translate::cache::CachedTranslation::Identity => {
-                                context
-                                    .events
-                                    .emit(Event::new(EventKind::TranslationCache {
-                                        page_index: page.index,
-                                        paragraph_index,
-                                        status: CacheStatus::Hit,
-                                    }))?;
-                                paragraph.translated_text = Some(paragraph.source_text());
-                                prose_identity_count += usize::from(prose_shaped);
-                                document.diagnostics.push(Diagnostic::TranslationIdentity {
-                                    page_index: page.index,
-                                    paragraph_index,
-                                    request_characters: prepared.request_text().chars().count(),
-                                });
-                                continue;
-                            }
-                            crate::translate::cache::CachedTranslation::Translated(validated) => {
-                                if let Ok(restored) = prepared.restore(&validated) {
-                                    context.events.emit(Event::new(
-                                        EventKind::TranslationCache {
-                                            page_index: page.index,
-                                            paragraph_index,
-                                            status: CacheStatus::Hit,
-                                        },
-                                    ))?;
-                                    paragraph.translated_text = Some(restored.plain_text());
-                                    document.restored_translations.insert(key, restored);
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-                    context
-                        .events
-                        .emit(Event::new(EventKind::TranslationCache {
-                            page_index: page.index,
-                            paragraph_index,
-                            status: CacheStatus::Miss,
-                        }))?;
-                }
-                let output =
-                    context
-                        .translator
-                        .translate(&crate::translate::TranslationRequest {
-                            text: prepared.request_text(),
-                            target_language: &context.config.target_language,
-                            glossary: &document.glossary,
-                        })?;
-                match prepared.classify(&output) {
-                    crate::translate::TranslationOutcome::Identity => {
-                        if let Some(cache) = &cache {
-                            cache.insert_identity(&cache_key)?;
-                        }
-                        paragraph.translated_text = Some(paragraph.source_text());
-                        prose_identity_count += usize::from(prose_shaped);
-                        document.diagnostics.push(Diagnostic::TranslationIdentity {
-                            page_index: page.index,
-                            paragraph_index,
-                            request_characters: prepared.request_text().chars().count(),
-                        });
-                    }
-                    crate::translate::TranslationOutcome::Translated(validated) => {
-                        match prepared.restore(&validated) {
-                            Ok(restored) => {
-                                if let Some(cache) = &cache {
-                                    cache.insert(&cache_key, &validated)?;
-                                }
-                                paragraph.translated_text = Some(restored.plain_text());
-                                document.restored_translations.insert(key, restored);
-                            }
-                            Err(violation) => preserve_placeholder_violation(
-                                paragraph,
-                                &mut document.diagnostics,
-                                &mut document.placeholder_violations,
-                                page.index,
-                                paragraph_index,
-                                violation,
-                                &output,
-                            ),
-                        }
-                    }
-                    crate::translate::TranslationOutcome::PlaceholderViolation(violation) => {
-                        preserve_placeholder_violation(
-                            paragraph,
-                            &mut document.diagnostics,
-                            &mut document.placeholder_violations,
-                            page.index,
-                            paragraph_index,
-                            violation,
-                            &output,
-                        );
-                    }
-                }
                 continue;
             }
             let chars = paragraph.chars();
@@ -1763,14 +1804,6 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
             paragraph.translated_text = Some(translated);
         }
     }
-    if prose_paragraph_count > 0 && prose_identity_count * 2 > prose_paragraph_count {
-        document
-            .diagnostics
-            .push(Diagnostic::SuspiciousTranslationEchoRate {
-                identity_count: prose_identity_count,
-                prose_paragraph_count,
-            });
-    }
     Ok(())
 }
 
@@ -1786,7 +1819,7 @@ fn preserve_placeholder_violation(
     page_index: usize,
     paragraph_index: usize,
     violation: crate::translate::PlaceholderViolation,
-    output: &str,
+    profile: crate::translate::RedactedTranslationProfile,
 ) {
     paragraph.translated_text = None;
     paragraph.preserved = Some(il::PreservedReason::PlaceholderViolation);
@@ -1796,7 +1829,6 @@ fn preserve_placeholder_violation(
         paragraph_index,
         violation,
     });
-    let profile = crate::translate::redacted_translation_profile(output);
     diagnostics.push_debug(Diagnostic::TranslationFailureProfile {
         page_index,
         paragraph_index,
@@ -3333,14 +3365,16 @@ fn encrypted_pdf_error() -> MimusError {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier, Mutex};
 
     use crate::engine::{
         LayoutDetector, LayoutRegion, PageCharSnapshot, PdfInspector, Rasterizer, RgbaImage,
         SingleLineLayoutDetector,
     };
-    use crate::event::{DiagnosticId, EventKind, PageDegradeReason, RecordingEventSink};
+    use crate::event::{
+        CacheStatus, DiagnosticId, EventKind, PageDegradeReason, RecordingEventSink,
+    };
     use crate::il::{PageGeometry, Point, Rect};
     use crate::translate::Translator;
 
@@ -3554,6 +3588,72 @@ mod tests {
     #[derive(Default)]
     struct FailingTranslator {
         calls: AtomicUsize,
+    }
+
+    struct BoundedTranslator {
+        first_wave: Barrier,
+        concurrency: usize,
+        calls: AtomicUsize,
+        in_flight: AtomicUsize,
+        max_in_flight: AtomicUsize,
+    }
+
+    impl BoundedTranslator {
+        fn new(concurrency: usize) -> Self {
+            Self {
+                first_wave: Barrier::new(concurrency),
+                concurrency,
+                calls: AtomicUsize::new(0),
+                in_flight: AtomicUsize::new(0),
+                max_in_flight: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Translator for BoundedTranslator {
+        fn translate(&self, request: &crate::translate::TranslationRequest<'_>) -> Result<String> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_in_flight.fetch_max(in_flight, Ordering::SeqCst);
+            if call < self.concurrency {
+                self.first_wave.wait();
+                std::thread::sleep(std::time::Duration::from_millis(
+                    ((self.concurrency - call) * 5) as u64,
+                ));
+            }
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(format!("translated:{}", request.text))
+        }
+    }
+
+    #[derive(Default)]
+    struct RetryingTranslator {
+        calls: AtomicUsize,
+    }
+
+    impl Translator for RetryingTranslator {
+        fn translate(&self, _request: &crate::translate::TranslationRequest<'_>) -> Result<String> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call < 2 {
+                return Err(MimusError::retryable_translation(
+                    crate::error::TranslationReason::BackendRejected,
+                    crate::error::RetryReason::RateLimited,
+                    "retry without a response body",
+                ));
+            }
+            Ok("Translated".to_owned())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingSleeper {
+        durations: Mutex<Vec<std::time::Duration>>,
+    }
+
+    impl crate::translate::Sleeper for RecordingSleeper {
+        fn sleep(&self, duration: std::time::Duration) {
+            self.durations.lock().unwrap().push(duration);
+        }
     }
 
     impl Translator for FailingTranslator {
@@ -5538,6 +5638,100 @@ mod tests {
                 .events()
                 .iter()
                 .all(|event| !matches!(event.kind, EventKind::TranslationCache { .. }))
+        );
+    }
+
+    #[test]
+    fn paragraph_translation_is_bounded_and_applied_in_reading_order() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = BoundedTranslator::new(3);
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig {
+                auto_terms: false,
+                max_concurrency: 3,
+                ..crate::context::PipelineConfig::default()
+            },
+        };
+        inspect(&mut document, &context).unwrap();
+        let original = document.il.pages[0].paragraphs[0].clone();
+        document.il.pages[0].paragraphs = (0..8)
+            .map(|index| {
+                let mut paragraph = original.clone();
+                paragraph.reading_order = index;
+                let TextCarrier::Chars { chars } = &mut paragraph.text;
+                chars[0].unicode = Some(char::from(b'A' + index as u8));
+                paragraph
+            })
+            .collect();
+        styles_and_formulas(&mut document, &context).unwrap();
+        extract_terms(&mut document, &context).unwrap();
+
+        translate(&mut document, &context).unwrap();
+
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 8);
+        assert_eq!(translator.max_in_flight.load(Ordering::SeqCst), 3);
+        assert_eq!(translator.in_flight.load(Ordering::SeqCst), 0);
+        assert_eq!(crate::context::PipelineConfig::default().max_concurrency, 4);
+        for (index, paragraph) in document.il.pages[0].paragraphs.iter().enumerate() {
+            assert_eq!(paragraph.reading_order, index);
+            assert_eq!(
+                paragraph.translated_text.as_deref(),
+                Some(format!("translated:{}IMUS", char::from(b'A' + index as u8)).as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn retry_waits_and_attempts_become_ordered_structured_diagnostics() {
+        let translator = RetryingTranslator::default();
+        let sleeper = Arc::new(RecordingSleeper::default());
+        let events = RecordingEventSink::default();
+        let document = translate_fixture_once(
+            &translator,
+            &events,
+            crate::context::PipelineConfig {
+                auto_terms: false,
+                sleeper: sleeper.clone(),
+                ..crate::context::PipelineConfig::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            *sleeper.durations.lock().unwrap(),
+            [
+                std::time::Duration::from_millis(250),
+                std::time::Duration::from_millis(500),
+            ]
+        );
+        assert_eq!(
+            document
+                .diagnostics
+                .entries()
+                .iter()
+                .filter_map(|diagnostic| match diagnostic {
+                    Diagnostic::TranslationRetry {
+                        page_index,
+                        paragraph_index,
+                        attempt,
+                        delay_ms,
+                        reason,
+                    } => Some((*page_index, *paragraph_index, *attempt, *delay_ms, *reason,)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [
+                (0, 0, 1, 250, crate::error::RetryReason::RateLimited),
+                (0, 0, 2, 500, crate::error::RetryReason::RateLimited),
+            ]
         );
     }
 

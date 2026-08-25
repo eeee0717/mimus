@@ -523,6 +523,23 @@ fn help_and_bare_invocation_succeed() {
 fn usage_errors_use_exit_code_one() {
     let output = Command::new(BIN).arg("not-a-command").output().unwrap();
     assert_eq!(output.status.code(), Some(1));
+
+    let output = Command::new(BIN)
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "none",
+            "--concurrency",
+            "0",
+        ])
+        .arg(fixture())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let events = parse_events(&output.stdout);
+    assert_one_terminal_last(&events, "error");
+    assert_eq!(events[0]["reason"], "invalid_arguments");
 }
 
 #[test]
@@ -582,7 +599,7 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
     let config = directory.path().join("config.toml");
     std::fs::write(
         &config,
-        "backend = 'none'\nbase_url = 'https://file.invalid'\nmodel = 'file-model'\ntarget_language = 'file-language'\nfont_regular = 'file-regular.ttf'\nfont_bold = 'file-bold.ttf'\ncache = 'file-cache.redb'\n",
+        "backend = 'none'\nbase_url = 'https://file.invalid'\nmodel = 'file-model'\ntarget_language = 'file-language'\nfont_regular = 'file-regular.ttf'\nfont_bold = 'file-bold.ttf'\ncache = 'file-cache.redb'\nconcurrency = 2\n",
     )
     .unwrap();
     let output_path = directory.path().join("translated.pdf");
@@ -593,6 +610,7 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
         .env("MODEL_ID", "env-model")
         .env("TARGET_LANGUAGE", "env-language")
         .env("MIMUS_CACHE", "env-cache.redb")
+        .env("MIMUS_CONCURRENCY", "invalid-but-overridden")
         .env("MIMUS_BACKEND", "invalid-but-overridden")
         .env("MIMUS_FONT_REGULAR", "env-regular.ttf")
         .env("MIMUS_FONT_BOLD", "env-bold.ttf")
@@ -609,6 +627,8 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
             "flag-language",
             "--cache",
             "flag-cache.redb",
+            "--concurrency",
+            "5",
         ])
         .arg("--font")
         .arg(test_font_path("Regular"))
@@ -655,6 +675,7 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
     );
     assert_eq!(resolved["cache_enabled"], true);
     assert_eq!(resolved["cache_path"], "flag-cache.redb");
+    assert_eq!(resolved["concurrency"], 5);
     assert!(events.iter().all(|event| event.get("api_key").is_none()));
 }
 

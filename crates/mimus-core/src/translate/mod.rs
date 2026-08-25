@@ -10,9 +10,10 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::error::{IoReason, MimusError, Result, TranslationReason, UsageReason};
+use crate::error::{IoReason, MimusError, Result, RetryReason, TranslationReason, UsageReason};
 
 pub(crate) mod cache;
+pub(crate) mod executor;
 
 pub const PARAGRAPH_PROMPT_VERSION: &str = "mimus-paragraph-v1";
 pub const TERMS_PROMPT_VERSION: &str = "mimus-terms-v1";
@@ -582,6 +583,19 @@ pub trait Translator: Send + Sync {
     }
 }
 
+pub trait Sleeper: Send + Sync + std::fmt::Debug {
+    fn sleep(&self, duration: Duration);
+}
+
+#[derive(Debug, Default)]
+pub struct ThreadSleeper;
+
+impl Sleeper for ThreadSleeper {
+    fn sleep(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct NoneTranslator;
 
@@ -688,11 +702,19 @@ impl OpenAiTranslator {
             .bearer_auth(self.api_key.expose_secret())
             .json(&payload)
             .send()
-            .map_err(|_| {
-                MimusError::translation(
-                    TranslationReason::TransportFailure,
-                    "OpenAI Responses API request failed",
-                )
+            .map_err(|error| {
+                if error.is_timeout() {
+                    MimusError::retryable_translation(
+                        TranslationReason::TransportFailure,
+                        RetryReason::Timeout,
+                        "OpenAI Responses API request timed out",
+                    )
+                } else {
+                    MimusError::translation(
+                        TranslationReason::TransportFailure,
+                        "OpenAI Responses API request failed",
+                    )
+                }
             })?;
         let status = response.status();
         if !status.is_success() {
@@ -753,7 +775,31 @@ fn responses_url(base_url: &str) -> Result<reqwest::Url> {
 }
 
 fn classify_status(status: StatusCode) -> MimusError {
-    if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        MimusError::retryable_translation(
+            TranslationReason::BackendRejected,
+            RetryReason::RateLimited,
+            "OpenAI Responses API rate limit was reached",
+        )
+    } else if status == StatusCode::REQUEST_TIMEOUT {
+        MimusError::retryable_translation(
+            TranslationReason::BackendRejected,
+            RetryReason::Timeout,
+            "OpenAI Responses API request timed out",
+        )
+    } else if matches!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    ) {
+        MimusError::retryable_translation(
+            TranslationReason::TranslationFailed,
+            RetryReason::ServerError,
+            format!("OpenAI Responses API temporarily failed ({status})"),
+        )
+    } else if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
         MimusError::translation(
             TranslationReason::AuthenticationFailed,
             format!("OpenAI Responses API authentication failed ({status})"),
@@ -835,6 +881,10 @@ mod tests {
 
     impl FakeServer {
         fn one(response: &'static [u8]) -> Self {
+            Self::delayed(response, Duration::ZERO)
+        }
+
+        fn delayed(response: &'static [u8], delay: Duration) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let request = Arc::new(Mutex::new(Vec::new()));
@@ -842,7 +892,8 @@ mod tests {
             let thread = thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
                 *captured.lock().unwrap() = read_request(&mut stream);
-                stream.write_all(response).unwrap();
+                thread::sleep(delay);
+                let _ = stream.write_all(response);
             });
             Self {
                 url,
@@ -1014,6 +1065,49 @@ mod tests {
             TranslationReason::TransportFailure.as_str()
         );
         assert!(!format!("{error:?}\n{error}").contains(CANARY));
+    }
+
+    #[test]
+    fn responses_timeout_is_marked_retryable_without_leaking_the_key() {
+        let server = FakeServer::delayed(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 28\r\nConnection: close\r\n\r\n{\"output_text\":\"Translated\"}",
+            Duration::from_millis(100),
+        );
+        let translator = OpenAiTranslator::new(
+            &server.url,
+            "test-model".to_owned(),
+            SecretString::from(CANARY.to_owned()),
+            Duration::from_millis(20),
+        )
+        .unwrap();
+
+        let error = translator.translate(&request()).unwrap_err();
+
+        assert_eq!(error.retry_reason(), Some(RetryReason::Timeout));
+        assert!(!format!("{error:?}\n{error}").contains(CANARY));
+    }
+
+    #[test]
+    fn only_declared_http_statuses_are_retryable() {
+        for (status, reason) in [
+            (StatusCode::TOO_MANY_REQUESTS, RetryReason::RateLimited),
+            (StatusCode::REQUEST_TIMEOUT, RetryReason::Timeout),
+            (StatusCode::INTERNAL_SERVER_ERROR, RetryReason::ServerError),
+            (StatusCode::BAD_GATEWAY, RetryReason::ServerError),
+            (StatusCode::SERVICE_UNAVAILABLE, RetryReason::ServerError),
+            (StatusCode::GATEWAY_TIMEOUT, RetryReason::ServerError),
+        ] {
+            assert_eq!(classify_status(status).retry_reason(), Some(reason));
+        }
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+            StatusCode::NOT_IMPLEMENTED,
+        ] {
+            assert_eq!(classify_status(status).retry_reason(), None);
+        }
     }
 
     fn placeholder_protocol() -> PreparedTranslation {

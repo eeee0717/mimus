@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 
-use crate::error::{ExitCategory, InternalReason, MimusError, Result};
+use crate::error::{ExitCategory, InternalReason, MimusError, Result, RetryReason};
 use crate::il;
 
 // CONTEXT "双 schema_version": CLI 事件协议与 IL 的演进节奏不同，禁止共用版本号。
@@ -57,6 +57,7 @@ pub enum EventKind {
         glossary_fingerprint: String,
         cache_enabled: bool,
         cache_path: Option<String>,
+        concurrency: usize,
     },
     TranslationCache {
         page_index: usize,
@@ -211,6 +212,7 @@ pub enum DiagnosticId {
     ScanSummary,
     PageDegraded,
     ContentRecovered,
+    TranslationRetry,
     DegradationSummary,
     TranslationIdentity,
     SuspiciousTranslationEchoRate,
@@ -366,6 +368,13 @@ pub enum Diagnostic {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         form_cycle_paths: Vec<Vec<u32>>,
     },
+    TranslationRetry {
+        page_index: usize,
+        paragraph_index: usize,
+        attempt: usize,
+        delay_ms: u64,
+        reason: RetryReason,
+    },
     DegradationSummary {
         degraded_page_indices: Vec<usize>,
         degraded_pages: usize,
@@ -413,6 +422,7 @@ impl Diagnostic {
             Self::ScanSummary { .. } => DiagnosticId::ScanSummary,
             Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
             Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
+            Self::TranslationRetry { .. } => DiagnosticId::TranslationRetry,
             Self::DegradationSummary { .. } => DiagnosticId::DegradationSummary,
             Self::TranslationIdentity { .. } => DiagnosticId::TranslationIdentity,
             Self::SuspiciousTranslationEchoRate { .. } => {
@@ -496,6 +506,13 @@ pub enum DiagnosticEvent {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         form_cycle_paths: Vec<Vec<u32>>,
     },
+    TranslationRetry {
+        page_index: usize,
+        paragraph_index: usize,
+        attempt: usize,
+        delay_ms: u64,
+        reason: RetryReason,
+    },
     DegradationSummary {
         degraded_page_indices: Vec<usize>,
         degraded_pages: usize,
@@ -547,6 +564,7 @@ impl DiagnosticEvent {
             Self::ScanSummary { .. } => DiagnosticId::ScanSummary,
             Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
             Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
+            Self::TranslationRetry { .. } => DiagnosticId::TranslationRetry,
             Self::DegradationSummary { .. } => DiagnosticId::DegradationSummary,
             Self::TranslationIdentity { .. } => DiagnosticId::TranslationIdentity,
             Self::SuspiciousTranslationEchoRate { .. } => {
@@ -645,6 +663,19 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 page_index: *page_index,
                 recovery: *recovery,
                 form_cycle_paths: form_cycle_paths.clone(),
+            },
+            Diagnostic::TranslationRetry {
+                page_index,
+                paragraph_index,
+                attempt,
+                delay_ms,
+                reason,
+            } => Self::TranslationRetry {
+                page_index: *page_index,
+                paragraph_index: *paragraph_index,
+                attempt: *attempt,
+                delay_ms: *delay_ms,
+                reason: *reason,
             },
             Diagnostic::DegradationSummary {
                 degraded_page_indices,
@@ -960,6 +991,27 @@ mod tests {
         assert_eq!(value["id"], "engine_baseline_mismatch");
         assert_eq!(value["page_index"], 0);
         assert_eq!(value["character_index"], 0);
+    }
+
+    #[test]
+    fn translation_retry_has_attempt_wait_and_typed_reason_without_source() {
+        let event = DiagnosticEvent::from(&Diagnostic::TranslationRetry {
+            page_index: 2,
+            paragraph_index: 4,
+            attempt: 3,
+            delay_ms: 1_000,
+            reason: RetryReason::RateLimited,
+        });
+        assert_eq!(event.id(), DiagnosticId::TranslationRetry);
+        let value =
+            serde_json::to_value(Event::new(EventKind::Diagnostic { diagnostic: event })).unwrap();
+        assert_eq!(value["id"], "translation_retry");
+        assert_eq!(value["page_index"], 2);
+        assert_eq!(value["paragraph_index"], 4);
+        assert_eq!(value["attempt"], 3);
+        assert_eq!(value["delay_ms"], 1_000);
+        assert_eq!(value["reason"], "rate_limited");
+        assert!(value.get("source").is_none());
     }
 
     #[test]

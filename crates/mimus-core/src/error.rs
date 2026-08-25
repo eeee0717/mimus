@@ -88,7 +88,16 @@ reason_enum!(TranslationReason {
     MalformedResponse => "malformed_response",
     TransportFailure => "transport_failure",
     TranslationFailed => "translation_failed",
+    RetryExhausted => "retry_exhausted",
 });
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryReason {
+    RateLimited,
+    Timeout,
+    ServerError,
+}
 
 reason_enum!(IoReason {
     InputRead => "input_read",
@@ -173,6 +182,7 @@ pub enum MimusError {
         reason: TranslationReason,
         message: String,
         hint: Option<String>,
+        retry_reason: Option<RetryReason>,
     },
     #[error("{message}")]
     Io {
@@ -224,6 +234,21 @@ impl MimusError {
             reason,
             message: message.into(),
             hint: None,
+            retry_reason: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn retryable_translation(
+        reason: TranslationReason,
+        retry_reason: RetryReason,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::Translation {
+            reason,
+            message: message.into(),
+            hint: None,
+            retry_reason: Some(retry_reason),
         }
     }
 
@@ -319,6 +344,14 @@ impl MimusError {
             | Self::Translation { hint, .. }
             | Self::Io { hint, .. }
             | Self::Internal { hint, .. } => hint.as_deref(),
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn retry_reason(&self) -> Option<RetryReason> {
+        match self {
+            Self::Translation { retry_reason, .. } => *retry_reason,
+            _ => None,
         }
     }
 }
@@ -433,6 +466,11 @@ mod tests {
                 "translation_failed",
             ),
             (
+                MimusError::translation(TranslationReason::RetryExhausted, "test"),
+                ExitCategory::Translation,
+                "retry_exhausted",
+            ),
+            (
                 MimusError::io(IoReason::InputRead, "test"),
                 ExitCategory::Io,
                 "input_read",
@@ -501,7 +539,7 @@ mod tests {
             assert!(wire_values.insert(*wire), "duplicate reason {wire}");
         }
 
-        assert_eq!(cases.len(), 25, "new reasons must be added to this matrix");
+        assert_eq!(cases.len(), 26, "new reasons must be added to this matrix");
         assert_eq!(wire_values.len(), cases.len());
     }
 }
