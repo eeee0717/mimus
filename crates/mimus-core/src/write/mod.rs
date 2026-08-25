@@ -488,6 +488,25 @@ mod tests {
             .join(format!("{id}.pdf"))
     }
 
+    fn embedded_test_font() -> EmbeddedFont {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../corpus/fonts/MimusCJK.ttf"
+        ));
+        let face = ttf_parser::Face::parse(bytes, 0).unwrap();
+        let glyph = face.glyph_index('M').unwrap();
+        EmbeddedFont {
+            resource_name: "MimusR".to_owned(),
+            base_font: "MIMUSW+NotoSansSC-Regular".to_owned(),
+            font_bytes: bytes.to_vec(),
+            units_per_em: face.units_per_em(),
+            ascent: face.ascender(),
+            descent: face.descender(),
+            cap_height: face.capital_height().unwrap_or(face.ascender()),
+            glyphs: vec![(glyph.0, 'M', face.glyph_hor_advance(glyph).unwrap())],
+        }
+    }
+
     fn rewrite() -> PageRewrite {
         PageRewrite {
             page_index: 0,
@@ -700,6 +719,108 @@ mod tests {
 
             for (key, value) in expected {
                 assert_eq!(output_page.get(&key).unwrap(), &value, "{id} /{key:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn embedded_font_copy_on_write_covers_all_resource_shapes() {
+        for id in [
+            "unit-write-01-bookmarks-rich",
+            "unit-write-02-shared-resources",
+            "unit-write-03-resources-gen-nonzero",
+            "unit-write-04-xobj-in-objstm",
+            "unit-write-05-indirect-resources-objstm",
+            "unit-write-06-free-object-slot",
+        ] {
+            let input = std::fs::read(fixture_path(id)).unwrap();
+            let original = Document::load_mem(&input).unwrap();
+            let page_ids = original.get_pages().into_values().collect::<Vec<_>>();
+            let page_id = page_ids[0];
+            let original_page = original.get_dictionary(page_id).unwrap().clone();
+            let (_, resource_ids) = original.get_page_resources(page_id).unwrap();
+            let original_resources = resource_ids
+                .iter()
+                .map(|object_id| (*object_id, original.get_object(*object_id).unwrap().clone()))
+                .collect::<Vec<_>>();
+            let content_id = original.get_page_contents(page_id)[0];
+            let decoded = original
+                .get_object(content_id)
+                .unwrap()
+                .as_stream()
+                .unwrap()
+                .decompressed_content()
+                .unwrap();
+            let rewrite = PageRewrite {
+                page_index: 0,
+                replacements: vec![ContentSpanReplacement {
+                    content_object: content_id,
+                    byte_start: 0,
+                    byte_end: 1,
+                    replacement: decoded[..1].to_vec(),
+                }],
+                reused_fonts: Vec::new(),
+                embedded_fonts: vec![embedded_test_font()],
+                typeset_characters: Vec::new(),
+            };
+
+            let (bytes, report) = build_incremental(&input, &original, &[rewrite]).unwrap();
+            assert!(bytes.starts_with(&input), "{id}");
+            assert!(
+                report
+                    .content_objects
+                    .iter()
+                    .all(|value| value.0 > original.max_id),
+                "{id}"
+            );
+            let output = Document::load_mem(&bytes).unwrap();
+            let output_page = output.get_dictionary(page_id).unwrap();
+            for (key, value) in original_page.iter() {
+                if key != b"Contents" && key != b"Resources" {
+                    assert_eq!(
+                        output_page.get(key).unwrap(),
+                        value,
+                        "{id} /{:?}",
+                        String::from_utf8_lossy(key)
+                    );
+                }
+            }
+            let output_resources = output_page
+                .get(b"Resources")
+                .unwrap()
+                .as_reference()
+                .unwrap();
+            assert!(output_resources.0 > original.max_id, "{id}");
+            assert!(
+                output
+                    .get_page_fonts(page_id)
+                    .unwrap()
+                    .contains_key(b"MimusR".as_slice()),
+                "{id}"
+            );
+            for (object_id, expected) in original_resources {
+                assert_eq!(
+                    output.get_object(object_id).unwrap(),
+                    &expected,
+                    "{id} resource {object_id:?}"
+                );
+            }
+            if id == "unit-write-02-shared-resources" {
+                assert_eq!(
+                    output
+                        .get_dictionary(page_ids[1])
+                        .unwrap()
+                        .get(b"Resources")
+                        .unwrap(),
+                    original
+                        .get_dictionary(page_ids[1])
+                        .unwrap()
+                        .get(b"Resources")
+                        .unwrap(),
+                );
+            }
+            if id == "unit-write-06-free-object-slot" {
+                assert!(report.content_objects.iter().all(|value| value.0 > 10));
             }
         }
     }
