@@ -1,7 +1,7 @@
 # CONTEXT
 
 > 项目共享术语与决策索引。术语随设计会话逐轮补充；难以逆转的技术选择在 `docs/adr/` 以 ADR 形式记录。
-> 事实基础：`docs/01-research.md`（2026-08-21 调研报告）+ 2026-08-21 模型/引擎事实查证（要点已并入 ADR-0002/0006）+ `docs/04-m0-experiment-1.md`、`docs/04-m0-experiment-2.md`、`docs/04-m0-experiment-3.md`（M0 三项实验结论）+ `docs/05-pdfium-backend-qualification.md`（PDFium Rust wrapper 资格验证）。
+> 事实基础：`docs/01-research.md`（2026-08-21 调研报告）+ 2026-08-21 模型/引擎事实查证（要点已并入 ADR-0002/0006）+ `docs/04-m0-experiment-1.md`、`docs/04-m0-experiment-2.md`、`docs/04-m0-experiment-3.md`（M0 三项实验结论）+ `docs/05-pdfium-backend-qualification.md`（PDFium Rust wrapper 资格验证）+ `docs/07-engine-character-alignment-experiment.md`（实验 5：跨引擎字符对齐残差分类）。
 
 ## 已定决策
 
@@ -49,6 +49,7 @@
 | 40 | 扫描件判定：单页判据=有图像且 0 可见文字对象（`Tr 3`/`Tr 7` 不算可见，非直立计入，不用光栅）；文档级=扫描页 ≥ 80% × 内容页（内容页=总页−空白页，含等于）即整份拒绝（`Input/scanned_pdf`、退出码 2），低于阈值继续、扫描/空白页豁免严格 walk 整页透传；数据来自宽容预扫（严格 walk 不动、挪到 ScanDetect 后），公开 IL 保持 v1；统计以 error 字段 `scanned_pages`/`total_pages` + 单条汇总 diagnostic 公开（v2 兼容扩展） | [ADR-0012](docs/adr/0012-scan-detection-policy.md) |
 | 41 | 写回改为**区间替换**（只替换被翻译单元的 text-show 操作数区间，其余原样透传），取代整流重建——这是拆除三堵 fail-closed 守卫而不破坏 Write 像素等值合同的前提；走查从白名单 fail-closed 变为有界宽容（恢复语义与边界数值见 ADR）；降级分文档/页/段三级，页级=不产生 rewrite 天然保留原流、段级=`Paragraph.preserved` 且区间不替换；「单元」是段内连续同因字符区间的**派生分组**，不是 IL 层级；非直立判定输入改为 `R(/Rotate)∘CTM∘Tm` 线性部分，页面几何事实层改由 lopdf 提供、engine 几何降为交叉证据 | [ADR-0013](docs/adr/0013-bounded-walk-and-graded-degradation.md) |
 | 42 | 字体/CMap 可靠性判定链：ToUnicode → 嵌入字体 cmap → 标准编码链，任一层失败即 `unicode=None`，链中**无「CID 当 Unicode」分支**；段内存在不可解码字符、advance 非正或字体不可解析即整段保留原文；M1 预定义 CMap 只支持 Identity 及别名，其余显式降级；缺 `/Widths` 走段级降级（PDFium glyph-width 未绑定）；CJK 输入 fixture 用 Noto Sans SC 确定性子集入库 | [ADR-0014](docs/adr/0014-font-decoding-reliability.md) |
+| 43 | 跨引擎字符对齐改为**分类交叉校验**：撤销 `engine_mismatch` 文档级硬失败（严格数组相等的前提被实验 5 在真实语料上证伪——PDFium text page 是提取视图，不是绘制序枚举）；几何锚定多重集匹配 + 提取视图等价类（空白/离页/控制符标记/UTF-16 代理项/连字折叠/顺序）；已配对 Unicode 冲突按走查解码链强弱分级——弱链段级保留、强链走查胜出记诊断；engine-only 墨迹残差的段级保留以 fixture 钉死配对窗口 + 来源桥（T1/O1）为生效前提，须在 M2 前完成；ToUnicode→非字符视为未映射（ADR-0014 修订）；页级/文档级不再由跨引擎分歧触发 | [ADR-0015](docs/adr/0015-classified-cross-engine-alignment.md) |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
@@ -72,6 +73,7 @@
 ### 解析层
 
 - **操作符走查（operator walk）**：在 lopdf 提供的原始 content stream 字节上自写 tokenizer + 图形状态机 + CTM 栈 + 文本定位，字符坐标自算；度量委托 PDFium，text page 做交叉校验（ADR-0006）。
+- **提取视图（extraction view）**：PDFium text page 返回的面向搜索/提取的规范化字符序列——丢独立空格 show、行末连字标 `U+0002`、非 BMP 只给 UTF-16 高代理项、连字展开、顺序与绘制序不同。它与走查的绘制事件枚举不是同一语义层，两者只做分类交叉校验，不做数组相等（ADR-0015，实证见 `docs/07`）。
 - **passthrough**：不理解的操作符原样存字节、输出时透传，IL 只覆盖"要修改的部分"。依赖自写走查（PDFium API 拿不到原始字节）。
 - **PdfInspector / Rasterizer trait**：字符度量与光栅化的能力边界。当前 V1 后端为 pdfium-render；firecrawl-pdfium 只有在 T1/F1/O1 上游能力补齐并重新通过 `docs/05-pdfium-backend-qualification.md` 的矩阵后才可替换。
 
@@ -141,7 +143,7 @@
 
 ## 待决清单
 
-与 `docs/03-corpus-requirements.md` §6 同源，此处为索引。2026-08-21 的设计会话已收口其中三条：加密 PDF（决策 #31 / ADR-0009）、非直立文本（决策 #32）、M0 fixture 排期（决策 #33）。2026-08-23 的设计会话（#16 收口）补上扫描件判定政策（决策 #40 / ADR-0012）。2026-08-24 的 #17/#18/#19 联合设计会话补上有界走查与分级降级（决策 #41 / ADR-0013）、字体可靠性判定链（决策 #42 / ADR-0014），并收口 CJK fixture 字体选型。
+与 `docs/03-corpus-requirements.md` §6 同源，此处为索引。2026-08-21 的设计会话已收口其中三条：加密 PDF（决策 #31 / ADR-0009）、非直立文本（决策 #32）、M0 fixture 排期（决策 #33）。2026-08-23 的设计会话（#16 收口）补上扫描件判定政策（决策 #40 / ADR-0012）。2026-08-24 的 #17/#18/#19 联合设计会话补上有界走查与分级降级（决策 #41 / ADR-0013）、字体可靠性判定链（决策 #42 / ADR-0014），并收口 CJK fixture 字体选型。2026-08-25 的设计会话以实验 5（`docs/07`）为据收口跨引擎字符对齐分类（决策 #43 / ADR-0015）。
 
 **仍需决策者拍板（0 条）**
 

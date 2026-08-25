@@ -117,6 +117,8 @@ M0 实验 2 的参数不自动成为生产政策（其 §范围限制明确不�
 
 依据 CONTEXT #35 / ADR-0006：PDFium 是交叉证据而非事实层，规范与 manifest 才是。
 
+> 2026-08-25 更新：本节分级表已由 [ADR-0015](0015-classified-cross-engine-alignment.md) 取代——「无恢复警告时字符数与 Unicode 按 index 硬对齐」的前提被实验 5（`docs/07-engine-character-alignment-experiment.md`）在真实语料上证伪，字符对齐分歧不再触发文档级 `engine_mismatch`。§6 的页面几何断言不受影响。
+
 ## 后果
 
 - 三堵 fail-closed 守卫（ScanDetect 的 `/Rotate`、walk 的 `Tm`、Typeset 的 upright 单 run）在 §1 的写回模型落地后依次拆除。#17 评论要求的「忠实重发或隔离路径成立前守卫必须保留」由实现顺序兑现：写回模型先于拆墙。
