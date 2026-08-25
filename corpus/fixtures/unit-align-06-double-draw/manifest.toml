@@ -1,0 +1,115 @@
+schema_version = 1
+[identity]
+id = "unit-align-06-double-draw"
+name = "Double-draw baseline multiplicity"
+class = "unit"
+legality = "legal"
+cases = ["ALIGN-06"]
+priority = "M1"
+variable = "The same visible glyph is painted twice at exactly the same baseline origin"
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-align-06-double-draw.pdf"
+pdf_sha256 = "a9f4382047d11bb83f43653beeca45cac1206ce890c0d21a7e4fbf6897efa475"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d616c69676e2d30362d646f"
+info_dictionary = false
+metadata_streams = 0
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+[[expected.block]]
+key = "A06"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "M"
+visual_text = "MM"
+baseline_origin = [72.0,120.0]
+metric_box = [72.0,117.168,82.356,131.136]
+visual_bbox = [73.177734,120.0,81.181641,128.748047]
+[[expected.alignment]]
+page = 0
+diagnostic = false
+walked_text = "MM"
+walked_character_count = 2
+engine_character_count = 2
+extraction_equivalent_count = 0
+strong_unicode_conflict_count = 0
+weak_unicode_conflict_count = 0
+unresolved_unicode_count = 0
+walk_only_count = 0
+engine_only_count = 0
+residual_count = 0
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 Tr
+1 0 0 1 72 120 Tm
+(M) Tj
+ET
+BT
+/F1 12 Tf
+0 Tr
+1 0 0 1 72 120 Tm
+(A) Tj
+ET
+"""
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 9
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 5
+[[expected.reference]]
+from_object = 5
+path = ["/FontDescriptor"]
+to_object = 6
+[[expected.reference]]
+from_object = 5
+path = ["/ToUnicode"]
+to_object = 8
+[[expected.reference]]
+from_object = 6
+path = ["/FontFile2"]
+to_object = 7
+[[expected.behaviour]]
+id = "ALIGN-06-classification"
+assertion = "mimus accepts the document, pairs both same-origin glyph occurrences, emits no classifier diagnostic, and preserves no paragraph"
+observable_via = "mimus production-path character counts, diagnostics, and inspect IL"
+[oracle]
+checks = ["determinism","legality","structure","page-geometry","hand-written-geometry","pdf-bytes","pdf-structure","render"]
+[[adjudication]]
+date = "2026-08-25"
+issue = "Two identical shows in one text object are coalesced by PDFium and do not model separate pseudo-bold painting events"
+resolution = "Keep the exact same baseline and glyph but place each draw in its own BT/ET text object, matching the real double-draw mechanism"
+[[adjudication]]
+date = "2026-08-25"
+issue = "PDFium coalesces byte-identical same-origin text objects even when their rendering modes differ"
+resolution = "Keep the exact same baseline and M outline while encode the second draw through an alias code that maps to the same glyph and Unicode, preventing text-page coalescing from erasing multiplicity"
+[[adjudication]]
+date = "2026-08-25"
+issue = "MuPDF and Poppler correctly expose one semantic M for the overprinted outline while the production text page retains both encoded paint events"
+resolution = "Keep independent block.text as one visible M and assert the two walk/engine occurrences separately through expected.alignment"

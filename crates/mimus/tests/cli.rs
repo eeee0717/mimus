@@ -92,6 +92,8 @@ struct ManifestExpected {
     transform: Vec<ManifestTransform>,
     #[serde(default)]
     degradation: Vec<ManifestDegradation>,
+    #[serde(default)]
+    alignment: Vec<ManifestAlignment>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,6 +121,22 @@ struct ManifestDegradation {
     #[serde(default)]
     paragraph: Option<usize>,
     reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestAlignment {
+    page: usize,
+    diagnostic: bool,
+    walked_text: String,
+    walked_character_count: usize,
+    engine_character_count: usize,
+    extraction_equivalent_count: usize,
+    strong_unicode_conflict_count: usize,
+    weak_unicode_conflict_count: usize,
+    unresolved_unicode_count: usize,
+    walk_only_count: usize,
+    engine_only_count: usize,
+    residual_count: usize,
 }
 
 fn fixture_manifest(id: &str) -> FixtureManifest {
@@ -720,8 +738,8 @@ fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 133, "M1 closure fixture inventory changed");
-    assert_eq!(cases.len(), 72, "M1 closure case inventory changed");
+    assert_eq!(ids.len(), 142, "M1 closure fixture inventory changed");
+    assert_eq!(cases.len(), 80, "M1 closure case inventory changed");
 
     for id in ids {
         let input = fixture_path(&id);
@@ -849,6 +867,141 @@ fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
                 "fixture {id}"
             );
             assert!(!translated.exists(), "fixture {id}: failure wrote output");
+        }
+    }
+}
+
+#[test]
+fn alignment_fixture_classifications_match_manifest_through_production() {
+    let ids = fixture_ids_with_case_prefixes(&["ALIGN-"]);
+    assert_eq!(ids.len(), 9);
+
+    for id in ids {
+        let manifest = fixture_manifest(&id);
+        assert!(!manifest.expected.alignment.is_empty(), "fixture {id}");
+        let input = fixture_path(&id);
+        let inspected = run_inspect(&input, true, None);
+        assert!(
+            inspected.status.success(),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&inspected.stderr)
+        );
+        let events = parse_events(&inspected.stdout);
+        assert_one_terminal_last(&events, "result");
+        let result = events.last().unwrap();
+        let diagnostics = events
+            .iter()
+            .filter(|event| {
+                event["event"] == "diagnostic" && event["id"] == "engine_character_alignment"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            diagnostics.len(),
+            manifest
+                .expected
+                .alignment
+                .iter()
+                .filter(|expected| expected.diagnostic)
+                .count(),
+            "fixture {id}"
+        );
+
+        for expected in &manifest.expected.alignment {
+            let actual = diagnostics
+                .iter()
+                .copied()
+                .find(|event| event["page_index"].as_u64() == Some(expected.page as u64));
+            if !expected.diagnostic {
+                assert!(actual.is_none(), "fixture {id}, page {}", expected.page);
+            } else {
+                let actual = actual.unwrap_or_else(|| {
+                    panic!(
+                        "fixture {id}, page {} has no alignment diagnostic",
+                        expected.page
+                    )
+                });
+                assert_eq!(
+                    actual,
+                    &serde_json::json!({
+                        "schema_version": 2,
+                        "event": "diagnostic",
+                        "id": "engine_character_alignment",
+                        "page_index": expected.page,
+                        "walked_character_count": expected.walked_character_count,
+                        "engine_character_count": expected.engine_character_count,
+                        "extraction_equivalent_count": expected.extraction_equivalent_count,
+                        "strong_unicode_conflict_count": expected.strong_unicode_conflict_count,
+                        "weak_unicode_conflict_count": expected.weak_unicode_conflict_count,
+                        "unresolved_unicode_count": expected.unresolved_unicode_count,
+                        "walk_only_count": expected.walk_only_count,
+                        "engine_only_count": expected.engine_only_count,
+                        "residual_count": expected.residual_count,
+                    }),
+                    "fixture {id}, page {}",
+                    expected.page
+                );
+            }
+
+            let walked_text = result["il"]["pages"][expected.page]["paragraphs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|paragraph| paragraph["text"]["chars"].as_array().unwrap())
+                .filter_map(|character| character["unicode"].as_str())
+                .collect::<String>();
+            assert_eq!(walked_text, expected.walked_text, "fixture {id}");
+        }
+
+        let expected_preserved = manifest
+            .expected
+            .degradation
+            .iter()
+            .filter(|degradation| degradation.scope == "paragraph")
+            .map(|degradation| {
+                (
+                    degradation.page,
+                    degradation.paragraph.unwrap(),
+                    degradation.reason.as_str(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let actual_preserved = result["il"]["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .flat_map(|(page_index, page)| {
+                page["paragraphs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(paragraph_index, paragraph)| {
+                        paragraph["preserved"]
+                            .as_str()
+                            .map(|reason| (page_index, paragraph_index, reason))
+                    })
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual_preserved, expected_preserved, "fixture {id}");
+
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join(format!("{id}.pdf"));
+        let translated = run_none(&input, Some(&output), true);
+        assert!(
+            translated.status.success(),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&translated.stderr)
+        );
+        let output_bytes = std::fs::read(&output).unwrap();
+        assert!(
+            !output_bytes
+                .windows(b"(cid:".len())
+                .any(|window| window == b"(cid:"),
+            "fixture {id}"
+        );
+        if !expected_preserved.is_empty() {
+            assert_eq!(output_bytes, std::fs::read(&input).unwrap(), "fixture {id}");
         }
     }
 }

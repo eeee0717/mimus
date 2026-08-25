@@ -67,6 +67,33 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
         "unit-cmap-identity-alias" => identity_cmap_alias(repo_root),
         "unit-cmap-predefined-gb" => predefined_gb_cmap(repo_root),
         "intg-cmap-mixed-degrade" => mixed_cmap_degradation(repo_root),
+        "unit-align-01-independent-space-show" => {
+            alignment_fixture(fixture_id, repo_root, AlignmentRecipe::IndependentSpace)
+        }
+        "unit-align-02-hyphen-marker" => {
+            alignment_fixture(fixture_id, repo_root, AlignmentRecipe::HyphenMarker)
+        }
+        "unit-align-03-high-surrogate" => {
+            alignment_composite_fixture(fixture_id, repo_root, "D835DC00")
+        }
+        "unit-align-04-ligature-expansion" => {
+            alignment_fixture(fixture_id, repo_root, AlignmentRecipe::Ligature)
+        }
+        "unit-align-05-tounicode-noncharacter" => {
+            alignment_fixture(fixture_id, repo_root, AlignmentRecipe::Noncharacter)
+        }
+        "unit-align-06-double-draw" => {
+            alignment_fixture(fixture_id, repo_root, AlignmentRecipe::DoubleDraw)
+        }
+        "unit-align-07-weak-unicode-conflict" => {
+            alignment_fixture(fixture_id, repo_root, AlignmentRecipe::WeakConflict)
+        }
+        "unit-align-08-engine-only-overlap" => {
+            alignment_fixture(fixture_id, repo_root, AlignmentRecipe::EngineOnlyOverlap)
+        }
+        "unit-align-09-engine-only-disjoint" => {
+            alignment_fixture(fixture_id, repo_root, AlignmentRecipe::EngineOnlyDisjoint)
+        }
         "unit-xobj-00-recursion-parent" => xobject_recursion_parent(repo_root),
         "unit-xobj-04-inherited-resources" => inherited_form_resources(repo_root),
         "unit-xobj-05-scope-parent" => xobject_scope_parent(repo_root),
@@ -913,6 +940,172 @@ fn identity_cid_no_tounicode(repo_root: &Path) -> Result<Vec<u8>> {
         b"BT /F1 12 Tf 1 0 0 1 72 120 Tm <000700060007000B0009> Tj ET\n",
     )?;
     pdf.finish(1)
+}
+
+#[derive(Clone, Copy)]
+enum AlignmentRecipe {
+    IndependentSpace,
+    HyphenMarker,
+    Ligature,
+    Noncharacter,
+    DoubleDraw,
+    WeakConflict,
+    EngineOnlyOverlap,
+    EngineOnlyDisjoint,
+}
+
+impl AlignmentRecipe {
+    fn content(self) -> &'static [u8] {
+        match self {
+            Self::IndependentSpace => {
+                b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(A) Tj\n[( )] TJ\nET\n"
+            }
+            Self::HyphenMarker => {
+                b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(M-) Tj\n0 -20 Td\n(M) Tj\nET\n"
+            }
+            Self::Ligature | Self::Noncharacter => {
+                b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(A) Tj\nET\n"
+            }
+            Self::DoubleDraw => b"BT\n/F1 12 Tf\n1 Tr\n1 0 0 1 72 120 Tm\n(M) Tj\nET\nBT\n/F1 12 Tf\n0 Tr\n1 0 0 1 72 120 Tm\n(A) Tj\nET\n",
+            Self::WeakConflict => b"/Span << /ActualText (I) >> BDC\nBT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(M) Tj\nET\nEMC\n",
+            Self::EngineOnlyOverlap => b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(M) Tj\nET\n/Span << /ActualText (MI) >> BDC\nBT\n/F1 12 Tf\n0 1 -1 0 88 120 Tm\n(M) Tj\nET\nEMC\n",
+            Self::EngineOnlyDisjoint => b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(M) Tj\nET\n/Span << /ActualText (MI) >> BDC\nBT\n/F1 12 Tf\n0 1 -1 0 200 40 Tm\n(M) Tj\nET\nEMC\n",
+        }
+    }
+
+    fn unicode_mappings(self) -> Option<&'static [(u8, &'static str)]> {
+        match self {
+            Self::IndependentSpace => Some(&[(0x20, "0020"), (0x41, "0041")]),
+            Self::HyphenMarker => Some(&[(0x2d, "002D"), (0x4d, "004D")]),
+            Self::Ligature => Some(&[(0x41, "FB01")]),
+            Self::Noncharacter => Some(&[(0x41, "FFFF")]),
+            Self::DoubleDraw => Some(&[(0x41, "004D"), (0x4d, "004D")]),
+            Self::WeakConflict | Self::EngineOnlyOverlap | Self::EngineOnlyDisjoint => None,
+        }
+    }
+}
+
+fn alignment_composite_fixture(
+    fixture_id: &str,
+    repo_root: &Path,
+    target: &str,
+) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new(fixture_id);
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 11 0 R >>")?;
+    pdf.object(b"<< /Font << /F1 9 0 R >> >>")?;
+    pdf.object(b"<< /MimusFixturePadding true >>")?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", &alignment_composite_to_unicode(target))?;
+    pdf.object(b"<< /Type /Font /Subtype /Type0 /BaseFont /MIMUSI+DejaVuSans /Encoding /Identity-H /DescendantFonts [10 0 R] /ToUnicode 8 0 R >>")?;
+    pdf.object(b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /MIMUSI+DejaVuSans /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 6 0 R /W [7 [863]] /CIDToGIDMap /Identity >>")?;
+    pdf.stream(b"", b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n<0007> Tj\nET\n")?;
+    pdf.finish(1)
+}
+
+fn alignment_composite_to_unicode(target: &str) -> Vec<u8> {
+    format!(
+        "/CIDInit /ProcSet findresource begin\n\
+12 dict begin\n\
+begincmap\n\
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+/CMapName /MimusAlignment-UCS def\n\
+/CMapType 2 def\n\
+1 begincodespacerange\n\
+<0000> <FFFF>\n\
+endcodespacerange\n\
+1 beginbfchar\n\
+<0007> <{target}>\n\
+endbfchar\n\
+endcmap\n\
+CMapName currentdict /CMap defineresource pop\n\
+end\n\
+end\n"
+    )
+    .into_bytes()
+}
+
+fn alignment_fixture(
+    fixture_id: &str,
+    repo_root: &Path,
+    recipe: AlignmentRecipe,
+) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new(fixture_id);
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 9 0 R >>",
+    )?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    let to_unicode_entry = recipe
+        .unicode_mappings()
+        .map_or("", |_| " /ToUnicode 8 0 R");
+    pdf.object(
+        format!(
+            "<< /Type /Font /Subtype /TrueType /BaseFont /MIMUSI+DejaVuSans \
+             /FirstChar 32 /LastChar 77 /Widths [{}] /FontDescriptor 6 0 R \
+             /Encoding << /Type /Encoding /BaseEncoding /WinAnsiEncoding \
+             /Differences [45 /M 65 /{}] >>{to_unicode_entry} >>",
+            alignment_widths(),
+            if matches!(recipe, AlignmentRecipe::Ligature) {
+                "fi"
+            } else {
+                "M"
+            }
+        )
+        .as_bytes(),
+    )?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    if let Some(mappings) = recipe.unicode_mappings() {
+        pdf.stream(b"/Type /CMap", &alignment_to_unicode(mappings))?;
+    } else {
+        pdf.object(b"<< /MimusFixturePadding true >>")?;
+    }
+    pdf.stream(b"", recipe.content())?;
+    pdf.finish(1)
+}
+
+fn alignment_widths() -> String {
+    (32_u8..=77)
+        .map(|code| match code {
+            32 => 318,
+            45 | 65 | 77 => 863,
+            73 => 295,
+            _ => 0,
+        })
+        .map(|width| width.to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn alignment_to_unicode(mappings: &[(u8, &str)]) -> Vec<u8> {
+    let mut cmap = b"/CIDInit /ProcSet findresource begin\n\
+12 dict begin\n\
+begincmap\n\
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+/CMapName /MimusAlignment-UCS def\n\
+/CMapType 2 def\n\
+1 begincodespacerange\n\
+<00> <FF>\n\
+endcodespacerange\n"
+        .to_vec();
+    cmap.extend_from_slice(format!("{} beginbfchar\n", mappings.len()).as_bytes());
+    for &(code, target) in mappings {
+        cmap.extend_from_slice(format!("<{code:02X}> <{target}>\n").as_bytes());
+    }
+    cmap.extend_from_slice(
+        b"endbfchar\n\
+endcmap\n\
+CMapName currentdict /CMap defineresource pop\n\
+end\n\
+end\n",
+    );
+    cmap
 }
 
 fn xobject_recursion_parent(repo_root: &Path) -> Result<Vec<u8>> {

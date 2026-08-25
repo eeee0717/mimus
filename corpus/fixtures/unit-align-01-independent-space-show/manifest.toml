@@ -1,0 +1,96 @@
+schema_version = 1
+[identity]
+id = "unit-align-01-independent-space-show"
+name = "Independent space show extraction equivalence"
+class = "unit"
+legality = "legal"
+cases = ["ALIGN-01"]
+priority = "M1"
+variable = "A standalone space text show follows a visible glyph in a separate TJ operation"
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-align-01-independent-space-show.pdf"
+pdf_sha256 = "bf0a191d13bc3104384ba5e8a820d239b1dbb755cacc8c8ca0a446787f73ac8a"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d616c69676e2d30312d696e"
+info_dictionary = false
+metadata_streams = 0
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+[[expected.block]]
+key = "A01"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "A"
+baseline_origin = [72.0,120.0]
+metric_box = [72.0,117.168,82.356,131.136]
+visual_bbox = [73.177734,120.0,81.181641,128.748047]
+[[expected.alignment]]
+page = 0
+diagnostic = true
+walked_text = "A "
+walked_character_count = 2
+engine_character_count = 1
+extraction_equivalent_count = 1
+strong_unicode_conflict_count = 0
+weak_unicode_conflict_count = 0
+unresolved_unicode_count = 0
+walk_only_count = 0
+engine_only_count = 0
+residual_count = 0
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 120 Tm
+(A) Tj
+[( )] TJ
+ET
+"""
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 9
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 5
+[[expected.reference]]
+from_object = 5
+path = ["/FontDescriptor"]
+to_object = 6
+[[expected.reference]]
+from_object = 5
+path = ["/ToUnicode"]
+to_object = 8
+[[expected.reference]]
+from_object = 6
+path = ["/FontFile2"]
+to_object = 7
+[[expected.behaviour]]
+id = "ALIGN-01-classification"
+assertion = "mimus accepts the document, classifies exactly one extraction-view equivalent, and preserves no paragraph"
+observable_via = "mimus production-path engine_character_alignment diagnostic and inspect IL"
+[oracle]
+checks = ["determinism","legality","structure","page-geometry","hand-written-geometry","pdf-bytes","pdf-structure","render"]

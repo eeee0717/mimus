@@ -270,6 +270,11 @@ pub struct Expected {
     pub transform: Vec<TransformExpectation>,
     #[serde(default)]
     pub degradation: Vec<DegradationExpectation>,
+    /// ADR-0015 cross-engine classifier outcomes, asserted through the
+    /// ordinary mimus production path rather than through a PDFium-specific
+    /// intermediate-value oracle.
+    #[serde(default)]
+    pub alignment: Vec<AlignmentExpectation>,
     #[serde(default)]
     pub reference: Vec<ObjectReference>,
     #[serde(default)]
@@ -374,6 +379,38 @@ pub struct DegradationExpectation {
     #[serde(default)]
     pub paragraph: Option<usize>,
     pub reason: DegradationReason,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlignmentExpectation {
+    pub page: usize,
+    pub diagnostic: bool,
+    /// Unicode owned by the production walk and expected in IL. This is
+    /// deliberately distinct from independently extracted block text.
+    pub walked_text: String,
+    pub walked_character_count: usize,
+    pub engine_character_count: usize,
+    pub extraction_equivalent_count: usize,
+    pub strong_unicode_conflict_count: usize,
+    pub weak_unicode_conflict_count: usize,
+    pub unresolved_unicode_count: usize,
+    pub walk_only_count: usize,
+    pub engine_only_count: usize,
+    pub residual_count: usize,
+}
+
+impl AlignmentExpectation {
+    fn has_classified_difference(&self) -> bool {
+        self.extraction_equivalent_count
+            + self.strong_unicode_conflict_count
+            + self.weak_unicode_conflict_count
+            + self.unresolved_unicode_count
+            + self.walk_only_count
+            + self.engine_only_count
+            + self.residual_count
+            > 0
+    }
 }
 
 /// 结构化期望——**先于生成写死**，生成结果不符即为失败（§2.1 例外条款）。
@@ -535,6 +572,15 @@ pub struct Block {
     pub reading_order: usize,
     /// 该块的完整文本；比较前按 `text::normalize` 归一。
     pub text: String,
+    /// Painted glyph identity when accessibility/extraction text differs from
+    /// the underlying outline (for example `/ActualText`).
+    #[serde(default)]
+    pub visual_text: Option<String>,
+    /// Whether parser/SVG Unicode is a meaningful identity for this block.
+    /// ALIGN-05 intentionally maps to a Unicode noncharacter, so independent
+    /// tools can only corroborate glyph count, order, and geometry there.
+    #[serde(default = "visible_by_default")]
+    pub unicode_semantic: bool,
     /// 是否实际着墨。`Tr 3` / `Tr 7` 文字没有可供渲染 oracle 核对的轮廓。
     #[serde(default = "visible_by_default")]
     pub visible: bool,
@@ -1121,6 +1167,34 @@ impl Manifest {
                 "重复的 degradation 期望",
             )?;
         }
+        let mut alignment_pages = BTreeSet::new();
+        for expected in &self.expected.alignment {
+            fail_if(
+                expected.page >= self.page.len(),
+                "§2.7",
+                &format!("alignment.page {} 超出页面范围", expected.page),
+            )?;
+            fail_if(
+                !alignment_pages.insert(expected.page),
+                "§2.7",
+                &format!("页面 {} 有重复的 alignment 期望", expected.page),
+            )?;
+            fail_if(
+                expected.walked_character_count == 0 && expected.engine_character_count == 0,
+                "§2.7/ADR-0015",
+                "alignment 期望不得同时声明 0 个 walk 字符和 0 个 engine 字符",
+            )?;
+            fail_if(
+                expected.walked_text.chars().count() > expected.walked_character_count,
+                "§2.7/ADR-0015",
+                "alignment.walked_text 的 Unicode 字符数不得超过 walk 字符总数",
+            )?;
+            fail_if(
+                expected.diagnostic != expected.has_classified_difference(),
+                "§2.7/ADR-0015",
+                "alignment.diagnostic 必须与分类计数是否非零一致",
+            )?;
+        }
         fail_if(
             self.expected
                 .visual_tolerance_pt
@@ -1180,6 +1254,20 @@ impl Manifest {
                 block.text.trim().is_empty(),
                 "§2.1",
                 &format!("block `{}` 的 text 为空——结构化期望必须手写", block.key),
+            )?;
+            fail_if(
+                block
+                    .visual_text
+                    .as_ref()
+                    .is_some_and(|value| value.trim().is_empty()),
+                "§2.1",
+                &format!("block `{}` 的 visual_text 若给出则不得为空", block.key),
+            )?;
+            fail_if(
+                !block.unicode_semantic
+                    && !self.identity.cases.iter().any(|case| case == "ALIGN-05"),
+                "§2.1",
+                "unicode_semantic = false 只允许用于 ALIGN-05 非字符 fixture",
             )?;
 
             if self.expected.geometry_source == GeometrySource::HandWritten {
@@ -1300,9 +1388,11 @@ impl Manifest {
         )?;
         if self.has_text_expectations() {
             fail_if(
-                !self.requires(Check::Structure) && !self.requires(Check::EmbeddedCmap),
+                !self.requires(Check::Structure)
+                    && !self.requires(Check::Glyphs)
+                    && !self.requires(Check::EmbeddedCmap),
                 "§2.8",
-                "exact-writer fixture 必须启用 structure 或 embedded-cmap 门禁",
+                "exact-writer fixture 必须启用 structure、glyphs 或 embedded-cmap 门禁",
             )?;
             fail_if(
                 !self.requires(Check::HandWrittenGeometry)
