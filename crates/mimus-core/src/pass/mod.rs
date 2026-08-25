@@ -6,8 +6,8 @@ use crate::context::{CharacterAlignment, Document, ExtractedPage, OutputFont, Pa
 use crate::engine::{PageCharSnapshot, RgbaImage};
 use crate::error::{AssetReason, InputReason, InternalReason, IoReason, MimusError, Result};
 use crate::event::{
-    Diagnostic, Diagnostics, Event, EventKind, PageDegradeReason, PreservedParagraph, RecoveryKind,
-    Stage,
+    CacheStatus, Diagnostic, Diagnostics, Event, EventKind, PageDegradeReason, PreservedParagraph,
+    RecoveryKind, Stage,
 };
 use crate::geometry::{PageFrame, PageGeometryResolveError};
 use crate::il::{
@@ -1528,16 +1528,41 @@ pub fn extract_terms(document: &mut Document, context: &PassContext<'_>) -> Resu
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n");
-    let automatic = if context.config.auto_terms
-        && context.translator.model_id() != "none"
-        && !document_text.is_empty()
+    let model_id = context.translator.model_id();
+    let automatic = if context.config.auto_terms && model_id != "none" && !document_text.is_empty()
     {
-        context
-            .translator
-            .extract_terms(&crate::translate::TermExtractionRequest {
-                document_text: &document_text,
-                target_language: &context.config.target_language,
-            })?
+        let cache = context
+            .config
+            .cache_path
+            .as_deref()
+            .map(crate::translate::cache::TranslationCache::open)
+            .transpose()?;
+        let cache_key = crate::translate::cache::TermExtractionCacheKey::new(
+            &document_text,
+            model_id,
+            &context.config.target_language,
+            crate::translate::TERMS_PROMPT_VERSION,
+        );
+        if let Some(glossary) = cache
+            .as_ref()
+            .map(|cache| cache.get_terms(&cache_key))
+            .transpose()?
+            .flatten()
+        {
+            glossary
+        } else {
+            let glossary =
+                context
+                    .translator
+                    .extract_terms(&crate::translate::TermExtractionRequest {
+                        document_text: &document_text,
+                        target_language: &context.config.target_language,
+                    })?;
+            if let Some(cache) = &cache {
+                cache.insert_terms(&cache_key, &glossary)?;
+            }
+            glossary
+        }
     } else {
         crate::translate::Glossary::default()
     };
@@ -1566,6 +1591,18 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
     document.placeholder_violations.clear();
     let mut prose_paragraph_count = 0;
     let mut prose_identity_count = 0;
+    let model_id = context.translator.model_id();
+    let cache = if model_id == "none" {
+        None
+    } else {
+        context
+            .config
+            .cache_path
+            .as_deref()
+            .map(crate::translate::cache::TranslationCache::open)
+            .transpose()?
+    };
+    let glossary_fingerprint = document.glossary.fingerprint();
     for page in &mut document.il.pages {
         let content_objects = page_content_objects.get(page.index).ok_or_else(|| {
             MimusError::internal(
@@ -1578,7 +1615,7 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                 paragraph.translated_text = None;
                 continue;
             }
-            if context.translator.model_id() != "none" {
+            if model_id != "none" {
                 let key = (page.index, paragraph.reading_order);
                 let prepared = document.prepared_translations.get(&key).ok_or_else(|| {
                     MimusError::internal(
@@ -1592,6 +1629,57 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                 }
                 let prose_shaped = translation_request_is_prose_shaped(prepared.request_text());
                 prose_paragraph_count += usize::from(prose_shaped);
+                let cache_key = crate::translate::cache::TranslationCacheKey::new(
+                    prepared.request_text(),
+                    model_id,
+                    &context.config.target_language,
+                    crate::translate::PARAGRAPH_PROMPT_VERSION,
+                    &glossary_fingerprint,
+                );
+                if let Some(cache) = &cache {
+                    if let Some(cached) = cache.get(&cache_key)? {
+                        match cached {
+                            crate::translate::cache::CachedTranslation::Identity => {
+                                context
+                                    .events
+                                    .emit(Event::new(EventKind::TranslationCache {
+                                        page_index: page.index,
+                                        paragraph_index,
+                                        status: CacheStatus::Hit,
+                                    }))?;
+                                paragraph.translated_text = Some(paragraph.source_text());
+                                prose_identity_count += usize::from(prose_shaped);
+                                document.diagnostics.push(Diagnostic::TranslationIdentity {
+                                    page_index: page.index,
+                                    paragraph_index,
+                                    request_characters: prepared.request_text().chars().count(),
+                                });
+                                continue;
+                            }
+                            crate::translate::cache::CachedTranslation::Translated(validated) => {
+                                if let Ok(restored) = prepared.restore(&validated) {
+                                    context.events.emit(Event::new(
+                                        EventKind::TranslationCache {
+                                            page_index: page.index,
+                                            paragraph_index,
+                                            status: CacheStatus::Hit,
+                                        },
+                                    ))?;
+                                    paragraph.translated_text = Some(restored.plain_text());
+                                    document.restored_translations.insert(key, restored);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    context
+                        .events
+                        .emit(Event::new(EventKind::TranslationCache {
+                            page_index: page.index,
+                            paragraph_index,
+                            status: CacheStatus::Miss,
+                        }))?;
+                }
                 let output =
                     context
                         .translator
@@ -1602,6 +1690,9 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                         })?;
                 match prepared.classify(&output) {
                     crate::translate::TranslationOutcome::Identity => {
+                        if let Some(cache) = &cache {
+                            cache.insert_identity(&cache_key)?;
+                        }
                         paragraph.translated_text = Some(paragraph.source_text());
                         prose_identity_count += usize::from(prose_shaped);
                         document.diagnostics.push(Diagnostic::TranslationIdentity {
@@ -1613,6 +1704,9 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                     crate::translate::TranslationOutcome::Translated(validated) => {
                         match prepared.restore(&validated) {
                             Ok(restored) => {
+                                if let Some(cache) = &cache {
+                                    cache.insert(&cache_key, &validated)?;
+                                }
                                 paragraph.translated_text = Some(restored.plain_text());
                                 document.restored_translations.insert(key, restored);
                             }
@@ -3458,6 +3552,43 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct FailingTranslator {
+        calls: AtomicUsize,
+    }
+
+    impl Translator for FailingTranslator {
+        fn translate(&self, _request: &crate::translate::TranslationRequest<'_>) -> Result<String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(MimusError::translation(
+                crate::error::TranslationReason::TransportFailure,
+                "injected transport failure",
+            ))
+        }
+    }
+
+    #[derive(Default)]
+    struct FailingTermTranslator {
+        term_calls: AtomicUsize,
+    }
+
+    impl Translator for FailingTermTranslator {
+        fn translate(&self, request: &crate::translate::TranslationRequest<'_>) -> Result<String> {
+            Ok(request.text.to_owned())
+        }
+
+        fn extract_terms(
+            &self,
+            _request: &crate::translate::TermExtractionRequest<'_>,
+        ) -> Result<crate::translate::Glossary> {
+            self.term_calls.fetch_add(1, Ordering::SeqCst);
+            Err(MimusError::translation(
+                crate::error::TranslationReason::TransportFailure,
+                "injected term extraction failure",
+            ))
+        }
+    }
+
+    #[derive(Default)]
     struct RecordingSnapshotSink {
         snapshots: Mutex<Vec<(usize, Stage, il::Document)>>,
     }
@@ -3553,6 +3684,28 @@ mod tests {
     fn singular_form_fixture() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus/fixtures/unit-xobj-05-singular-ctm/unit-xobj-05-singular-ctm.pdf")
+    }
+
+    fn translate_fixture_once(
+        translator: &dyn Translator,
+        events: &RecordingEventSink,
+        config: crate::context::PipelineConfig,
+    ) -> Result<Document> {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator,
+            events,
+            snapshots: None,
+            config,
+        };
+        inspect(&mut document, &context)?;
+        styles_and_formulas(&mut document, &context)?;
+        extract_terms(&mut document, &context)?;
+        translate(&mut document, &context)?;
+        Ok(document)
     }
 
     fn nested_text_fixture() -> PathBuf {
@@ -5327,6 +5480,119 @@ mod tests {
                     }
                 ))
         );
+    }
+
+    #[test]
+    fn second_identical_run_hits_translation_and_term_caches() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache_path = directory.path().join("translations.redb");
+        let translator = GlossaryTranslator::default();
+        let events = RecordingEventSink::default();
+        for _ in 0..2 {
+            translate_fixture_once(
+                &translator,
+                &events,
+                crate::context::PipelineConfig {
+                    cache_path: Some(cache_path.clone()),
+                    ..crate::context::PipelineConfig::default()
+                },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(translator.term_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(translator.translation_glossaries.lock().unwrap().len(), 1);
+        let statuses = events
+            .events()
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                EventKind::TranslationCache { status, .. } => Some(status),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(statuses, [CacheStatus::Miss, CacheStatus::Hit]);
+        let bytes = std::fs::read(cache_path).unwrap();
+        assert!(!bytes.windows(b"MIMUS".len()).any(|part| part == b"MIMUS"));
+    }
+
+    #[test]
+    fn no_cache_bypasses_reads_and_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let unused_path = directory.path().join("translations.redb");
+        let translator = GlossaryTranslator::default();
+        let events = RecordingEventSink::default();
+        for _ in 0..2 {
+            translate_fixture_once(
+                &translator,
+                &events,
+                crate::context::PipelineConfig::default(),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(translator.term_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(translator.translation_glossaries.lock().unwrap().len(), 2);
+        assert!(!unused_path.exists());
+        assert!(
+            events
+                .events()
+                .iter()
+                .all(|event| !matches!(event.kind, EventKind::TranslationCache { .. }))
+        );
+    }
+
+    #[test]
+    fn backend_failures_do_not_enter_cache_and_identity_outcomes_do() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache_path = directory.path().join("translations.redb");
+        let events = RecordingEventSink::default();
+        let failing = FailingTranslator::default();
+        let cache_config = || crate::context::PipelineConfig {
+            cache_path: Some(cache_path.clone()),
+            ..crate::context::PipelineConfig::default()
+        };
+        assert!(translate_fixture_once(&failing, &events, cache_config()).is_err());
+        assert!(translate_fixture_once(&failing, &events, cache_config()).is_err());
+        assert_eq!(failing.calls.load(Ordering::SeqCst), 2);
+
+        let identity = StaticTranslator {
+            output: "MIMUS",
+            calls: AtomicUsize::new(0),
+        };
+        for _ in 0..2 {
+            let document = translate_fixture_once(&identity, &events, cache_config()).unwrap();
+            let paragraph = &document.il.pages[0].paragraphs[0];
+            assert_eq!(paragraph.preserved, None);
+            assert_eq!(paragraph.translated_text.as_deref(), Some("MIMUS"));
+            assert_eq!(document.diagnostics.warning_count(), 0);
+            assert!(document.diagnostics.entries().iter().any(|diagnostic| {
+                matches!(diagnostic, Diagnostic::TranslationIdentity { .. })
+            }));
+        }
+        assert_eq!(identity.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failed_term_extraction_never_enters_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache_path = directory.path().join("translations.redb");
+        let translator = FailingTermTranslator::default();
+        let events = RecordingEventSink::default();
+        for _ in 0..2 {
+            assert!(
+                translate_fixture_once(
+                    &translator,
+                    &events,
+                    crate::context::PipelineConfig {
+                        cache_path: Some(cache_path.clone()),
+                        ..crate::context::PipelineConfig::default()
+                    },
+                )
+                .is_err()
+            );
+        }
+
+        assert_eq!(translator.term_calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

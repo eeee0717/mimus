@@ -38,6 +38,8 @@ pub(crate) struct ConfigOverrides {
     pub glossary: Option<PathBuf>,
     pub dump_glossary: Option<PathBuf>,
     pub no_auto_terms: bool,
+    pub cache: Option<PathBuf>,
+    pub no_cache: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +60,7 @@ pub(crate) struct ResolvedConfig {
     pub user_glossary: Glossary,
     pub dump_glossary: Option<PathBuf>,
     pub auto_terms: bool,
+    pub cache_path: Option<PathBuf>,
     api_key: Option<SecretString>,
 }
 
@@ -132,6 +135,22 @@ impl ResolvedConfig {
             .map(Glossary::from_path)
             .transpose()?
             .unwrap_or_default();
+        let cache_path = if overrides.no_cache {
+            None
+        } else {
+            let path = overrides
+                .cache
+                .or(environment.cache_path)
+                .or(file.cache)
+                .map_or_else(default_cache_path, Ok)?;
+            if path.as_os_str().is_empty() {
+                return Err(MimusError::usage(
+                    UsageReason::InvalidArguments,
+                    "translation cache path must not be empty",
+                ));
+            }
+            Some(path)
+        };
 
         if backend == Backend::Openai && api_key.is_none() {
             return Err(MimusError::usage(
@@ -153,6 +172,7 @@ impl ResolvedConfig {
             user_glossary,
             dump_glossary: overrides.dump_glossary,
             auto_terms: !overrides.no_auto_terms,
+            cache_path,
             api_key,
         })
     }
@@ -186,6 +206,7 @@ struct FileConfig {
     font_bold: Option<PathBuf>,
     asset_mirror: Option<String>,
     cache_dir: Option<PathBuf>,
+    cache: Option<PathBuf>,
 }
 
 struct EnvironmentConfig {
@@ -198,6 +219,7 @@ struct EnvironmentConfig {
     font_bold: Option<PathBuf>,
     asset_mirror: Option<String>,
     cache_dir: Option<PathBuf>,
+    cache_path: Option<PathBuf>,
 }
 
 impl EnvironmentConfig {
@@ -219,6 +241,9 @@ impl EnvironmentConfig {
             font_bold: first_env(&["MIMUS_FONT_BOLD"]).map(PathBuf::from),
             asset_mirror: first_env(&["MIMUS_ASSET_MIRROR"]),
             cache_dir: first_env(&["MIMUS_CACHE_DIR"]).map(PathBuf::from),
+            cache_path: first_env(&["MIMUS_CACHE"])
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from),
         }
     }
 }
@@ -273,6 +298,22 @@ fn choose_font_path(
             source: "config",
         })
     })
+}
+
+fn default_cache_path() -> Result<PathBuf> {
+    if let Some(root) = first_env(&["XDG_CACHE_HOME"]).filter(|root| !root.trim().is_empty()) {
+        return Ok(PathBuf::from(root).join("mimus/translations.redb"));
+    }
+    first_env(&["HOME"])
+        .filter(|root| !root.trim().is_empty())
+        .map(|root| PathBuf::from(root).join(".cache/mimus/translations.redb"))
+        .ok_or_else(|| {
+            MimusError::usage(
+                UsageReason::InvalidArguments,
+                "could not resolve the default translation cache path",
+            )
+            .with_hint("set XDG_CACHE_HOME or HOME, pass --cache, or use --no-cache")
+        })
 }
 
 fn choose(
