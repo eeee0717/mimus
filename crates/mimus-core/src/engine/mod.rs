@@ -1,5 +1,9 @@
 use crate::error::{InputReason, MimusError, Result};
-use crate::il::{PageGeometry, Point, Rect};
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::Deserialize;
+
+use crate::il::{LayoutLabel, LayoutSource, PageGeometry, Point, Rect};
 
 pub mod pdfium;
 
@@ -91,15 +95,20 @@ pub trait PdfEngine: PdfInspector + Rasterizer {}
 
 impl<T> PdfEngine for T where T: PdfInspector + Rasterizer {}
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LayoutRegion {
     pub bounds: Rect,
     pub reading_order: usize,
+    pub label: LayoutLabel,
+    pub source: LayoutSource,
+    pub confidence: f32,
 }
 
 pub trait LayoutDetector: Send + Sync {
     fn detect(
         &self,
+        page_index: usize,
         geometry: PageGeometry,
         raster: &RgbaImage,
         characters: &[PageCharSnapshot],
@@ -112,6 +121,7 @@ pub struct SingleLineLayoutDetector;
 impl LayoutDetector for SingleLineLayoutDetector {
     fn detect(
         &self,
+        _page_index: usize,
         _geometry: PageGeometry,
         _raster: &RgbaImage,
         characters: &[PageCharSnapshot],
@@ -122,6 +132,9 @@ impl LayoutDetector for SingleLineLayoutDetector {
         let mut regions = vec![LayoutRegion {
             bounds: first.tight_box,
             reading_order: 0,
+            label: LayoutLabel::Text,
+            source: LayoutSource::FallbackLine,
+            confidence: 1.0,
         }];
         let mut baseline_y = first.baseline_origin.y;
         for character in &characters[1..] {
@@ -136,12 +149,132 @@ impl LayoutDetector for SingleLineLayoutDetector {
                 regions.push(LayoutRegion {
                     bounds: character.tight_box,
                     reading_order: regions.len(),
+                    label: LayoutLabel::Text,
+                    source: LayoutSource::FallbackLine,
+                    confidence: 1.0,
                 });
             } else if let Some(region) = regions.last_mut() {
                 region.bounds = region.bounds.union(character.tight_box);
             }
         }
         Ok(regions)
+    }
+}
+
+const LAYOUT_REPLAY_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LayoutRecording {
+    schema_version: u32,
+    pages: Vec<RecordedLayoutPage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordedLayoutPage {
+    page_index: usize,
+    geometry: PageGeometry,
+    regions: Vec<LayoutRegion>,
+}
+
+/// Strict replay of detector-owned snapshots. The input bytes are parsed once;
+/// every page is then addressed explicitly, so replay does not depend on call
+/// order or thread scheduling.
+#[derive(Debug)]
+pub struct RecordedLayoutDetector {
+    pages: BTreeMap<usize, (PageGeometry, Vec<LayoutRegion>)>,
+}
+
+impl RecordedLayoutDetector {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let recording: LayoutRecording = serde_json::from_slice(bytes).map_err(|error| {
+            MimusError::input(
+                InputReason::EngineMismatch,
+                format!("invalid layout recording: {error}"),
+            )
+        })?;
+        if recording.schema_version != LAYOUT_REPLAY_SCHEMA_VERSION {
+            return Err(MimusError::input(
+                InputReason::EngineMismatch,
+                format!(
+                    "unsupported layout recording schema {}; expected {}",
+                    recording.schema_version, LAYOUT_REPLAY_SCHEMA_VERSION
+                ),
+            ));
+        }
+        let mut pages = BTreeMap::new();
+        for page in recording.pages {
+            validate_recorded_page(&page)?;
+            if pages
+                .insert(page.page_index, (page.geometry, page.regions))
+                .is_some()
+            {
+                return Err(MimusError::input(
+                    InputReason::EngineMismatch,
+                    format!("layout recording repeats page {}", page.page_index),
+                ));
+            }
+        }
+        Ok(Self { pages })
+    }
+}
+
+fn validate_recorded_page(page: &RecordedLayoutPage) -> Result<()> {
+    let mut orders = BTreeSet::new();
+    for region in &page.regions {
+        let bounds = region.bounds;
+        if !bounds.left.is_finite()
+            || !bounds.bottom.is_finite()
+            || !bounds.right.is_finite()
+            || !bounds.top.is_finite()
+            || bounds.right <= bounds.left
+            || bounds.top <= bounds.bottom
+            || !region.confidence.is_finite()
+            || !(0.0..=1.0).contains(&region.confidence)
+        {
+            return Err(MimusError::input(
+                InputReason::EngineMismatch,
+                format!(
+                    "layout recording page {} has an invalid region",
+                    page.page_index
+                ),
+            ));
+        }
+        if !orders.insert(region.reading_order) {
+            return Err(MimusError::input(
+                InputReason::EngineMismatch,
+                format!(
+                    "layout recording page {} repeats reading order {}",
+                    page.page_index, region.reading_order
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+impl LayoutDetector for RecordedLayoutDetector {
+    fn detect(
+        &self,
+        page_index: usize,
+        geometry: PageGeometry,
+        _raster: &RgbaImage,
+        _characters: &[PageCharSnapshot],
+    ) -> Result<Vec<LayoutRegion>> {
+        let (recorded_geometry, regions) = self.pages.get(&page_index).ok_or_else(|| {
+            MimusError::input(
+                InputReason::EngineMismatch,
+                format!("layout recording has no page {page_index}"),
+            )
+        })?;
+        if *recorded_geometry != geometry {
+            return Err(MimusError::input(
+                InputReason::EngineMismatch,
+                format!("layout recording geometry differs on page {page_index}"),
+            ));
+        }
+        Ok(regions.clone())
     }
 }
 
@@ -181,6 +314,7 @@ mod tests {
         ];
         let regions = SingleLineLayoutDetector
             .detect(
+                0,
                 PageGeometry {
                     width: 300.0,
                     height: 200.0,
@@ -214,6 +348,7 @@ mod tests {
         });
         let regions = SingleLineLayoutDetector
             .detect(
+                0,
                 PageGeometry {
                     width: 300.0,
                     height: 200.0,
@@ -235,5 +370,84 @@ mod tests {
                 .code(),
             2
         );
+    }
+
+    #[test]
+    fn recorded_detector_is_strict_and_page_addressed() {
+        let bytes = br#"{
+            "schema_version": 1,
+            "pages": [{
+                "page_index": 2,
+                "geometry": {"width": 100.0, "height": 200.0, "rotate_degrees": 0},
+                "regions": [{
+                    "bounds": {"left": 1.0, "bottom": 2.0, "right": 30.0, "top": 40.0},
+                    "reading_order": 7,
+                    "label": "abstract",
+                    "source": "model",
+                    "confidence": 0.75
+                }]
+            }]
+        }"#;
+        let detector = RecordedLayoutDetector::from_bytes(bytes).unwrap();
+        let geometry = PageGeometry {
+            width: 100.0,
+            height: 200.0,
+            rotate_degrees: 0,
+        };
+        let raster = RgbaImage::new(1, 1, vec![255; 4]).unwrap();
+        let first = detector.detect(2, geometry, &raster, &[]).unwrap();
+        let second = detector.detect(2, geometry, &raster, &[]).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first[0].label, LayoutLabel::Abstract);
+        assert!(detector.detect(1, geometry, &raster, &[]).is_err());
+
+        let unknown_field = bytes
+            .strip_suffix(b"}")
+            .unwrap()
+            .iter()
+            .copied()
+            .chain(br#", "unexpected": true}"#.iter().copied())
+            .collect::<Vec<_>>();
+        assert!(RecordedLayoutDetector::from_bytes(&unknown_field).is_err());
+    }
+
+    #[test]
+    fn layout_policy_covers_the_fixed_model_vocabulary() {
+        use crate::il::TranslationPolicy::{Passthrough, Translate};
+
+        for label in [
+            LayoutLabel::Abstract,
+            LayoutLabel::AsideText,
+            LayoutLabel::Content,
+            LayoutLabel::DocTitle,
+            LayoutLabel::FigureTitle,
+            LayoutLabel::Footnote,
+            LayoutLabel::ParagraphTitle,
+            LayoutLabel::Text,
+            LayoutLabel::VisionFootnote,
+            LayoutLabel::FallbackLine,
+        ] {
+            assert_eq!(label.translation_policy(), Translate, "{label:?}");
+        }
+        for label in [
+            LayoutLabel::Algorithm,
+            LayoutLabel::Chart,
+            LayoutLabel::DisplayFormula,
+            LayoutLabel::Footer,
+            LayoutLabel::FooterImage,
+            LayoutLabel::FormulaNumber,
+            LayoutLabel::Header,
+            LayoutLabel::HeaderImage,
+            LayoutLabel::Image,
+            LayoutLabel::InlineFormula,
+            LayoutLabel::Number,
+            LayoutLabel::Reference,
+            LayoutLabel::ReferenceContent,
+            LayoutLabel::Seal,
+            LayoutLabel::Table,
+            LayoutLabel::VerticalText,
+        ] {
+            assert_eq!(label.translation_policy(), Passthrough, "{label:?}");
+        }
     }
 }

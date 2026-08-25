@@ -8,7 +8,7 @@ use crate::pdf_stream;
 
 #[derive(Debug, Clone)]
 pub(super) struct DecodedGlyph {
-    pub unicode: Option<char>,
+    pub unicode: Vec<char>,
     pub code: u32,
     pub encoded: Vec<u8>,
     pub advance_em: f64,
@@ -99,7 +99,7 @@ struct CodeMap {
 #[derive(Debug, Clone, Default)]
 struct UnicodeMap {
     codespaces: Vec<CodeSpace>,
-    chars: BTreeMap<Vec<u8>, char>,
+    chars: BTreeMap<Vec<u8>, Vec<char>>,
 }
 
 #[derive(Debug, Clone)]
@@ -298,13 +298,16 @@ impl ResolvedFont {
             .unwrap_or_default();
         let cid_to_gid = read_cid_to_gid(document, descendant).unwrap_or(CidToGid::Invalid);
         let widths = read_cid_widths(document, descendant)?;
-        let supported = descendant_subtype == Some(b"CIDFontType2")
-            && ascent.is_some()
-            && descent.is_some()
+        let has_reliable_to_unicode = matches!(unicode, UnicodeSource::Valid(_));
+        let has_embedded_fallback = descendant_subtype == Some(b"CIDFontType2")
             && embedded.is_some()
             && !gid_to_unicode.is_empty()
-            && !matches!(cid_to_gid, CidToGid::Invalid)
-            && !matches!(encoding, CompositeEncoding::Unsupported);
+            && !matches!(cid_to_gid, CidToGid::Invalid);
+        let supported = matches!(descendant_subtype, Some(b"CIDFontType0" | b"CIDFontType2"))
+            && ascent.is_some()
+            && descent.is_some()
+            && !matches!(encoding, CompositeEncoding::Unsupported)
+            && (has_reliable_to_unicode || has_embedded_fallback);
         let embedded_unicode = matches!(unicode, UnicodeSource::Absent);
         let identity_alias = matches!(
             encoding_object,
@@ -466,7 +469,7 @@ impl ResolvedFont {
             FontKind::Unknown => bytes
                 .iter()
                 .map(|code| DecodedGlyph {
-                    unicode: None,
+                    unicode: Vec::new(),
                     code: u32::from(*code),
                     encoded: vec![*code],
                     advance_em: 0.0,
@@ -476,11 +479,11 @@ impl ResolvedFont {
         }
     }
 
-    fn unicode_for(&self, encoded: &[u8], fallback: impl FnOnce() -> Option<char>) -> Option<char> {
+    fn unicode_for(&self, encoded: &[u8], fallback: impl FnOnce() -> Option<char>) -> Vec<char> {
         match &self.unicode {
-            UnicodeSource::Absent => fallback(),
-            UnicodeSource::Valid(map) => map.chars.get(encoded).copied(),
-            UnicodeSource::Invalid => None,
+            UnicodeSource::Absent => fallback().into_iter().collect(),
+            UnicodeSource::Valid(map) => map.chars.get(encoded).cloned().unwrap_or_default(),
+            UnicodeSource::Invalid => Vec::new(),
         }
     }
 }
@@ -1149,7 +1152,10 @@ fn validate_bfrange_count(tokens: &[CMapToken], expected: usize) -> FontResult<(
     (actual == expected).then_some(()).ok_or(FontFailure)
 }
 
-fn parse_bf_ranges(tokens: &[CMapToken], output: &mut BTreeMap<Vec<u8>, char>) -> FontResult<()> {
+fn parse_bf_ranges(
+    tokens: &[CMapToken],
+    output: &mut BTreeMap<Vec<u8>, Vec<char>>,
+) -> FontResult<()> {
     let mut index = 0;
     while index < tokens.len() {
         let (Some(CMapToken::Bytes(low)), Some(CMapToken::Bytes(high))) =
@@ -1167,7 +1173,7 @@ fn parse_bf_ranges(tokens: &[CMapToken], output: &mut BTreeMap<Vec<u8>, char>) -
                 for offset in 0..=high_value - low_value {
                     output.insert(
                         u32_to_bytes(low_value + offset, low.len()),
-                        char::from_u32(first + offset).ok_or(FontFailure)?,
+                        vec![char::from_u32(first + offset).ok_or(FontFailure)?],
                     );
                 }
                 index += 1;
@@ -1234,7 +1240,7 @@ fn segment_codes(bytes: &[u8], spaces: &[CodeSpace]) -> Vec<Vec<u8>> {
     output
 }
 
-fn decode_utf16be(bytes: &[u8]) -> FontResult<char> {
+fn decode_utf16be(bytes: &[u8]) -> FontResult<Vec<char>> {
     if bytes.is_empty() || bytes.len() % 2 != 0 {
         return Err(FontFailure);
     }
@@ -1248,10 +1254,10 @@ fn decode_utf16be(bytes: &[u8]) -> FontResult<char> {
     if chars.first() == Some(&'\u{feff}') {
         chars.remove(0);
     }
-    let [character] = chars.as_slice() else {
+    if chars.is_empty() {
         return Err(FontFailure);
-    };
-    Ok(*character)
+    }
+    Ok(chars)
 }
 
 fn bytes_to_u32(bytes: &[u8]) -> Option<u32> {
@@ -1348,7 +1354,7 @@ mod tests {
         let UnicodeSource::Valid(map) = read_to_unicode(&document, &font) else {
             panic!("indirect ASCIIHexDecode ToUnicode stream was rejected");
         };
-        assert_eq!(map.chars.get(b"A".as_slice()), Some(&'Z'));
+        assert_eq!(map.chars.get(b"A".as_slice()), Some(&vec!['Z']));
     }
 
     #[test]
@@ -1382,6 +1388,17 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn to_unicode_preserves_multi_scalar_mappings() {
+        let map = parse_unicode_cmap(
+            b"1 begincodespacerange <00> <FF> endcodespacerange \
+              1 beginbfchar <01> <00660069> endbfchar",
+        )
+        .unwrap();
+
+        assert_eq!(map.chars.get(&[1][..]), Some(&vec!['f', 'i']));
     }
 
     #[test]
