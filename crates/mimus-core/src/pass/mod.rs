@@ -2887,23 +2887,74 @@ fn retained_input_characters(
         }
     }
 
-    let removed_engine_indices = page
+    let modified_walk = page
         .walked_characters
         .iter()
-        .enumerate()
-        .filter(|(_, character)| {
+        .map(|character| {
             modified_spans.contains(&(
                 character.content_object.0,
                 character.byte_start,
                 character.byte_end,
             ))
         })
-        .filter_map(|(walk_index, _)| {
-            page.character_alignment
-                .engine_indices_by_walk
-                .get(walk_index)
-                .copied()
-                .flatten()
+        .collect::<Vec<_>>();
+    if !modified_walk.is_empty() && modified_walk.iter().all(|modified| *modified) {
+        return Ok(Vec::new());
+    }
+    let mut engine_owners = vec![None; page.engine_characters.len()];
+    for (walk_index, engine_index) in page
+        .character_alignment
+        .engine_indices_by_walk
+        .iter()
+        .enumerate()
+        .filter_map(|(walk_index, engine_index)| engine_index.map(|value| (walk_index, value)))
+    {
+        if let Some(owner) = engine_owners.get_mut(engine_index) {
+            *owner = Some(walk_index);
+        }
+    }
+    if let Some(sequence) =
+        sequence_engine_indices_by_walk(&page.walked_characters, &page.engine_characters)
+    {
+        for (walk_index, engine_index) in sequence.into_iter().enumerate() {
+            let Some(engine_index) = engine_index else {
+                continue;
+            };
+            if page.character_alignment.engine_indices_by_walk[walk_index].is_none()
+                && engine_owners[engine_index].is_none()
+            {
+                engine_owners[engine_index] = Some(walk_index);
+            }
+        }
+    }
+    inherit_pdfium_utf16_surrogate_owners(
+        &page.walked_characters,
+        &page.engine_characters,
+        &mut engine_owners,
+    );
+    let owner_states = engine_owners
+        .iter()
+        .map(|owner| owner.map(|walk_index| modified_walk[walk_index]))
+        .collect::<Vec<_>>();
+    let mut next_state = vec![None; owner_states.len()];
+    let mut next = None;
+    for index in (0..owner_states.len()).rev() {
+        next_state[index] = next;
+        if owner_states[index].is_some() {
+            next = owner_states[index];
+        }
+    }
+    let mut previous = None;
+    let removed_engine_indices = owner_states
+        .iter()
+        .enumerate()
+        .filter_map(|(index, state)| {
+            if state.is_some() {
+                previous = *state;
+            }
+            let removed = state.unwrap_or(false)
+                || (state.is_none() && previous == Some(true) && next_state[index] == Some(true));
+            removed.then_some(index)
         })
         .collect::<BTreeSet<_>>();
 
@@ -2917,6 +2968,103 @@ fn retained_input_characters(
             baseline_origin: character.baseline_origin,
         })
         .collect())
+}
+
+fn exact_unicode_sequence(walked: &[crate::walk::WalkedChar], engine: &[PageCharSnapshot]) -> bool {
+    walked.len() == engine.len()
+        && walked
+            .iter()
+            .zip(engine)
+            .all(|(walked, engine)| walked.unicode == engine.unicode)
+}
+
+const MAX_SEQUENCE_ALIGNMENT_CELLS: usize = 4_000_000;
+
+fn sequence_engine_indices_by_walk(
+    walked: &[crate::walk::WalkedChar],
+    engine: &[PageCharSnapshot],
+) -> Option<Vec<Option<usize>>> {
+    if exact_unicode_sequence(walked, engine) {
+        return Some((0..walked.len()).map(Some).collect());
+    }
+    let rows = walked.len().checked_add(1)?;
+    let columns = engine.len().checked_add(1)?;
+    let cells = rows.checked_mul(columns)?;
+    if cells > MAX_SEQUENCE_ALIGNMENT_CELLS {
+        return None;
+    }
+    let mut lengths = vec![0u32; cells];
+    for walk_index in 0..walked.len() {
+        for engine_index in 0..engine.len() {
+            let index = (walk_index + 1) * columns + engine_index + 1;
+            lengths[index] =
+                if source_characters_correspond(&walked[walk_index], &engine[engine_index]) {
+                    lengths[walk_index * columns + engine_index] + 1
+                } else {
+                    lengths[walk_index * columns + engine_index + 1]
+                        .max(lengths[(walk_index + 1) * columns + engine_index])
+                };
+        }
+    }
+
+    let mut mapping = vec![None; walked.len()];
+    let mut walk_index = walked.len();
+    let mut engine_index = engine.len();
+    while walk_index > 0 && engine_index > 0 {
+        if source_characters_correspond(&walked[walk_index - 1], &engine[engine_index - 1])
+            && lengths[walk_index * columns + engine_index]
+                == lengths[(walk_index - 1) * columns + engine_index - 1] + 1
+        {
+            mapping[walk_index - 1] = Some(engine_index - 1);
+            walk_index -= 1;
+            engine_index -= 1;
+        } else if lengths[(walk_index - 1) * columns + engine_index]
+            >= lengths[walk_index * columns + engine_index - 1]
+        {
+            walk_index -= 1;
+        } else {
+            engine_index -= 1;
+        }
+    }
+    Some(mapping)
+}
+
+fn source_characters_correspond(
+    walked: &crate::walk::WalkedChar,
+    engine: &PageCharSnapshot,
+) -> bool {
+    walked.unicode == engine.unicode
+        || is_pdfium_utf16_surrogate(walked, engine)
+        || PDFIUM_LIGATURE_FIRST_COMPONENTS.contains(&(
+            walked.unicode.unwrap_or('\0'),
+            engine.unicode.unwrap_or('\0'),
+        ))
+}
+
+fn inherit_pdfium_utf16_surrogate_owners(
+    walked: &[crate::walk::WalkedChar],
+    engine: &[PageCharSnapshot],
+    owners: &mut [Option<usize>],
+) {
+    for engine_index in 1..engine.len() {
+        if owners[engine_index].is_some() {
+            continue;
+        }
+        let Some(walk_index) = owners[engine_index - 1] else {
+            continue;
+        };
+        let Some(unicode) = walked[walk_index].unicode else {
+            continue;
+        };
+        let mut units = [0u16; 2];
+        let encoded = unicode.encode_utf16(&mut units);
+        if encoded.len() == 2
+            && engine[engine_index - 1].unicode_value == u32::from(encoded[0])
+            && engine[engine_index].unicode_value == u32::from(encoded[1])
+        {
+            owners[engine_index] = Some(walk_index);
+        }
+    }
 }
 
 fn validate_mixed_output_characters(
@@ -2988,25 +3136,7 @@ fn validate_typeset_characters(
     actual: &[PageCharSnapshot],
     tolerance: f64,
 ) -> Result<()> {
-    if expected.len() != actual.len() {
-        return Err(output_mismatch(format!(
-            "output page {} has {} typeset characters; expected {}",
-            page_index + 1,
-            actual.len(),
-            expected.len()
-        )));
-    }
-    for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
-        if actual.unicode != Some(expected.unicode)
-            || !point_close(expected.baseline_origin, actual.baseline_origin, tolerance)
-        {
-            return Err(output_mismatch(format!(
-                "output page {} typeset character {index} differs from the plan",
-                page_index + 1
-            )));
-        }
-    }
-    Ok(())
+    validate_mixed_output_characters(page_index, &[], expected, actual, tolerance)
 }
 
 fn validate_output_geometry(
@@ -4627,6 +4757,9 @@ mod tests {
         let pdfium = crate::engine::pdfium::PdfiumEngine::from_environment().unwrap();
         let actual = pdfium.page_characters(&first, 0).unwrap();
         validate_typeset_characters(0, &rewrite.typeset_characters, &actual, 0.01).unwrap();
+        let mut reversed = actual.clone();
+        reversed.reverse();
+        validate_typeset_characters(0, &rewrite.typeset_characters, &reversed, 0.01).unwrap();
         pdfium
             .rasterize_page(&first, 0)
             .unwrap()
@@ -4858,6 +4991,55 @@ mod tests {
             error.reason(),
             crate::error::ErrorReason::Internal(InternalReason::OutputMismatch)
         );
+    }
+
+    #[test]
+    fn exact_unicode_sequences_can_attribute_rewrites_without_baseline_links() {
+        let pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        let walked = walk_page(&pdf, page_id).unwrap().characters;
+        let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap();
+
+        assert!(exact_unicode_sequence(&walked, &engine));
+        assert_eq!(
+            sequence_engine_indices_by_walk(&walked, &engine).unwrap(),
+            vec![Some(0), Some(1), Some(2), Some(3), Some(4)]
+        );
+        let mut marker = engine[1].clone();
+        marker.unicode = None;
+        marker.unicode_value = 0;
+        engine.insert(2, marker);
+        assert_eq!(
+            sequence_engine_indices_by_walk(&walked, &engine).unwrap(),
+            vec![Some(0), Some(1), Some(3), Some(4), Some(5)]
+        );
+        engine.remove(2);
+        engine[0].unicode = Some('X');
+        assert!(!exact_unicode_sequence(&walked, &engine));
+        engine.pop();
+        assert!(!exact_unicode_sequence(&walked, &engine));
+    }
+
+    #[test]
+    fn pdfium_utf16_surrogate_pairs_share_one_walk_owner() {
+        let pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        let mut walked = walk_page(&pdf, page_id).unwrap().characters;
+        walked.truncate(1);
+        walked[0].unicode = Some('\u{1D11E}');
+        let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap();
+        engine.truncate(2);
+        let mut utf16 = [0u16; 2];
+        let encoded = '\u{1D11E}'.encode_utf16(&mut utf16);
+        engine[0].unicode = None;
+        engine[0].unicode_value = u32::from(encoded[0]);
+        engine[1].unicode = None;
+        engine[1].unicode_value = u32::from(encoded[1]);
+        let mut owners = vec![Some(0), None];
+
+        inherit_pdfium_utf16_surrogate_owners(&walked, &engine, &mut owners);
+
+        assert_eq!(owners, [Some(0), Some(0)]);
     }
 
     #[test]
