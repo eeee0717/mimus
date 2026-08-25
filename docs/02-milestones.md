@@ -71,6 +71,12 @@
 
 **收口断言**：合成语料非畸形组端到端全绿；占位符守恒 100%（违者必已降级且计入汇总）；同文档重跑第二次 API 调用数为 0（缓存命中）。
 
+**实现状态（2026-08-25，待 review/merge）**：上述断言已由 loopback deterministic
+Responses fake server、142 份 Corpus v1 inventory 和 production CLI 路径满足；M1 的
+`none` 后端与独立 corpus oracle 继续全绿。#25–#32 的线性 stack 尚未合入
+`master`，因此正式里程碑状态仍待 trunk-first review、合并和 master CI。完整证据见
+[M2 实现收口记录](08-m2-closure.md)。
+
 ## M3 · 质量攻坚
 
 - 启发式调参主战场：段落识别、fallback_line、layout 归属优先级、排版 scale 搜索——以真实文档反馈驱动。
