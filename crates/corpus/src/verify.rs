@@ -2117,6 +2117,45 @@ fn check_glyphs(
     mutool_pages: &[ParsedPage],
     poppler_pages: &[ParsedPage],
 ) -> Vec<Outcome> {
+    if !manifest.expected.block.is_empty()
+        && manifest
+            .expected
+            .block
+            .iter()
+            .all(|block| !block.unicode_semantic)
+    {
+        let expected = manifest
+            .expected
+            .block
+            .iter()
+            .map(|block| text::compare_key(&block.text).chars().count())
+            .sum::<usize>();
+        return [
+            ("glyphs/mutool", mutool_pages),
+            ("glyphs/poppler", poppler_pages),
+        ]
+        .into_iter()
+        .map(|(check, pages)| {
+            let actual = flatten(pages)
+                .iter()
+                .map(|value| text::compare_key(value).chars().count())
+                .sum::<usize>();
+            if actual == expected {
+                Outcome::ok(
+                    check,
+                    "§2.1/ADR-0015",
+                    format!("Unicode 无语义；解析器独立报告 {actual} 个 glyph"),
+                )
+            } else {
+                Outcome::fail(
+                    check,
+                    "§2.1/ADR-0015",
+                    format!("Unicode 无语义；手写 {expected} 个 glyph，解析器给出 {actual} 个"),
+                )
+            }
+        })
+        .collect();
+    }
     let expected_poppler = glyph_counts(
         &manifest
             .expected
@@ -2439,7 +2478,22 @@ fn check_hand_written_geometry(
             .context("hand-written block missing visual_bbox")?;
 
         if block.mutool_extractable {
-            match pick_on_page(mutool_pages, block.page, &key, draw_occurrence) {
+            let observed = if block.unicode_semantic {
+                pick_on_page(mutool_pages, block.page, &key, draw_occurrence)
+            } else {
+                let ordinal = manifest
+                    .expected
+                    .block
+                    .iter()
+                    .filter(|other| {
+                        other.page == block.page
+                            && other.draw_order < block.draw_order
+                            && other.mutool_extractable
+                    })
+                    .count();
+                pick_on_page_by_ordinal(mutool_pages, block.page, ordinal)
+            };
+            match observed {
                 Ok(observed) => match observed.baseline_origin {
                     Some(point)
                         if close(point.x, expected_baseline[0], arithmetic_tolerance)
@@ -2457,7 +2511,20 @@ fn check_hand_written_geometry(
             }
         }
 
-        match pick_on_page(poppler_pages, block.page, &key, reading_occurrence) {
+        let observed = if block.unicode_semantic {
+            pick_on_page(poppler_pages, block.page, &key, reading_occurrence)
+        } else {
+            let ordinal = manifest
+                .expected
+                .block
+                .iter()
+                .filter(|other| {
+                    other.page == block.page && other.reading_order < block.reading_order
+                })
+                .count();
+            pick_on_page_by_ordinal(poppler_pages, block.page, ordinal)
+        };
+        match observed {
             Ok(observed)
                 if arrays_close(
                     &observed.rect.to_array(),
@@ -2901,7 +2968,9 @@ fn outline_blocks(
         let mut cursor = 0usize;
         for block in blocks {
             let expected: Vec<char> = block
-                .text
+                .visual_text
+                .as_deref()
+                .unwrap_or(&block.text)
                 .chars()
                 .filter(|character| !character.is_whitespace())
                 .collect();
@@ -2912,7 +2981,7 @@ fn outline_blocks(
                 })?;
                 let mut observed = glyph.text.chars();
                 let scalar = observed.next().context("SVG glyph data-text is empty")?;
-                if observed.next().is_some() || scalar != character {
+                if block.unicode_semantic && (observed.next().is_some() || scalar != character) {
                     bail!(
                         "块 `{}` 第 {} 个 glyph：期望 {character:?}，mutool SVG 给出 {:?}",
                         block.key,
@@ -3061,6 +3130,24 @@ fn pick_on_page<'a>(
                 occurrence + 1
             )
         })
+}
+
+fn pick_on_page_by_ordinal(
+    pages: &[ParsedPage],
+    page_index: usize,
+    ordinal: usize,
+) -> Result<&crate::oracle::ParsedBlock, String> {
+    let page = pages
+        .iter()
+        .find(|page| page.index == page_index)
+        .ok_or_else(|| format!("找不到第 {} 页的解析器输出", page_index + 1))?;
+    page.blocks.get(ordinal).ok_or_else(|| {
+        format!(
+            "第 {} 页找不到绘制序号为 {} 的块",
+            page_index + 1,
+            ordinal + 1
+        )
+    })
 }
 
 // ---------------------------------------------------------------- 跨 fixture 断言

@@ -1,0 +1,105 @@
+schema_version = 1
+[identity]
+id = "unit-align-05-tounicode-noncharacter"
+name = "ToUnicode noncharacter preservation"
+class = "unit"
+legality = "legal"
+cases = ["ALIGN-05"]
+priority = "M1"
+variable = "A single ToUnicode mapping targets the Unicode noncharacter U+FFFF"
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-align-05-tounicode-noncharacter.pdf"
+pdf_sha256 = "2126d156e35816a7810700ca7b4a36c8869df82bd55acfd92a21fc6ad3253d6c"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d616c69676e2d30352d746f"
+info_dictionary = false
+metadata_streams = 0
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+[[expected.block]]
+key = "A05"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "M"
+unicode_semantic = false
+baseline_origin = [72.0,120.0]
+metric_box = [72.0,117.168,82.356,131.136]
+visual_bbox = [73.177734,120.0,81.181641,128.748047]
+[[expected.alignment]]
+page = 0
+diagnostic = true
+walked_text = ""
+walked_character_count = 1
+engine_character_count = 1
+extraction_equivalent_count = 0
+strong_unicode_conflict_count = 0
+weak_unicode_conflict_count = 0
+unresolved_unicode_count = 1
+walk_only_count = 0
+engine_only_count = 0
+residual_count = 0
+[[expected.degradation]]
+scope = "paragraph"
+page = 0
+paragraph = 0
+reason = "unreliable_unicode"
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 120 Tm
+(A) Tj
+ET
+"""
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 9
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 5
+[[expected.reference]]
+from_object = 5
+path = ["/FontDescriptor"]
+to_object = 6
+[[expected.reference]]
+from_object = 5
+path = ["/ToUnicode"]
+to_object = 8
+[[expected.reference]]
+from_object = 6
+path = ["/FontFile2"]
+to_object = 7
+[[expected.behaviour]]
+id = "ALIGN-05-classification"
+assertion = "mimus treats U+FFFF as unresolved, preserves the paragraph, writes byte-identical output, and emits no cid literal"
+observable_via = "mimus production-path diagnostics, inspect IL, and none-backend output bytes"
+[oracle]
+checks = ["determinism","legality","glyphs","page-geometry","hand-written-geometry","pdf-bytes","pdf-structure","render"]
+[[adjudication]]
+date = "2026-08-25"
+issue = "U+FFFF is not a valid Unicode text identity: independent parsers expose replacement text while the SVG glyph label retains the raw noncharacter"
+resolution = "Keep the hand-written embedded-glyph identity M, disable Unicode identity only for this block, and corroborate glyph count, draw ordinal, geometry, object bytes, and raster independently"

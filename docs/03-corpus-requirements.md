@@ -720,6 +720,48 @@ BabelDOC 的输出**不得作为唯一正确性 oracle**。它是参考实现而
 - 预期：该 CID 标记为无 Unicode（不静默替换成 U+FFFD）→ 段级降级；不 panic
 - oracle：IR 字段断言 + 无 panic · **M3** · 故意畸形
 
+#### ALIGN — ADR-0015 跨引擎字符对齐分类
+
+**ALIGN-01 · 独立空格 show 属于提取视图等价**
+- 构造：`(A) Tj [( )] TJ`
+- 预期：走查 2 字符、PDFium 1 字符；1 个提取视图等价，不拒绝、不保留
+- oracle：production-path `engine_character_alignment` 聚合计数 + 独立结构/渲染验收 · **M1** · 合法
+
+**ALIGN-02 · 行末连字标记属于提取视图等价**
+- 构造：行末 `-` 后续下一行正文
+- 预期：走查解码 `U+002D`，PDFium 的 C0 连字标记归入提取视图等价；不拒绝、不保留
+- oracle：production-path 聚合计数，不断言 PDFium 中间 Unicode 值 · **M1** · 合法
+
+**ALIGN-03 · 非 BMP 字符的 UTF-16 高代理项属于提取视图等价**
+- 构造：ToUnicode 将一个已嵌入字形映射为 `U+1D400`
+- 预期：走查单字符与 PDFium 单字符 API 的高代理项归入提取视图等价；不拒绝、不保留
+- oracle：production-path 聚合计数，不断言 PDFium 中间 Unicode 值 · **M1** · 合法
+
+**ALIGN-04 · 连字展开首成分属于提取视图等价**
+- 构造：ToUnicode 将一个已嵌入字形映射为 `U+FB01`
+- 预期：走查单字符与 PDFium 首成分字符归入提取视图等价；generated 余字符不进入分类，不拒绝、不保留
+- oracle：production-path 聚合计数，不断言 PDFium 中间 Unicode 值 · **M1** · 合法
+
+**ALIGN-05 · ToUnicode 非字符归入未解析**
+- 构造：ToUnicode 映射目标为 `U+FFFF`
+- 预期：走查 `unicode=None`，1 个未解析冲突，段级 `UnreliableUnicode` 保留
+- oracle：production-path 聚合计数 + 输出逐字节恒等且不含 `(cid:` · **M1** · 合法
+
+**ALIGN-06 · 同 baseline 重复绘制保留 multiplicity**
+- 构造：同一字符以同一 text matrix 重复绘制两次
+- 预期：两侧各 2 字符且逐一配对，不折叠、不发分类诊断、不保留
+- oracle：production-path 字符计数 + 独立渲染验收 · **M1** · 合法
+
+**ALIGN-07 · 弱链 Unicode 冲突触发段级保留**
+- 构造：无 ToUnicode 的 simple encoding 字体，PDF `/ActualText` 与字形编码语义不同
+- 预期：1 个 `SimpleEncoding` 弱冲突，段级 `UnreliableUnicode` 保留
+- oracle：production-path 聚合计数 + 输出逐字节恒等 · **M1** · 合法
+
+**ALIGN-08 · engine-only 墨迹的相交与不相交过渡政策**
+- 构造：两份 fixture 分别把 engine-only 字符放在待替换单元内、待替换单元外
+- 预期：stage-1 过渡期均仅诊断、不保留；#70 落地后相交侧按生成合同重新裁定为段级保留
+- oracle：production-path 聚合计数 + 两份独立几何/渲染验收 · **M1** · 合法
+
 #### XOBJ — Form / Image XObject 与嵌套 CTM
 
 **XOBJ-01 · Do 引用不存在的名字时静默返回空**

@@ -47,7 +47,20 @@ pub fn compare_key(s: &str) -> String {
     normalize(s)
         .chars()
         .filter(|c| !c.is_whitespace())
+        .flat_map(extraction_equivalent_chars)
         .collect()
+}
+
+fn extraction_equivalent_chars(character: char) -> Vec<char> {
+    match character {
+        '\u{FB00}' => vec!['f', 'f'],
+        '\u{FB01}' => vec!['f', 'i'],
+        '\u{FB02}' => vec!['f', 'l'],
+        '\u{FB03}' => vec!['f', 'f', 'i'],
+        '\u{FB04}' => vec!['f', 'f', 'l'],
+        '\u{FB05}' | '\u{FB06}' => vec!['s', 't'],
+        value => vec![value],
+    }
 }
 
 #[cfg(test)]
@@ -82,6 +95,12 @@ mod tests {
     fn the_compare_key_ignores_word_boundaries() {
         // 实测的公式分词分歧：mutool 与 poppler 在同一行给出不同的空格位置。
         assert_eq!(compare_key("𝐸= 𝑚𝑐2"), compare_key("𝐸 = 𝑚𝑐 2"));
+    }
+
+    #[test]
+    fn the_compare_key_folds_pdf_extractor_ligature_expansion() {
+        assert_eq!(compare_key("ﬁ"), compare_key("fi"));
+        assert_eq!(compare_key("ﬄ"), compare_key("ffl"));
     }
 
     #[test]

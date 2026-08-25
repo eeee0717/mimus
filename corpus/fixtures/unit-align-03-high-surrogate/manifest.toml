@@ -1,0 +1,103 @@
+schema_version = 1
+[identity]
+id = "unit-align-03-high-surrogate"
+name = "Non-BMP high-surrogate extraction equivalence"
+class = "unit"
+legality = "legal"
+cases = ["ALIGN-03"]
+priority = "M1"
+variable = "A single embedded glyph has a ToUnicode target of U+1D400"
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-align-03-high-surrogate.pdf"
+pdf_sha256 = "517f239d7c3b50910bebc7f43ba5436705d7e00196959da1d702132aaa4e1a5a"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 9, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+[[page]]
+index = 0
+media_box = [0.0,0.0,300.0,200.0]
+rotate = 0
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9,10,11]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d616c69676e2d30332d6869"
+info_dictionary = false
+metadata_streams = 0
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+[[expected.block]]
+key = "A03"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "𝐀"
+baseline_origin = [72.0,120.0]
+metric_box = [72.0,117.168,82.356,131.136]
+visual_bbox = [73.177734,120.0,81.181641,128.748047]
+[[expected.alignment]]
+page = 0
+diagnostic = true
+walked_text = "𝐀"
+walked_character_count = 1
+engine_character_count = 2
+extraction_equivalent_count = 1
+strong_unicode_conflict_count = 0
+weak_unicode_conflict_count = 0
+unresolved_unicode_count = 0
+walk_only_count = 0
+engine_only_count = 0
+residual_count = 1
+[[expected.content_stream]]
+object = 11
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 120 Tm
+<0007> Tj
+ET
+"""
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 11
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 9
+[[expected.reference]]
+from_object = 9
+path = ["/ToUnicode"]
+to_object = 8
+[[expected.reference]]
+from_object = 9
+path = ["/DescendantFonts", "0"]
+to_object = 10
+[[expected.reference]]
+from_object = 10
+path = ["/FontDescriptor"]
+to_object = 6
+[[expected.reference]]
+from_object = 6
+path = ["/FontFile2"]
+to_object = 7
+[[expected.behaviour]]
+id = "ALIGN-03-classification"
+assertion = "mimus accepts the document, classifies the UTF-16 high-surrogate view as equivalent, and keeps U+1D400 from the walk in IL"
+observable_via = "mimus production-path engine_character_alignment diagnostic and inspect IL"
+[oracle]
+checks = ["determinism","legality","structure","page-geometry","hand-written-geometry","pdf-bytes","pdf-structure","render"]
+[[adjudication]]
+date = "2026-08-25"
+issue = "A simple-font ToUnicode mapping exposes both UTF-16 code units as separate PDFium characters, unlike the Type0 mathematical-font mechanism evidenced by experiment 5"
+resolution = "Use an Identity-H CIDFontType2 with one CID mapped to U+1D400; retain the hand-derived glyph geometry and classifier outcome"
