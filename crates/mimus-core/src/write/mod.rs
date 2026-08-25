@@ -3,10 +3,10 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-use lopdf::{Document, IncrementalDocument, Object, ObjectId, Stream};
+use lopdf::{Dictionary, Document, IncrementalDocument, Object, ObjectId, Stream, dictionary};
 
 use crate::error::{InternalReason, IoReason, MimusError, Result};
-use crate::il::FontRef;
+use crate::il::{FontRef, Point};
 use crate::pdf_stream;
 use crate::walk::MAX_STREAM_BYTES;
 
@@ -18,12 +18,32 @@ pub(crate) struct ContentSpanReplacement {
     pub replacement: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PageRewrite {
     pub page_index: usize,
     pub replacements: Vec<ContentSpanReplacement>,
     pub reused_fonts: Vec<FontRef>,
-    pub needs_new_font: bool,
+    pub embedded_fonts: Vec<EmbeddedFont>,
+    pub typeset_characters: Vec<TypesetCharacter>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TypesetCharacter {
+    pub unicode: char,
+    pub baseline_origin: Point,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EmbeddedFont {
+    pub resource_name: String,
+    pub base_font: String,
+    pub font_bytes: Vec<u8>,
+    pub units_per_em: u16,
+    pub ascent: i16,
+    pub descent: i16,
+    pub cap_height: i16,
+    /// Output CID/GID, Unicode scalar, and advance in font units.
+    pub glyphs: Vec<(u16, char, u16)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +107,16 @@ pub(crate) fn build_incremental(
         incremental
             .opt_clone_object_to_new_document(page_id)
             .map_err(output_build_error)?;
+
+        if !rewrite.embedded_fonts.is_empty() {
+            install_page_fonts(
+                original,
+                &mut incremental.new_document,
+                page_id,
+                &rewrite.embedded_fonts,
+                object_ceiling,
+            )?;
+        }
         let source_content_ids = original.get_page_contents(page_id);
         if source_content_ids.is_empty() {
             return Err(MimusError::internal(
@@ -184,6 +214,155 @@ pub(crate) fn build_incremental(
         content_objects,
     };
     Ok((output, report))
+}
+
+fn install_page_fonts(
+    original: &Document,
+    output: &mut Document,
+    page_id: ObjectId,
+    embedded_fonts: &[EmbeddedFont],
+    object_ceiling: u32,
+) -> Result<()> {
+    let (inline, inherited_ids) = original
+        .get_page_resources(page_id)
+        .map_err(output_build_error)?;
+    let mut resources = if let Some(resources) = inline {
+        resources.clone()
+    } else if let Some(resource_id) = inherited_ids.first() {
+        original
+            .get_dictionary(*resource_id)
+            .map_err(output_build_error)?
+            .clone()
+    } else {
+        Dictionary::new()
+    };
+    let mut fonts = match resources.get(b"Font") {
+        Ok(Object::Dictionary(fonts)) => fonts.clone(),
+        Ok(Object::Reference(fonts_id)) => original
+            .get_dictionary(*fonts_id)
+            .map_err(output_build_error)?
+            .clone(),
+        Err(_) => Dictionary::new(),
+        Ok(_) => {
+            return Err(MimusError::internal(
+                InternalReason::OutputBuild,
+                "page Font resources are neither a dictionary nor a reference",
+            ));
+        }
+    };
+
+    for font in embedded_fonts {
+        if fonts.has(font.resource_name.as_bytes()) {
+            return Err(MimusError::internal(
+                InternalReason::OutputBuild,
+                format!("font resource /{} already exists", font.resource_name),
+            ));
+        }
+        let font_id = append_embedded_font(output, font, object_ceiling)?;
+        fonts.set(font.resource_name.as_bytes(), Object::Reference(font_id));
+    }
+    resources.set("Font", Object::Dictionary(fonts));
+    let resources_id = output.add_object(resources);
+    ensure_appended(resources_id, object_ceiling)?;
+    output
+        .get_object_mut(page_id)
+        .and_then(Object::as_dict_mut)
+        .map_err(output_build_error)?
+        .set("Resources", Object::Reference(resources_id));
+    Ok(())
+}
+
+fn append_embedded_font(
+    output: &mut Document,
+    font: &EmbeddedFont,
+    object_ceiling: u32,
+) -> Result<ObjectId> {
+    let scale = |value: i16| i64::from(value) * 1000 / i64::from(font.units_per_em);
+    let font_file_id = output.add_object(Stream::new(
+        dictionary! { "Length1" => font.font_bytes.len() as i64 },
+        font.font_bytes.clone(),
+    ));
+    ensure_appended(font_file_id, object_ceiling)?;
+    let descriptor_id = output.add_object(dictionary! {
+        "Type" => "FontDescriptor",
+        "FontName" => Object::Name(font.base_font.as_bytes().to_vec()),
+        "Flags" => 4,
+        "FontBBox" => vec![Object::Integer(-1000), Object::Integer(scale(font.descent)), Object::Integer(2000), Object::Integer(scale(font.ascent))],
+        "ItalicAngle" => 0,
+        "Ascent" => scale(font.ascent),
+        "Descent" => scale(font.descent),
+        "CapHeight" => scale(font.cap_height),
+        "StemV" => 80,
+        "FontFile2" => Object::Reference(font_file_id),
+    });
+    ensure_appended(descriptor_id, object_ceiling)?;
+
+    let widths = font
+        .glyphs
+        .iter()
+        .flat_map(|(cid, _, advance)| {
+            let width = i64::from(*advance) * 1000 / i64::from(font.units_per_em);
+            [
+                Object::Integer(i64::from(*cid)),
+                Object::Array(vec![Object::Integer(width)]),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let descendant_id = output.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "CIDFontType2",
+        "BaseFont" => Object::Name(font.base_font.as_bytes().to_vec()),
+        "CIDSystemInfo" => dictionary! { "Registry" => Object::string_literal("Adobe"), "Ordering" => Object::string_literal("Identity"), "Supplement" => 0 },
+        "FontDescriptor" => Object::Reference(descriptor_id),
+        "DW" => 1000,
+        "W" => Object::Array(widths),
+        "CIDToGIDMap" => "Identity",
+    });
+    ensure_appended(descendant_id, object_ceiling)?;
+    let cmap_id = output.add_object(Stream::new(Dictionary::new(), to_unicode_cmap(font)));
+    ensure_appended(cmap_id, object_ceiling)?;
+    let type0_id = output.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type0",
+        "BaseFont" => Object::Name(font.base_font.as_bytes().to_vec()),
+        "Encoding" => "Identity-H",
+        "DescendantFonts" => vec![Object::Reference(descendant_id)],
+        "ToUnicode" => Object::Reference(cmap_id),
+    });
+    ensure_appended(type0_id, object_ceiling)?;
+    Ok(type0_id)
+}
+
+fn to_unicode_cmap(font: &EmbeddedFont) -> Vec<u8> {
+    let mut output = String::from(
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /Mimus-UCS def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+    );
+    output.push_str(&format!("{} beginbfchar\n", font.glyphs.len()));
+    for (cid, unicode, _) in &font.glyphs {
+        let mut utf16 = [0u16; 2];
+        let encoded = unicode.encode_utf16(&mut utf16);
+        let unicode_hex = encoded
+            .iter()
+            .map(|value| format!("{value:04X}"))
+            .collect::<String>();
+        output.push_str(&format!("<{cid:04X}> <{unicode_hex}>\n"));
+    }
+    output
+        .push_str("endbfchar\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    output.into_bytes()
+}
+
+fn ensure_appended(object_id: ObjectId, object_ceiling: u32) -> Result<()> {
+    if object_id.0 <= object_ceiling {
+        return Err(MimusError::internal(
+            InternalReason::OutputBuild,
+            format!(
+                "incremental object {} did not exceed input ceiling {object_ceiling}",
+                object_id.0
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn apply_span_replacements<'a>(
@@ -323,7 +502,8 @@ mod tests {
                 object_number: 5,
                 generation: 0,
             }],
-            needs_new_font: false,
+            embedded_fonts: Vec::new(),
+            typeset_characters: Vec::new(),
         }
     }
 
@@ -433,7 +613,8 @@ mod tests {
                 replacement: source_contents[0][..1].to_vec(),
             }],
             reused_fonts: Vec::new(),
-            needs_new_font: false,
+            embedded_fonts: Vec::new(),
+            typeset_characters: Vec::new(),
         };
 
         let (output, report) = build_incremental(&input, &document, &[rewrite]).unwrap();
@@ -504,7 +685,8 @@ mod tests {
                 page_index: 0,
                 replacements: Vec::new(),
                 reused_fonts: Vec::new(),
-                needs_new_font: false,
+                embedded_fonts: Vec::new(),
+                typeset_characters: Vec::new(),
             };
 
             let (output, _) = build_incremental(&input, &document, &[rewrite]).unwrap();

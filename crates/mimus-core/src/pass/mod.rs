@@ -18,7 +18,9 @@ use crate::scan::{PageClass, prescan_page};
 #[cfg(test)]
 use crate::walk::walk_page;
 use crate::walk::{PageWalkError, walk_page_detailed_with_rotation};
-use crate::write::{ContentSpanReplacement, PageRewrite, build_incremental, publish};
+use crate::write::{
+    ContentSpanReplacement, EmbeddedFont, PageRewrite, TypesetCharacter, build_incremental, publish,
+};
 
 pub const ORDER: [Stage; 10] = [
     Stage::Parse,
@@ -1584,6 +1586,7 @@ fn character_is_translatable(character: &Char, content_objects: &BTreeSet<u32>) 
 
 pub fn typeset(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
     let mut rewrites = Vec::with_capacity(document.il.pages.len());
+    let mut preserved = Vec::new();
     for page in &document.il.pages {
         if page.paragraphs.is_empty() {
             continue;
@@ -1621,7 +1624,10 @@ pub fn typeset(document: &mut Document, _context: &PassContext<'_>) -> Result<()
             .iter()
             .map(|stream| (stream.object_id, stream.decoded.as_slice()))
             .collect::<BTreeMap<_, _>>();
-        let mut span_is_replaceable = BTreeMap::<(lopdf::ObjectId, usize, usize), bool>::new();
+        let content_objects = streams.keys().copied().collect::<BTreeSet<_>>();
+        let mut replacements = BTreeMap::<(lopdf::ObjectId, usize, usize), Vec<u8>>::new();
+        let mut reused_fonts = BTreeSet::new();
+        let mut plans = Vec::new();
         for paragraph in &page.paragraphs {
             if paragraph.preserved.is_some() {
                 if paragraph.translated_text.is_some() {
@@ -1633,12 +1639,12 @@ pub fn typeset(document: &mut Document, _context: &PassContext<'_>) -> Result<()
                 continue;
             }
             let source = paragraph.source_text();
-            if paragraph.translated_text.as_deref() != Some(source.as_str()) {
-                return Err(MimusError::input(
-                    InputReason::UnsupportedPdf,
-                    "M1 can typeset only the identity output from --backend none",
-                ));
-            }
+            let translated = paragraph.translated_text.as_deref().ok_or_else(|| {
+                MimusError::internal(
+                    InternalReason::InvariantViolation,
+                    "an unpreserved paragraph has no translated text",
+                )
+            })?;
             let chars = paragraph.chars();
             if chars.is_empty() {
                 return Err(MimusError::input(
@@ -1646,114 +1652,103 @@ pub fn typeset(document: &mut Document, _context: &PassContext<'_>) -> Result<()
                     "cannot typeset an empty line",
                 ));
             }
-            for character in chars {
-                let matching_streams = streams
-                    .keys()
-                    .copied()
-                    .filter(|object_id| object_id.0 == character.passthrough.content_object)
-                    .collect::<Vec<_>>();
-                let content_object = match matching_streams.as_slice() {
-                    // Characters painted inside a Form XObject are walkable, but M1 does not yet
-                    // copy-on-write the Form stream. Keeping them out of the page replacement set
-                    // preserves the invocation and the shared Form object byte-for-byte.
-                    [] => continue,
-                    [content_object] => *content_object,
-                    _ => {
-                        return Err(MimusError::internal(
-                            InternalReason::InvariantViolation,
-                            format!(
-                                "character references ambiguous content object {}",
-                                character.passthrough.content_object
-                            ),
-                        ));
+            if translated == source {
+                for character in chars {
+                    let Some(content_object) = unique_page_content(character, &content_objects)?
+                    else {
+                        continue;
+                    };
+                    if !character.visible || character.text_transform != TextTransform::Upright {
+                        continue;
                     }
-                };
-                let key = (
-                    content_object,
-                    character.passthrough.byte_start,
-                    character.passthrough.byte_end,
-                );
-                span_is_replaceable
-                    .entry(key)
-                    .and_modify(|replaceable| {
-                        *replaceable &=
-                            character.visible && character.text_transform == TextTransform::Upright;
-                    })
-                    .or_insert(
-                        character.visible && character.text_transform == TextTransform::Upright,
-                    );
+                    let key = span_key(character, content_object);
+                    let bytes = streams[&content_object].get(key.1..key.2).ok_or_else(|| {
+                        span_out_of_bounds(
+                            content_object,
+                            key.1,
+                            key.2,
+                            streams[&content_object].len(),
+                        )
+                    })?;
+                    replacements.entry(key).or_insert_with(|| bytes.to_vec());
+                    reused_fonts.insert(character.font.clone());
+                }
+                continue;
+            }
+
+            match plan_paragraph(paragraph, translated, &content_objects) {
+                Ok(plan) => plans.push(plan),
+                Err(reason) => preserved.push((page.index, paragraph.reading_order, reason)),
             }
         }
-        let replaceable_spans = span_is_replaceable
-            .iter()
-            .filter_map(|(key, replaceable)| replaceable.then_some(*key))
-            .collect::<BTreeSet<_>>();
-        if replaceable_spans.is_empty() {
+
+        let mut embedded_fonts = Vec::new();
+        let mut typeset_characters = Vec::new();
+        for bold in [false, true] {
+            let matching = plans
+                .iter()
+                .filter(|plan| plan.bold == bold)
+                .collect::<Vec<_>>();
+            if matching.is_empty() {
+                continue;
+            }
+            let used = matching
+                .iter()
+                .flat_map(|plan| plan.lines.iter().flatten().copied())
+                .collect::<BTreeSet<_>>();
+            let (font, cids) = build_embedded_font(&used, bold).map_err(|_| {
+                MimusError::input(
+                    InputReason::UnsupportedPdf,
+                    "translated text contains a glyph absent from the pinned Noto Sans SC asset",
+                )
+            })?;
+            for plan in matching {
+                install_typeset_replacements(plan, &font.resource_name, &cids, &mut replacements)?;
+                typeset_characters.extend(planned_characters(plan, &font));
+            }
+            embedded_fonts.push(font);
+        }
+        if replacements.is_empty() {
             continue;
         }
-        let mut fonts = BTreeSet::new();
-        for paragraph in &page.paragraphs {
-            for character in paragraph.chars() {
-                if streams
-                    .keys()
-                    .copied()
-                    .find(|object_id| object_id.0 == character.passthrough.content_object)
-                    .is_some_and(|content_object| {
-                        replaceable_spans.contains(&(
-                            content_object,
-                            character.passthrough.byte_start,
-                            character.passthrough.byte_end,
-                        ))
-                    })
-                {
-                    fonts.insert(character.font.clone());
-                }
-            }
-        }
-        let replacements = replaceable_spans
+        let replacements = replacements
             .into_iter()
-            .map(|(content_object, byte_start, byte_end)| {
-                let source = streams[&content_object];
-                let replacement = source.get(byte_start..byte_end).ok_or_else(|| {
-                    MimusError::internal(
-                        InternalReason::InvariantViolation,
-                        format!(
-                            "content object {} span {byte_start}..{byte_end} exceeds {} bytes",
-                            content_object.0,
-                            source.len()
-                        ),
-                    )
-                })?;
-                Ok(ContentSpanReplacement {
+            .map(
+                |((content_object, byte_start, byte_end), replacement)| ContentSpanReplacement {
                     content_object,
                     byte_start,
                     byte_end,
-                    replacement: replacement.to_vec(),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+                    replacement,
+                },
+            )
+            .collect();
         rewrites.push(PageRewrite {
             page_index: page.index,
             replacements,
-            reused_fonts: fonts.into_iter().collect(),
-            needs_new_font: false,
+            reused_fonts: reused_fonts.into_iter().collect(),
+            embedded_fonts,
+            typeset_characters,
         });
+    }
+    for (page_index, reading_order, reason) in preserved {
+        if let Some(paragraph) = document.il.pages[page_index]
+            .paragraphs
+            .iter_mut()
+            .find(|paragraph| paragraph.reading_order == reading_order)
+        {
+            paragraph.translated_text = None;
+            paragraph.preserved = Some(reason);
+        }
     }
     document.rewrites = rewrites;
     Ok(())
 }
 
 pub fn font_embed(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
-    if document.rewrites.iter().any(|value| value.needs_new_font) {
-        return Err(MimusError::input(
-            InputReason::UnsupportedPdf,
-            "embedding a new font is deferred to issue #22",
-        ));
-    }
     if document
         .rewrites
         .iter()
-        .any(|value| value.reused_fonts.is_empty())
+        .any(|value| value.reused_fonts.is_empty() && value.embedded_fonts.is_empty())
     {
         return Err(MimusError::input(
             InputReason::UnsupportedPdf,
@@ -1761,6 +1756,317 @@ pub fn font_embed(document: &mut Document, _context: &PassContext<'_>) -> Result
         ));
     }
     Ok(())
+}
+
+type SpanKey = (lopdf::ObjectId, usize, usize);
+
+#[derive(Debug)]
+struct TypesetPlan {
+    spans: Vec<SpanKey>,
+    lines: Vec<Vec<char>>,
+    baselines: Vec<(f64, f64)>,
+    font_size: f64,
+    bold: bool,
+}
+
+const MIN_FONT_SIZE_PT: f64 = 8.0;
+const LINE_ADVANCE_EM: f64 = 1.5;
+const REGULAR_FONT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../corpus/fonts/MimusCJK.ttf"
+));
+const BOLD_FONT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../corpus/fonts/MimusCJKBold.ttf"
+));
+
+fn unique_page_content(
+    character: &Char,
+    content_objects: &BTreeSet<lopdf::ObjectId>,
+) -> Result<Option<lopdf::ObjectId>> {
+    let matching = content_objects
+        .iter()
+        .copied()
+        .filter(|object_id| object_id.0 == character.passthrough.content_object)
+        .collect::<Vec<_>>();
+    match matching.as_slice() {
+        [] => Ok(None),
+        [object_id] => Ok(Some(*object_id)),
+        _ => Err(MimusError::internal(
+            InternalReason::InvariantViolation,
+            format!(
+                "character references ambiguous content object {}",
+                character.passthrough.content_object
+            ),
+        )),
+    }
+}
+
+fn span_key(character: &Char, content_object: lopdf::ObjectId) -> SpanKey {
+    (
+        content_object,
+        character.passthrough.byte_start,
+        character.passthrough.byte_end,
+    )
+}
+
+fn span_out_of_bounds(
+    content_object: lopdf::ObjectId,
+    start: usize,
+    end: usize,
+    len: usize,
+) -> MimusError {
+    MimusError::internal(
+        InternalReason::InvariantViolation,
+        format!(
+            "content object {} span {start}..{end} exceeds {len} bytes",
+            content_object.0
+        ),
+    )
+}
+
+fn plan_paragraph(
+    paragraph: &Paragraph,
+    translated: &str,
+    content_objects: &BTreeSet<lopdf::ObjectId>,
+) -> std::result::Result<TypesetPlan, il::PreservedReason> {
+    let chars = paragraph.chars();
+    if chars.iter().any(|character| {
+        !character_is_translatable(character, &content_objects.iter().map(|id| id.0).collect())
+    }) {
+        return Err(il::PreservedReason::UnsupportedFont);
+    }
+    let mut spans = chars
+        .iter()
+        .filter_map(|character| {
+            unique_page_content(character, content_objects)
+                .ok()
+                .flatten()
+                .map(|id| span_key(character, id))
+        })
+        .collect::<Vec<_>>();
+    spans.sort_unstable();
+    spans.dedup();
+    if spans.is_empty() {
+        return Err(il::PreservedReason::UnsupportedFont);
+    }
+    let bold = chars.iter().any(|character| {
+        character.layout.is_some_and(|layout| {
+            matches!(
+                layout.label,
+                LayoutLabel::DocTitle | LayoutLabel::ParagraphTitle
+            )
+        })
+    });
+    let font_bytes = if bold { BOLD_FONT } else { REGULAR_FONT };
+    let face =
+        ttf_parser::Face::parse(font_bytes, 0).map_err(|_| il::PreservedReason::UnsupportedFont)?;
+    if translated
+        .chars()
+        .any(|value| face.glyph_index(value).is_none())
+    {
+        return Err(il::PreservedReason::UnsupportedFont);
+    }
+    let container = chars
+        .iter()
+        .filter_map(|character| character.layout.map(|layout| layout.bounds))
+        .reduce(Rect::union)
+        .unwrap_or(paragraph.bounds);
+    let preferred = chars
+        .iter()
+        .map(|character| character.font_size)
+        .sum::<f64>()
+        / chars.len() as f64;
+    let first = &chars[0];
+    let mut size = preferred.max(MIN_FONT_SIZE_PT);
+    while size + 0.001 >= MIN_FONT_SIZE_PT {
+        if let Some(lines) = wrap_text(translated, &face, size, container.right - container.left) {
+            let ascent = f64::from(face.ascender()) / f64::from(face.units_per_em()) * size;
+            let descent = f64::from(face.descender()) / f64::from(face.units_per_em()) * size;
+            let first_y = first.baseline_origin.y.min(container.top - ascent);
+            let baselines = lines
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    (
+                        container.left,
+                        first_y - index as f64 * size * LINE_ADVANCE_EM,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let last_y = baselines.last().unwrap().1;
+            if last_y + descent >= container.bottom - 0.01 {
+                return Ok(TypesetPlan {
+                    spans,
+                    lines,
+                    baselines,
+                    font_size: size,
+                    bold,
+                });
+            }
+        }
+        size -= 0.5;
+    }
+    Err(il::PreservedReason::TypesetOverflow)
+}
+
+fn wrap_text(
+    text: &str,
+    face: &ttf_parser::Face<'_>,
+    size: f64,
+    width: f64,
+) -> Option<Vec<Vec<char>>> {
+    let units_per_em = f64::from(face.units_per_em());
+    let mut lines = vec![Vec::new()];
+    let mut line_width = 0.0;
+    for token in text_tokens(text) {
+        let token_width = token.iter().try_fold(0.0, |sum, character| {
+            let glyph = face.glyph_index(*character)?;
+            Some(sum + f64::from(face.glyph_hor_advance(glyph)?) / units_per_em * size)
+        })?;
+        if token_width > width + 0.01 {
+            return None;
+        }
+        if line_width > 0.0 && line_width + token_width > width + 0.01 {
+            lines.push(Vec::new());
+            line_width = 0.0;
+        }
+        lines.last_mut().unwrap().extend(token);
+        line_width += token_width;
+    }
+    Some(lines)
+}
+
+fn text_tokens(text: &str) -> Vec<Vec<char>> {
+    let mut tokens = Vec::<Vec<char>>::new();
+    for character in text.chars() {
+        let joins_ascii_word = character.is_ascii_alphanumeric()
+            && tokens
+                .last()
+                .and_then(|token| token.last())
+                .is_some_and(char::is_ascii_alphanumeric);
+        if joins_ascii_word {
+            tokens.last_mut().unwrap().push(character);
+        } else {
+            tokens.push(vec![character]);
+        }
+    }
+    tokens
+}
+
+fn build_embedded_font(
+    used: &BTreeSet<char>,
+    bold: bool,
+) -> std::result::Result<(EmbeddedFont, BTreeMap<char, u16>), ()> {
+    let bytes = if bold { BOLD_FONT } else { REGULAR_FONT };
+    let face = ttf_parser::Face::parse(bytes, 0).map_err(|_| ())?;
+    let mut remapper = subsetter::GlyphRemapper::new();
+    let mut original = Vec::new();
+    for character in used {
+        let glyph = face.glyph_index(*character).ok_or(())?;
+        remapper.remap(glyph.0);
+        original.push((*character, glyph));
+    }
+    let font_bytes = subsetter::subset(bytes, 0, &remapper).map_err(|_| ())?;
+    let mut cids = BTreeMap::new();
+    let mut glyphs = original
+        .into_iter()
+        .map(|(character, glyph)| {
+            let cid = remapper.get(glyph.0).ok_or(())?;
+            let advance = face.glyph_hor_advance(glyph).ok_or(())?;
+            cids.insert(character, cid);
+            Ok((cid, character, advance))
+        })
+        .collect::<std::result::Result<Vec<_>, ()>>()?;
+    glyphs.sort_by_key(|value| value.0);
+    let weight = if bold { "Bold" } else { "Regular" };
+    let tag = subset_tag(used, bold);
+    Ok((
+        EmbeddedFont {
+            resource_name: if bold { "MimusB" } else { "MimusR" }.to_owned(),
+            base_font: format!("{tag}+NotoSansSC-{weight}"),
+            font_bytes,
+            units_per_em: face.units_per_em(),
+            ascent: face.ascender(),
+            descent: face.descender(),
+            cap_height: face.capital_height().unwrap_or(face.ascender()),
+            glyphs,
+        },
+        cids,
+    ))
+}
+
+fn subset_tag(used: &BTreeSet<char>, bold: bool) -> String {
+    let mut hash = if bold { 0x811c9dc4u32 } else { 0x811c9dc5u32 };
+    for character in used {
+        hash ^= u32::from(*character);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    (0..6)
+        .map(|shift| char::from(b'A' + ((hash >> (shift * 5)) % 26) as u8))
+        .collect()
+}
+
+fn install_typeset_replacements(
+    plan: &TypesetPlan,
+    resource_name: &str,
+    cids: &BTreeMap<char, u16>,
+    replacements: &mut BTreeMap<SpanKey, Vec<u8>>,
+) -> Result<()> {
+    let mut command = format!("/{resource_name} {} Tf ", pdf_number(plan.font_size));
+    for (index, line) in plan.lines.iter().enumerate() {
+        let (x, y) = plan.baselines[index];
+        if index > 0 {
+            command.push_str(" Tj\n");
+        }
+        command.push_str(&format!("1 0 0 1 {} {} Tm <", pdf_number(x), pdf_number(y)));
+        for character in line {
+            let cid = cids.get(character).ok_or_else(|| {
+                MimusError::internal(
+                    InternalReason::InvariantViolation,
+                    "typeset glyph has no output CID",
+                )
+            })?;
+            command.push_str(&format!("{cid:04X}"));
+        }
+        command.push('>');
+    }
+    replacements.insert(plan.spans[0], command.into_bytes());
+    for span in &plan.spans[1..] {
+        replacements.insert(*span, Vec::new());
+    }
+    Ok(())
+}
+
+fn planned_characters(plan: &TypesetPlan, font: &EmbeddedFont) -> Vec<TypesetCharacter> {
+    let advances = font
+        .glyphs
+        .iter()
+        .map(|(_, character, advance)| (*character, *advance))
+        .collect::<BTreeMap<_, _>>();
+    let mut output = Vec::new();
+    for (line, &(start_x, baseline_y)) in plan.lines.iter().zip(&plan.baselines) {
+        let mut x = start_x;
+        for character in line {
+            output.push(TypesetCharacter {
+                unicode: *character,
+                baseline_origin: il::Point { x, y: baseline_y },
+            });
+            x += f64::from(advances[character]) / f64::from(font.units_per_em) * plan.font_size;
+        }
+    }
+    output
+}
+
+fn pdf_number(value: f64) -> String {
+    let mut output = format!("{value:.4}");
+    while output.ends_with('0') {
+        output.pop();
+    }
+    if output.ends_with('.') {
+        output.pop();
+    }
+    output
 }
 
 pub fn write(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
@@ -1830,12 +2136,31 @@ fn validate_output_roundtrip(
                     expected.index + 1
                 ))
             })?;
-        validate_output_characters(
-            expected.index,
-            &expected.engine_characters,
-            &characters,
-            context.config.baseline_tolerance_pt,
-        )?;
+        let rewrite = document
+            .rewrites
+            .iter()
+            .find(|rewrite| rewrite.page_index == expected.index)
+            .ok_or_else(|| {
+                MimusError::internal(
+                    InternalReason::InvariantViolation,
+                    "rewritten page has no rewrite plan",
+                )
+            })?;
+        if rewrite.typeset_characters.is_empty() {
+            validate_output_characters(
+                expected.index,
+                &expected.engine_characters,
+                &characters,
+                context.config.baseline_tolerance_pt,
+            )?;
+        } else {
+            validate_typeset_characters(
+                expected.index,
+                &rewrite.typeset_characters,
+                &characters,
+                context.config.baseline_tolerance_pt,
+            )?;
+        }
         let raster = context
             .engine
             .rasterize_page(candidate, expected.index)
@@ -1858,7 +2183,36 @@ fn validate_output_roundtrip(
             )
         })?;
         input_raster.validate()?;
-        validate_output_raster(expected.index, input_raster, &raster)?;
+        if rewrite.typeset_characters.is_empty() {
+            validate_output_raster(expected.index, input_raster, &raster)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_typeset_characters(
+    page_index: usize,
+    expected: &[TypesetCharacter],
+    actual: &[PageCharSnapshot],
+    tolerance: f64,
+) -> Result<()> {
+    if expected.len() != actual.len() {
+        return Err(output_mismatch(format!(
+            "output page {} has {} typeset characters; expected {}",
+            page_index + 1,
+            actual.len(),
+            expected.len()
+        )));
+    }
+    for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+        if actual.unicode != Some(expected.unicode)
+            || !point_close(expected.baseline_origin, actual.baseline_origin, tolerance)
+        {
+            return Err(output_mismatch(format!(
+                "output page {} typeset character {index} differs from the plan",
+                page_index + 1
+            )));
+        }
     }
     Ok(())
 }
@@ -2218,6 +2572,14 @@ mod tests {
     impl Translator for NonIdentityTranslator {
         fn translate(&self, text: &str) -> Result<String> {
             Ok(format!("{text}!"))
+        }
+    }
+
+    struct CjkTranslator;
+
+    impl Translator for CjkTranslator {
+        fn translate(&self, _text: &str) -> Result<String> {
+            Ok("MIMUS中文测试".to_owned())
         }
     }
 
@@ -2786,7 +3148,7 @@ mod tests {
     }
 
     #[test]
-    fn non_identity_translator_stub_exercises_the_typeset_guard() {
+    fn unsupported_translated_glyphs_preserve_the_paragraph() {
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("must-not-exist.pdf");
         let mut document = Document::new(fixture(), &output);
@@ -2801,17 +3163,130 @@ mod tests {
             config: crate::context::PipelineConfig::default(),
         };
 
-        let error = run(&mut document, &context).unwrap_err();
+        run(&mut document, &context).unwrap();
         assert_eq!(
-            error.reason(),
-            crate::error::ErrorReason::Input(InputReason::UnsupportedPdf)
+            std::fs::read(&output).unwrap(),
+            std::fs::read(fixture()).unwrap()
         );
-        assert!(
-            error
-                .to_string()
-                .contains("only the identity output from --backend none")
+        assert!(document.rewrites.is_empty());
+        assert_eq!(
+            document.il.pages[0].paragraphs[0].preserved,
+            Some(il::PreservedReason::UnsupportedFont)
         );
-        assert!(!output.exists());
+    }
+
+    #[test]
+    fn translated_cjk_builds_a_deterministic_searchable_subset() {
+        let mut document = Document::new(fixture(), "unused.pdf");
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CjkTranslator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        for pass in [parse as Pass, scan_detect, layout, paragraph_find] {
+            pass(&mut document, &context).unwrap();
+        }
+        for character in match &mut document.il.pages[0].paragraphs[0].text {
+            TextCarrier::Chars { chars } => chars,
+        } {
+            character.layout.as_mut().unwrap().bounds = Rect {
+                left: 72.0,
+                bottom: 90.0,
+                right: 122.0,
+                top: 135.0,
+            };
+        }
+        translate(&mut document, &context).unwrap();
+        typeset(&mut document, &context).unwrap();
+        font_embed(&mut document, &context).unwrap();
+
+        let rewrite = &document.rewrites[0];
+        let font = &rewrite.embedded_fonts[0];
+        assert_eq!(
+            font.glyphs
+                .iter()
+                .map(|(_, value, _)| *value)
+                .collect::<BTreeSet<_>>(),
+            "MIMUS中文测试".chars().collect()
+        );
+        assert_eq!(font.base_font.len(), 6 + 1 + "NotoSansSC-Regular".len());
+        let original = document.pdf.as_ref().unwrap();
+        let (first, _) =
+            build_incremental(&document.original_bytes, original, &document.rewrites).unwrap();
+        let (second, _) =
+            build_incremental(&document.original_bytes, original, &document.rewrites).unwrap();
+        assert_eq!(first, second);
+        if let Ok(path) = std::env::var("MIMUS_TEST_OUTPUT") {
+            std::fs::write(path, &first).unwrap();
+        }
+        let output = LopdfDocument::load_mem(&first).unwrap();
+        let page_id = output.get_pages()[&1];
+        let fonts = output.get_page_fonts(page_id).unwrap();
+        let type0 = fonts.get(b"MimusR".as_slice()).unwrap();
+        let cmap_id = type0.get(b"ToUnicode").unwrap().as_reference().unwrap();
+        let cmap = output
+            .get_object(cmap_id)
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .decompressed_content()
+            .unwrap();
+        let cmap = String::from_utf8(cmap).unwrap();
+        for (cid, value, _) in &font.glyphs {
+            assert!(cmap.contains(&format!("<{cid:04X}> <{:04X}>", u32::from(*value))));
+        }
+        let pdfium = crate::engine::pdfium::PdfiumEngine::from_environment().unwrap();
+        let actual = pdfium.page_characters(&first, 0).unwrap();
+        validate_typeset_characters(0, &rewrite.typeset_characters, &actual, 0.01).unwrap();
+        pdfium
+            .rasterize_page(&first, 0)
+            .unwrap()
+            .validate()
+            .unwrap();
+        let mut baselines = rewrite
+            .typeset_characters
+            .iter()
+            .map(|character| character.baseline_origin.y)
+            .collect::<Vec<_>>();
+        baselines.sort_by(f64::total_cmp);
+        baselines.dedup_by(|left, right| (*left - *right).abs() < 0.001);
+        assert_eq!(baselines.len(), 2);
+        assert!(baselines[1] - baselines[0] >= MIN_FONT_SIZE_PT * LINE_ADVANCE_EM);
+        let (bold, bold_cids) =
+            build_embedded_font(&"MIMUS中文测试".chars().collect(), true).unwrap();
+        assert!(bold.base_font.ends_with("+NotoSansSC-Bold"));
+        assert_eq!(bold_cids.len(), font.glyphs.len());
+        assert_ne!(bold.font_bytes, font.font_bytes);
+    }
+
+    #[test]
+    fn unsafe_fit_preserves_the_paragraph_without_tiny_text() {
+        let mut document = Document::new(fixture(), "unused.pdf");
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CjkTranslator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        for pass in [parse as Pass, scan_detect, layout, paragraph_find] {
+            pass(&mut document, &context).unwrap();
+        }
+        translate(&mut document, &context).unwrap();
+        typeset(&mut document, &context).unwrap();
+        assert_eq!(
+            document.il.pages[0].paragraphs[0].preserved,
+            Some(il::PreservedReason::TypesetOverflow)
+        );
+        assert!(document.il.pages[0].paragraphs[0].translated_text.is_none());
         assert!(document.rewrites.is_empty());
     }
 
@@ -3154,7 +3629,7 @@ mod tests {
     }
 
     #[test]
-    fn font_embed_deferred_paths_are_typed_as_unsupported_input() {
+    fn font_embed_rejects_rewrites_without_any_font_provenance() {
         let engine = FakeEngine::default();
         let translator = CountingTranslator::default();
         let events = RecordingEventSink::default();
@@ -3171,16 +3646,9 @@ mod tests {
             page_index: 0,
             replacements: Vec::new(),
             reused_fonts: Vec::new(),
-            needs_new_font: true,
+            embedded_fonts: Vec::new(),
+            typeset_characters: Vec::new(),
         }];
-        let error = font_embed(&mut document, &context).unwrap_err();
-        assert_eq!(error.category().code(), 2);
-        assert_eq!(
-            error.reason(),
-            crate::error::ErrorReason::Input(InputReason::UnsupportedPdf)
-        );
-
-        document.rewrites[0].needs_new_font = false;
         let error = font_embed(&mut document, &context).unwrap_err();
         assert_eq!(error.category().code(), 2);
         assert_eq!(

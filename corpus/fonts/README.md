@@ -57,3 +57,11 @@ files compared byte-for-byte. Both outputs had SHA-256
 `a1677185f15e59c1ccb25e0fb320ab23d3a34d27649496eff089df41e27074ac`.
 The upstream SIL Open Font License 1.1 is preserved in
 `LICENSE-Noto-Sans-SC.txt`.
+
+`MimusCJKBold.ttf` is the matching 700-weight instance with the same committed
+glyph coverage. It is produced with the same commands above except
+`wght=700`, and has SHA-256
+`16a829fddcd44df524ffc64cf22d64fbf7259919ff64ceeea3c6d47e14df21bb`.
+Production builds subset these committed Regular/Bold assets in memory with
+the pinned Rust `subsetter` crate; builds and CI never download the upstream
+variable font.
