@@ -70,7 +70,7 @@ noncharacter 包括 `U+FDD0`–`U+FDEF` 及每个平面末尾的 `U+FFFE/U+FFFF`
 
 ### 5. 宽度来源
 
-- 简单字体：文件 `/Widths[code − FirstChar]` → 缺项用 descriptor 的 `MissingWidth` → 再缺则该字体不可信。**缺 `/Widths` 整体（FONT-03）在 M1 走段级降级**，不做 PDFium advance 兜底：`pdfium-render` 尚未绑定 `FPDFFont_GetGlyphWidth`（PDFium 资格报告的 F1 项未完成），M1 没有这个数据源。F1 补齐并重跑资格矩阵后可复议为「兜底 + warning」。
+- 简单字体：文件 `/Widths[code − FirstChar]` → 缺项用 descriptor 的 `MissingWidth` → 再缺则该字体不可信。**缺 `/Widths` 整体（FONT-03）在 M1 走段级降级**，不做 PDFium advance 兜底：当前 `pdfium-render 0.9.1` 已通过 `PdfFontGlyph::width_at_font_size()` 安全绑定 `FPDFFont_GetGlyphWidth`，但 PDFium 公共 API 没有 text-page 字符 → 源 charcode/glyph 的反查桥，因而无法为 walk 字符提供可证明对应的逐字符 advance。`docs/05` 的 F1「未绑定」只适用于 firecrawl 候选后端。若未来 backend-neutral owned snapshot 与保守源相关足以封闭该对应，可复议为「兜底 + warning」；当前保留行为不变。
 - CID 字体：`W` 数组区间查找 → `DW` → 规范缺省 1000。
 - Type3：`d0`/`d1` 的前两个操作数 × `FontMatrix`。
 
@@ -88,4 +88,4 @@ noncharacter 包括 `U+FDD0`–`U+FDEF` 及每个平面末尾的 `U+FFFE/U+FFFF`
 - Standard-14 的隐式内置度量在 M1 仍不支持（FONT-02 的政策是文件 `/Widths` 优先，内置度量兜底属 M3 范围）。
 - 判定链的每一层都可能产出 `unicode = None`，而 `unicode` 在 IL 中本就是 `Option<char>`——IL 结构不变。
 - PDFium 在字体侧的角色被进一步收窄为交叉证据：CMAP-04 明确禁止它当 Unicode oracle，走查与 PDFium 在这类页上的分歧按 ADR-0013 §7 的分级处理。
-- 若 PDFium 的 F1 能力（字体 owned snapshot、glyph width、embedded 状态）在上游补齐，§5 的 FONT-03 兜底与 §2 的支持面都可复议，届时更新本 ADR。
+- 若 backend-neutral 字体 owned snapshot、embedded 状态和 text-page 字符到 walk 源字形的保守相关足以封闭对应，§5 的 FONT-03 兜底与 §2 的支持面都可复议，届时更新本 ADR；单独存在 glyph-width getter 不满足该条件。

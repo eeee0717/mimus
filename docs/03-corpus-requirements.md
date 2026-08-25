@@ -757,10 +757,10 @@ BabelDOC 的输出**不得作为唯一正确性 oracle**。它是参考实现而
 - 预期：1 个 `SimpleEncoding` 弱冲突，段级 `UnreliableUnicode` 保留
 - oracle：production-path 聚合计数 + 输出逐字节恒等 · **M1** · 合法
 
-**ALIGN-08 · engine-only 墨迹的相交与不相交过渡政策**
-- 构造：两份 fixture 分别把 engine-only 字符放在待替换单元内、待替换单元外
-- 预期：stage-1 过渡期均仅诊断、不保留；#70 落地后相交侧按生成合同重新裁定为段级保留
-- oracle：production-path 聚合计数 + 两份独立几何/渲染验收 · **M1** · 合法
+**ALIGN-08 · `/ActualText` 提取展开不是额外墨迹**
+- 构造：两份 fixture 分别在与待替换单元相交、相离的位置，用 `/ActualText (MI)` 包住一个实际只绘制 `M` 的非直立字形
+- 预期：非直立 walk 字符以解释边吸收一个 engine 观测；其余 `/ActualText` 提取展开归入 residual，均不算 engine-only 墨迹、不触发保留
+- oracle：production-path 聚合计数 + 独立结构/渲染证明每个 marked-content span 只有一个实际墨迹 · **M1** · 合法
 
 #### XOBJ — Form / Image XObject 与嵌套 CTM
 
