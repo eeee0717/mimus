@@ -35,6 +35,12 @@ pub struct PassContext<'a> {
     pub config: PipelineConfig,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct CharacterAlignment {
+    pub engine_indices_by_walk: Vec<Option<usize>>,
+    pub weak_unicode_conflicts: BTreeSet<usize>,
+}
+
 pub trait PassSnapshotSink: Send + Sync {
     fn write_snapshot(
         &self,
@@ -119,6 +125,7 @@ pub(crate) struct ExtractedPage {
     pub walked_characters: Vec<WalkedChar>,
     pub content_streams: Vec<WalkedContentStream>,
     pub engine_characters: Vec<PageCharSnapshot>,
+    pub character_alignment: CharacterAlignment,
     pub layout_regions: Vec<LayoutRegion>,
     pub input_raster: Option<RgbaImage>,
 }

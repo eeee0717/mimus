@@ -45,13 +45,16 @@ M1 只内置 `Identity-H`/`Identity-V` 与一份钉死的已知别名清单（�
 每个字体一次判定，逐字符产出 `unicode: Option<char>`：
 
 ```
-1. ToUnicode 存在且有效     → 用它；该字符未被映射 → unicode = None
+1. ToUnicode 存在且有效     → 用它；该字符未被映射，或映射目标含 Unicode
+                              noncharacter → unicode = None，且不回落后续层
 2. 否则：嵌入字体 cmap 可反查 → CID → GID → cmap 反查
 3. 否则：简单字体标准编码链   → Encoding/Differences → 字形名 → Unicode
                               字形名不可映射（如 CMAP-07 的 gNN）→ 该字符 None，
                               不回落 BaseEncoding
 4. 全部失败                  → unicode = None
 ```
+
+noncharacter 包括 `U+FDD0`–`U+FDEF` 及每个平面末尾的 `U+FFFE/U+FFFF`，共 66 个；该分支由 [ADR-0015 §4](0015-classified-cross-engine-alignment.md#4-adr-0014-修订tounicode-映射到非字符视为未映射) 修订。
 
 判定链中**不存在「把 CID 当 Unicode」的分支**——这是「不出现错误 identity mapping」的第一道防线。第二道防线在验收侧：fixture oracle 断言输出不含 `(cid:` 子串，且降级段的输出字节与输入逐字节相同。
 

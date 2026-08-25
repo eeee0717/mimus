@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use lopdf::{Document as LopdfDocument, Object, ObjectId};
 
-use crate::context::{Document, ExtractedPage, PassContext};
+use crate::context::{CharacterAlignment, Document, ExtractedPage, PassContext};
 use crate::engine::{PageCharSnapshot, RgbaImage};
 use crate::error::{InputReason, InternalReason, IoReason, MimusError, Result};
 use crate::event::{
@@ -17,7 +17,7 @@ use crate::il::{
 use crate::scan::{PageClass, prescan_page};
 #[cfg(test)]
 use crate::walk::walk_page;
-use crate::walk::{PageWalkError, walk_page_detailed_with_rotation};
+use crate::walk::{PageWalkError, UnicodeProvenance, walk_page_detailed_with_rotation};
 use crate::write::{
     ContentSpanReplacement, EmbeddedFont, PageRewrite, TypesetCharacter, build_incremental, publish,
 };
@@ -250,6 +250,7 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
             walked_characters: Vec::new(),
             content_streams: Vec::new(),
             engine_characters: Vec::new(),
+            character_alignment: CharacterAlignment::default(),
             layout_regions: Vec::new(),
             input_raster: None,
         };
@@ -560,14 +561,14 @@ pub fn scan_detect(document: &mut Document, context: &PassContext<'_>) -> Result
         page.engine_characters = context
             .engine
             .page_characters(&document.original_bytes, page.index)?;
-        validate_character_alignment(
+        page.character_alignment = validate_character_alignment(
             page.index,
+            page.geometry,
             &page.walked_characters,
             &page.engine_characters,
             context.config.baseline_tolerance_pt,
-            !page.recoveries.is_empty(),
             &mut document.diagnostics,
-        )?;
+        );
     }
     Ok(())
 }
@@ -874,28 +875,33 @@ fn reliable_upright_snapshots(walked: &[crate::walk::WalkedChar]) -> Vec<PageCha
 }
 
 fn paragraph_preserved_reason<'a>(
-    walked: impl IntoIterator<Item = &'a crate::walk::WalkedChar>,
+    walked: impl IntoIterator<Item = (usize, &'a crate::walk::WalkedChar)>,
+    weak_unicode_conflicts: &BTreeSet<usize>,
 ) -> Option<il::PreservedReason> {
     let translatable = walked
         .into_iter()
-        .filter(|character| character.visible && character.text_transform == TextTransform::Upright)
+        .filter(|(_, character)| {
+            character.visible && character.text_transform == TextTransform::Upright
+        })
         .collect::<Vec<_>>();
     if translatable
         .iter()
-        .any(|character| !character.font_supported)
+        .any(|(_, character)| !character.font_supported)
     {
         Some(il::PreservedReason::UnsupportedFont)
-    } else if translatable
-        .iter()
-        .any(|character| character.unicode.is_none())
-    {
+    } else if translatable.iter().any(|(index, character)| {
+        character.unicode.is_none() || weak_unicode_conflicts.contains(index)
+    }) {
         Some(il::PreservedReason::UnreliableUnicode)
     } else if translatable
         .iter()
-        .any(|character| !character.advance.is_finite() || character.advance <= 0.0)
+        .any(|(_, character)| !character.advance.is_finite() || character.advance <= 0.0)
     {
         Some(il::PreservedReason::NonPositiveAdvance)
-    } else if translatable.iter().any(|character| !character.locatable) {
+    } else if translatable
+        .iter()
+        .any(|(_, character)| !character.locatable)
+    {
         Some(il::PreservedReason::Unlocatable)
     } else {
         None
@@ -953,13 +959,6 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
             });
             continue;
         }
-        let engine_boxes_are_aligned = extracted.walked_characters.len()
-            == extracted.engine_characters.len()
-            && extracted
-                .walked_characters
-                .iter()
-                .zip(&extracted.engine_characters)
-                .all(|(walked, engine)| walked.unicode == engine.unicode);
         let positioned = extracted
             .walked_characters
             .iter()
@@ -976,11 +975,14 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
                     font_size: walked.font_size,
                     baseline_origin: walked.baseline_origin,
                     r#box: walked.metric_box,
-                    visual_bbox: if engine_boxes_are_aligned && walked.locatable {
-                        extracted.engine_characters[index].tight_box
-                    } else {
-                        walked.metric_box
-                    },
+                    visual_bbox: extracted
+                        .character_alignment
+                        .engine_indices_by_walk
+                        .get(index)
+                        .and_then(|engine_index| *engine_index)
+                        .and_then(|engine_index| extracted.engine_characters.get(engine_index))
+                        .filter(|_| walked.locatable)
+                        .map_or(walked.metric_box, |engine| engine.tight_box),
                     text_transform: walked.text_transform,
                     implicit_space_before: false,
                     layout: layout_assignment(&extracted.layout_regions, walked.metric_box),
@@ -1085,7 +1087,12 @@ pub fn paragraph_find(document: &mut Document, _context: &PassContext<'_>) -> Re
             .into_iter()
             .enumerate()
             .map(|(reading_order, draft)| {
-                paragraph_from_lines(reading_order, draft.lines, &extracted.walked_characters)
+                paragraph_from_lines(
+                    reading_order,
+                    draft.lines,
+                    &extracted.walked_characters,
+                    &extracted.character_alignment.weak_unicode_conflicts,
+                )
             })
             .collect();
         pages.push(il::Page {
@@ -1452,6 +1459,7 @@ fn paragraph_from_lines(
     reading_order: usize,
     lines: Vec<TextLine>,
     walked: &[crate::walk::WalkedChar],
+    weak_unicode_conflicts: &BTreeSet<usize>,
 ) -> Paragraph {
     let bounds = lines_bounds(&lines);
     let mut positioned = Vec::new();
@@ -1461,7 +1469,8 @@ fn paragraph_from_lines(
     let preserved = paragraph_preserved_reason(
         positioned
             .iter()
-            .map(|positioned| &walked[positioned.walked_index]),
+            .map(|positioned| (positioned.walked_index, &walked[positioned.walked_index])),
+        weak_unicode_conflicts,
     );
     let mut chars = Vec::with_capacity(positioned.len());
     let mut previous_locatable = None;
@@ -2304,93 +2313,359 @@ fn output_mismatch(message: impl Into<String>) -> MimusError {
     MimusError::internal(InternalReason::OutputMismatch, message)
 }
 
+const PDFIUM_C0_EXTRACTION_MARKERS: std::ops::RangeInclusive<u32> = 0x0000..=0x001F;
+const PDFIUM_LIGATURE_FIRST_COMPONENTS: [(char, char); 7] = [
+    ('\u{FB00}', 'f'),
+    ('\u{FB01}', 'f'),
+    ('\u{FB02}', 'f'),
+    ('\u{FB03}', 'f'),
+    ('\u{FB04}', 'f'),
+    ('\u{FB05}', 's'),
+    ('\u{FB06}', 's'),
+];
+
+#[derive(Debug, Clone, Copy)]
+struct BaselineMatch {
+    walk_index: usize,
+    engine_index: usize,
+}
+
+#[derive(Debug, Default)]
+struct AlignmentCounts {
+    extraction_equivalent: usize,
+    strong_unicode_conflict: usize,
+    weak_unicode_conflict: usize,
+    unresolved_unicode: usize,
+    walk_only: usize,
+    engine_only: usize,
+    residual: usize,
+}
+
+impl AlignmentCounts {
+    fn has_diagnostic(&self) -> bool {
+        self.extraction_equivalent
+            + self.strong_unicode_conflict
+            + self.weak_unicode_conflict
+            + self.unresolved_unicode
+            + self.walk_only
+            + self.engine_only
+            + self.residual
+            > 0
+    }
+}
+
 fn validate_character_alignment(
+    page_index: usize,
+    page_geometry: PageGeometry,
+    walked: &[crate::walk::WalkedChar],
+    engine: &[crate::engine::PageCharSnapshot],
+    tolerance: f64,
+    diagnostics: &mut Diagnostics,
+) -> CharacterAlignment {
+    let mut alignment = CharacterAlignment {
+        engine_indices_by_walk: vec![None; walked.len()],
+        weak_unicode_conflicts: BTreeSet::new(),
+    };
+    if !tolerance.is_finite() || tolerance < 0.0 {
+        diagnostics.push(Diagnostic::EngineCharacterMismatch {
+            page_index,
+            character_index: None,
+            walked_character_count: walked.len(),
+            engine_character_count: engine.len(),
+            walked_unicode: None,
+            engine_unicode: None,
+        });
+        return alignment;
+    }
+
+    let (pairs, walk_candidate_counts, engine_candidate_counts) =
+        match_baseline_multisets(walked, engine, tolerance);
+    let mut walk_matched = vec![false; walked.len()];
+    let mut engine_matched = vec![false; engine.len()];
+    let mut counts = AlignmentCounts::default();
+
+    for pair in pairs {
+        walk_matched[pair.walk_index] = true;
+        engine_matched[pair.engine_index] = true;
+        alignment.engine_indices_by_walk[pair.walk_index] = Some(pair.engine_index);
+        let walk = &walked[pair.walk_index];
+        let engine_character = &engine[pair.engine_index];
+        let ignored = walk.unicode.is_some_and(char::is_whitespace)
+            || engine_character.unicode.is_some_and(char::is_whitespace)
+            || !walk.visible;
+        if walk.unicode == engine_character.unicode {
+            if walk.unicode.is_none() && !ignored {
+                counts.unresolved_unicode += 1;
+            }
+            continue;
+        }
+        if ignored || is_extraction_view_equivalent(walk, engine_character) {
+            counts.extraction_equivalent += 1;
+            continue;
+        }
+        match walk.unicode_provenance {
+            UnicodeProvenance::ToUnicode | UnicodeProvenance::EmbeddedFontCmap => {
+                counts.strong_unicode_conflict += 1;
+            }
+            UnicodeProvenance::SimpleEncoding => {
+                counts.weak_unicode_conflict += 1;
+                alignment.weak_unicode_conflicts.insert(pair.walk_index);
+            }
+            UnicodeProvenance::Unresolved => counts.unresolved_unicode += 1,
+        }
+    }
+
+    for (index, character) in walked.iter().enumerate() {
+        if walk_matched[index] {
+            continue;
+        }
+        if character.unicode.is_some_and(char::is_whitespace) || !character.visible {
+            counts.extraction_equivalent += 1;
+        } else if !valid_walk_alignment_anchor(character)
+            || character.unicode.is_none()
+            || walk_candidate_counts[index] > 0
+        {
+            counts.residual += 1;
+        } else {
+            counts.walk_only += 1;
+        }
+    }
+
+    for (index, character) in engine.iter().enumerate() {
+        if engine_matched[index] {
+            continue;
+        }
+        if engine_character_is_outside_page(character, page_geometry)
+            || character.unicode.is_some_and(char::is_whitespace)
+            || is_pdfium_c0_extraction_marker(character)
+        {
+            counts.extraction_equivalent += 1;
+        } else if !valid_engine_alignment_anchor(character)
+            || character.unicode.is_none()
+            || !rect_is_finite(character.tight_box)
+            || engine_candidate_counts[index] > 0
+        {
+            counts.residual += 1;
+        } else {
+            counts.engine_only += 1;
+        }
+    }
+
+    emit_residual_baseline_diagnostics(
+        page_index,
+        walked,
+        engine,
+        tolerance,
+        &walk_matched,
+        &engine_matched,
+        diagnostics,
+    );
+    if counts.has_diagnostic() {
+        diagnostics.push(Diagnostic::EngineCharacterAlignment {
+            page_index,
+            walked_character_count: walked.len(),
+            engine_character_count: engine.len(),
+            extraction_equivalent_count: counts.extraction_equivalent,
+            strong_unicode_conflict_count: counts.strong_unicode_conflict,
+            weak_unicode_conflict_count: counts.weak_unicode_conflict,
+            unresolved_unicode_count: counts.unresolved_unicode,
+            walk_only_count: counts.walk_only,
+            engine_only_count: counts.engine_only,
+            residual_count: counts.residual,
+        });
+    }
+    alignment
+}
+
+fn match_baseline_multisets(
+    walked: &[crate::walk::WalkedChar],
+    engine: &[crate::engine::PageCharSnapshot],
+    tolerance: f64,
+) -> (Vec<BaselineMatch>, Vec<usize>, Vec<usize>) {
+    let cell_size = tolerance.max(f64::EPSILON);
+    let mut buckets = HashMap::<(i64, i64), Vec<usize>>::new();
+    for (index, character) in engine.iter().enumerate() {
+        if valid_engine_alignment_anchor(character) {
+            buckets
+                .entry(baseline_grid_key(character.baseline_origin, cell_size))
+                .or_default()
+                .push(index);
+        }
+    }
+
+    let mut candidates = vec![Vec::<(usize, f64)>::new(); walked.len()];
+    let mut engine_candidate_counts = vec![0usize; engine.len()];
+    for (walk_index, character) in walked.iter().enumerate() {
+        if !valid_walk_alignment_anchor(character) {
+            continue;
+        }
+        let (grid_x, grid_y) = baseline_grid_key(character.baseline_origin, cell_size);
+        for offset_x in -1..=1 {
+            for offset_y in -1..=1 {
+                let Some(indices) = buckets.get(&(grid_x + offset_x, grid_y + offset_y)) else {
+                    continue;
+                };
+                for &engine_index in indices {
+                    let engine_character = &engine[engine_index];
+                    let delta_x =
+                        (character.baseline_origin.x - engine_character.baseline_origin.x).abs();
+                    let delta_y =
+                        (character.baseline_origin.y - engine_character.baseline_origin.y).abs();
+                    if delta_x <= tolerance && delta_y <= tolerance {
+                        let distance = delta_x.mul_add(delta_x, delta_y * delta_y);
+                        candidates[walk_index].push((engine_index, distance));
+                        engine_candidate_counts[engine_index] += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    let walk_candidate_counts = candidates.iter().map(Vec::len).collect::<Vec<_>>();
+    let mut edges = candidates
+        .iter()
+        .enumerate()
+        .flat_map(|(walk_index, values)| {
+            values
+                .iter()
+                .map(move |&(engine_index, distance)| (walk_index, engine_index, distance))
+        })
+        .collect::<Vec<_>>();
+    edges.sort_by(
+        |(left_walk, left_engine, left_distance), (right_walk, right_engine, right_distance)| {
+            alignment_match_rank(&walked[*left_walk], &engine[*left_engine])
+                .cmp(&alignment_match_rank(
+                    &walked[*right_walk],
+                    &engine[*right_engine],
+                ))
+                .then_with(|| left_distance.total_cmp(right_distance))
+                .then_with(|| left_walk.cmp(right_walk))
+                .then_with(|| left_engine.cmp(right_engine))
+        },
+    );
+
+    let mut walk_matched = vec![false; walked.len()];
+    let mut engine_matched = vec![false; engine.len()];
+    let mut pairs = Vec::new();
+    for (walk_index, engine_index, _) in edges {
+        if walk_matched[walk_index] || engine_matched[engine_index] {
+            continue;
+        }
+        walk_matched[walk_index] = true;
+        engine_matched[engine_index] = true;
+        pairs.push(BaselineMatch {
+            walk_index,
+            engine_index,
+        });
+    }
+    (pairs, walk_candidate_counts, engine_candidate_counts)
+}
+
+fn baseline_grid_key(point: crate::il::Point, cell_size: f64) -> (i64, i64) {
+    (
+        (point.x / cell_size).floor() as i64,
+        (point.y / cell_size).floor() as i64,
+    )
+}
+
+fn alignment_match_rank(
+    walk: &crate::walk::WalkedChar,
+    engine: &crate::engine::PageCharSnapshot,
+) -> u8 {
+    if walk.unicode == engine.unicode {
+        0
+    } else if walk.unicode.is_some_and(char::is_whitespace)
+        || engine.unicode.is_some_and(char::is_whitespace)
+        || !walk.visible
+        || is_extraction_view_equivalent(walk, engine)
+    {
+        1
+    } else {
+        2
+    }
+}
+
+fn valid_walk_alignment_anchor(character: &crate::walk::WalkedChar) -> bool {
+    character.locatable
+        && character.text_transform == TextTransform::Upright
+        && character.baseline_origin.x.is_finite()
+        && character.baseline_origin.y.is_finite()
+}
+
+fn valid_engine_alignment_anchor(character: &crate::engine::PageCharSnapshot) -> bool {
+    character.baseline_origin.x.is_finite() && character.baseline_origin.y.is_finite()
+}
+
+fn is_extraction_view_equivalent(
+    walk: &crate::walk::WalkedChar,
+    engine: &crate::engine::PageCharSnapshot,
+) -> bool {
+    is_pdfium_c0_extraction_marker(engine)
+        || is_pdfium_utf16_surrogate(walk, engine)
+        || PDFIUM_LIGATURE_FIRST_COMPONENTS
+            .contains(&(walk.unicode.unwrap_or('\0'), engine.unicode.unwrap_or('\0')))
+}
+
+fn is_pdfium_c0_extraction_marker(character: &crate::engine::PageCharSnapshot) -> bool {
+    PDFIUM_C0_EXTRACTION_MARKERS.contains(&character.unicode_value)
+}
+
+fn is_pdfium_utf16_surrogate(
+    walk: &crate::walk::WalkedChar,
+    engine: &crate::engine::PageCharSnapshot,
+) -> bool {
+    let Some(unicode) = walk.unicode else {
+        return false;
+    };
+    let mut units = [0u16; 2];
+    let encoded = unicode.encode_utf16(&mut units);
+    encoded.len() == 2 && u32::from(encoded[0]) == engine.unicode_value
+}
+
+fn rect_is_finite(rect: Rect) -> bool {
+    rect.left.is_finite()
+        && rect.bottom.is_finite()
+        && rect.right.is_finite()
+        && rect.top.is_finite()
+}
+
+fn engine_character_is_outside_page(
+    character: &crate::engine::PageCharSnapshot,
+    geometry: PageGeometry,
+) -> bool {
+    rect_is_finite(character.tight_box)
+        && geometry.width.is_finite()
+        && geometry.height.is_finite()
+        && (character.tight_box.right <= 0.0
+            || character.tight_box.left >= geometry.width
+            || character.tight_box.top <= 0.0
+            || character.tight_box.bottom >= geometry.height)
+}
+
+fn emit_residual_baseline_diagnostics(
     page_index: usize,
     walked: &[crate::walk::WalkedChar],
     engine: &[crate::engine::PageCharSnapshot],
     tolerance: f64,
-    recovered: bool,
+    walk_matched: &[bool],
+    engine_matched: &[bool],
     diagnostics: &mut Diagnostics,
-) -> Result<()> {
-    let divergence_is_recoverable = recovered
-        || walked.iter().any(|character| {
-            !character.locatable
-                || !character.font_supported
-                || character.unicode.is_none()
-                || !character.advance.is_finite()
-                || character.advance <= 0.0
-                || character.engine_mismatch_tolerated
-        });
-    if walked.len() != engine.len() {
-        if divergence_is_recoverable {
-            diagnostics.push(Diagnostic::EngineCharacterMismatch {
-                page_index,
-                character_index: None,
-                walked_character_count: walked.len(),
-                engine_character_count: engine.len(),
-                walked_unicode: None,
-                engine_unicode: None,
-            });
-            return Ok(());
-        }
-        return Err(MimusError::input(
-            InputReason::EngineMismatch,
-            format!(
-                "page {} operator walk found {} characters but PDFium found {}",
-                page_index + 1,
-                walked.len(),
-                engine.len()
-            ),
-        ));
-    }
-    for (index, (walked_character, engine_character)) in walked.iter().zip(engine).enumerate() {
-        if walked_character.unicode != engine_character.unicode {
-            if divergence_is_recoverable {
-                diagnostics.push(Diagnostic::EngineCharacterMismatch {
-                    page_index,
-                    character_index: Some(index),
-                    walked_character_count: walked.len(),
-                    engine_character_count: engine.len(),
-                    walked_unicode: walked_character.unicode,
-                    engine_unicode: engine_character.unicode,
-                });
-            } else {
-                return Err(MimusError::input(
-                    InputReason::EngineMismatch,
-                    format!(
-                        "page {} character {} differs between operator walk and PDFium",
-                        page_index + 1,
-                        index
-                    ),
-                ));
-            }
-        }
-        if !walked_character.locatable {
+) {
+    for (index, walk) in walked.iter().enumerate() {
+        let Some(engine_character) = engine.get(index) else {
+            continue;
+        };
+        if walk_matched[index]
+            || engine_matched[index]
+            || walk.unicode != engine_character.unicode
+            || !valid_walk_alignment_anchor(walk)
+            || !valid_engine_alignment_anchor(engine_character)
+        {
             continue;
         }
-        let delta_x =
-            (walked_character.baseline_origin.x - engine_character.baseline_origin.x).abs();
-        let delta_y =
-            (walked_character.baseline_origin.y - engine_character.baseline_origin.y).abs();
-        if !walked_character.baseline_origin.x.is_finite()
-            || !walked_character.baseline_origin.y.is_finite()
-            || !engine_character.baseline_origin.x.is_finite()
-            || !engine_character.baseline_origin.y.is_finite()
-            || !tolerance.is_finite()
-            || tolerance < 0.0
-        {
-            return Err(MimusError::input(
-                InputReason::EngineMismatch,
-                format!(
-                    "page {} character {} has a non-finite baseline or tolerance",
-                    page_index + 1,
-                    index
-                ),
-            ));
-        }
+        let delta_x = (walk.baseline_origin.x - engine_character.baseline_origin.x).abs();
+        let delta_y = (walk.baseline_origin.y - engine_character.baseline_origin.y).abs();
         if delta_x > tolerance || delta_y > tolerance {
-            // CONTEXT #35: PDFium 是交叉证据而非事实层；有限的 baseline 分歧记为
-            // 稳定 diagnostic，最终候选仍必须通过 Write 前的字符与像素往返验证。
             diagnostics.push(Diagnostic::EngineBaselineMismatch {
                 page_index,
                 character_index: index,
@@ -2399,7 +2674,6 @@ fn validate_character_alignment(
             });
         }
     }
-    Ok(())
 }
 
 fn encrypted_pdf_error() -> MimusError {
@@ -2484,6 +2758,7 @@ mod tests {
     struct FakeEngine {
         raster_calls: AtomicUsize,
         corrupt_raster_after_bytes: Option<usize>,
+        characters: Option<Vec<PageCharSnapshot>>,
     }
 
     impl PdfInspector for FakeEngine {
@@ -2502,6 +2777,9 @@ mod tests {
 
         fn page_characters(&self, _pdf: &[u8], page_index: usize) -> Result<Vec<PageCharSnapshot>> {
             assert_eq!(page_index, 0);
+            if let Some(characters) = &self.characters {
+                return Ok(characters.clone());
+            }
             let origins = [72.0, 82.356, 85.896, 96.252, 105.036];
             Ok("MIMUS"
                 .chars()
@@ -3302,6 +3580,7 @@ mod tests {
         let engine = FakeEngine {
             raster_calls: AtomicUsize::new(0),
             corrupt_raster_after_bytes: Some(input.len()),
+            characters: None,
         };
         let translator = CountingTranslator::default();
         let events = RecordingEventSink::default();
@@ -3352,17 +3631,28 @@ mod tests {
         engine[0].baseline_origin.y -= 0.02;
         let mut diagnostics = Diagnostics::default();
 
-        validate_character_alignment(0, &walked, &engine, 0.001, false, &mut diagnostics).unwrap();
-        assert_eq!(diagnostics.entries().len(), 1);
-        let Diagnostic::EngineBaselineMismatch {
-            page_index,
-            character_index,
-            delta_x_pt,
-            delta_y_pt,
-        } = diagnostics.entries()[0]
-        else {
-            panic!("expected an engine baseline diagnostic");
-        };
+        let alignment = validate_character_alignment(
+            0,
+            FakeEngine::default().page_geometry(&[], 0).unwrap(),
+            &walked,
+            &engine,
+            0.001,
+            &mut diagnostics,
+        );
+        assert_eq!(alignment.engine_indices_by_walk[0], None);
+        let (page_index, character_index, delta_x_pt, delta_y_pt) = diagnostics
+            .entries()
+            .iter()
+            .find_map(|diagnostic| match diagnostic {
+                Diagnostic::EngineBaselineMismatch {
+                    page_index,
+                    character_index,
+                    delta_x_pt,
+                    delta_y_pt,
+                } => Some((*page_index, *character_index, *delta_x_pt, *delta_y_pt)),
+                _ => None,
+            })
+            .expect("expected an engine baseline diagnostic");
         assert_eq!(page_index, 0);
         assert_eq!(character_index, 0);
         assert!((delta_x_pt - 0.01).abs() < 1e-12);
@@ -3371,88 +3661,429 @@ mod tests {
         assert!(delta_y_pt >= 0.0);
 
         engine[0].baseline_origin.x = f64::NAN;
-        assert!(
-            validate_character_alignment(0, &walked, &engine, 0.001, false, &mut diagnostics)
-                .is_err()
+        diagnostics = Diagnostics::default();
+        validate_character_alignment(
+            0,
+            FakeEngine::default().page_geometry(&[], 0).unwrap(),
+            &walked,
+            &engine,
+            0.001,
+            &mut diagnostics,
         );
+        assert!(diagnostics.entries().iter().any(|diagnostic| matches!(
+            diagnostic,
+            Diagnostic::EngineCharacterAlignment {
+                residual_count: 1,
+                ..
+            }
+        )));
     }
 
     #[test]
-    fn recovered_pages_report_engine_character_differences_without_failing() {
+    fn unicode_conflicts_are_classified_without_overriding_the_walk() {
         let pdf = LopdfDocument::load(fixture()).unwrap();
         let page_id = pdf.get_pages()[&1];
         let walked = walk_page(&pdf, page_id).unwrap().characters;
         let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap();
         engine[0].unicode = Some('X');
+        engine[0].unicode_value = u32::from('X');
         let mut diagnostics = Diagnostics::default();
 
-        validate_character_alignment(0, &walked, &engine, 0.001, true, &mut diagnostics).unwrap();
+        let alignment = validate_character_alignment(
+            0,
+            FakeEngine::default().page_geometry(&[], 0).unwrap(),
+            &walked,
+            &engine,
+            0.001,
+            &mut diagnostics,
+        );
+        assert_eq!(alignment.engine_indices_by_walk[0], Some(0));
+        assert!(alignment.weak_unicode_conflicts.is_empty());
+        assert_eq!(walked[0].unicode, Some('M'));
         assert!(matches!(
             diagnostics.entries(),
-            [Diagnostic::EngineCharacterMismatch {
+            [Diagnostic::EngineCharacterAlignment {
                 page_index: 0,
-                character_index: Some(0),
                 walked_character_count: 5,
                 engine_character_count: 5,
-                walked_unicode: Some('M'),
-                engine_unicode: Some('X'),
+                extraction_equivalent_count: 0,
+                strong_unicode_conflict_count: 1,
+                weak_unicode_conflict_count: 0,
+                unresolved_unicode_count: 0,
+                walk_only_count: 0,
+                engine_only_count: 0,
+                residual_count: 0,
             }]
         ));
+    }
 
-        diagnostics = Diagnostics::default();
-        engine.pop();
-        validate_character_alignment(0, &walked, &engine, 0.001, true, &mut diagnostics).unwrap();
+    #[test]
+    fn independent_space_shows_are_extraction_equivalent() {
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        pdf.get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(A) Tj [( )] TJ\nET\n".to_vec());
+        let cmap = pdf
+            .get_object((8, 0))
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .decompressed_content()
+            .unwrap();
+        let cmap = String::from_utf8(cmap)
+            .unwrap()
+            .replace("4 beginbfchar", "6 beginbfchar\n<20> <0020>\n<41> <0041>");
+        pdf.get_object_mut((8, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(cmap.into_bytes());
+        let page_id = pdf.get_pages()[&1];
+        let walked = walk_page(&pdf, page_id).unwrap().characters;
+        let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap();
+        engine.truncate(1);
+        engine[0].unicode = Some('A');
+        engine[0].unicode_value = u32::from('A');
+        let mut diagnostics = Diagnostics::default();
+
+        let alignment = validate_character_alignment(
+            0,
+            FakeEngine::default().page_geometry(&[], 0).unwrap(),
+            &walked,
+            &engine,
+            0.001,
+            &mut diagnostics,
+        );
+
+        assert_eq!(walked.len(), 2);
+        assert_eq!(
+            walked
+                .iter()
+                .map(|character| character.unicode)
+                .collect::<Vec<_>>(),
+            [Some('A'), Some(' ')]
+        );
+        assert_eq!(engine.len(), 1);
+        assert_eq!(alignment.engine_indices_by_walk, [Some(0), None]);
+        assert!(alignment.weak_unicode_conflicts.is_empty());
         assert!(matches!(
             diagnostics.entries(),
-            [Diagnostic::EngineCharacterMismatch {
-                character_index: None,
-                walked_character_count: 5,
-                engine_character_count: 4,
+            [Diagnostic::EngineCharacterAlignment {
+                extraction_equivalent_count: 1,
+                walk_only_count: 0,
+                engine_only_count: 0,
+                residual_count: 0,
                 ..
             }]
         ));
     }
 
     #[test]
-    fn unlocatable_walked_characters_downgrade_engine_count_divergence() {
+    fn baseline_matching_preserves_multiplicity_and_ignores_array_order() {
+        let pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        let walked = walk_page(&pdf, page_id).unwrap().characters;
+        let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap();
+        engine.reverse();
+        let mut diagnostics = Diagnostics::default();
+
+        let alignment = validate_character_alignment(
+            0,
+            FakeEngine::default().page_geometry(&[], 0).unwrap(),
+            &walked,
+            &engine,
+            0.001,
+            &mut diagnostics,
+        );
+        assert_eq!(
+            alignment.engine_indices_by_walk,
+            [Some(4), Some(3), Some(2), Some(1), Some(0)]
+        );
+        assert!(diagnostics.entries().is_empty());
+
+        let doubled_walk = vec![walked[0].clone(), walked[0].clone()];
+        let doubled_engine = vec![engine[4].clone(), engine[4].clone()];
+        let doubled = validate_character_alignment(
+            0,
+            FakeEngine::default().page_geometry(&[], 0).unwrap(),
+            &doubled_walk,
+            &doubled_engine,
+            0.001,
+            &mut diagnostics,
+        );
+        assert_eq!(
+            doubled
+                .engine_indices_by_walk
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([0, 1])
+        );
+    }
+
+    #[test]
+    fn extraction_marker_surrogate_and_ligature_pairs_are_equivalent() {
+        let pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        let source = walk_page(&pdf, page_id).unwrap().characters;
+        let mut walked = source[..3].to_vec();
+        walked[0].unicode = Some('-');
+        walked[1].unicode = Some('\u{1D11E}');
+        walked[2].unicode = Some('\u{FB01}');
+        let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap()[..3].to_vec();
+        engine[0].unicode = Some('\u{2}');
+        engine[0].unicode_value = 2;
+        let mut utf16 = [0u16; 2];
+        engine[1].unicode = None;
+        engine[1].unicode_value = u32::from('\u{1D11E}'.encode_utf16(&mut utf16)[0]);
+        engine[2].unicode = Some('f');
+        engine[2].unicode_value = u32::from('f');
+        let mut diagnostics = Diagnostics::default();
+
+        let alignment = validate_character_alignment(
+            0,
+            FakeEngine::default().page_geometry(&[], 0).unwrap(),
+            &walked,
+            &engine,
+            0.001,
+            &mut diagnostics,
+        );
+
+        assert!(alignment.engine_indices_by_walk.iter().all(Option::is_some));
+        assert!(matches!(
+            diagnostics.entries(),
+            [Diagnostic::EngineCharacterAlignment {
+                extraction_equivalent_count: 3,
+                strong_unicode_conflict_count: 0,
+                weak_unicode_conflict_count: 0,
+                residual_count: 0,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn unmatched_characters_follow_the_transition_matrix_without_preservation() {
+        let pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        let source = walk_page(&pdf, page_id).unwrap().characters;
+        let mut whitespace = source[0].clone();
+        whitespace.unicode = Some(' ');
+        whitespace.baseline_origin.x = 10.0;
+        let mut invisible = source[0].clone();
+        invisible.visible = false;
+        invisible.baseline_origin.x = 20.0;
+        let mut walk_only = source[0].clone();
+        walk_only.baseline_origin.x = 30.0;
+        let mut residual_walk = source[0].clone();
+        residual_walk.locatable = false;
+        let walked = vec![whitespace, invisible, walk_only, residual_walk];
+
+        let source_engine = FakeEngine::default().page_characters(&[], 0).unwrap()[0].clone();
+        let mut outside = source_engine.clone();
+        outside.baseline_origin.x = 400.0;
+        outside.tight_box = Rect {
+            left: 400.0,
+            bottom: 10.0,
+            right: 410.0,
+            top: 20.0,
+        };
+        let mut engine_only = source_engine.clone();
+        engine_only.baseline_origin.x = 50.0;
+        let mut residual_engine = source_engine;
+        residual_engine.baseline_origin.x = f64::NAN;
+        let engine = vec![outside, engine_only, residual_engine];
+        let mut diagnostics = Diagnostics::default();
+
+        let alignment = validate_character_alignment(
+            0,
+            FakeEngine::default().page_geometry(&[], 0).unwrap(),
+            &walked,
+            &engine,
+            0.001,
+            &mut diagnostics,
+        );
+
+        assert!(alignment.weak_unicode_conflicts.is_empty());
+        assert!(
+            diagnostics.entries().iter().any(|diagnostic| matches!(
+                diagnostic,
+                Diagnostic::EngineCharacterAlignment {
+                    extraction_equivalent_count: 3,
+                    walk_only_count: 1,
+                    engine_only_count: 1,
+                    residual_count: 2,
+                    ..
+                }
+            )),
+            "{:?}",
+            diagnostics.entries()
+        );
+    }
+
+    #[test]
+    fn weak_unicode_conflicts_preserve_the_owning_paragraph() {
         let pdf = LopdfDocument::load(fixture()).unwrap();
         let page_id = pdf.get_pages()[&1];
         let mut walked = walk_page(&pdf, page_id).unwrap().characters;
-        walked[0].locatable = false;
+        walked[0].unicode_provenance = UnicodeProvenance::SimpleEncoding;
         let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap();
-        engine.pop();
+        engine[0].unicode = Some('X');
+        engine[0].unicode_value = u32::from('X');
         let mut diagnostics = Diagnostics::default();
 
-        validate_character_alignment(0, &walked, &engine, 0.001, false, &mut diagnostics).unwrap();
+        let alignment = validate_character_alignment(
+            0,
+            FakeEngine::default().page_geometry(&[], 0).unwrap(),
+            &walked,
+            &engine,
+            0.001,
+            &mut diagnostics,
+        );
 
+        assert_eq!(alignment.weak_unicode_conflicts, BTreeSet::from([0]));
+        assert_eq!(
+            paragraph_preserved_reason(
+                walked.iter().enumerate(),
+                &alignment.weak_unicode_conflicts
+            ),
+            Some(il::PreservedReason::UnreliableUnicode)
+        );
         assert!(matches!(
             diagnostics.entries(),
-            [Diagnostic::EngineCharacterMismatch {
-                character_index: None,
-                walked_character_count: 5,
-                engine_character_count: 4,
+            [Diagnostic::EngineCharacterAlignment {
+                weak_unicode_conflict_count: 1,
                 ..
             }]
         ));
     }
 
     #[test]
-    fn clean_pages_still_fail_on_engine_character_differences() {
+    fn paragraph_find_uses_per_character_boxes_but_never_pdfium_unicode() {
+        let mut engine_characters = FakeEngine::default().page_characters(&[], 0).unwrap();
+        let expected_first_box = engine_characters[0].tight_box;
+        engine_characters[0].unicode = Some('X');
+        engine_characters[0].unicode_value = u32::from('X');
+        engine_characters.remove(1);
+        engine_characters.reverse();
+        let engine = FakeEngine {
+            characters: Some(engine_characters),
+            ..FakeEngine::default()
+        };
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        let mut document = Document::new(fixture(), "unused.pdf");
+        for pass in [parse as Pass, scan_detect, layout, paragraph_find] {
+            pass(&mut document, &context).unwrap();
+        }
+
+        let paragraph = &document.il.pages[0].paragraphs[0];
+        assert_eq!(paragraph.source_text(), "MIMUS");
+        assert_eq!(paragraph.chars()[0].unicode, Some('M'));
+        assert_eq!(paragraph.chars()[0].visual_bbox, expected_first_box);
+        assert_eq!(paragraph.chars()[1].visual_bbox, paragraph.chars()[1].r#box);
+        assert_eq!(paragraph.preserved, None);
+    }
+
+    #[test]
+    fn to_unicode_noncharacters_preserve_the_paragraph_and_exact_input_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let input_path = directory.path().join("noncharacter.pdf");
+        let output_path = directory.path().join("noncharacter-output.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        let cmap = pdf
+            .get_object((8, 0))
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .decompressed_content()
+            .unwrap();
+        let cmap = String::from_utf8(cmap)
+            .unwrap()
+            .replace("<4D> <004D>", "<4D> <FFFF>");
+        pdf.get_object_mut((8, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(cmap.into_bytes());
+        pdf.save(&input_path).unwrap();
+        let input = std::fs::read(&input_path).unwrap();
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let mut document = Document::new(&input_path, &output_path);
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &NonIdentityTranslator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+
+        run(&mut document, &context).unwrap();
+
+        assert_eq!(
+            document.il.pages[0].paragraphs[0].preserved,
+            Some(il::PreservedReason::UnreliableUnicode)
+        );
+        assert!(document.il.pages[0].paragraphs[0].translated_text.is_none());
+        assert!(document.rewrites.is_empty());
+        assert_eq!(std::fs::read(&output_path).unwrap(), input);
+        assert!(
+            !input
+                .windows(b"(cid:".len())
+                .any(|window| window == b"(cid:")
+        );
+        assert!(
+            document.extracted_pages[0]
+                .walked_characters
+                .iter()
+                .filter(|character| character.code == u32::from(b'M'))
+                .all(|character| {
+                    character.unicode.is_none()
+                        && character.unicode_provenance == UnicodeProvenance::Unresolved
+                })
+        );
+    }
+
+    #[test]
+    fn invalid_classifier_tolerance_uses_the_existing_fallback_diagnostic() {
         let pdf = LopdfDocument::load(fixture()).unwrap();
         let page_id = pdf.get_pages()[&1];
         let walked = walk_page(&pdf, page_id).unwrap().characters;
-        let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap();
-        engine[0].unicode = Some('X');
+        let engine = FakeEngine::default().page_characters(&[], 0).unwrap();
         let mut diagnostics = Diagnostics::default();
 
-        let error =
-            validate_character_alignment(0, &walked, &engine, 0.001, false, &mut diagnostics)
-                .unwrap_err();
-        assert_eq!(
-            error.reason(),
-            crate::error::ErrorReason::Input(InputReason::EngineMismatch)
+        let alignment = validate_character_alignment(
+            0,
+            FakeEngine::default().page_geometry(&[], 0).unwrap(),
+            &walked,
+            &engine,
+            f64::NAN,
+            &mut diagnostics,
         );
-        assert!(diagnostics.entries().is_empty());
+
+        assert!(alignment.engine_indices_by_walk.iter().all(Option::is_none));
+        assert!(matches!(
+            diagnostics.entries(),
+            [Diagnostic::EngineCharacterMismatch {
+                character_index: None,
+                walked_character_count: 5,
+                engine_character_count: 5,
+                ..
+            }]
+        ));
     }
 
     #[test]
