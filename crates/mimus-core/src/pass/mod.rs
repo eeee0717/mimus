@@ -2802,12 +2802,23 @@ fn validate_output_roundtrip(
                 context.config.baseline_tolerance_pt,
             )?;
         } else {
-            validate_typeset_characters(
-                expected.index,
-                &rewrite.typeset_characters,
-                &characters,
-                context.config.baseline_tolerance_pt,
-            )?;
+            let retained = retained_input_characters(expected, rewrite)?;
+            if retained.is_empty() {
+                validate_typeset_characters(
+                    expected.index,
+                    &rewrite.typeset_characters,
+                    &characters,
+                    context.config.baseline_tolerance_pt,
+                )?;
+            } else {
+                validate_mixed_output_characters(
+                    expected.index,
+                    &retained,
+                    &rewrite.typeset_characters,
+                    &characters,
+                    context.config.baseline_tolerance_pt,
+                )?;
+            }
         }
         let raster = context
             .engine
@@ -2836,6 +2847,139 @@ fn validate_output_roundtrip(
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct ExpectedOutputCharacter {
+    unicode: Option<char>,
+    baseline_origin: il::Point,
+}
+
+fn retained_input_characters(
+    page: &ExtractedPage,
+    rewrite: &PageRewrite,
+) -> Result<Vec<ExpectedOutputCharacter>> {
+    let streams = page
+        .content_streams
+        .iter()
+        .map(|stream| (stream.object_id, stream.decoded.as_slice()))
+        .collect::<BTreeMap<_, _>>();
+    let mut modified_spans = BTreeSet::new();
+    for replacement in &rewrite.replacements {
+        let original = streams
+            .get(&replacement.content_object)
+            .and_then(|stream| stream.get(replacement.byte_start..replacement.byte_end))
+            .ok_or_else(|| {
+                output_mismatch(format!(
+                    "output page {} rewrite span {}:{}..{} is outside the input stream",
+                    page.index + 1,
+                    replacement.content_object.0,
+                    replacement.byte_start,
+                    replacement.byte_end
+                ))
+            })?;
+        if original != replacement.replacement {
+            modified_spans.insert((
+                replacement.content_object.0,
+                replacement.byte_start,
+                replacement.byte_end,
+            ));
+        }
+    }
+
+    let removed_engine_indices = page
+        .walked_characters
+        .iter()
+        .enumerate()
+        .filter(|(_, character)| {
+            modified_spans.contains(&(
+                character.content_object.0,
+                character.byte_start,
+                character.byte_end,
+            ))
+        })
+        .filter_map(|(walk_index, _)| {
+            page.character_alignment
+                .engine_indices_by_walk
+                .get(walk_index)
+                .copied()
+                .flatten()
+        })
+        .collect::<BTreeSet<_>>();
+
+    Ok(page
+        .engine_characters
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !removed_engine_indices.contains(index))
+        .map(|(_, character)| ExpectedOutputCharacter {
+            unicode: character.unicode,
+            baseline_origin: character.baseline_origin,
+        })
+        .collect())
+}
+
+fn validate_mixed_output_characters(
+    page_index: usize,
+    retained: &[ExpectedOutputCharacter],
+    typeset: &[TypesetCharacter],
+    actual: &[PageCharSnapshot],
+    tolerance: f64,
+) -> Result<()> {
+    let expected = retained
+        .iter()
+        .copied()
+        .chain(typeset.iter().map(|character| ExpectedOutputCharacter {
+            unicode: Some(character.unicode),
+            baseline_origin: character.baseline_origin,
+        }))
+        .collect::<Vec<_>>();
+    if expected.len() != actual.len() {
+        return Err(output_mismatch(format!(
+            "output page {} has {} mixed characters; expected {}",
+            page_index + 1,
+            actual.len(),
+            expected.len()
+        )));
+    }
+
+    let mut matched = vec![false; actual.len()];
+    for expected_character in expected {
+        let owner = actual
+            .iter()
+            .enumerate()
+            .filter(|(index, actual_character)| {
+                !matched[*index]
+                    && actual_character.unicode == expected_character.unicode
+                    && point_close(
+                        expected_character.baseline_origin,
+                        actual_character.baseline_origin,
+                        tolerance,
+                    )
+            })
+            .min_by(|(_, left), (_, right)| {
+                point_distance_squared(expected_character.baseline_origin, left.baseline_origin)
+                    .total_cmp(&point_distance_squared(
+                        expected_character.baseline_origin,
+                        right.baseline_origin,
+                    ))
+            })
+            .map(|(index, _)| index)
+            .ok_or_else(|| {
+                output_mismatch(format!(
+                    "output page {} is missing a preserved or typeset character",
+                    page_index + 1
+                ))
+            })?;
+        matched[owner] = true;
+    }
+    Ok(())
+}
+
+fn point_distance_squared(left: il::Point, right: il::Point) -> f64 {
+    let delta_x = left.x - right.x;
+    let delta_y = left.y - right.y;
+    delta_x.mul_add(delta_x, delta_y * delta_y)
 }
 
 fn validate_typeset_characters(
@@ -4666,6 +4810,50 @@ mod tests {
         actual[0].index += 1;
 
         let error = validate_output_characters(0, &expected, &actual, 0.001).unwrap_err();
+        assert_eq!(
+            error.reason(),
+            crate::error::ErrorReason::Internal(InternalReason::OutputMismatch)
+        );
+    }
+
+    #[test]
+    fn mixed_output_validation_accepts_preserved_and_typeset_characters() {
+        let retained = [ExpectedOutputCharacter {
+            unicode: Some('A'),
+            baseline_origin: Point { x: 10.0, y: 20.0 },
+        }];
+        let typeset = [TypesetCharacter {
+            unicode: '中',
+            baseline_origin: Point { x: 30.0, y: 20.0 },
+        }];
+        let template = FakeEngine::default().page_characters(&[], 0).unwrap()[0].clone();
+        let mut translated = template.clone();
+        translated.unicode = Some('中');
+        translated.unicode_value = u32::from('中');
+        translated.baseline_origin = Point { x: 30.0, y: 20.0 };
+        let mut preserved = template;
+        preserved.unicode = Some('A');
+        preserved.unicode_value = u32::from('A');
+        preserved.baseline_origin = Point { x: 10.0, y: 20.0 };
+
+        validate_mixed_output_characters(
+            0,
+            &retained,
+            &typeset,
+            &[translated.clone(), preserved.clone()],
+            0.001,
+        )
+        .unwrap();
+
+        preserved.baseline_origin.x += 0.01;
+        let error = validate_mixed_output_characters(
+            0,
+            &retained,
+            &typeset,
+            &[translated, preserved],
+            0.001,
+        )
+        .unwrap_err();
         assert_eq!(
             error.reason(),
             crate::error::ErrorReason::Internal(InternalReason::OutputMismatch)
