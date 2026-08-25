@@ -167,6 +167,7 @@ impl EventSink for RecordingEventSink {
 pub enum DiagnosticId {
     EngineBaselineMismatch,
     EngineCharacterMismatch,
+    EngineCharacterAlignment,
     ScanSummary,
     PageDegraded,
     ContentRecovered,
@@ -276,6 +277,18 @@ pub enum Diagnostic {
         walked_unicode: Option<char>,
         engine_unicode: Option<char>,
     },
+    EngineCharacterAlignment {
+        page_index: usize,
+        walked_character_count: usize,
+        engine_character_count: usize,
+        extraction_equivalent_count: usize,
+        strong_unicode_conflict_count: usize,
+        weak_unicode_conflict_count: usize,
+        unresolved_unicode_count: usize,
+        walk_only_count: usize,
+        engine_only_count: usize,
+        residual_count: usize,
+    },
     ScanSummary {
         scanned_page_indices: Vec<usize>,
         scanned_pages: usize,
@@ -307,6 +320,7 @@ impl Diagnostic {
         match self {
             Self::EngineBaselineMismatch { .. } => DiagnosticId::EngineBaselineMismatch,
             Self::EngineCharacterMismatch { .. } => DiagnosticId::EngineCharacterMismatch,
+            Self::EngineCharacterAlignment { .. } => DiagnosticId::EngineCharacterAlignment,
             Self::ScanSummary { .. } => DiagnosticId::ScanSummary,
             Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
             Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
@@ -342,6 +356,18 @@ pub enum DiagnosticEvent {
         walked_unicode: Option<char>,
         engine_unicode: Option<char>,
     },
+    EngineCharacterAlignment {
+        page_index: usize,
+        walked_character_count: usize,
+        engine_character_count: usize,
+        extraction_equivalent_count: usize,
+        strong_unicode_conflict_count: usize,
+        weak_unicode_conflict_count: usize,
+        unresolved_unicode_count: usize,
+        walk_only_count: usize,
+        engine_only_count: usize,
+        residual_count: usize,
+    },
     ScanSummary {
         scanned_page_indices: Vec<usize>,
         scanned_pages: usize,
@@ -376,6 +402,7 @@ impl DiagnosticEvent {
         match self {
             Self::EngineBaselineMismatch { .. } => DiagnosticId::EngineBaselineMismatch,
             Self::EngineCharacterMismatch { .. } => DiagnosticId::EngineCharacterMismatch,
+            Self::EngineCharacterAlignment { .. } => DiagnosticId::EngineCharacterAlignment,
             Self::ScanSummary { .. } => DiagnosticId::ScanSummary,
             Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
             Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
@@ -413,6 +440,29 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 engine_character_count: *engine_character_count,
                 walked_unicode: *walked_unicode,
                 engine_unicode: *engine_unicode,
+            },
+            Diagnostic::EngineCharacterAlignment {
+                page_index,
+                walked_character_count,
+                engine_character_count,
+                extraction_equivalent_count,
+                strong_unicode_conflict_count,
+                weak_unicode_conflict_count,
+                unresolved_unicode_count,
+                walk_only_count,
+                engine_only_count,
+                residual_count,
+            } => Self::EngineCharacterAlignment {
+                page_index: *page_index,
+                walked_character_count: *walked_character_count,
+                engine_character_count: *engine_character_count,
+                extraction_equivalent_count: *extraction_equivalent_count,
+                strong_unicode_conflict_count: *strong_unicode_conflict_count,
+                weak_unicode_conflict_count: *weak_unicode_conflict_count,
+                unresolved_unicode_count: *unresolved_unicode_count,
+                walk_only_count: *walk_only_count,
+                engine_only_count: *engine_only_count,
+                residual_count: *residual_count,
             },
             Diagnostic::ScanSummary {
                 scanned_page_indices,
@@ -588,6 +638,39 @@ mod tests {
         assert_eq!(value["engine_character_count"], 7);
         assert_eq!(value["walked_unicode"], "M");
         assert!(value["engine_unicode"].is_null());
+    }
+
+    #[test]
+    fn classified_character_alignment_has_an_additive_wire_shape() {
+        let diagnostic = Diagnostic::EngineCharacterAlignment {
+            page_index: 2,
+            walked_character_count: 10,
+            engine_character_count: 9,
+            extraction_equivalent_count: 1,
+            strong_unicode_conflict_count: 2,
+            weak_unicode_conflict_count: 3,
+            unresolved_unicode_count: 4,
+            walk_only_count: 5,
+            engine_only_count: 6,
+            residual_count: 7,
+        };
+        let event = DiagnosticEvent::from(&diagnostic);
+        assert_eq!(event.id(), DiagnosticId::EngineCharacterAlignment);
+
+        let line =
+            serialize_line(&Event::new(EventKind::Diagnostic { diagnostic: event })).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(value["id"], "engine_character_alignment");
+        assert_eq!(value["page_index"], 2);
+        assert_eq!(value["walked_character_count"], 10);
+        assert_eq!(value["engine_character_count"], 9);
+        assert_eq!(value["extraction_equivalent_count"], 1);
+        assert_eq!(value["strong_unicode_conflict_count"], 2);
+        assert_eq!(value["weak_unicode_conflict_count"], 3);
+        assert_eq!(value["unresolved_unicode_count"], 4);
+        assert_eq!(value["walk_only_count"], 5);
+        assert_eq!(value["engine_only_count"], 6);
+        assert_eq!(value["residual_count"], 7);
     }
 
     #[test]

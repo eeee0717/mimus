@@ -504,11 +504,22 @@ impl ResolvedFont {
             ),
             UnicodeSource::Valid(map) => map.chars.get(encoded).map_or_else(
                 || (Vec::new(), UnicodeProvenance::Unresolved),
-                |characters| (characters.clone(), UnicodeProvenance::ToUnicode),
+                |characters| {
+                    if characters.iter().copied().any(is_unicode_noncharacter) {
+                        (Vec::new(), UnicodeProvenance::Unresolved)
+                    } else {
+                        (characters.clone(), UnicodeProvenance::ToUnicode)
+                    }
+                },
             ),
             UnicodeSource::Invalid => (Vec::new(), UnicodeProvenance::Unresolved),
         }
     }
+}
+
+fn is_unicode_noncharacter(character: char) -> bool {
+    let value = u32::from(character);
+    (0xFDD0..=0xFDEF).contains(&value) || value & 0xFFFF >= 0xFFFE
 }
 
 fn dangling_font_reference(
@@ -1354,6 +1365,8 @@ fn is_standard_14_name(name: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
 
     #[test]
@@ -1422,6 +1435,52 @@ mod tests {
         .unwrap();
 
         assert_eq!(map.chars.get(&[1][..]), Some(&vec!['f', 'i']));
+    }
+
+    #[test]
+    fn all_unicode_noncharacters_are_rejected() {
+        let mut noncharacters = (0xFDD0..=0xFDEF)
+            .map(|value| char::from_u32(value).unwrap())
+            .collect::<Vec<_>>();
+        for plane in 0..=16 {
+            noncharacters.push(char::from_u32((plane << 16) | 0xFFFE).unwrap());
+            noncharacters.push(char::from_u32((plane << 16) | 0xFFFF).unwrap());
+        }
+
+        assert_eq!(noncharacters.len(), 66);
+        assert!(noncharacters.into_iter().all(is_unicode_noncharacter));
+        assert!(!is_unicode_noncharacter('\u{FDCF}'));
+        assert!(!is_unicode_noncharacter('\u{FDF0}'));
+        assert!(!is_unicode_noncharacter('\u{10FFFD}'));
+    }
+
+    #[test]
+    fn to_unicode_noncharacters_become_unresolved_without_falling_back() {
+        let font = ResolvedFont {
+            reference: FontRef {
+                resource_name: "F1".to_owned(),
+                object_number: 1,
+                generation: 0,
+            },
+            ascent_em: 0.8,
+            descent_em: -0.2,
+            engine_mismatch_tolerated: false,
+            supported: true,
+            unicode: UnicodeSource::Valid(UnicodeMap {
+                codespaces: Vec::new(),
+                chars: BTreeMap::from([(b"A".to_vec(), vec!['\u{FFFF}'])]),
+            }),
+            kind: FontKind::Unknown,
+        };
+        let fallback_called = Cell::new(false);
+
+        let decoded = font.unicode_for(b"A", || {
+            fallback_called.set(true);
+            Some(('Z', UnicodeProvenance::EmbeddedFontCmap))
+        });
+
+        assert_eq!(decoded, (Vec::new(), UnicodeProvenance::Unresolved));
+        assert!(!fallback_called.get());
     }
 
     #[test]

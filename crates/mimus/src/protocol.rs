@@ -266,6 +266,24 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 page_index + 1
             );
         }
+        DiagnosticEvent::EngineCharacterAlignment {
+            page_index,
+            walked_character_count,
+            engine_character_count,
+            extraction_equivalent_count,
+            strong_unicode_conflict_count,
+            weak_unicode_conflict_count,
+            unresolved_unicode_count,
+            walk_only_count,
+            engine_only_count,
+            residual_count,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[engine_character_alignment]: page {} walk={walked_character_count} engine={engine_character_count} equivalent={extraction_equivalent_count} strong_conflicts={strong_unicode_conflict_count} weak_conflicts={weak_unicode_conflict_count} unresolved={unresolved_unicode_count} walk_only={walk_only_count} engine_only={engine_only_count} residual={residual_count}",
+                page_index + 1
+            );
+        }
         DiagnosticEvent::ScanSummary {
             scanned_page_indices,
             scanned_pages,
