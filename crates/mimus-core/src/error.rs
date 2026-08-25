@@ -95,6 +95,7 @@ reason_enum!(IoReason {
     OutputWrite => "output_write",
     AtomicPublish => "atomic_publish",
     DebugWrite => "debug_write",
+    GlossaryWrite => "glossary_write",
     StdoutWrite => "stdout_write",
 });
 
@@ -451,6 +452,11 @@ mod tests {
                 "debug_write",
             ),
             (
+                MimusError::io(IoReason::GlossaryWrite, "test"),
+                ExitCategory::Io,
+                "glossary_write",
+            ),
+            (
                 MimusError::io(IoReason::StdoutWrite, "test"),
                 ExitCategory::Io,
                 "stdout_write",
@@ -489,7 +495,7 @@ mod tests {
             assert!(wire_values.insert(*wire), "duplicate reason {wire}");
         }
 
-        assert_eq!(cases.len(), 23, "new reasons must be added to this matrix");
+        assert_eq!(cases.len(), 24, "new reasons must be added to this matrix");
         assert_eq!(wire_values.len(), cases.len());
     }
 }

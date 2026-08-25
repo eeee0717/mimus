@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use clap::ValueEnum;
 use mimus_core::error::{MimusError, Result, UsageReason};
-use mimus_core::translate::{NoneTranslator, OpenAiTranslator, Translator};
+use mimus_core::translate::{Glossary, NoneTranslator, OpenAiTranslator, Translator};
 use secrecy::SecretString;
 use serde::Deserialize;
 
@@ -35,6 +35,9 @@ pub(crate) struct ConfigOverrides {
     pub font_regular: Option<PathBuf>,
     pub font_bold: Option<PathBuf>,
     pub asset_mirror: Option<String>,
+    pub glossary: Option<PathBuf>,
+    pub dump_glossary: Option<PathBuf>,
+    pub no_auto_terms: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +55,9 @@ pub(crate) struct ResolvedConfig {
     pub font_bold: Option<FontPathSelection>,
     pub asset_mirror: Option<String>,
     pub font_cache_dir: PathBuf,
+    pub user_glossary: Glossary,
+    pub dump_glossary: Option<PathBuf>,
+    pub auto_terms: bool,
     api_key: Option<SecretString>,
 }
 
@@ -120,6 +126,12 @@ impl ResolvedConfig {
                 )
                 .with_hint("set MIMUS_CACHE_DIR or provide --font and --font-bold")
             })?;
+        let user_glossary = overrides
+            .glossary
+            .as_deref()
+            .map(Glossary::from_path)
+            .transpose()?
+            .unwrap_or_default();
 
         if backend == Backend::Openai && api_key.is_none() {
             return Err(MimusError::usage(
@@ -138,17 +150,21 @@ impl ResolvedConfig {
             font_bold,
             asset_mirror,
             font_cache_dir,
+            user_glossary,
+            dump_glossary: overrides.dump_glossary,
+            auto_terms: !overrides.no_auto_terms,
             api_key,
         })
     }
 
-    pub(crate) fn into_translator(self) -> Result<Box<dyn Translator>> {
+    pub(crate) fn take_translator(&mut self) -> Result<Box<dyn Translator>> {
         match self.backend {
             Backend::None => Ok(Box::new(NoneTranslator)),
             Backend::Openai => Ok(Box::new(OpenAiTranslator::new(
                 &self.base_url,
-                self.model,
+                self.model.clone(),
                 self.api_key
+                    .take()
                     .expect("validated OpenAI configuration has a key"),
                 Duration::from_secs(30),
             )?)),
