@@ -11,7 +11,7 @@
 # 坐标一律在 PDF 页面空间：单位 pt、原点左下、/Rotate 之前（§2.2）。
 
 schema_version = 1
-fixture = "unit-align-08-engine-only-overlap"
+fixture = "unit-align-08-actualtext-overlap"
 tolerance_pt = 0.001000
 
 [[render]]

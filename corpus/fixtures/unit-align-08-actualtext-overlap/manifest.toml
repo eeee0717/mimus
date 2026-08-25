@@ -1,17 +1,17 @@
 schema_version = 1
 [identity]
-id = "unit-align-09-engine-only-disjoint"
-name = "Engine-only character outside replacement units"
+id = "unit-align-08-actualtext-overlap"
+name = "ActualText extraction expansion intersecting a replacement unit"
 class = "unit"
 legality = "legal"
 cases = ["ALIGN-08"]
 priority = "M1"
-variable = "A two-character ActualText replacement is attached to a separate non-upright glyph away from the upright translatable unit"
+variable = "A two-character ActualText extraction expansion is attached to one non-upright painted glyph whose ink intersects an upright translatable unit"
 [source]
 method = "exact-writer"
 generator = "corpus-exact-writer-v1"
-pdf = "unit-align-09-engine-only-disjoint.pdf"
-pdf_sha256 = "b02d50c40de7020a47e84dba20704c1a688c905cfe59810ff70f4e1c5b481c09"
+pdf = "unit-align-08-actualtext-overlap.pdf"
+pdf_sha256 = "aa30df35f1582f0aaa52b230f5e30fbad9833c3d35c46763cadb0853c134cda2"
 font_provenance = "vendored"
 fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
 [[page]]
@@ -28,7 +28,7 @@ header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
 object_numbers = [1,2,3,4,5,6,7,8,9]
 root_object = 1
 xref_kind = "table"
-trailer_id_hex = "756e69742d616c69676e2d30392d656e"
+trailer_id_hex = "756e69742d616c69676e2d30382d6163"
 info_dictionary = false
 metadata_streams = 0
 [expected.structure]
@@ -36,7 +36,7 @@ pages = 1
 blocks = 2
 columns = 1
 [[expected.block]]
-key = "A09-visible"
+key = "A08"
 page = 0
 column = "full"
 draw_order = 1
@@ -46,16 +46,16 @@ baseline_origin = [72.0,120.0]
 metric_box = [72.0,117.168,82.356,131.136]
 visual_bbox = [73.177734,120.0,81.181641,128.748047]
 [[expected.block]]
-key = "A09-disjoint"
+key = "A08-engine"
 page = 0
 column = "full"
 draw_order = 2
 reading_order = 2
 text = "MI"
 visual_text = "M"
-baseline_origin = [200.0,40.0]
-metric_box = [188.864,40.0,202.832,50.356]
-visual_bbox = [191.251953,41.177734,200.0,49.181641]
+baseline_origin = [88.0,120.0]
+metric_box = [76.864,120.0,90.832,130.356]
+visual_bbox = [79.251953,121.177734,88.0,129.181641]
 [[expected.alignment]]
 page = 0
 diagnostic = true
@@ -63,12 +63,13 @@ walked_text = "MM"
 walked_character_count = 2
 engine_character_count = 3
 extraction_equivalent_count = 0
+explained_count = 0
 strong_unicode_conflict_count = 0
 weak_unicode_conflict_count = 0
 unresolved_unicode_count = 0
 walk_only_count = 0
-engine_only_count = 2
-residual_count = 1
+engine_only_count = 0
+residual_count = 3
 [[expected.content_stream]]
 object = 9
 compressed = false
@@ -80,7 +81,7 @@ ET
 /Span << /ActualText (MI) >> BDC
 BT
 /F1 12 Tf
-0 1 -1 0 200 40 Tm
+0 1 -1 0 88 120 Tm
 (M) Tj
 ET
 EMC
@@ -102,16 +103,20 @@ from_object = 6
 path = ["/FontFile2"]
 to_object = 7
 [[expected.behaviour]]
-id = "ALIGN-08-disjoint-classification"
-assertion = "mimus accepts the document and reports the geometrically disjoint engine-only character without preserving any paragraph"
+id = "ALIGN-08-extraction-expansion"
+assertion = "mimus accepts the document and leaves the non-upright walk character plus both same-baseline ActualText extraction components as three ambiguous residuals without preserving the paragraph"
 observable_via = "mimus production-path engine_character_alignment diagnostic and inspect IL"
 [[expected.behaviour]]
-id = "ALIGN-08-T44-nonintersection"
-assertion = "After #70 lands, this non-intersecting fixture remains diagnostic-only while the paired intersecting fixture is re-adjudicated"
-observable_via = "manifest revision reviewed with issue #70"
+id = "ALIGN-08-not-genuine-ink"
+assertion = "This fixture must not enable E preservation because independent rendering proves one painted glyph under the two-character extraction expansion; #70 requires a separate genuine-ink fixture"
+observable_via = "manifest structure and independent render adjudication reviewed with issue #70"
 [oracle]
 checks = ["determinism","legality","structure","page-geometry","hand-written-geometry","pdf-bytes","pdf-structure","render"]
 [[adjudication]]
 date = "2026-08-25"
 issue = "Extra ActualText components share the underlying upright glyph baseline and are therefore ambiguous stage-1 residuals, not engine-only characters"
-resolution = "Attach ActualText to a non-upright painted glyph, which has no valid walk anchor, and place its independently derived ink box away from the upright replacement unit"
+resolution = "Attach ActualText to a non-upright painted glyph, which has no valid walk anchor, and overlap its independently derived ink box with a separate upright replacement unit"
+[[adjudication]]
+date = "2026-08-25"
+issue = "T44 provenance research proved that the additional PDFium character is an ActualText extraction expansion, not additional page ink"
+resolution = "Rename and re-adjudicate the fixture as extraction expansion; retain the one-walk-to-two-engine same-baseline ambiguity as three residuals, and require a separate genuine-ink fixture before E preservation can activate"

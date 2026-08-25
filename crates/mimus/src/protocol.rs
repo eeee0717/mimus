@@ -271,6 +271,7 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
             walked_character_count,
             engine_character_count,
             extraction_equivalent_count,
+            explained_count,
             strong_unicode_conflict_count,
             weak_unicode_conflict_count,
             unresolved_unicode_count,
@@ -280,7 +281,7 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
         } => {
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "warning[engine_character_alignment]: page {} walk={walked_character_count} engine={engine_character_count} equivalent={extraction_equivalent_count} strong_conflicts={strong_unicode_conflict_count} weak_conflicts={weak_unicode_conflict_count} unresolved={unresolved_unicode_count} walk_only={walk_only_count} engine_only={engine_only_count} residual={residual_count}",
+                "warning[engine_character_alignment]: page {} walk={walked_character_count} engine={engine_character_count} equivalent={extraction_equivalent_count} explained={explained_count} strong_conflicts={strong_unicode_conflict_count} weak_conflicts={weak_unicode_conflict_count} unresolved={unresolved_unicode_count} walk_only={walk_only_count} engine_only={engine_only_count} residual={residual_count}",
                 page_index + 1
             );
         }

@@ -53,6 +53,7 @@ walked_text = "MM"
 walked_character_count = 2
 engine_character_count = 2
 extraction_equivalent_count = 0
+explained_count = 0
 strong_unicode_conflict_count = 0
 weak_unicode_conflict_count = 0
 unresolved_unicode_count = 0

@@ -392,6 +392,7 @@ pub struct AlignmentExpectation {
     pub walked_character_count: usize,
     pub engine_character_count: usize,
     pub extraction_equivalent_count: usize,
+    pub explained_count: usize,
     pub strong_unicode_conflict_count: usize,
     pub weak_unicode_conflict_count: usize,
     pub unresolved_unicode_count: usize,
@@ -403,6 +404,7 @@ pub struct AlignmentExpectation {
 impl AlignmentExpectation {
     fn has_classified_difference(&self) -> bool {
         self.extraction_equivalent_count
+            + self.explained_count
             + self.strong_unicode_conflict_count
             + self.weak_unicode_conflict_count
             + self.unresolved_unicode_count

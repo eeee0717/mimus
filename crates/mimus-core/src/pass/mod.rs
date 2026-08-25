@@ -2333,6 +2333,7 @@ struct BaselineMatch {
 #[derive(Debug, Default)]
 struct AlignmentCounts {
     extraction_equivalent: usize,
+    explained: usize,
     strong_unicode_conflict: usize,
     weak_unicode_conflict: usize,
     unresolved_unicode: usize,
@@ -2344,6 +2345,7 @@ struct AlignmentCounts {
 impl AlignmentCounts {
     fn has_diagnostic(&self) -> bool {
         self.extraction_equivalent
+            + self.explained
             + self.strong_unicode_conflict
             + self.weak_unicode_conflict
             + self.unresolved_unicode
@@ -2415,6 +2417,16 @@ fn validate_character_alignment(
         }
     }
 
+    let (explanation_pairs, explanation_walk_candidate_counts, explanation_engine_candidate_counts) =
+        match_unique_explanation_edges(walked, engine, tolerance, &walk_matched, &engine_matched);
+    // Explanation suppresses a false engine-only residue but never grants the
+    // per-character engine geometry link used for tight-box adoption.
+    for pair in explanation_pairs {
+        walk_matched[pair.walk_index] = true;
+        engine_matched[pair.engine_index] = true;
+        counts.explained += 1;
+    }
+
     for (index, character) in walked.iter().enumerate() {
         if walk_matched[index] {
             continue;
@@ -2424,6 +2436,7 @@ fn validate_character_alignment(
         } else if !valid_walk_alignment_anchor(character)
             || character.unicode.is_none()
             || walk_candidate_counts[index] > 0
+            || explanation_walk_candidate_counts[index] > 0
         {
             counts.residual += 1;
         } else {
@@ -2444,6 +2457,7 @@ fn validate_character_alignment(
             || character.unicode.is_none()
             || !rect_is_finite(character.tight_box)
             || engine_candidate_counts[index] > 0
+            || explanation_engine_candidate_counts[index] > 0
         {
             counts.residual += 1;
         } else {
@@ -2466,6 +2480,7 @@ fn validate_character_alignment(
             walked_character_count: walked.len(),
             engine_character_count: engine.len(),
             extraction_equivalent_count: counts.extraction_equivalent,
+            explained_count: counts.explained,
             strong_unicode_conflict_count: counts.strong_unicode_conflict,
             weak_unicode_conflict_count: counts.weak_unicode_conflict,
             unresolved_unicode_count: counts.unresolved_unicode,
@@ -2561,6 +2576,68 @@ fn match_baseline_multisets(
     (pairs, walk_candidate_counts, engine_candidate_counts)
 }
 
+fn match_unique_explanation_edges(
+    walked: &[crate::walk::WalkedChar],
+    engine: &[crate::engine::PageCharSnapshot],
+    tolerance: f64,
+    walk_matched: &[bool],
+    engine_matched: &[bool],
+) -> (Vec<BaselineMatch>, Vec<usize>, Vec<usize>) {
+    let cell_size = tolerance.max(f64::EPSILON);
+    let mut buckets = HashMap::<(i64, i64), Vec<usize>>::new();
+    for (index, character) in engine.iter().enumerate() {
+        if !engine_matched[index] && valid_engine_alignment_anchor(character) {
+            buckets
+                .entry(baseline_grid_key(character.baseline_origin, cell_size))
+                .or_default()
+                .push(index);
+        }
+    }
+
+    let mut candidates = vec![Vec::<usize>::new(); walked.len()];
+    let mut engine_candidate_counts = vec![0usize; engine.len()];
+    for (walk_index, character) in walked.iter().enumerate() {
+        if walk_matched[walk_index] || !valid_walk_explanation_anchor(character) {
+            continue;
+        }
+        let (grid_x, grid_y) = baseline_grid_key(character.baseline_origin, cell_size);
+        for offset_x in -1..=1 {
+            for offset_y in -1..=1 {
+                let Some(indices) = buckets.get(&(grid_x + offset_x, grid_y + offset_y)) else {
+                    continue;
+                };
+                for &engine_index in indices {
+                    let engine_character = &engine[engine_index];
+                    let delta_x =
+                        (character.baseline_origin.x - engine_character.baseline_origin.x).abs();
+                    let delta_y =
+                        (character.baseline_origin.y - engine_character.baseline_origin.y).abs();
+                    if delta_x <= tolerance && delta_y <= tolerance {
+                        candidates[walk_index].push(engine_index);
+                        engine_candidate_counts[engine_index] += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    let walk_candidate_counts = candidates.iter().map(Vec::len).collect::<Vec<_>>();
+    let pairs = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(walk_index, engine_indices)| {
+            let [engine_index] = engine_indices.as_slice() else {
+                return None;
+            };
+            (engine_candidate_counts[*engine_index] == 1).then_some(BaselineMatch {
+                walk_index,
+                engine_index: *engine_index,
+            })
+        })
+        .collect();
+    (pairs, walk_candidate_counts, engine_candidate_counts)
+}
+
 fn baseline_grid_key(point: crate::il::Point, cell_size: f64) -> (i64, i64) {
     (
         (point.x / cell_size).floor() as i64,
@@ -2588,6 +2665,19 @@ fn alignment_match_rank(
 fn valid_walk_alignment_anchor(character: &crate::walk::WalkedChar) -> bool {
     character.locatable
         && character.text_transform == TextTransform::Upright
+        && character.unicode.is_some()
+        && character.advance.is_finite()
+        && character.advance > 0.0
+        && character.baseline_origin.x.is_finite()
+        && character.baseline_origin.y.is_finite()
+}
+
+fn valid_walk_explanation_anchor(character: &crate::walk::WalkedChar) -> bool {
+    character.locatable
+        && (character.text_transform != TextTransform::Upright
+            || character.unicode.is_none()
+            || !character.advance.is_finite()
+            || character.advance <= 0.0)
         && character.baseline_origin.x.is_finite()
         && character.baseline_origin.y.is_finite()
 }
@@ -3707,6 +3797,7 @@ mod tests {
                 walked_character_count: 5,
                 engine_character_count: 5,
                 extraction_equivalent_count: 0,
+                explained_count: 0,
                 strong_unicode_conflict_count: 1,
                 weak_unicode_conflict_count: 0,
                 unresolved_unicode_count: 0,
@@ -3741,7 +3832,8 @@ mod tests {
             .unwrap()
             .set_plain_content(cmap.into_bytes());
         let page_id = pdf.get_pages()[&1];
-        let walked = walk_page(&pdf, page_id).unwrap().characters;
+        let mut walked = walk_page(&pdf, page_id).unwrap().characters;
+        walked[0].advance = 1.0;
         let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap();
         engine.truncate(1);
         engine[0].unicode = Some('A');
@@ -3822,6 +3914,78 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from([0, 1])
         );
+    }
+
+    #[test]
+    fn non_translatable_walk_characters_explain_unique_engine_observations() {
+        let pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        let mut walked = walk_page(&pdf, page_id).unwrap().characters[..3].to_vec();
+        walked[0].text_transform = TextTransform::Rotated(90.0);
+        walked[1].unicode = None;
+        walked[1].unicode_provenance = UnicodeProvenance::Unresolved;
+        walked[2].advance = 0.0;
+        let engine = FakeEngine::default().page_characters(&[], 0).unwrap()[..3].to_vec();
+        let mut diagnostics = Diagnostics::default();
+
+        let alignment = validate_character_alignment(
+            0,
+            FakeEngine::default().page_geometry(&[], 0).unwrap(),
+            &walked,
+            &engine,
+            0.001,
+            &mut diagnostics,
+        );
+
+        assert_eq!(alignment.engine_indices_by_walk, [None, None, None]);
+        assert!(alignment.weak_unicode_conflicts.is_empty());
+        assert_eq!(
+            paragraph_preserved_reason(walked.iter().enumerate(), &BTreeSet::new()),
+            Some(il::PreservedReason::UnreliableUnicode)
+        );
+        assert!(matches!(
+            diagnostics.entries(),
+            [Diagnostic::EngineCharacterAlignment {
+                explained_count: 3,
+                walk_only_count: 0,
+                engine_only_count: 0,
+                residual_count: 0,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn ambiguous_explanation_candidates_preserve_multiplicity_as_residuals() {
+        let pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        let mut walk_character = walk_page(&pdf, page_id).unwrap().characters[0].clone();
+        walk_character.text_transform = TextTransform::Rotated(90.0);
+        let walked = vec![walk_character.clone(), walk_character];
+        let engine_character = FakeEngine::default().page_characters(&[], 0).unwrap()[0].clone();
+        let engine = vec![engine_character.clone(), engine_character];
+        let mut diagnostics = Diagnostics::default();
+
+        let alignment = validate_character_alignment(
+            0,
+            FakeEngine::default().page_geometry(&[], 0).unwrap(),
+            &walked,
+            &engine,
+            0.001,
+            &mut diagnostics,
+        );
+
+        assert_eq!(alignment.engine_indices_by_walk, [None, None]);
+        assert!(matches!(
+            diagnostics.entries(),
+            [Diagnostic::EngineCharacterAlignment {
+                explained_count: 0,
+                walk_only_count: 0,
+                engine_only_count: 0,
+                residual_count: 4,
+                ..
+            }]
+        ));
     }
 
     #[test]
