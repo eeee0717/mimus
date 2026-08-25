@@ -62,6 +62,7 @@ walked_text = "M-M"
 walked_character_count = 3
 engine_character_count = 3
 extraction_equivalent_count = 1
+explained_count = 0
 strong_unicode_conflict_count = 0
 weak_unicode_conflict_count = 0
 unresolved_unicode_count = 0

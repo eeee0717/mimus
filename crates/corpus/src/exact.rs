@@ -88,11 +88,11 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
         "unit-align-07-weak-unicode-conflict" => {
             alignment_fixture(fixture_id, repo_root, AlignmentRecipe::WeakConflict)
         }
-        "unit-align-08-engine-only-overlap" => {
-            alignment_fixture(fixture_id, repo_root, AlignmentRecipe::EngineOnlyOverlap)
+        "unit-align-08-actualtext-overlap" => {
+            alignment_fixture(fixture_id, repo_root, AlignmentRecipe::ActualTextOverlap)
         }
-        "unit-align-09-engine-only-disjoint" => {
-            alignment_fixture(fixture_id, repo_root, AlignmentRecipe::EngineOnlyDisjoint)
+        "unit-align-09-actualtext-disjoint" => {
+            alignment_fixture(fixture_id, repo_root, AlignmentRecipe::ActualTextDisjoint)
         }
         "unit-xobj-00-recursion-parent" => xobject_recursion_parent(repo_root),
         "unit-xobj-04-inherited-resources" => inherited_form_resources(repo_root),
@@ -950,8 +950,8 @@ enum AlignmentRecipe {
     Noncharacter,
     DoubleDraw,
     WeakConflict,
-    EngineOnlyOverlap,
-    EngineOnlyDisjoint,
+    ActualTextOverlap,
+    ActualTextDisjoint,
 }
 
 impl AlignmentRecipe {
@@ -968,8 +968,8 @@ impl AlignmentRecipe {
             }
             Self::DoubleDraw => b"BT\n/F1 12 Tf\n1 Tr\n1 0 0 1 72 120 Tm\n(M) Tj\nET\nBT\n/F1 12 Tf\n0 Tr\n1 0 0 1 72 120 Tm\n(A) Tj\nET\n",
             Self::WeakConflict => b"/Span << /ActualText (I) >> BDC\nBT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(M) Tj\nET\nEMC\n",
-            Self::EngineOnlyOverlap => b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(M) Tj\nET\n/Span << /ActualText (MI) >> BDC\nBT\n/F1 12 Tf\n0 1 -1 0 88 120 Tm\n(M) Tj\nET\nEMC\n",
-            Self::EngineOnlyDisjoint => b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(M) Tj\nET\n/Span << /ActualText (MI) >> BDC\nBT\n/F1 12 Tf\n0 1 -1 0 200 40 Tm\n(M) Tj\nET\nEMC\n",
+            Self::ActualTextOverlap => b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(M) Tj\nET\n/Span << /ActualText (MI) >> BDC\nBT\n/F1 12 Tf\n0 1 -1 0 88 120 Tm\n(M) Tj\nET\nEMC\n",
+            Self::ActualTextDisjoint => b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(M) Tj\nET\n/Span << /ActualText (MI) >> BDC\nBT\n/F1 12 Tf\n0 1 -1 0 200 40 Tm\n(M) Tj\nET\nEMC\n",
         }
     }
 
@@ -980,7 +980,7 @@ impl AlignmentRecipe {
             Self::Ligature => Some(&[(0x41, "FB01")]),
             Self::Noncharacter => Some(&[(0x41, "FFFF")]),
             Self::DoubleDraw => Some(&[(0x41, "004D"), (0x4d, "004D")]),
-            Self::WeakConflict | Self::EngineOnlyOverlap | Self::EngineOnlyDisjoint => None,
+            Self::WeakConflict | Self::ActualTextOverlap | Self::ActualTextDisjoint => None,
         }
     }
 }

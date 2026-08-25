@@ -52,6 +52,7 @@ walked_text = "𝐀"
 walked_character_count = 1
 engine_character_count = 2
 extraction_equivalent_count = 1
+explained_count = 0
 strong_unicode_conflict_count = 0
 weak_unicode_conflict_count = 0
 unresolved_unicode_count = 0

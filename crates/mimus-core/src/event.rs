@@ -282,6 +282,7 @@ pub enum Diagnostic {
         walked_character_count: usize,
         engine_character_count: usize,
         extraction_equivalent_count: usize,
+        explained_count: usize,
         strong_unicode_conflict_count: usize,
         weak_unicode_conflict_count: usize,
         unresolved_unicode_count: usize,
@@ -361,6 +362,7 @@ pub enum DiagnosticEvent {
         walked_character_count: usize,
         engine_character_count: usize,
         extraction_equivalent_count: usize,
+        explained_count: usize,
         strong_unicode_conflict_count: usize,
         weak_unicode_conflict_count: usize,
         unresolved_unicode_count: usize,
@@ -446,6 +448,7 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 walked_character_count,
                 engine_character_count,
                 extraction_equivalent_count,
+                explained_count,
                 strong_unicode_conflict_count,
                 weak_unicode_conflict_count,
                 unresolved_unicode_count,
@@ -457,6 +460,7 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 walked_character_count: *walked_character_count,
                 engine_character_count: *engine_character_count,
                 extraction_equivalent_count: *extraction_equivalent_count,
+                explained_count: *explained_count,
                 strong_unicode_conflict_count: *strong_unicode_conflict_count,
                 weak_unicode_conflict_count: *weak_unicode_conflict_count,
                 unresolved_unicode_count: *unresolved_unicode_count,
@@ -647,6 +651,7 @@ mod tests {
             walked_character_count: 10,
             engine_character_count: 9,
             extraction_equivalent_count: 1,
+            explained_count: 8,
             strong_unicode_conflict_count: 2,
             weak_unicode_conflict_count: 3,
             unresolved_unicode_count: 4,
@@ -665,6 +670,7 @@ mod tests {
         assert_eq!(value["walked_character_count"], 10);
         assert_eq!(value["engine_character_count"], 9);
         assert_eq!(value["extraction_equivalent_count"], 1);
+        assert_eq!(value["explained_count"], 8);
         assert_eq!(value["strong_unicode_conflict_count"], 2);
         assert_eq!(value["weak_unicode_conflict_count"], 3);
         assert_eq!(value["unresolved_unicode_count"], 4);

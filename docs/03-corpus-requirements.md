@@ -759,7 +759,7 @@ BabelDOC 的输出**不得作为唯一正确性 oracle**。它是参考实现而
 
 **ALIGN-08 · `/ActualText` 提取展开不是额外墨迹**
 - 构造：两份 fixture 分别在与待替换单元相交、相离的位置，用 `/ActualText (MI)` 包住一个实际只绘制 `M` 的非直立字形
-- 预期：非直立 walk 字符以解释边吸收一个 engine 观测；其余 `/ActualText` 提取展开归入 residual，均不算 engine-only 墨迹、不触发保留
+- 预期：一个非直立 walk 字符对应两个同 baseline 的 engine 提取字符，因候选不唯一三者全部留 residual；不算 engine-only 墨迹、不触发保留
 - oracle：production-path 聚合计数 + 独立结构/渲染证明每个 marked-content span 只有一个实际墨迹 · **M1** · 合法
 
 #### XOBJ — Form / Image XObject 与嵌套 CTM
