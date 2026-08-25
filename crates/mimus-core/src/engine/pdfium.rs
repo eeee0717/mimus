@@ -86,6 +86,67 @@ impl PdfiumEngine {
             )
         })
     }
+
+    /// Queries optional PDFium text flags for offline diagnostics. The normal production
+    /// `PdfInspector` path deliberately does not add these calls or their failure modes.
+    pub fn page_characters_with_text_diagnostics(
+        &self,
+        pdf: &[u8],
+        page_index: usize,
+    ) -> Result<Vec<PageCharSnapshot>> {
+        self.page_characters_internal(pdf, page_index, true)
+    }
+
+    fn page_characters_internal(
+        &self,
+        pdf: &[u8],
+        page_index: usize,
+        inspect_text_flags: bool,
+    ) -> Result<Vec<PageCharSnapshot>> {
+        let document = self.load(pdf)?;
+        let page = Self::page(&document, page_index)?;
+        let text = page.text().map_err(|error| {
+            MimusError::input(
+                InputReason::UnsupportedPdf,
+                format!("PDFium could not load text for page {page_index}: {error}"),
+            )
+        })?;
+        let mut snapshots = Vec::new();
+        for character in text.chars().iter() {
+            if character.is_generated().map_err(|error| {
+                MimusError::input(
+                    InputReason::UnsupportedPdf,
+                    format!("PDFium could not classify a generated character: {error}"),
+                )
+            })? {
+                continue;
+            }
+            let (x, y) = character.origin().map_err(character_error)?;
+            let tight = character.tight_bounds().map_err(character_error)?;
+            let loose = character.loose_bounds().map_err(character_error)?;
+            let is_hyphen = inspect_text_flags
+                .then(|| character.is_hyphen().map_err(character_error))
+                .transpose()?;
+            snapshots.push(PageCharSnapshot {
+                index: u32::try_from(character.index()).map_err(|_| {
+                    MimusError::input(
+                        InputReason::UnsupportedPdf,
+                        "PDFium returned a negative character index",
+                    )
+                })?,
+                unicode: character.unicode_char(),
+                unicode_value: character.unicode_value(),
+                is_hyphen,
+                baseline_origin: Point {
+                    x: f64::from(x.value),
+                    y: f64::from(y.value),
+                },
+                tight_box: pdfium_rect(tight),
+                loose_box: pdfium_rect(loose),
+            });
+        }
+        Ok(snapshots)
+    }
 }
 
 impl PdfInspector for PdfiumEngine {
@@ -116,45 +177,7 @@ impl PdfInspector for PdfiumEngine {
     }
 
     fn page_characters(&self, pdf: &[u8], page_index: usize) -> Result<Vec<PageCharSnapshot>> {
-        let document = self.load(pdf)?;
-        let page = Self::page(&document, page_index)?;
-        let text = page.text().map_err(|error| {
-            MimusError::input(
-                InputReason::UnsupportedPdf,
-                format!("PDFium could not load text for page {page_index}: {error}"),
-            )
-        })?;
-        let mut snapshots = Vec::new();
-        for character in text.chars().iter() {
-            if character.is_generated().map_err(|error| {
-                MimusError::input(
-                    InputReason::UnsupportedPdf,
-                    format!("PDFium could not classify a generated character: {error}"),
-                )
-            })? {
-                continue;
-            }
-            let (x, y) = character.origin().map_err(character_error)?;
-            let tight = character.tight_bounds().map_err(character_error)?;
-            let loose = character.loose_bounds().map_err(character_error)?;
-            snapshots.push(PageCharSnapshot {
-                index: u32::try_from(character.index()).map_err(|_| {
-                    MimusError::input(
-                        InputReason::UnsupportedPdf,
-                        "PDFium returned a negative character index",
-                    )
-                })?,
-                unicode: character.unicode_char(),
-                unicode_value: character.unicode_value(),
-                baseline_origin: Point {
-                    x: f64::from(x.value),
-                    y: f64::from(y.value),
-                },
-                tight_box: pdfium_rect(tight),
-                loose_box: pdfium_rect(loose),
-            });
-        }
-        Ok(snapshots)
+        self.page_characters_internal(pdf, page_index, false)
     }
 }
 
@@ -257,12 +280,24 @@ mod tests {
         );
         assert_close(characters[0].baseline_origin.x, 72.0, 0.001);
         assert_close(characters[0].baseline_origin.y, 120.0, 0.001);
+        assert!(
+            characters
+                .iter()
+                .all(|character| character.is_hyphen.is_none())
+        );
         assert!(characters.iter().all(|character| {
             character.tight_box.left <= character.tight_box.right
                 && character.tight_box.bottom <= character.tight_box.top
                 && character.loose_box.left <= character.loose_box.right
                 && character.loose_box.bottom <= character.loose_box.top
         }));
+        assert!(
+            engine
+                .page_characters_with_text_diagnostics(&bytes, 0)
+                .unwrap()
+                .iter()
+                .all(|character| character.is_hyphen == Some(false))
+        );
 
         let raster = engine.rasterize_page(&bytes, 0).unwrap();
         assert_eq!((raster.width(), raster.height()), (300, 200));

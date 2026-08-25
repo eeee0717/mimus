@@ -864,6 +864,7 @@ fn reliable_upright_snapshots(walked: &[crate::walk::WalkedChar]) -> Vec<PageCha
                 index: u32::try_from(index).ok()?,
                 unicode: character.unicode,
                 unicode_value: character.unicode.map_or(0, u32::from),
+                is_hyphen: None,
                 baseline_origin: character.baseline_origin,
                 tight_box: character.metric_box,
                 loose_box: character.metric_box,
@@ -2510,6 +2511,7 @@ mod tests {
                     index: index as u32,
                     unicode: Some(unicode),
                     unicode_value: unicode.into(),
+                    is_hyphen: None,
                     baseline_origin: Point { x, y: 120.0 },
                     tight_box: Rect {
                         left: x,

@@ -19,6 +19,7 @@ pub(crate) const MAX_FORM_DEPTH: usize = 64;
 #[derive(Debug, Clone, PartialEq)]
 pub struct WalkedChar {
     pub unicode: Option<char>,
+    pub unicode_provenance: UnicodeProvenance,
     pub code: u32,
     pub visible: bool,
     pub locatable: bool,
@@ -34,6 +35,14 @@ pub struct WalkedChar {
     pub content_object: ObjectId,
     pub byte_start: usize,
     pub byte_end: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnicodeProvenance {
+    ToUnicode,
+    EmbeddedFontCmap,
+    SimpleEncoding,
+    Unresolved,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -841,6 +850,7 @@ impl Walker<'_> {
                 );
                 self.characters.push(WalkedChar {
                     unicode,
+                    unicode_provenance: glyph.unicode_provenance,
                     code: glyph.code,
                     visible: !matches!(self.state.rendering_mode, 3 | 7),
                     locatable,
@@ -1307,6 +1317,11 @@ mod tests {
         assert_eq!(characters[0].font.object_number, 5);
         assert_eq!(characters[0].font.resource_name, "F1");
         assert_eq!(characters[0].text_transform, TextTransform::Upright);
+        assert!(
+            characters
+                .iter()
+                .all(|character| character.unicode_provenance == UnicodeProvenance::ToUnicode)
+        );
         let metric = characters
             .iter()
             .skip(1)
@@ -1570,11 +1585,31 @@ mod tests {
 
     #[test]
     fn production_walk_decodes_type0_type3_and_file_defined_standard14_widths() {
-        for (id, expected_text, expected_advance) in [
-            ("unit-cmap-01-identity-no-tounicode", "MIMUS", 10.356),
-            ("unit-stream-02-type3-d1", "M", 12.0),
-            ("unit-stream-04-type3-d0", "M", 12.0),
-            ("unit-font-01-std14-custom-widths", "AAAA", 12.0),
+        for (id, expected_text, expected_advance, expected_provenance) in [
+            (
+                "unit-cmap-01-identity-no-tounicode",
+                "MIMUS",
+                10.356,
+                UnicodeProvenance::EmbeddedFontCmap,
+            ),
+            (
+                "unit-stream-02-type3-d1",
+                "M",
+                12.0,
+                UnicodeProvenance::SimpleEncoding,
+            ),
+            (
+                "unit-stream-04-type3-d0",
+                "M",
+                12.0,
+                UnicodeProvenance::SimpleEncoding,
+            ),
+            (
+                "unit-font-01-std14-custom-widths",
+                "AAAA",
+                12.0,
+                UnicodeProvenance::SimpleEncoding,
+            ),
         ] {
             let walked = walk_fixture(id);
             assert_eq!(text_of(&walked), expected_text, "fixture {id}");
@@ -1584,6 +1619,13 @@ mod tests {
                         && character.advance.is_finite()
                         && character.advance > 0.0
                 }),
+                "fixture {id}"
+            );
+            assert!(
+                walked
+                    .characters
+                    .iter()
+                    .all(|character| { character.unicode_provenance == expected_provenance }),
                 "fixture {id}"
             );
             assert!(
@@ -1609,6 +1651,10 @@ mod tests {
         assert_eq!(walked.characters.len(), 1);
         assert_eq!(walked.characters[0].code, u32::from(b'Z'));
         assert_eq!(walked.characters[0].unicode, None);
+        assert_eq!(
+            walked.characters[0].unicode_provenance,
+            UnicodeProvenance::Unresolved
+        );
         assert!(walked.characters[0].font_supported);
         assert!(walked.characters[0].advance > 0.0);
     }

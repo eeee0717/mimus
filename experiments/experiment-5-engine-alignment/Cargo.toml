@@ -1,0 +1,16 @@
+[package]
+name = "mimus-engine-alignment-experiment"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+lopdf = { version = "0.44", default-features = false }
+mimus-core = { path = "../../crates/mimus-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
