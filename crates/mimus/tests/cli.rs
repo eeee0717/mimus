@@ -2747,6 +2747,69 @@ fn a_truncated_content_stream_degrades_its_page() {
     );
 }
 
+#[test]
+fn strict_mode_turns_page_degradation_into_translation_exit_without_publishing() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = fixture_path("mal-stream-10-unterminated-string");
+    let output_path = directory.path().join("strict.pdf");
+    std::fs::write(&output_path, b"existing destination").unwrap();
+    let output = Command::new(BIN)
+        .env(PDFIUM_ENV, pdfium_library())
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "none",
+            "--strict",
+            "--output",
+        ])
+        .arg(&output_path)
+        .arg(&input)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(4));
+    assert!(output.stderr.is_empty());
+    let events = parse_events(&output.stdout);
+    assert_one_terminal_last(&events, "error");
+    let resolved = events
+        .iter()
+        .find(|event| event["event"] == "configuration_resolved")
+        .unwrap();
+    assert_eq!(resolved["strict"], true);
+    assert!(events.iter().any(|event| {
+        event["event"] == "diagnostic"
+            && event["id"] == "page_degraded"
+            && event["reason"] == "content_stream_syntax"
+    }));
+    assert!(events.iter().any(|event| {
+        event["event"] == "diagnostic"
+            && event["id"] == "degradation_summary"
+            && event["degraded_page_indices"] == serde_json::json!([0])
+    }));
+    assert_eq!(events.last().unwrap()["category"], "translation");
+    assert_eq!(events.last().unwrap()["reason"], "strict_degradation");
+    assert_eq!(std::fs::read(output_path).unwrap(), b"existing destination");
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+
+    let human_path = directory.path().join("strict-human.pdf");
+    std::fs::write(&human_path, b"human destination").unwrap();
+    let human = Command::new(BIN)
+        .env(PDFIUM_ENV, pdfium_library())
+        .args(["translate", "--backend", "none", "--strict", "--output"])
+        .arg(&human_path)
+        .arg(input)
+        .output()
+        .unwrap();
+    assert_eq!(human.status.code(), Some(4));
+    assert!(human.stdout.is_empty());
+    let stderr = String::from_utf8(human.stderr).unwrap();
+    assert!(stderr.contains("warning[page_degraded]"));
+    assert!(stderr.contains("warning[degradation_summary]"));
+    assert!(stderr.contains("error[strict_degradation]"));
+    assert_eq!(std::fs::read(human_path).unwrap(), b"human destination");
+}
+
 /// `mal-stream-09-orphan-text` 与 `mal-stream-11-tj-array-type` 的声明行为在生产
 /// 路径上的对应断言：文字一个不少地进入 IL，恢复每页只报一次。
 #[test]

@@ -6,7 +6,8 @@ use rayon::prelude::*;
 use crate::context::{CharacterAlignment, Document, ExtractedPage, OutputFont, PassContext};
 use crate::engine::{PageCharSnapshot, RgbaImage};
 use crate::error::{
-    AssetReason, InputReason, InternalReason, IoReason, MimusError, Result, UsageReason,
+    AssetReason, ErrorReason, InputReason, InternalReason, IoReason, MimusError, Result,
+    TranslationReason, UsageReason,
 };
 use crate::event::{
     Diagnostic, Diagnostics, Event, EventKind, PageDegradeReason, PreservedParagraph, RecoveryKind,
@@ -114,6 +115,10 @@ fn run_stages(
             .events
             .emit(Event::new(EventKind::StageStarted { stage }))?;
         pass(document, context)?;
+        if context.config.strict && document_has_degradation(document) {
+            push_degradation_summary(document);
+            return Err(strict_degradation_error(document));
+        }
         if let Some(snapshots) = context.snapshots {
             let snapshot = il::snapshot(&document.il);
             snapshots.write_snapshot(pass_index, stage, &snapshot)?;
@@ -124,6 +129,60 @@ fn run_stages(
     }
     push_degradation_summary(document);
     Ok(())
+}
+
+fn document_has_degradation(document: &Document) -> bool {
+    document
+        .extracted_pages
+        .iter()
+        .any(|page| page.degraded.is_some())
+        || document
+            .il
+            .pages
+            .iter()
+            .flat_map(|page| &page.paragraphs)
+            .any(|paragraph| paragraph.preserved.is_some())
+}
+
+fn strict_degradation_error(document: &Document) -> MimusError {
+    let degraded_pages = document
+        .extracted_pages
+        .iter()
+        .filter(|page| page.degraded.is_some())
+        .count();
+    let preserved_paragraphs = document
+        .il
+        .pages
+        .iter()
+        .flat_map(|page| &page.paragraphs)
+        .filter(|paragraph| paragraph.preserved.is_some())
+        .count();
+    let placeholder_violations = document
+        .placeholder_violations
+        .iter()
+        .map(|(&(page_index, paragraph_index), &violation)| {
+            format!(
+                "page {} paragraph {} {}",
+                page_index + 1,
+                paragraph_index + 1,
+                violation.wire_name()
+            )
+        })
+        .collect::<Vec<_>>();
+    let placeholder_detail = if placeholder_violations.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; placeholder violations: {}",
+            placeholder_violations.join(", ")
+        )
+    };
+    MimusError::translation(
+        TranslationReason::StrictDegradation,
+        format!(
+            "strict mode rejected {degraded_pages} degraded pages and {preserved_paragraphs} preserved paragraphs{placeholder_detail}"
+        ),
+    )
 }
 
 /// ADR-0013 §5：受影响页与保留段的总账走单条汇总 diagnostic，不进 `result`
@@ -162,6 +221,7 @@ fn push_degradation_summary(document: &mut Document) {
     document.diagnostics.push(Diagnostic::DegradationSummary {
         degraded_pages: degraded_page_indices.len(),
         degraded_page_indices,
+        preserved_paragraph_count: preserved_paragraphs.len(),
         preserved_paragraphs,
         total_pages: document.extracted_pages.len(),
     });
@@ -1701,14 +1761,14 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                     "translation result no longer owns a paragraph",
                 )
             })?;
-        match execution.outcome? {
-            crate::translate::executor::TranslationOutcome::Translated(restored) => {
+        match execution.outcome {
+            Ok(crate::translate::executor::TranslationOutcome::Translated(restored)) => {
                 paragraph.translated_text = Some(restored.plain_text());
                 document
                     .restored_translations
                     .insert((job.page_index, paragraph.reading_order), restored);
             }
-            crate::translate::executor::TranslationOutcome::Identity => {
+            Ok(crate::translate::executor::TranslationOutcome::Identity) => {
                 paragraph.translated_text = Some(paragraph.source_text());
                 prose_identity_count += usize::from(job.prose_shaped);
                 document.diagnostics.push(Diagnostic::TranslationIdentity {
@@ -1717,10 +1777,10 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                     request_characters: job.prepared.request_text().chars().count(),
                 });
             }
-            crate::translate::executor::TranslationOutcome::PlaceholderViolation {
+            Ok(crate::translate::executor::TranslationOutcome::PlaceholderViolation {
                 violation,
                 profile,
-            } => {
+            }) => {
                 preserve_placeholder_violation(
                     paragraph,
                     &mut document.diagnostics,
@@ -1731,6 +1791,11 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                     profile,
                 );
             }
+            Err(error) if matches!(error.reason(), ErrorReason::Translation(_)) => {
+                paragraph.translated_text = None;
+                paragraph.preserved = Some(il::PreservedReason::TranslationFailure);
+            }
+            Err(error) => return Err(error),
         }
     }
     if prose_paragraph_count > 0 && prose_identity_count * 2 > prose_paragraph_count {
@@ -3642,6 +3707,20 @@ mod tests {
                 ));
             }
             Ok("Translated".to_owned())
+        }
+    }
+
+    struct SelectiveFailTranslator;
+
+    impl Translator for SelectiveFailTranslator {
+        fn translate(&self, request: &crate::translate::TranslationRequest<'_>) -> Result<String> {
+            if request.text.starts_with('B') {
+                return Err(MimusError::translation(
+                    TranslationReason::TranslationFailed,
+                    "injected paragraph failure",
+                ));
+            }
+            Ok(format!("translated:{}", request.text))
         }
     }
 
@@ -5745,8 +5824,13 @@ mod tests {
             cache_path: Some(cache_path.clone()),
             ..crate::context::PipelineConfig::default()
         };
-        assert!(translate_fixture_once(&failing, &events, cache_config()).is_err());
-        assert!(translate_fixture_once(&failing, &events, cache_config()).is_err());
+        for _ in 0..2 {
+            let document = translate_fixture_once(&failing, &events, cache_config()).unwrap();
+            assert_eq!(
+                document.il.pages[0].paragraphs[0].preserved,
+                Some(il::PreservedReason::TranslationFailure)
+            );
+        }
         assert_eq!(failing.calls.load(Ordering::SeqCst), 2);
 
         let identity = StaticTranslator {
@@ -5787,6 +5871,206 @@ mod tests {
         }
 
         assert_eq!(translator.term_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn normal_mode_preserves_a_failed_paragraph_and_publishes_the_source_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("normal.pdf");
+        let mut document = Document::new(fixture(), &output);
+        let engine = FakeEngine::default();
+        let translator = FailingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig {
+                auto_terms: false,
+                ..crate::context::PipelineConfig::default()
+            },
+        };
+
+        let result = run(&mut document, &context).unwrap();
+
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(result.warnings, 1);
+        assert_eq!(
+            document.il.pages[0].paragraphs[0].preserved,
+            Some(il::PreservedReason::TranslationFailure)
+        );
+        assert_eq!(
+            std::fs::read(output).unwrap(),
+            std::fs::read(fixture()).unwrap()
+        );
+        assert!(
+            document
+                .diagnostics
+                .entries()
+                .iter()
+                .any(|diagnostic| matches!(
+                    diagnostic,
+                    Diagnostic::DegradationSummary {
+                        preserved_paragraphs,
+                        ..
+                    } if preserved_paragraphs == &[PreservedParagraph {
+                        page_index: 0,
+                        paragraph_index: 0,
+                        reason: il::PreservedReason::TranslationFailure,
+                        placeholder_violation: None,
+                    }]
+                ))
+        );
+    }
+
+    #[test]
+    fn strict_mode_reports_all_degradation_before_publish_and_preserves_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("strict.pdf");
+        std::fs::write(&output, b"existing destination").unwrap();
+        let mut document = Document::new(fixture(), &output);
+        let engine = FakeEngine::default();
+        let translator = FailingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig {
+                auto_terms: false,
+                strict: true,
+                ..crate::context::PipelineConfig::default()
+            },
+        };
+
+        let error = run(&mut document, &context).unwrap_err();
+
+        assert_eq!(
+            error.reason(),
+            ErrorReason::Translation(TranslationReason::StrictDegradation)
+        );
+        assert_eq!(std::fs::read(&output).unwrap(), b"existing destination");
+        assert!(document.write_report.is_none());
+        assert!(document.rewrites.is_empty());
+        assert!(
+            document
+                .diagnostics
+                .entries()
+                .iter()
+                .any(|diagnostic| matches!(
+                    diagnostic,
+                    Diagnostic::DegradationSummary {
+                        preserved_paragraphs,
+                        ..
+                    } if preserved_paragraphs == &[PreservedParagraph {
+                        page_index: 0,
+                        paragraph_index: 0,
+                        reason: il::PreservedReason::TranslationFailure,
+                        placeholder_violation: None,
+                    }]
+                ))
+        );
+        assert_eq!(
+            std::fs::read_dir(directory.path()).unwrap().count(),
+            1,
+            "strict mode must not leave an output temporary"
+        );
+    }
+
+    #[test]
+    fn strict_mode_accepts_identity_translation_outcomes() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("strict-identity.pdf");
+        let mut document = Document::new(fixture(), &output);
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: "MIMUS",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig {
+                auto_terms: false,
+                strict: true,
+                ..crate::context::PipelineConfig::default()
+            },
+        };
+
+        let result = run(&mut document, &context).unwrap();
+
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(result.warnings, 0);
+        assert_eq!(document.il.pages[0].paragraphs[0].preserved, None);
+        assert!(output.is_file());
+    }
+
+    #[test]
+    fn strict_placeholder_failure_reports_the_exact_subtype() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: "<b1>Translated</b1>",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig {
+                auto_terms: false,
+                strict: true,
+                ..crate::context::PipelineConfig::default()
+            },
+        };
+        inspect(&mut document, &context).unwrap();
+        let TextCarrier::Chars { chars } = &mut document.il.pages[0].paragraphs[0].text;
+        for character in &mut chars[..2] {
+            character.font.resource_name = "BodyBold".to_owned();
+        }
+        let layout = chars[2].layout.as_mut().unwrap();
+        layout.label = LayoutLabel::InlineFormula;
+        layout.policy = TranslationPolicy::Passthrough;
+        styles_and_formulas(&mut document, &context).unwrap();
+
+        let error =
+            run_stages(&mut document, &context, &[(Stage::Translate, translate)]).unwrap_err();
+
+        assert_eq!(
+            error.reason(),
+            ErrorReason::Translation(TranslationReason::StrictDegradation)
+        );
+        assert!(
+            error.to_string().contains("page 1 paragraph 1 missing"),
+            "{error}"
+        );
+        assert!(document.diagnostics.entries().iter().any(|diagnostic| {
+            matches!(
+                diagnostic,
+                Diagnostic::DegradationSummary {
+                    preserved_paragraphs,
+                    ..
+                } if preserved_paragraphs == &[PreservedParagraph {
+                    page_index: 0,
+                    paragraph_index: 0,
+                    reason: il::PreservedReason::PlaceholderViolation,
+                    placeholder_violation: Some(
+                        crate::translate::PlaceholderViolation::Missing,
+                    ),
+                }]
+            )
+        }));
     }
 
     #[test]
@@ -6077,8 +6361,59 @@ mod tests {
                 degraded_pages: 1,
                 total_pages: 1,
                 preserved_paragraphs,
+                preserved_paragraph_count: 0,
             } if degraded_page_indices == &[0] && preserved_paragraphs.is_empty()
         )));
+    }
+
+    #[test]
+    fn one_backend_failure_preserves_only_its_own_paragraph() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &SelectiveFailTranslator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig {
+                auto_terms: false,
+                ..crate::context::PipelineConfig::default()
+            },
+        };
+        inspect(&mut document, &context).unwrap();
+        let original = document.il.pages[0].paragraphs[0].clone();
+        document.il.pages[0].paragraphs = (0..3)
+            .map(|index| {
+                let mut paragraph = original.clone();
+                paragraph.reading_order = index;
+                let TextCarrier::Chars { chars } = &mut paragraph.text;
+                chars[0].unicode = Some(char::from(b'A' + index as u8));
+                paragraph
+            })
+            .collect();
+        styles_and_formulas(&mut document, &context).unwrap();
+        extract_terms(&mut document, &context).unwrap();
+
+        translate(&mut document, &context).unwrap();
+
+        let paragraphs = &document.il.pages[0].paragraphs;
+        assert_eq!(
+            paragraphs[0].translated_text.as_deref(),
+            Some("translated:AIMUS")
+        );
+        assert_eq!(paragraphs[0].preserved, None);
+        assert_eq!(paragraphs[1].translated_text, None);
+        assert_eq!(
+            paragraphs[1].preserved,
+            Some(il::PreservedReason::TranslationFailure)
+        );
+        assert_eq!(
+            paragraphs[2].translated_text.as_deref(),
+            Some("translated:CIMUS")
+        );
+        assert_eq!(paragraphs[2].preserved, None);
     }
 
     #[test]

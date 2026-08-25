@@ -80,6 +80,8 @@ pub enum PreservedReason {
     TypesetProtocol,
     /// 翻译后端破坏了公式或富文本占位符协议。
     PlaceholderViolation,
+    /// 单段翻译请求失败；普通模式保留原文，strict 模式升级为硬失败。
+    TranslationFailure,
 }
 
 impl Paragraph {

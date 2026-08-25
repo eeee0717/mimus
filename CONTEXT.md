@@ -22,7 +22,7 @@
 | 13 | 阶段草案：Parse → ScanDetect(拒绝) → Layout → ParagraphFind → StylesAndFormulas → ExtractTerms → Translate → Typeset → FontEmbed → Write | — |
 | 14 | 阅读顺序：以 V3 模型输出为准 + 几何排序兜底；实测 `[M,7]` 第 7 列是 RT-DETR query id，同时可作页内阅读顺序键；同 query 多类别先取最高分，排序键为 `(page_index, col7)` | [ADR-0002](docs/adr/0002-pp-doclayoutv3.md) |
 | 15 | 翻译政策表（见下）；表体默认不翻留 `--translate-table` 实验开关 | — |
-| 16 | 错误恢复：三层降级（段→页→文档，宁保原文不出坏译文）+ 结束汇总 + `--strict`；畸形 PDF fail-fast、修复函数语料驱动；退出码 0/1/2/3/4/5/6 分类（Usage/Input/Asset/Translation/Io/Internal） | [ADR-0011](docs/adr/0011-cli-machine-protocol.md) |
+| 16 | 错误恢复：三层降级（段→页→文档，宁保原文不出坏译文）+ 结束汇总 + `--strict`；畸形 PDF fail-fast、修复函数语料驱动；退出码 0/1/2/3/4/5/6 分类（Usage/Input/Asset/Translation/Io/Internal） | [ADR-0011](docs/adr/0011-cli-machine-protocol.md)、[ADR-0017](docs/adr/0017-translation-degradation-and-strict.md) |
 | 17 | V1 单进程；PDFium 崩溃（abort）接受，子进程隔离推 V2 | — |
 | 18 | 输出字体：Noto Sans SC 单族走运行时资产链（flag > env > config > SHA 缓存 > manifest 下载），Regular/Bold 经 `PassContext` 注入、subsetter 子集化；`--font`/`--font-bold` 逃生门；italic 映射正常字重。当前离线恢复 manifest 暂以同一份 2.004 可变字体承载两个逻辑槽，静态双字重仍是明确 follow-up | [ADR-0018](docs/adr/0018-output-font-assets.md) |
 | 19 | 术语：**保留自动术语提取**（独立 pass，LLM）+ `--glossary` 用户术语表 | — |
