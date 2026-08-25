@@ -9,6 +9,327 @@ use crate::error::{MimusError, Result, TranslationReason, UsageReason};
 
 pub const PARAGRAPH_PROMPT_VERSION: &str = "mimus-paragraph-v1";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PreparedPart {
+    Text { text: String, bold: bool },
+    Formula,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedTranslation {
+    request_text: String,
+    tokens: Vec<ProtocolToken>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ValidatedTranslation(String);
+
+impl ValidatedTranslation {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StyledCharacter {
+    pub(crate) value: char,
+    pub(crate) bold: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RestoredTranslation {
+    segments: Vec<Vec<StyledCharacter>>,
+}
+
+impl RestoredTranslation {
+    pub(crate) fn plain_text(&self) -> String {
+        self.segments
+            .iter()
+            .flatten()
+            .map(|character| character.value)
+            .collect()
+    }
+
+    pub(crate) fn segments(&self) -> &[Vec<StyledCharacter>] {
+        &self.segments
+    }
+}
+
+impl PreparedTranslation {
+    pub(crate) fn new(parts: impl IntoIterator<Item = PreparedPart>) -> Self {
+        let mut request_text = String::new();
+        let mut tokens = Vec::new();
+        let mut formula_index = 0;
+        let mut bold_index = 0;
+        let mut literal_index = 0;
+        for part in parts {
+            match part {
+                PreparedPart::Text { text, bold: false } => {
+                    push_encoded_text(&mut request_text, &mut tokens, &mut literal_index, &text);
+                }
+                PreparedPart::Text { text, bold: true } => {
+                    bold_index += 1;
+                    let open = format!("<b{bold_index}>");
+                    let close = format!("</b{bold_index}>");
+                    request_text.push_str(&open);
+                    push_encoded_text(&mut request_text, &mut tokens, &mut literal_index, &text);
+                    request_text.push_str(&close);
+                    tokens.push(ProtocolToken::BoldOpen {
+                        index: bold_index,
+                        literal: open,
+                    });
+                    tokens.push(ProtocolToken::BoldClose {
+                        index: bold_index,
+                        literal: close,
+                    });
+                }
+                PreparedPart::Formula => {
+                    formula_index += 1;
+                    let literal = format!("{{v{formula_index}}}");
+                    request_text.push_str(&literal);
+                    tokens.push(ProtocolToken::Formula {
+                        index: formula_index,
+                        literal,
+                    });
+                }
+            }
+        }
+        Self {
+            request_text,
+            tokens,
+        }
+    }
+
+    pub(crate) fn request_text(&self) -> &str {
+        &self.request_text
+    }
+
+    pub(crate) fn validate(
+        &self,
+        output: &str,
+        allow_echo: bool,
+    ) -> std::result::Result<ValidatedTranslation, PlaceholderViolation> {
+        if !allow_echo && output == self.request_text {
+            return Err(PlaceholderViolation::BackendEcho);
+        }
+        let observed = scan_tokens(output)?;
+        let expected = self
+            .tokens
+            .iter()
+            .map(ProtocolToken::literal)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+        let mut formula_order = Vec::new();
+        let mut bold_stack = Vec::new();
+        for token in &observed {
+            if !expected.contains(token.literal.as_str()) {
+                return Err(PlaceholderViolation::Unknown);
+            }
+            *counts.entry(token.literal.as_str()).or_default() += 1;
+            match token.kind {
+                ScannedTokenKind::Formula(index) => formula_order.push(index),
+                ScannedTokenKind::BoldOpen(index) => bold_stack.push(index),
+                ScannedTokenKind::BoldClose(index) => {
+                    if bold_stack.pop() != Some(index) {
+                        return Err(PlaceholderViolation::TagNesting);
+                    }
+                }
+                ScannedTokenKind::Literal => {}
+            }
+        }
+        if !bold_stack.is_empty() {
+            return Err(PlaceholderViolation::TagNesting);
+        }
+        for token in &self.tokens {
+            match counts.get(token.literal()).copied().unwrap_or(0) {
+                0 => return Err(PlaceholderViolation::Missing),
+                1 => {}
+                _ => return Err(PlaceholderViolation::Duplicate),
+            }
+        }
+        let expected_formula_order = self
+            .tokens
+            .iter()
+            .filter_map(|token| match token {
+                ProtocolToken::Formula { index, .. } => Some(*index),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if formula_order != expected_formula_order {
+            return Err(PlaceholderViolation::FormulaOrder);
+        }
+
+        Ok(ValidatedTranslation(output.to_owned()))
+    }
+
+    pub(crate) fn restore(
+        &self,
+        validated: &ValidatedTranslation,
+    ) -> std::result::Result<RestoredTranslation, PlaceholderViolation> {
+        let observed = scan_tokens(validated.as_str())?;
+        let protocol = self
+            .tokens
+            .iter()
+            .map(|token| (token.literal(), token))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut segments = vec![Vec::new()];
+        let mut bold_stack = Vec::new();
+        let mut cursor = 0;
+        for token in observed {
+            push_styled_text(
+                segments.last_mut().unwrap(),
+                &validated.as_str()[cursor..token.start],
+                !bold_stack.is_empty(),
+            );
+            let Some(expected) = protocol.get(token.literal.as_str()) else {
+                return Err(PlaceholderViolation::Unknown);
+            };
+            match expected {
+                ProtocolToken::Formula { .. } => segments.push(Vec::new()),
+                ProtocolToken::BoldOpen { index, .. } => bold_stack.push(*index),
+                ProtocolToken::BoldClose { index, .. } => {
+                    if bold_stack.pop() != Some(*index) {
+                        return Err(PlaceholderViolation::TagNesting);
+                    }
+                }
+                ProtocolToken::Literal { value, .. } => {
+                    segments.last_mut().unwrap().push(StyledCharacter {
+                        value: *value,
+                        bold: !bold_stack.is_empty(),
+                    })
+                }
+            }
+            cursor = token.end;
+        }
+        push_styled_text(
+            segments.last_mut().unwrap(),
+            &validated.as_str()[cursor..],
+            !bold_stack.is_empty(),
+        );
+        if !bold_stack.is_empty() {
+            return Err(PlaceholderViolation::TagNesting);
+        }
+        Ok(RestoredTranslation { segments })
+    }
+}
+
+fn push_encoded_text(
+    request_text: &mut String,
+    tokens: &mut Vec<ProtocolToken>,
+    literal_index: &mut usize,
+    text: &str,
+) {
+    for value in text.chars() {
+        if matches!(value, '{' | '<') {
+            *literal_index += 1;
+            let literal = format!("{{l{literal_index}}}");
+            request_text.push_str(&literal);
+            tokens.push(ProtocolToken::Literal { value, literal });
+        } else {
+            request_text.push(value);
+        }
+    }
+}
+
+fn push_styled_text(output: &mut Vec<StyledCharacter>, text: &str, bold: bool) {
+    output.extend(text.chars().map(|value| StyledCharacter { value, bold }));
+}
+
+#[derive(Debug, Clone)]
+enum ProtocolToken {
+    Formula { index: usize, literal: String },
+    BoldOpen { index: usize, literal: String },
+    BoldClose { index: usize, literal: String },
+    Literal { value: char, literal: String },
+}
+
+impl ProtocolToken {
+    fn literal(&self) -> &str {
+        match self {
+            Self::Formula { literal, .. }
+            | Self::BoldOpen { literal, .. }
+            | Self::BoldClose { literal, .. }
+            | Self::Literal { literal, .. } => literal,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlaceholderViolation {
+    Missing,
+    Duplicate,
+    Unknown,
+    TagNesting,
+    FormulaOrder,
+    PartialToken,
+    BackendEcho,
+}
+
+struct ScannedToken {
+    literal: String,
+    kind: ScannedTokenKind,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone, Copy)]
+enum ScannedTokenKind {
+    Formula(usize),
+    BoldOpen(usize),
+    BoldClose(usize),
+    Literal,
+}
+
+fn scan_tokens(text: &str) -> std::result::Result<Vec<ScannedToken>, PlaceholderViolation> {
+    let mut output = Vec::new();
+    let mut cursor = 0;
+    while cursor < text.len() {
+        let tail = &text[cursor..];
+        let (prefix, terminator, kind) = if tail.starts_with("{v") {
+            ("{v", '}', 0_u8)
+        } else if tail.starts_with("{l") {
+            ("{l", '}', 3_u8)
+        } else if tail.starts_with("</b") {
+            ("</b", '>', 2_u8)
+        } else if tail.starts_with("<b") {
+            ("<b", '>', 1_u8)
+        } else {
+            let character = tail
+                .chars()
+                .next()
+                .expect("cursor is on a character boundary");
+            cursor += character.len_utf8();
+            continue;
+        };
+        let digits_start = cursor + prefix.len();
+        let Some(relative_end) = text[digits_start..].find(terminator) else {
+            return Err(PlaceholderViolation::PartialToken);
+        };
+        let digits_end = digits_start + relative_end;
+        let digits = &text[digits_start..digits_end];
+        let index = digits
+            .parse::<usize>()
+            .ok()
+            .filter(|index| *index > 0)
+            .ok_or(PlaceholderViolation::PartialToken)?;
+        let end = digits_end + terminator.len_utf8();
+        let token_kind = match kind {
+            0 => ScannedTokenKind::Formula(index),
+            1 => ScannedTokenKind::BoldOpen(index),
+            2 => ScannedTokenKind::BoldClose(index),
+            _ => ScannedTokenKind::Literal,
+        };
+        output.push(ScannedToken {
+            literal: text[cursor..end].to_owned(),
+            kind: token_kind,
+            start: cursor,
+            end,
+        });
+        cursor = end;
+    }
+    Ok(output)
+}
+
 pub struct TranslationRequest<'a> {
     pub text: &'a str,
     pub target_language: &'a str,
@@ -430,5 +751,91 @@ mod tests {
             TranslationReason::TransportFailure.as_str()
         );
         assert!(!format!("{error:?}\n{error}").contains(CANARY));
+    }
+
+    fn placeholder_protocol() -> PreparedTranslation {
+        PreparedTranslation::new([
+            PreparedPart::Text {
+                text: "Alpha ".to_owned(),
+                bold: false,
+            },
+            PreparedPart::Formula,
+            PreparedPart::Text {
+                text: " bold ".to_owned(),
+                bold: true,
+            },
+            PreparedPart::Formula,
+        ])
+    }
+
+    #[test]
+    fn placeholder_protocol_restores_validated_text_without_redrawing_formulas_or_tags() {
+        let protocol = placeholder_protocol();
+        assert_eq!(protocol.request_text(), "Alpha {v1}<b1> bold </b1>{v2}");
+        let validated = protocol
+            .validate("Translated {v1}<b1> strong </b1>{v2}", false)
+            .unwrap();
+        assert_eq!(validated.as_str(), "Translated {v1}<b1> strong </b1>{v2}");
+        let restored = protocol.restore(&validated).unwrap();
+        assert_eq!(restored.plain_text(), "Translated  strong ");
+        assert_eq!(restored.segments().len(), 3);
+        assert!(restored.segments()[0].iter().all(|value| !value.bold));
+        assert!(restored.segments()[1].iter().all(|value| value.bold));
+        assert!(restored.segments()[2].is_empty());
+    }
+
+    #[test]
+    fn literal_marker_syntax_is_encoded_and_restored_without_collision() {
+        let protocol = PreparedTranslation::new([
+            PreparedPart::Text {
+                text: "literal {v1} <b1> {v".to_owned(),
+                bold: false,
+            },
+            PreparedPart::Formula,
+        ]);
+        assert_eq!(protocol.request_text(), "literal {l1}v1} {l2}b1> {l3}v{v1}");
+        let validated = protocol
+            .validate("translated {l1}v1} {l2}b1> {l3}v{v1}", false)
+            .unwrap();
+        let restored = protocol.restore(&validated).unwrap();
+        assert_eq!(restored.plain_text(), "translated {v1} <b1> {v");
+        assert_eq!(restored.segments().len(), 2);
+    }
+
+    #[test]
+    fn placeholder_protocol_rejects_every_declared_failure_mode() {
+        let protocol = placeholder_protocol();
+        for (output, expected) in [
+            (
+                "Translated <b1> strong </b1>{v2}",
+                PlaceholderViolation::Missing,
+            ),
+            (
+                "Translated {v1}{v1}<b1> strong </b1>{v2}",
+                PlaceholderViolation::Duplicate,
+            ),
+            (
+                "Translated {v1}<b1> strong </b1>{v2}{v3}",
+                PlaceholderViolation::Unknown,
+            ),
+            (
+                "Translated {v1}</b1> strong <b1>{v2}",
+                PlaceholderViolation::TagNesting,
+            ),
+            (
+                "Translated {v2}<b1> strong </b1>{v1}",
+                PlaceholderViolation::FormulaOrder,
+            ),
+            (
+                "Translated {v1}<b1> strong </b1>{v2",
+                PlaceholderViolation::PartialToken,
+            ),
+            (
+                "Alpha {v1}<b1> bold </b1>{v2}",
+                PlaceholderViolation::BackendEcho,
+            ),
+        ] {
+            assert_eq!(protocol.validate(output, false), Err(expected), "{output}");
+        }
     }
 }
