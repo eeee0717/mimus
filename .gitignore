@@ -8,3 +8,5 @@
 # .log 里还带本机绝对路径与 format 日期，提交进来等于把生成环境固化进仓库。
 /corpus/**/*.aux
 /corpus/**/*.log
+
+.env.local
