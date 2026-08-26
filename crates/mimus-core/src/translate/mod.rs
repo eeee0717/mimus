@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{IoReason, MimusError, Result, TranslationReason, UsageReason};
 
+pub(crate) mod cache;
+
 pub const PARAGRAPH_PROMPT_VERSION: &str = "mimus-paragraph-v1";
 pub const TERMS_PROMPT_VERSION: &str = "mimus-terms-v1";
 
@@ -205,6 +207,10 @@ pub(crate) enum TranslationOutcome {
 }
 
 impl ValidatedTranslation {
+    pub(crate) fn from_cache(value: String) -> Self {
+        Self(value)
+    }
+
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -234,7 +240,6 @@ impl RestoredTranslation {
         &self.segments
     }
 }
-
 impl PreparedTranslation {
     pub(crate) fn new(parts: impl IntoIterator<Item = PreparedPart>) -> Self {
         let mut request_text = String::new();

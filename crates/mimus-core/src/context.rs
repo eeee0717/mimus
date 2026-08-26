@@ -21,6 +21,7 @@ pub struct PipelineConfig {
     pub user_glossary: Glossary,
     pub auto_terms: bool,
     pub dump_glossary: Option<PathBuf>,
+    pub cache_path: Option<PathBuf>,
 }
 
 impl Default for PipelineConfig {
@@ -32,6 +33,7 @@ impl Default for PipelineConfig {
             user_glossary: Glossary::default(),
             auto_terms: true,
             dump_glossary: None,
+            cache_path: None,
         }
     }
 }

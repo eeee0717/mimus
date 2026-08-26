@@ -82,6 +82,12 @@ struct TranslateArgs {
     /// Skip automatic document-level term extraction.
     #[arg(long)]
     no_auto_terms: bool,
+    /// Translation cache database path.
+    #[arg(long, value_name = "REDB", conflicts_with = "no_cache")]
+    cache: Option<PathBuf>,
+    /// Bypass translation cache reads and writes.
+    #[arg(long)]
+    no_cache: bool,
     /// New directory for per-pass IL snapshots and diagnostics.
     #[arg(long, value_name = "NEW_DIR")]
     debug: Option<PathBuf>,
@@ -169,6 +175,8 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         glossary: args.glossary,
         dump_glossary: args.dump_glossary,
         no_auto_terms: args.no_auto_terms,
+        cache: args.cache,
+        no_cache: args.no_cache,
     }) {
         Ok(value) => value,
         Err(error) => return session.finish_error(error),
@@ -194,6 +202,11 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
     let font_bold_source = output_fonts.bold.source.clone();
     let font_bold_sha256 = output_fonts.bold.sha256.clone();
     let glossary_fingerprint = resolved.user_glossary.fingerprint();
+    let cache_path = resolved.cache_path.clone();
+    let cache_enabled = cache_path.is_some();
+    let cache_path_display = cache_path
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
     let translator = match resolved.take_translator() {
         Ok(value) => value,
         Err(error) => return session.finish_error(error),
@@ -209,6 +222,8 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         font_bold_sha256: Some(font_bold_sha256),
         auto_terms,
         glossary_fingerprint,
+        cache_enabled,
+        cache_path: cache_path_display,
     })) {
         return session.finish_error(error);
     }
@@ -236,6 +251,7 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
             user_glossary,
             auto_terms,
             dump_glossary,
+            cache_path,
             ..PipelineConfig::default()
         },
     };

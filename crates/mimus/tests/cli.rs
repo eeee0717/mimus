@@ -582,7 +582,7 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
     let config = directory.path().join("config.toml");
     std::fs::write(
         &config,
-        "backend = 'none'\nbase_url = 'https://file.invalid'\nmodel = 'file-model'\ntarget_language = 'file-language'\nfont_regular = 'file-regular.ttf'\nfont_bold = 'file-bold.ttf'\n",
+        "backend = 'none'\nbase_url = 'https://file.invalid'\nmodel = 'file-model'\ntarget_language = 'file-language'\nfont_regular = 'file-regular.ttf'\nfont_bold = 'file-bold.ttf'\ncache = 'file-cache.redb'\n",
     )
     .unwrap();
     let output_path = directory.path().join("translated.pdf");
@@ -592,6 +592,7 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
         .env("BASE_URL", "https://env.invalid")
         .env("MODEL_ID", "env-model")
         .env("TARGET_LANGUAGE", "env-language")
+        .env("MIMUS_CACHE", "env-cache.redb")
         .env("MIMUS_BACKEND", "invalid-but-overridden")
         .env("MIMUS_FONT_REGULAR", "env-regular.ttf")
         .env("MIMUS_FONT_BOLD", "env-bold.ttf")
@@ -606,6 +607,8 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
             "flag-model",
             "--target-language",
             "flag-language",
+            "--cache",
+            "flag-cache.redb",
         ])
         .arg("--font")
         .arg(test_font_path("Regular"))
@@ -650,6 +653,8 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
         resolved["font_bold_sha256"],
         "1a917349eb06866f5701532f0cea586d184edadbd1cfdd3f034f3a18f2ff5316"
     );
+    assert_eq!(resolved["cache_enabled"], true);
+    assert_eq!(resolved["cache_path"], "flag-cache.redb");
     assert!(events.iter().all(|event| event.get("api_key").is_none()));
 }
 
@@ -735,6 +740,47 @@ fn missing_output_fonts_fail_fast_as_asset_without_contacting_a_public_endpoint(
             .unwrap()
             .contains("--font")
     );
+}
+
+#[test]
+fn no_cache_resolves_as_a_complete_read_write_bypass() {
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("translated.pdf");
+    let mut command = Command::new(BIN);
+    configure_test_fonts(&mut command);
+    let output = command
+        .env(PDFIUM_ENV, pdfium_library())
+        .env("MIMUS_CACHE", directory.path().join("environment.redb"))
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "none",
+            "--no-cache",
+            "--output",
+        ])
+        .arg(&output_path)
+        .arg(fixture())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = parse_events(&output.stdout);
+    let resolved = events
+        .iter()
+        .find(|event| event["event"] == "configuration_resolved")
+        .unwrap();
+    assert_eq!(resolved["cache_enabled"], false);
+    assert!(resolved["cache_path"].is_null());
+    assert!(
+        events
+            .iter()
+            .all(|event| event["event"] != "translation_cache")
+    );
+    assert!(!directory.path().join("environment.redb").exists());
 }
 
 #[test]

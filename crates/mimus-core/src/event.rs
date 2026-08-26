@@ -55,6 +55,13 @@ pub enum EventKind {
         font_bold_sha256: Option<String>,
         auto_terms: bool,
         glossary_fingerprint: String,
+        cache_enabled: bool,
+        cache_path: Option<String>,
+    },
+    TranslationCache {
+        page_index: usize,
+        paragraph_index: usize,
+        status: CacheStatus,
     },
     StageStarted {
         stage: Stage,
@@ -87,6 +94,13 @@ pub enum EventKind {
         #[serde(skip_serializing_if = "Option::is_none")]
         total_pages: Option<usize>,
     },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheStatus {
+    Hit,
+    Miss,
 }
 
 impl EventKind {
