@@ -40,7 +40,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Translate a native PDF while preserving its layout.
-    Translate(TranslateArgs),
+    Translate(Box<TranslateArgs>),
     /// Inspect the IL produced by the read-only pipeline prefix.
     Inspect(InspectArgs),
 }
@@ -136,7 +136,7 @@ fn main() -> ExitCode {
 
     let session = ProtocolSession::stdout(cli.json);
     match command {
-        Command::Translate(args) => run_translate(args, &session),
+        Command::Translate(args) => run_translate(*args, &session),
         Command::Inspect(args) => run_inspect(args, &session),
     }
 }
