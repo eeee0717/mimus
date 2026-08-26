@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -7,8 +8,17 @@ use crate::il;
 
 // CONTEXT "双 schema_version": CLI 事件协议与 IL 的演进节奏不同，禁止共用版本号。
 pub const SCHEMA_VERSION: u32 = 2;
-pub const MAX_DIAGNOSTICS: usize = 100;
+pub const MAX_DIAGNOSTICS: usize = 500;
+pub const MAX_DIAGNOSTICS_PER_ID: usize = 25;
 pub const MINIMAL_SERIALIZATION_ERROR_LINE: &[u8] = b"{\"schema_version\":2,\"event\":\"error\",\"category\":\"internal\",\"reason\":\"event_serialization\",\"message\":\"could not serialize protocol event\",\"hint\":null}\n";
+
+fn usize_is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+fn f64_is_zero(value: &f64) -> bool {
+    *value == 0.0
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Event {
@@ -30,6 +40,20 @@ impl Event {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum EventKind {
+    ConfigurationResolved {
+        backend: String,
+        endpoint: Option<String>,
+        model: Option<String>,
+        target_language: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        font_regular_source: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        font_regular_sha256: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        font_bold_source: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        font_bold_sha256: Option<String>,
+    },
     StageStarted {
         stage: Stage,
     },
@@ -162,7 +186,7 @@ impl EventSink for RecordingEventSink {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticId {
     EngineBaselineMismatch,
@@ -172,7 +196,14 @@ pub enum DiagnosticId {
     PageDegraded,
     ContentRecovered,
     DegradationSummary,
+    UnsupportedOutputGlyph,
     DroppedDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct DroppedDiagnosticCount {
+    pub id: DiagnosticId,
+    pub count: usize,
 }
 
 /// 有界宽容 walk 从畸形 content stream 里恢复出来的一处偏离（ADR-0013 §3）。
@@ -289,6 +320,12 @@ pub enum Diagnostic {
         walk_only_count: usize,
         engine_only_count: usize,
         residual_count: usize,
+        #[serde(skip_serializing_if = "usize_is_zero")]
+        baseline_residual_count: usize,
+        #[serde(skip_serializing_if = "f64_is_zero")]
+        baseline_residual_max_delta_x_pt: f64,
+        #[serde(skip_serializing_if = "f64_is_zero")]
+        baseline_residual_max_delta_y_pt: f64,
     },
     ScanSummary {
         scanned_page_indices: Vec<usize>,
@@ -313,6 +350,13 @@ pub enum Diagnostic {
         preserved_paragraphs: Vec<PreservedParagraph>,
         total_pages: usize,
     },
+    UnsupportedOutputGlyph {
+        page_index: usize,
+        reading_order: usize,
+        missing_characters: String,
+        font_source: String,
+        font_sha256: String,
+    },
 }
 
 impl Diagnostic {
@@ -326,16 +370,17 @@ impl Diagnostic {
             Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
             Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
             Self::DegradationSummary { .. } => DiagnosticId::DegradationSummary,
+            Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
         }
     }
 
-    /// 汇总类诊断无条件入库且不占 `MAX_DIAGNOSTICS` 名额——逐页/逐段的明细可能被
-    /// 截断，但「哪些页被降级」这个总账必须完整到达消费者（ADR-0012 §5、ADR-0013 §5）。
+    /// 汇总和页级降级无条件入库且不占普通诊断预算——逐字符/逐段明细可能被截断，
+    /// 但页面是否降级及其总账必须完整到达消费者（ADR-0012 §5、ADR-0013 §5）。
     #[must_use]
-    const fn is_summary(&self) -> bool {
+    const fn bypasses_budget(&self) -> bool {
         matches!(
             self,
-            Self::ScanSummary { .. } | Self::DegradationSummary { .. }
+            Self::ScanSummary { .. } | Self::PageDegraded { .. } | Self::DegradationSummary { .. }
         )
     }
 }
@@ -369,6 +414,12 @@ pub enum DiagnosticEvent {
         walk_only_count: usize,
         engine_only_count: usize,
         residual_count: usize,
+        #[serde(skip_serializing_if = "usize_is_zero")]
+        baseline_residual_count: usize,
+        #[serde(skip_serializing_if = "f64_is_zero")]
+        baseline_residual_max_delta_x_pt: f64,
+        #[serde(skip_serializing_if = "f64_is_zero")]
+        baseline_residual_max_delta_y_pt: f64,
     },
     ScanSummary {
         scanned_page_indices: Vec<usize>,
@@ -393,8 +444,16 @@ pub enum DiagnosticEvent {
         preserved_paragraphs: Vec<PreservedParagraph>,
         total_pages: usize,
     },
+    UnsupportedOutputGlyph {
+        page_index: usize,
+        reading_order: usize,
+        missing_characters: String,
+        font_source: String,
+        font_sha256: String,
+    },
     DroppedDiagnostics {
         count: usize,
+        counts_by_id: Vec<DroppedDiagnosticCount>,
     },
 }
 
@@ -409,6 +468,7 @@ impl DiagnosticEvent {
             Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
             Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
             Self::DegradationSummary { .. } => DiagnosticId::DegradationSummary,
+            Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
             Self::DroppedDiagnostics { .. } => DiagnosticId::DroppedDiagnostics,
         }
     }
@@ -455,6 +515,9 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 walk_only_count,
                 engine_only_count,
                 residual_count,
+                baseline_residual_count,
+                baseline_residual_max_delta_x_pt,
+                baseline_residual_max_delta_y_pt,
             } => Self::EngineCharacterAlignment {
                 page_index: *page_index,
                 walked_character_count: *walked_character_count,
@@ -467,6 +530,9 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 walk_only_count: *walk_only_count,
                 engine_only_count: *engine_only_count,
                 residual_count: *residual_count,
+                baseline_residual_count: *baseline_residual_count,
+                baseline_residual_max_delta_x_pt: *baseline_residual_max_delta_x_pt,
+                baseline_residual_max_delta_y_pt: *baseline_residual_max_delta_y_pt,
             },
             Diagnostic::ScanSummary {
                 scanned_page_indices,
@@ -505,6 +571,19 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 preserved_paragraphs: preserved_paragraphs.clone(),
                 total_pages: *total_pages,
             },
+            Diagnostic::UnsupportedOutputGlyph {
+                page_index,
+                reading_order,
+                missing_characters,
+                font_source,
+                font_sha256,
+            } => Self::UnsupportedOutputGlyph {
+                page_index: *page_index,
+                reading_order: *reading_order,
+                missing_characters: missing_characters.clone(),
+                font_source: font_source.clone(),
+                font_sha256: font_sha256.clone(),
+            },
         }
     }
 }
@@ -512,23 +591,36 @@ impl From<&Diagnostic> for DiagnosticEvent {
 #[derive(Debug, Default)]
 pub struct Diagnostics {
     entries: Vec<Diagnostic>,
+    debug_entries: Vec<Diagnostic>,
     dropped: usize,
+    dropped_by_id: BTreeMap<DiagnosticId, usize>,
 }
 
 impl Diagnostics {
     pub fn push(&mut self, diagnostic: Diagnostic) {
-        if diagnostic.is_summary()
-            || self
-                .entries
-                .iter()
-                .filter(|value| !value.is_summary())
-                .count()
-                < MAX_DIAGNOSTICS
+        let bypasses_budget = diagnostic.bypasses_budget();
+        let ordinary_count = self
+            .entries
+            .iter()
+            .filter(|value| !value.bypasses_budget())
+            .count();
+        let same_id_count = self
+            .entries
+            .iter()
+            .filter(|value| value.id() == diagnostic.id())
+            .count();
+        if bypasses_budget
+            || (ordinary_count < MAX_DIAGNOSTICS && same_id_count < MAX_DIAGNOSTICS_PER_ID)
         {
             self.entries.push(diagnostic);
         } else {
             self.dropped += 1;
+            *self.dropped_by_id.entry(diagnostic.id()).or_default() += 1;
         }
+    }
+
+    pub fn push_debug(&mut self, diagnostic: Diagnostic) {
+        self.debug_entries.push(diagnostic);
     }
 
     #[must_use]
@@ -556,6 +648,38 @@ impl Diagnostics {
         if self.dropped > 0 {
             events.push(DiagnosticEvent::DroppedDiagnostics {
                 count: self.dropped,
+                counts_by_id: self
+                    .dropped_by_id
+                    .iter()
+                    .map(|(id, count)| DroppedDiagnosticCount {
+                        id: *id,
+                        count: *count,
+                    })
+                    .collect(),
+            });
+        }
+        events
+    }
+
+    #[must_use]
+    pub fn debug_events(&self) -> Vec<DiagnosticEvent> {
+        let mut events = self
+            .entries
+            .iter()
+            .chain(&self.debug_entries)
+            .map(DiagnosticEvent::from)
+            .collect::<Vec<_>>();
+        if self.dropped > 0 {
+            events.push(DiagnosticEvent::DroppedDiagnostics {
+                count: self.dropped,
+                counts_by_id: self
+                    .dropped_by_id
+                    .iter()
+                    .map(|(id, count)| DroppedDiagnosticCount {
+                        id: *id,
+                        count: *count,
+                    })
+                    .collect(),
             });
         }
         events
@@ -594,13 +718,85 @@ mod tests {
         for index in 0..(MAX_DIAGNOSTICS + 7) {
             diagnostics.push(baseline(index));
         }
-        assert_eq!(diagnostics.entries().len(), MAX_DIAGNOSTICS);
-        assert_eq!(diagnostics.dropped(), 7);
+        let dropped = MAX_DIAGNOSTICS + 7 - MAX_DIAGNOSTICS_PER_ID;
+        assert_eq!(diagnostics.entries().len(), MAX_DIAGNOSTICS_PER_ID);
+        assert_eq!(diagnostics.dropped(), dropped);
         assert_eq!(diagnostics.total_count(), MAX_DIAGNOSTICS + 7);
         assert!(matches!(
             diagnostics.events().last(),
-            Some(DiagnosticEvent::DroppedDiagnostics { count: 7 })
+            Some(DiagnosticEvent::DroppedDiagnostics { count, .. }) if *count == dropped
         ));
+    }
+
+    #[test]
+    fn one_diagnostic_kind_cannot_starve_other_kinds_or_page_degradation() {
+        let mut diagnostics = Diagnostics::default();
+        for index in 0..(MAX_DIAGNOSTICS + 7) {
+            diagnostics.push(baseline(index));
+        }
+        diagnostics.push(Diagnostic::ContentRecovered {
+            page_index: 1,
+            recovery: RecoveryKind::UnknownOperator,
+            form_cycle_paths: Vec::new(),
+        });
+        diagnostics.push(Diagnostic::PageDegraded {
+            page_index: 2,
+            reason: PageDegradeReason::ContentStreamSyntax,
+        });
+
+        assert_eq!(
+            diagnostics
+                .entries()
+                .iter()
+                .filter(|diagnostic| { diagnostic.id() == DiagnosticId::EngineBaselineMismatch })
+                .count(),
+            25
+        );
+        assert!(diagnostics.entries().iter().any(|diagnostic| matches!(
+            diagnostic,
+            Diagnostic::ContentRecovered {
+                page_index: 1,
+                recovery: RecoveryKind::UnknownOperator,
+                ..
+            }
+        )));
+        assert!(diagnostics.entries().iter().any(|diagnostic| matches!(
+            diagnostic,
+            Diagnostic::PageDegraded {
+                page_index: 2,
+                reason: PageDegradeReason::ContentStreamSyntax,
+            }
+        )));
+    }
+
+    #[test]
+    fn dropped_diagnostics_report_counts_by_id() {
+        let mut diagnostics = Diagnostics::default();
+        for index in 0..30 {
+            diagnostics.push(baseline(index));
+        }
+        for _ in 0..28 {
+            diagnostics.push(Diagnostic::ContentRecovered {
+                page_index: 1,
+                recovery: RecoveryKind::UnknownOperator,
+                form_cycle_paths: Vec::new(),
+            });
+        }
+
+        let dropped = diagnostics.events().pop().unwrap();
+        let value = serde_json::to_value(Event::new(EventKind::Diagnostic {
+            diagnostic: dropped,
+        }))
+        .unwrap();
+        assert_eq!(value["id"], "dropped_diagnostics");
+        assert_eq!(value["count"], 8);
+        assert_eq!(
+            value["counts_by_id"],
+            serde_json::json!([
+                {"id": "engine_baseline_mismatch", "count": 5},
+                {"id": "content_recovered", "count": 3}
+            ])
+        );
     }
 
     #[test]
@@ -658,6 +854,9 @@ mod tests {
             walk_only_count: 5,
             engine_only_count: 6,
             residual_count: 7,
+            baseline_residual_count: 8,
+            baseline_residual_max_delta_x_pt: 0.125,
+            baseline_residual_max_delta_y_pt: 0.25,
         };
         let event = DiagnosticEvent::from(&diagnostic);
         assert_eq!(event.id(), DiagnosticId::EngineCharacterAlignment);
@@ -677,6 +876,29 @@ mod tests {
         assert_eq!(value["walk_only_count"], 5);
         assert_eq!(value["engine_only_count"], 6);
         assert_eq!(value["residual_count"], 7);
+        assert_eq!(value["baseline_residual_count"], 8);
+        assert_eq!(value["baseline_residual_max_delta_x_pt"], 0.125);
+        assert_eq!(value["baseline_residual_max_delta_y_pt"], 0.25);
+    }
+
+    #[test]
+    fn missing_output_glyphs_have_a_typed_font_identity_wire_shape() {
+        let value = serde_json::to_value(Event::new(EventKind::Diagnostic {
+            diagnostic: DiagnosticEvent::from(&Diagnostic::UnsupportedOutputGlyph {
+                page_index: 3,
+                reading_order: 7,
+                missing_characters: "龘".to_owned(),
+                font_source: "flag:/tmp/font.ttf".to_owned(),
+                font_sha256: "abc123".to_owned(),
+            }),
+        }))
+        .unwrap();
+        assert_eq!(value["id"], "unsupported_output_glyph");
+        assert_eq!(value["page_index"], 3);
+        assert_eq!(value["reading_order"], 7);
+        assert_eq!(value["missing_characters"], "龘");
+        assert_eq!(value["font_source"], "flag:/tmp/font.ttf");
+        assert_eq!(value["font_sha256"], "abc123");
     }
 
     #[test]
@@ -718,8 +940,9 @@ mod tests {
             total_pages: 9,
         });
 
-        assert_eq!(diagnostics.entries().len(), MAX_DIAGNOSTICS + 1);
-        assert_eq!(diagnostics.dropped(), 7);
+        let dropped = MAX_DIAGNOSTICS + 7 - MAX_DIAGNOSTICS_PER_ID;
+        assert_eq!(diagnostics.entries().len(), MAX_DIAGNOSTICS_PER_ID + 1);
+        assert_eq!(diagnostics.dropped(), dropped);
         assert_eq!(diagnostics.total_count(), MAX_DIAGNOSTICS + 8);
         assert!(diagnostics.events().iter().any(|event| matches!(
             event,
@@ -754,10 +977,18 @@ mod tests {
             total_pages: 6,
         });
 
-        // 逐页明细吃上限（被丢弃），汇总仍然完整到达。
-        assert_eq!(diagnostics.entries().len(), MAX_DIAGNOSTICS + 1);
-        assert_eq!(diagnostics.dropped(), 4);
+        // 逐页降级与汇总都不吃普通诊断预算，必须完整到达。
+        let dropped = MAX_DIAGNOSTICS + 3 - MAX_DIAGNOSTICS_PER_ID;
+        assert_eq!(diagnostics.entries().len(), MAX_DIAGNOSTICS_PER_ID + 2);
+        assert_eq!(diagnostics.dropped(), dropped);
         let events = diagnostics.events();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DiagnosticEvent::PageDegraded {
+                page_index: 2,
+                reason: PageDegradeReason::ContentStreamSyntax,
+            }
+        )));
         assert!(events.iter().any(|event| matches!(
             event,
             DiagnosticEvent::DegradationSummary {
@@ -769,7 +1000,7 @@ mod tests {
         )));
         assert!(matches!(
             events.last(),
-            Some(DiagnosticEvent::DroppedDiagnostics { count: 4 })
+            Some(DiagnosticEvent::DroppedDiagnostics { count, .. }) if *count == dropped
         ));
     }
 

@@ -13,17 +13,35 @@ use crate::translate::Translator;
 use crate::walk::{WalkedChar, WalkedContentStream};
 use crate::write::{PageRewrite, WriteReport};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PipelineConfig {
     pub baseline_tolerance_pt: f64,
+    pub target_language: String,
+    pub output_fonts: Option<OutputFonts>,
 }
 
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
             baseline_tolerance_pt: 0.001,
+            target_language: "zh-CN".to_owned(),
+            output_fonts: None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct OutputFont {
+    pub bytes: Vec<u8>,
+    pub postscript_name: String,
+    pub source: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct OutputFonts {
+    pub regular: OutputFont,
+    pub bold: OutputFont,
 }
 
 pub struct PassContext<'a> {

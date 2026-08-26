@@ -76,6 +76,8 @@ pub enum PreservedReason {
     Unlocatable,
     /// 译文在最低可读字号下仍无法容纳于原段落框。
     TypesetOverflow,
+    /// 段落结构不满足翻译到排版的协议不变量。
+    TypesetProtocol,
 }
 
 impl Paragraph {

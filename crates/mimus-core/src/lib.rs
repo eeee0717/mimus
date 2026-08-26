@@ -13,7 +13,9 @@ pub mod translate;
 pub mod walk;
 pub mod write;
 
-pub use context::{Document, PassContext, PassSnapshotSink, PipelineConfig};
+pub use context::{
+    Document, OutputFont, OutputFonts, PassContext, PassSnapshotSink, PipelineConfig,
+};
 pub use error::{
     AssetReason, ErrorReason, ExitCategory, InputReason, InternalReason, IoReason, MimusError,
     Result, TranslationReason, UsageReason,

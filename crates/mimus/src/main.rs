@@ -1,6 +1,8 @@
 //! `mimus` - the CLI boundary defined by ADR-0001.
 
+mod config;
 mod debug;
+mod font_assets;
 mod protocol;
 
 use std::ffi::{OsStr, OsString};
@@ -9,14 +11,15 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::error::ErrorKind;
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand};
+use config::{Backend, ConfigOverrides, ResolvedConfig};
 use debug::DebugArtifacts;
 use mimus_core::engine::pdfium::PdfiumEngine;
 use mimus_core::engine::{LayoutDetector, RecordedLayoutDetector, SingleLineLayoutDetector};
 use mimus_core::error::{ErrorReason, InternalReason, IoReason, MimusError, Result, UsageReason};
-use mimus_core::event::ResultPayload;
+use mimus_core::event::{Event, EventKind, EventSink, ResultPayload};
 use mimus_core::pass;
-use mimus_core::translate::{NoneTranslator, openai_not_implemented};
+use mimus_core::translate::NoneTranslator;
 use mimus_core::{Document, PassContext, PassSnapshotSink, PipelineConfig};
 use protocol::ProtocolSession;
 
@@ -37,7 +40,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Translate a native PDF while preserving its layout.
-    Translate(TranslateArgs),
+    Translate(Box<TranslateArgs>),
     /// Inspect the IL produced by the read-only pipeline prefix.
     Inspect(InspectArgs),
 }
@@ -49,9 +52,27 @@ struct TranslateArgs {
     /// Output PDF path. Defaults to <stem>.zh.pdf.
     #[arg(short, long)]
     output: Option<PathBuf>,
-    /// Translation backend. M1 implements only the offline none backend.
-    #[arg(long, value_enum, default_value_t = Backend::Openai)]
-    backend: Backend,
+    /// Translation backend.
+    #[arg(long, value_enum)]
+    backend: Option<Backend>,
+    /// OpenAI-compatible API base URL.
+    #[arg(long)]
+    endpoint: Option<String>,
+    /// OpenAI-compatible model ID.
+    #[arg(long)]
+    model: Option<String>,
+    /// Translation target language.
+    #[arg(long)]
+    target_language: Option<String>,
+    /// Regular output font file.
+    #[arg(long, value_name = "TTF_OR_OTF")]
+    font: Option<PathBuf>,
+    /// Bold output font file.
+    #[arg(long, value_name = "TTF_OR_OTF")]
+    font_bold: Option<PathBuf>,
+    /// Base URL used to mirror output-font assets.
+    #[arg(long, value_name = "URL")]
+    asset_mirror: Option<String>,
     /// New directory for per-pass IL snapshots and diagnostics.
     #[arg(long, value_name = "NEW_DIR")]
     debug: Option<PathBuf>,
@@ -70,12 +91,6 @@ struct InspectArgs {
     /// Deterministic detector recording used by Corpus and explicit local validation.
     #[arg(long, value_name = "JSON", hide = true)]
     layout_replay: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum Backend {
-    Openai,
-    None,
 }
 
 #[derive(Debug)]
@@ -121,7 +136,7 @@ fn main() -> ExitCode {
 
     let session = ProtocolSession::stdout(cli.json);
     match command {
-        Command::Translate(args) => run_translate(args, &session),
+        Command::Translate(args) => run_translate(*args, &session),
         Command::Inspect(args) => run_inspect(args, &session),
     }
 }
@@ -134,8 +149,50 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
             Err(error) => return session.finish_error(error),
         },
     };
-    if matches!(args.backend, Backend::Openai) {
-        return session.finish_error(openai_not_implemented());
+    let resolved = match ResolvedConfig::load(ConfigOverrides {
+        backend: args.backend,
+        base_url: args.endpoint,
+        model: args.model,
+        target_language: args.target_language,
+        font_regular: args.font,
+        font_bold: args.font_bold,
+        asset_mirror: args.asset_mirror,
+    }) {
+        Ok(value) => value,
+        Err(error) => return session.finish_error(error),
+    };
+    let target_language = resolved.target_language.clone();
+    let backend = resolved.backend.as_str().to_owned();
+    let endpoint = resolved.base_url.clone();
+    let model = resolved.model.clone();
+    let output_fonts = match font_assets::resolve_fonts(
+        resolved.font_regular.as_ref(),
+        resolved.font_bold.as_ref(),
+        &resolved.font_cache_dir,
+        resolved.asset_mirror.as_deref(),
+    ) {
+        Ok(value) => value,
+        Err(error) => return session.finish_error(error),
+    };
+    let font_regular_source = output_fonts.regular.source.clone();
+    let font_regular_sha256 = output_fonts.regular.sha256.clone();
+    let font_bold_source = output_fonts.bold.source.clone();
+    let font_bold_sha256 = output_fonts.bold.sha256.clone();
+    let translator = match resolved.into_translator() {
+        Ok(value) => value,
+        Err(error) => return session.finish_error(error),
+    };
+    if let Err(error) = session.emit(Event::new(EventKind::ConfigurationResolved {
+        backend,
+        endpoint: Some(endpoint),
+        model: Some(model),
+        target_language: target_language.clone(),
+        font_regular_source: Some(font_regular_source),
+        font_regular_sha256: Some(font_regular_sha256),
+        font_bold_source: Some(font_bold_source),
+        font_bold_sha256: Some(font_bold_sha256),
+    })) {
+        return session.finish_error(error);
     }
     let engine = match PdfiumEngine::from_environment() {
         Ok(value) => value,
@@ -145,7 +202,6 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         Ok(value) => value,
         Err(error) => return session.finish_error(error),
     };
-    let translator = NoneTranslator;
     let layout_detector = match create_layout_detector(args.layout_replay.as_deref()) {
         Ok(value) => value,
         Err(error) => return session.finish_error(error),
@@ -153,10 +209,14 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
     let context = PassContext {
         engine: &engine,
         layout_detector: layout_detector.as_ref(),
-        translator: &translator,
+        translator: translator.as_ref(),
         events: session,
         snapshots: debug.as_ref().map(|value| value as &dyn PassSnapshotSink),
-        config: PipelineConfig::default(),
+        config: PipelineConfig {
+            target_language,
+            output_fonts: Some(output_fonts),
+            ..PipelineConfig::default()
+        },
     };
     let mut document = Document::for_translation(args.input, output);
     let outcome = pass::run(&mut document, &context).map(|result| CommandOutcome {
@@ -212,12 +272,12 @@ fn finish_command(
         }
     }
 
-    let diagnostics = document.diagnostics.events();
     if let Some(debug) = debug {
-        if let Err(error) = debug.write_diagnostics(&diagnostics) {
+        if let Err(error) = debug.write_diagnostics(&document.diagnostics.debug_events()) {
             return session.finish_error(error);
         }
     }
+    let diagnostics = document.diagnostics.events();
     if let Err(error) = session.emit_diagnostics(&diagnostics) {
         return session.finish_error(error);
     }

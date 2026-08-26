@@ -126,6 +126,7 @@ impl<W: Write + Send> ProtocolSession<W> {
 
     fn emit_human(&self, event: Event, state: &mut SessionState<W>) -> Result<()> {
         match event.kind {
+            EventKind::ConfigurationResolved { .. } => {}
             EventKind::StageStarted { stage } => {
                 let _ = writeln!(std::io::stderr().lock(), "{}...", human_stage_name(stage));
             }
@@ -278,10 +279,13 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
             walk_only_count,
             engine_only_count,
             residual_count,
+            baseline_residual_count,
+            baseline_residual_max_delta_x_pt,
+            baseline_residual_max_delta_y_pt,
         } => {
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "warning[engine_character_alignment]: page {} walk={walked_character_count} engine={engine_character_count} equivalent={extraction_equivalent_count} explained={explained_count} strong_conflicts={strong_unicode_conflict_count} weak_conflicts={weak_unicode_conflict_count} unresolved={unresolved_unicode_count} walk_only={walk_only_count} engine_only={engine_only_count} residual={residual_count}",
+                "warning[engine_character_alignment]: page {} walk={walked_character_count} engine={engine_character_count} equivalent={extraction_equivalent_count} explained={explained_count} strong_conflicts={strong_unicode_conflict_count} weak_conflicts={weak_unicode_conflict_count} unresolved={unresolved_unicode_count} walk_only={walk_only_count} engine_only={engine_only_count} residual={residual_count} baseline_residual={baseline_residual_count} baseline_max_delta=({baseline_residual_max_delta_x_pt:.6},{baseline_residual_max_delta_y_pt:.6})pt",
                 page_index + 1
             );
         }
@@ -338,10 +342,26 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 preserved_paragraphs.len()
             );
         }
-        DiagnosticEvent::DroppedDiagnostics { count } => {
+        DiagnosticEvent::UnsupportedOutputGlyph {
+            page_index,
+            reading_order,
+            missing_characters,
+            font_source,
+            font_sha256,
+        } => {
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "warning[dropped_diagnostics]: {count} additional diagnostics dropped"
+                "warning[unsupported_output_glyph]: page {} paragraph {reading_order} missing {missing_characters:?} in {font_source} ({font_sha256})",
+                page_index + 1
+            );
+        }
+        DiagnosticEvent::DroppedDiagnostics {
+            count,
+            counts_by_id,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[dropped_diagnostics]: {count} additional diagnostics dropped; by id: {counts_by_id:?}"
             );
         }
     }

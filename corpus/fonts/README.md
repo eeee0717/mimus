@@ -62,6 +62,8 @@ The upstream SIL Open Font License 1.1 is preserved in
 glyph coverage. It is produced with the same commands above except
 `wght=700`, and has SHA-256
 `16a829fddcd44df524ffc64cf22d64fbf7259919ff64ceeea3c6d47e14df21bb`.
-Production builds subset these committed Regular/Bold assets in memory with
-the pinned Rust `subsetter` crate; builds and CI never download the upstream
-variable font.
+These committed Regular/Bold files are input fixture assets only. Production
+output fonts are resolved at runtime and are never compiled from this
+directory. Output-font tests use separate assets under
+`crates/mimus/tests/assets/fonts/` through the same path/config injection used
+by the CLI.

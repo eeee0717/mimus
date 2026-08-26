@@ -78,10 +78,15 @@ reason_enum!(InputReason {
 
 reason_enum!(AssetReason {
     PdfiumUnavailable => "pdfium_unavailable",
+    OutputFontUnavailable => "output_font_unavailable",
 });
 
 reason_enum!(TranslationReason {
     BackendNotImplemented => "backend_not_implemented",
+    AuthenticationFailed => "authentication_failed",
+    BackendRejected => "backend_rejected",
+    MalformedResponse => "malformed_response",
+    TransportFailure => "transport_failure",
     TranslationFailed => "translation_failed",
 });
 
@@ -401,6 +406,26 @@ mod tests {
                 "backend_not_implemented",
             ),
             (
+                MimusError::translation(TranslationReason::AuthenticationFailed, "test"),
+                ExitCategory::Translation,
+                "authentication_failed",
+            ),
+            (
+                MimusError::translation(TranslationReason::BackendRejected, "test"),
+                ExitCategory::Translation,
+                "backend_rejected",
+            ),
+            (
+                MimusError::translation(TranslationReason::MalformedResponse, "test"),
+                ExitCategory::Translation,
+                "malformed_response",
+            ),
+            (
+                MimusError::translation(TranslationReason::TransportFailure, "test"),
+                ExitCategory::Translation,
+                "transport_failure",
+            ),
+            (
                 MimusError::translation(TranslationReason::TranslationFailed, "test"),
                 ExitCategory::Translation,
                 "translation_failed",
@@ -464,7 +489,7 @@ mod tests {
             assert!(wire_values.insert(*wire), "duplicate reason {wire}");
         }
 
-        assert_eq!(cases.len(), 19, "new reasons must be added to this matrix");
+        assert_eq!(cases.len(), 23, "new reasons must be added to this matrix");
         assert_eq!(wire_values.len(), cases.len());
     }
 }
