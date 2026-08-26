@@ -53,6 +53,8 @@ pub enum EventKind {
         font_bold_source: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         font_bold_sha256: Option<String>,
+        auto_terms: bool,
+        glossary_fingerprint: String,
     },
     StageStarted {
         stage: Stage,

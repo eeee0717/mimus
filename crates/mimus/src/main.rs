@@ -73,6 +73,15 @@ struct TranslateArgs {
     /// Base URL used to mirror output-font assets.
     #[arg(long, value_name = "URL")]
     asset_mirror: Option<String>,
+    /// User glossary TOML file. User entries override automatically extracted terms.
+    #[arg(long, value_name = "TOML")]
+    glossary: Option<PathBuf>,
+    /// Write the final canonical glossary to this path.
+    #[arg(long, value_name = "TOML")]
+    dump_glossary: Option<PathBuf>,
+    /// Skip automatic document-level term extraction.
+    #[arg(long)]
+    no_auto_terms: bool,
     /// New directory for per-pass IL snapshots and diagnostics.
     #[arg(long, value_name = "NEW_DIR")]
     debug: Option<PathBuf>,
@@ -149,7 +158,7 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
             Err(error) => return session.finish_error(error),
         },
     };
-    let resolved = match ResolvedConfig::load(ConfigOverrides {
+    let mut resolved = match ResolvedConfig::load(ConfigOverrides {
         backend: args.backend,
         base_url: args.endpoint,
         model: args.model,
@@ -157,11 +166,17 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         font_regular: args.font,
         font_bold: args.font_bold,
         asset_mirror: args.asset_mirror,
+        glossary: args.glossary,
+        dump_glossary: args.dump_glossary,
+        no_auto_terms: args.no_auto_terms,
     }) {
         Ok(value) => value,
         Err(error) => return session.finish_error(error),
     };
     let target_language = resolved.target_language.clone();
+    let user_glossary = resolved.user_glossary.clone();
+    let auto_terms = resolved.auto_terms;
+    let dump_glossary = resolved.dump_glossary.clone();
     let backend = resolved.backend.as_str().to_owned();
     let endpoint = resolved.base_url.clone();
     let model = resolved.model.clone();
@@ -178,7 +193,8 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
     let font_regular_sha256 = output_fonts.regular.sha256.clone();
     let font_bold_source = output_fonts.bold.source.clone();
     let font_bold_sha256 = output_fonts.bold.sha256.clone();
-    let translator = match resolved.into_translator() {
+    let glossary_fingerprint = resolved.user_glossary.fingerprint();
+    let translator = match resolved.take_translator() {
         Ok(value) => value,
         Err(error) => return session.finish_error(error),
     };
@@ -191,6 +207,8 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         font_regular_sha256: Some(font_regular_sha256),
         font_bold_source: Some(font_bold_source),
         font_bold_sha256: Some(font_bold_sha256),
+        auto_terms,
+        glossary_fingerprint,
     })) {
         return session.finish_error(error);
     }
@@ -215,6 +233,9 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         config: PipelineConfig {
             target_language,
             output_fonts: Some(output_fonts),
+            user_glossary,
+            auto_terms,
+            dump_glossary,
             ..PipelineConfig::default()
         },
     };

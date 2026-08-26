@@ -1520,7 +1520,32 @@ pub fn styles_and_formulas(document: &mut Document, _context: &PassContext<'_>) 
     Ok(())
 }
 
-pub fn extract_terms(_document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
+pub fn extract_terms(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
+    let document_text = document
+        .prepared_translations
+        .values()
+        .map(crate::translate::PreparedTranslation::request_text)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let automatic = if context.config.auto_terms
+        && context.translator.model_id() != "none"
+        && !document_text.is_empty()
+    {
+        context
+            .translator
+            .extract_terms(&crate::translate::TermExtractionRequest {
+                document_text: &document_text,
+                target_language: &context.config.target_language,
+            })?
+    } else {
+        crate::translate::Glossary::default()
+    };
+    document.glossary =
+        crate::translate::Glossary::merged(automatic, &context.config.user_glossary);
+    if let Some(path) = &context.config.dump_glossary {
+        document.glossary.write_to_path(path)?;
+    }
     Ok(())
 }
 
@@ -1573,6 +1598,7 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                         .translate(&crate::translate::TranslationRequest {
                             text: prepared.request_text(),
                             target_language: &context.config.target_language,
+                            glossary: &document.glossary,
                         })?;
                 match prepared.classify(&output) {
                     crate::translate::TranslationOutcome::Identity => {
@@ -1632,6 +1658,7 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                         &crate::translate::TranslationRequest {
                             text: &source,
                             target_language: &context.config.target_language,
+                            glossary: &document.glossary,
                         },
                     )?);
                 } else {
@@ -3395,6 +3422,32 @@ mod tests {
     struct StaticTranslator {
         output: &'static str,
         calls: AtomicUsize,
+    }
+
+    #[derive(Default)]
+    struct GlossaryTranslator {
+        term_calls: AtomicUsize,
+        translation_glossaries: Mutex<Vec<crate::translate::Glossary>>,
+    }
+
+    impl Translator for GlossaryTranslator {
+        fn translate(&self, request: &crate::translate::TranslationRequest<'_>) -> Result<String> {
+            self.translation_glossaries
+                .lock()
+                .unwrap()
+                .push(request.glossary.clone());
+            Ok("Translated".to_owned())
+        }
+
+        fn extract_terms(
+            &self,
+            _request: &crate::translate::TermExtractionRequest<'_>,
+        ) -> Result<crate::translate::Glossary> {
+            self.term_calls.fetch_add(1, Ordering::SeqCst);
+            crate::translate::Glossary::from_toml(
+                "version = 1\n[[terms]]\nsource = 'attention'\ntarget = 'auto-attention'\n[[terms]]\nsource = 'model'\ntarget = 'auto-model'\n",
+            )
+        }
     }
 
     impl Translator for StaticTranslator {
@@ -5274,6 +5327,108 @@ mod tests {
                     }
                 ))
         );
+    }
+
+    #[test]
+    fn extract_terms_calls_once_merges_user_override_dumps_and_injects_the_final_glossary() {
+        let directory = tempfile::tempdir().unwrap();
+        let dump = directory.path().join("final-glossary.toml");
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = GlossaryTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig {
+                user_glossary: crate::translate::Glossary::from_toml(
+                    "version = 1\n[[terms]]\nsource = 'attention'\ntarget = 'user-attention'\n[[terms]]\nsource = 'cache'\ntarget = 'user-cache'\n",
+                )
+                .unwrap(),
+                dump_glossary: Some(dump.clone()),
+                ..crate::context::PipelineConfig::default()
+            },
+        };
+        inspect(&mut document, &context).unwrap();
+        styles_and_formulas(&mut document, &context).unwrap();
+        extract_terms(&mut document, &context).unwrap();
+        translate(&mut document, &context).unwrap();
+
+        assert_eq!(translator.term_calls.load(Ordering::SeqCst), 1);
+        let final_glossary = &translator.translation_glossaries.lock().unwrap()[0];
+        assert_eq!(final_glossary.entries()["attention"], "user-attention");
+        assert_eq!(final_glossary.entries()["model"], "auto-model");
+        assert_eq!(final_glossary.entries()["cache"], "user-cache");
+        assert_eq!(
+            crate::translate::Glossary::from_path(&dump).unwrap(),
+            *final_glossary
+        );
+    }
+
+    #[test]
+    fn no_auto_terms_skips_extraction_entirely() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = GlossaryTranslator::default();
+        let events = RecordingEventSink::default();
+        let user_glossary = crate::translate::Glossary::from_toml(
+            "version = 1\n[[terms]]\nsource = 'attention'\ntarget = 'user-attention'\n",
+        )
+        .unwrap();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig {
+                user_glossary: user_glossary.clone(),
+                auto_terms: false,
+                ..crate::context::PipelineConfig::default()
+            },
+        };
+        inspect(&mut document, &context).unwrap();
+        styles_and_formulas(&mut document, &context).unwrap();
+        extract_terms(&mut document, &context).unwrap();
+
+        assert_eq!(translator.term_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(document.glossary, user_glossary);
+    }
+
+    #[test]
+    fn automatic_terms_skip_empty_passthrough_documents() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = GlossaryTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let TextCarrier::Chars { chars } = &mut document.il.pages[0].paragraphs[0].text;
+        for character in chars {
+            character.layout.as_mut().unwrap().policy = TranslationPolicy::Passthrough;
+        }
+        styles_and_formulas(&mut document, &context).unwrap();
+        assert!(
+            document
+                .prepared_translations
+                .values()
+                .all(|prepared| prepared.request_text().is_empty())
+        );
+
+        extract_terms(&mut document, &context).unwrap();
+
+        assert_eq!(translator.term_calls.load(Ordering::SeqCst), 0);
+        assert!(document.glossary.is_empty());
     }
 
     #[test]

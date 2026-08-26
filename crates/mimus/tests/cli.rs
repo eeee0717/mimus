@@ -738,6 +738,77 @@ fn missing_output_fonts_fail_fast_as_asset_without_contacting_a_public_endpoint(
 }
 
 #[test]
+fn missing_and_malformed_glossaries_fail_as_usage_before_pdf_or_network_work() {
+    let directory = tempfile::tempdir().unwrap();
+    let malformed = directory.path().join("malformed.toml");
+    std::fs::write(
+        &malformed,
+        "version = 1\n[[terms]]\nsource = ''\ntarget = 'x'\n",
+    )
+    .unwrap();
+    for glossary in [directory.path().join("missing.toml"), malformed] {
+        let output = Command::new(BIN)
+            .env_remove(PDFIUM_ENV)
+            .env(
+                "MIMUS_CONFIG_FILE",
+                directory.path().join("config-missing.toml"),
+            )
+            .args(["translate", "--backend", "none", "--glossary"])
+            .arg(&glossary)
+            .arg(directory.path().join("input-does-not-exist.pdf"))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("invalid_arguments"));
+    }
+}
+
+#[test]
+fn user_glossary_dumps_as_a_stable_round_trip_when_auto_terms_are_disabled() {
+    let directory = tempfile::tempdir().unwrap();
+    let glossary = directory.path().join("user.toml");
+    let dumped = directory.path().join("dumped.toml");
+    let output_pdf = directory.path().join("translated.pdf");
+    std::fs::write(
+        &glossary,
+        "version = 1\n[[terms]]\nsource = 'zeta'\ntarget = 'z'\n[[terms]]\nsource = 'alpha'\ntarget = 'a'\n",
+    )
+    .unwrap();
+    let mut command = Command::new(BIN);
+    configure_test_fonts(&mut command);
+    let output = command
+        .env(PDFIUM_ENV, pdfium_library())
+        .env(
+            "MIMUS_CONFIG_FILE",
+            directory.path().join("config-missing.toml"),
+        )
+        .args([
+            "translate",
+            "--backend",
+            "none",
+            "--no-auto-terms",
+            "--glossary",
+        ])
+        .arg(&glossary)
+        .arg("--dump-glossary")
+        .arg(&dumped)
+        .arg("--output")
+        .arg(&output_pdf)
+        .arg(fixture())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let original = mimus_core::translate::Glossary::from_path(&glossary).unwrap();
+    let round_trip = mimus_core::translate::Glossary::from_path(&dumped).unwrap();
+    assert_eq!(round_trip, original);
+    assert_eq!(round_trip.fingerprint(), original.fingerprint());
+}
+
+#[test]
 fn none_backend_uses_the_default_output_path_without_network_access() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("paper.pdf");

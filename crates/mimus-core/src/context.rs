@@ -9,7 +9,7 @@ use crate::event::{Diagnostics, EventSink, PageDegradeReason, RecoveryKind, Stag
 use crate::geometry::PageFrame;
 use crate::il;
 use crate::scan::{PageClass, PageEvidence};
-use crate::translate::{PreparedTranslation, Translator};
+use crate::translate::{Glossary, PreparedTranslation, Translator};
 use crate::walk::{WalkedChar, WalkedContentStream};
 use crate::write::{PageRewrite, WriteReport};
 
@@ -18,6 +18,9 @@ pub struct PipelineConfig {
     pub baseline_tolerance_pt: f64,
     pub target_language: String,
     pub output_fonts: Option<OutputFonts>,
+    pub user_glossary: Glossary,
+    pub auto_terms: bool,
+    pub dump_glossary: Option<PathBuf>,
 }
 
 impl Default for PipelineConfig {
@@ -26,6 +29,9 @@ impl Default for PipelineConfig {
             baseline_tolerance_pt: 0.001,
             target_language: "zh-CN".to_owned(),
             output_fonts: None,
+            user_glossary: Glossary::default(),
+            auto_terms: true,
+            dump_glossary: None,
         }
     }
 }
@@ -81,6 +87,7 @@ pub struct Document {
         std::collections::BTreeMap<(usize, usize), crate::translate::RestoredTranslation>,
     pub(crate) placeholder_violations:
         std::collections::BTreeMap<(usize, usize), crate::translate::PlaceholderViolation>,
+    pub(crate) glossary: Glossary,
     pub(crate) extracted_pages: Vec<ExtractedPage>,
     pub(crate) rewrites: Vec<PageRewrite>,
     pub(crate) write_report: Option<WriteReport>,
@@ -107,6 +114,7 @@ impl Document {
             prepared_translations: std::collections::BTreeMap::new(),
             restored_translations: std::collections::BTreeMap::new(),
             placeholder_violations: std::collections::BTreeMap::new(),
+            glossary: Glossary::default(),
             extracted_pages: Vec::new(),
             rewrites: Vec::new(),
             write_report: None,
@@ -125,6 +133,7 @@ impl Document {
             prepared_translations: std::collections::BTreeMap::new(),
             restored_translations: std::collections::BTreeMap::new(),
             placeholder_violations: std::collections::BTreeMap::new(),
+            glossary: Glossary::default(),
             extracted_pages: Vec::new(),
             rewrites: Vec::new(),
             write_report: None,

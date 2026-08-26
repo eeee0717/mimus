@@ -1,13 +1,186 @@
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::io::Write as _;
+use std::path::Path;
 use std::time::Duration;
 
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-use crate::error::{MimusError, Result, TranslationReason, UsageReason};
+use crate::error::{IoReason, MimusError, Result, TranslationReason, UsageReason};
 
 pub const PARAGRAPH_PROMPT_VERSION: &str = "mimus-paragraph-v1";
+pub const TERMS_PROMPT_VERSION: &str = "mimus-terms-v1";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Glossary {
+    entries: BTreeMap<String, String>,
+}
+
+impl Glossary {
+    pub fn from_toml(contents: &str) -> Result<Self> {
+        let file = toml::from_str::<GlossaryFile>(contents).map_err(|_| {
+            MimusError::usage(
+                UsageReason::InvalidArguments,
+                "user glossary is malformed TOML",
+            )
+        })?;
+        if file.version != 1 {
+            return Err(MimusError::usage(
+                UsageReason::InvalidArguments,
+                "user glossary version must be 1",
+            ));
+        }
+        Self::from_records(file.terms, GlossarySource::User)
+    }
+
+    pub fn from_path(path: &Path) -> Result<Self> {
+        let contents = std::fs::read_to_string(path).map_err(|_| {
+            MimusError::usage(
+                UsageReason::InvalidArguments,
+                format!("could not read glossary {}", path.display()),
+            )
+        })?;
+        Self::from_toml(&contents)
+    }
+
+    pub fn canonical_toml(&self) -> String {
+        toml::to_string_pretty(&GlossaryFile {
+            version: 1,
+            terms: self
+                .entries
+                .iter()
+                .map(|(source, target)| GlossaryRecord {
+                    source: source.clone(),
+                    target: target.clone(),
+                })
+                .collect(),
+        })
+        .expect("the canonical glossary schema is always serializable")
+    }
+
+    pub fn write_to_path(&self, path: &Path) -> Result<()> {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|_| {
+            MimusError::io(
+                IoReason::GlossaryWrite,
+                format!("could not create glossary beside {}", path.display()),
+            )
+        })?;
+        temporary
+            .write_all(self.canonical_toml().as_bytes())
+            .map_err(|_| {
+                MimusError::io(
+                    IoReason::GlossaryWrite,
+                    format!("could not write glossary {}", path.display()),
+                )
+            })?;
+        temporary.persist(path).map_err(|_| {
+            MimusError::io(
+                IoReason::GlossaryWrite,
+                format!("could not publish glossary {}", path.display()),
+            )
+        })?;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn fingerprint(&self) -> String {
+        let digest = Sha256::digest(self.canonical_toml().as_bytes());
+        let mut output = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            write!(output, "{byte:02x}").expect("writing into a String cannot fail");
+        }
+        output
+    }
+
+    #[must_use]
+    pub fn merged(auto: Self, user: &Self) -> Self {
+        let mut entries = auto.entries;
+        entries.extend(user.entries.clone());
+        Self { entries }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[must_use]
+    pub fn entries(&self) -> &BTreeMap<String, String> {
+        &self.entries
+    }
+
+    fn prompt_json(&self) -> String {
+        serde_json::to_string(&self.entries)
+            .expect("a glossary containing strings is always serializable")
+    }
+
+    fn from_backend_json(contents: &str) -> Result<Self> {
+        let response = serde_json::from_str::<ExtractedGlossary>(contents).map_err(|_| {
+            MimusError::translation(
+                TranslationReason::MalformedResponse,
+                "term extraction returned malformed JSON",
+            )
+        })?;
+        Self::from_records(response.terms, GlossarySource::Backend)
+    }
+
+    fn from_records(records: Vec<GlossaryRecord>, source: GlossarySource) -> Result<Self> {
+        let mut entries = BTreeMap::new();
+        for record in records {
+            if record.source.trim().is_empty() || record.target.trim().is_empty() {
+                return Err(source.error("glossary entries must have non-empty source and target"));
+            }
+            if entries.insert(record.source, record.target).is_some() {
+                return Err(source.error("glossary contains a duplicate source term"));
+            }
+        }
+        Ok(Self { entries })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum GlossarySource {
+    User,
+    Backend,
+}
+
+impl GlossarySource {
+    fn error(self, message: &str) -> MimusError {
+        match self {
+            Self::User => MimusError::usage(UsageReason::InvalidArguments, message),
+            Self::Backend => MimusError::translation(TranslationReason::MalformedResponse, message),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GlossaryFile {
+    version: u32,
+    #[serde(default)]
+    terms: Vec<GlossaryRecord>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GlossaryRecord {
+    source: String,
+    target: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExtractedGlossary {
+    terms: Vec<GlossaryRecord>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PreparedPart {
@@ -384,6 +557,12 @@ fn scan_tokens(text: &str) -> std::result::Result<Vec<ScannedToken>, Placeholder
 pub struct TranslationRequest<'a> {
     pub text: &'a str,
     pub target_language: &'a str,
+    pub glossary: &'a Glossary,
+}
+
+pub struct TermExtractionRequest<'a> {
+    pub document_text: &'a str,
+    pub target_language: &'a str,
 }
 
 pub trait Translator: Send + Sync {
@@ -391,6 +570,10 @@ pub trait Translator: Send + Sync {
 
     fn model_id(&self) -> &str {
         "custom"
+    }
+
+    fn extract_terms(&self, _request: &TermExtractionRequest<'_>) -> Result<Glossary> {
+        Ok(Glossary::default())
     }
 }
 
@@ -461,13 +644,38 @@ pub fn validate_openai_base_url(base_url: &str) -> Result<()> {
 
 impl Translator for OpenAiTranslator {
     fn translate(&self, request: &TranslationRequest<'_>) -> Result<String> {
-        let payload = ResponsesRequest {
-            model: &self.model,
-            instructions: format!(
-                "Translate the input into {}. Return only the translated text. Preserve every placeholder exactly.",
+        let glossary = request.glossary.prompt_json();
+        self.response_text(
+            format!(
+                "Translate the input into {}. Return only the translated text. Preserve every placeholder exactly. Apply this source-to-target glossary JSON exactly: {glossary}",
                 request.target_language
             ),
-            input: request.text,
+            request.text,
+        )
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model
+    }
+
+    fn extract_terms(&self, request: &TermExtractionRequest<'_>) -> Result<Glossary> {
+        let output = self.response_text(
+            format!(
+                "Extract important technical terms and their translations into {}. Return only JSON with shape {{\"terms\":[{{\"source\":\"...\",\"target\":\"...\"}}]}}. Prompt version: {TERMS_PROMPT_VERSION}",
+                request.target_language
+            ),
+            request.document_text,
+        )?;
+        Glossary::from_backend_json(&output)
+    }
+}
+
+impl OpenAiTranslator {
+    fn response_text(&self, instructions: String, input: &str) -> Result<String> {
+        let payload = ResponsesRequest {
+            model: &self.model,
+            instructions,
+            input,
         };
         let response = self
             .client
@@ -497,10 +705,6 @@ impl Translator for OpenAiTranslator {
                 "OpenAI Responses API returned no output_text content",
             )
         })
-    }
-
-    fn model_id(&self) -> &str {
-        &self.model
     }
 }
 
@@ -611,7 +815,7 @@ struct ResponseContent {
 mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, LazyLock, Mutex};
     use std::thread;
 
     use super::*;
@@ -689,10 +893,13 @@ mod tests {
         .unwrap()
     }
 
-    fn request<'a>() -> TranslationRequest<'a> {
+    static EMPTY_GLOSSARY: LazyLock<Glossary> = LazyLock::new(Glossary::default);
+
+    fn request() -> TranslationRequest<'static> {
         TranslationRequest {
             text: "Hello",
             target_language: "zh-CN",
+            glossary: &EMPTY_GLOSSARY,
         }
     }
 
@@ -905,5 +1112,59 @@ mod tests {
             prepared.classify("translated"),
             TranslationOutcome::Translated(_)
         ));
+    }
+
+    #[test]
+    fn glossary_round_trip_is_canonical_and_user_entries_override_automatic_terms() {
+        let automatic = Glossary::from_toml(
+            "version = 1\n[[terms]]\nsource = 'zeta'\ntarget = 'auto-z'\n[[terms]]\nsource = 'alpha'\ntarget = 'auto-a'\n",
+        )
+        .unwrap();
+        let user = Glossary::from_toml(
+            "version = 1\n[[terms]]\nsource = 'zeta'\ntarget = 'user-z'\n[[terms]]\nsource = 'beta'\ntarget = 'user-b'\n",
+        )
+        .unwrap();
+        let merged = Glossary::merged(automatic, &user);
+        assert_eq!(merged.entries()["zeta"], "user-z");
+        assert_eq!(merged.entries()["alpha"], "auto-a");
+        assert_eq!(merged.entries()["beta"], "user-b");
+
+        let canonical = merged.canonical_toml();
+        assert!(canonical.find("alpha").unwrap() < canonical.find("beta").unwrap());
+        assert!(canonical.find("beta").unwrap() < canonical.find("zeta").unwrap());
+        let round_trip = Glossary::from_toml(&canonical).unwrap();
+        assert_eq!(round_trip, merged);
+        assert_eq!(round_trip.fingerprint(), merged.fingerprint());
+        assert_eq!(merged.fingerprint().len(), 64);
+    }
+
+    #[test]
+    fn malformed_user_glossaries_are_usage_errors() {
+        for contents in [
+            "version = 2",
+            "version = 1\nunknown = true",
+            "version = 1\n[[terms]]\nsource = ''\ntarget = 'x'",
+            "version = 1\n[[terms]]\nsource = 'x'\ntarget = 'a'\n[[terms]]\nsource = 'x'\ntarget = 'b'",
+        ] {
+            let error = Glossary::from_toml(contents).unwrap_err();
+            assert_eq!(error.category(), crate::error::ExitCategory::Usage);
+        }
+    }
+
+    #[test]
+    fn responses_term_extraction_uses_one_structured_request() {
+        let server = FakeServer::one(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"output_text\":\"{\\\"terms\\\":[{\\\"source\\\":\\\"attention\\\",\\\"target\\\":\\\"attention-cn\\\"}]}\"}",
+        );
+        let glossary = translator(&server.url)
+            .extract_terms(&TermExtractionRequest {
+                document_text: "Attention is all you need.",
+                target_language: "zh-CN",
+            })
+            .unwrap();
+        assert_eq!(glossary.entries()["attention"], "attention-cn");
+        let request = String::from_utf8(server.request.lock().unwrap().clone()).unwrap();
+        assert_eq!(request.matches("POST /v1/responses").count(), 1);
+        assert!(request.contains(TERMS_PROMPT_VERSION));
     }
 }
