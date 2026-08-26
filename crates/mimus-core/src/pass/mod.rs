@@ -6173,8 +6173,11 @@ mod tests {
                 1,
                 "output {output}"
             );
-            assert!(
-                document.diagnostics.entries().iter().any(|diagnostic| {
+            let diagnostic = document
+                .diagnostics
+                .entries()
+                .iter()
+                .find(|diagnostic| {
                     matches!(
                         diagnostic,
                         Diagnostic::PlaceholderViolation {
@@ -6183,10 +6186,16 @@ mod tests {
                             violation,
                         } if *violation == expected
                     )
-                }),
-                "output {output}, expected {expected:?}, diagnostics {:?}",
-                document.diagnostics.entries()
-            );
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "output {output}, expected {expected:?}, diagnostics {:?}",
+                        document.diagnostics.entries()
+                    )
+                });
+            let wire =
+                serde_json::to_value(crate::event::DiagnosticEvent::from(diagnostic)).unwrap();
+            assert_eq!(wire["violation"], expected.wire_name(), "output {output}");
             assert!(
                 document
                     .diagnostics
@@ -6204,16 +6213,27 @@ mod tests {
                     })
             );
             push_degradation_summary(&mut document);
-            assert!(document.diagnostics.entries().iter().any(|diagnostic| {
-                matches!(
-                    diagnostic,
-                    Diagnostic::DegradationSummary {
-                        preserved_paragraphs,
-                        ..
-                    } if preserved_paragraphs.len() == 1
-                        && preserved_paragraphs[0].placeholder_violation == Some(expected)
-                )
-            }));
+            let summary = document
+                .diagnostics
+                .entries()
+                .iter()
+                .find(|diagnostic| {
+                    matches!(
+                        diagnostic,
+                        Diagnostic::DegradationSummary {
+                            preserved_paragraphs,
+                            ..
+                        } if preserved_paragraphs.len() == 1
+                            && preserved_paragraphs[0].placeholder_violation == Some(expected)
+                    )
+                })
+                .unwrap();
+            let wire = serde_json::to_value(crate::event::DiagnosticEvent::from(summary)).unwrap();
+            assert_eq!(
+                wire["preserved_paragraphs"][0]["placeholder_violation"],
+                expected.wire_name(),
+                "output {output}"
+            );
         }
     }
 
