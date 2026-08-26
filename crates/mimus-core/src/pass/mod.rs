@@ -86,7 +86,7 @@ pub fn run(document: &mut Document, context: &PassContext<'_>) -> Result<Transla
     Ok(TranslationResult {
         output: output.to_string_lossy().into_owned(),
         pages: document.il.pages.len(),
-        warnings: document.diagnostics.total_count(),
+        warnings: document.diagnostics.warning_count(),
         appended_bytes: write_report.appended_bytes,
     })
 }
@@ -96,7 +96,7 @@ pub fn inspect(document: &mut Document, context: &PassContext<'_>) -> Result<Ins
     let il = il::snapshot(&document.il);
     Ok(InspectionResult {
         pages: il.pages.len(),
-        warnings: document.diagnostics.total_count(),
+        warnings: document.diagnostics.warning_count(),
         il,
     })
 }
@@ -132,6 +132,7 @@ fn push_degradation_summary(document: &mut Document) {
         .filter(|page| page.degraded.is_some())
         .map(|page| page.index)
         .collect::<Vec<_>>();
+    let placeholder_violations = &document.placeholder_violations;
     let preserved_paragraphs = document
         .il
         .pages
@@ -145,6 +146,9 @@ fn push_degradation_summary(document: &mut Document) {
                         page_index: page.index,
                         paragraph_index,
                         reason,
+                        placeholder_violation: placeholder_violations
+                            .get(&(page.index, paragraph_index))
+                            .copied(),
                     })
                 })
         })
@@ -1534,6 +1538,9 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
     if document.prepared_translations.is_empty() {
         prepare_translations(document)?;
     }
+    document.placeholder_violations.clear();
+    let mut prose_paragraph_count = 0;
+    let mut prose_identity_count = 0;
     for page in &mut document.il.pages {
         let content_objects = page_content_objects.get(page.index).ok_or_else(|| {
             MimusError::internal(
@@ -1541,7 +1548,7 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                 format!("Translate could not find extracted page {}", page.index),
             )
         })?;
-        for paragraph in &mut page.paragraphs {
+        for (paragraph_index, paragraph) in page.paragraphs.iter_mut().enumerate() {
             if paragraph.preserved.is_some() {
                 paragraph.translated_text = None;
                 continue;
@@ -1558,6 +1565,8 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                     paragraph.translated_text = Some(paragraph.source_text());
                     continue;
                 }
+                let prose_shaped = translation_request_is_prose_shaped(prepared.request_text());
+                prose_paragraph_count += usize::from(prose_shaped);
                 let output =
                     context
                         .translator
@@ -1565,17 +1574,43 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                             text: prepared.request_text(),
                             target_language: &context.config.target_language,
                         })?;
-                match prepared
-                    .validate(&output, false)
-                    .and_then(|validated| prepared.restore(&validated))
-                {
-                    Ok(restored) => {
-                        paragraph.translated_text = Some(restored.plain_text());
-                        document.restored_translations.insert(key, restored);
+                match prepared.classify(&output) {
+                    crate::translate::TranslationOutcome::Identity => {
+                        paragraph.translated_text = Some(paragraph.source_text());
+                        prose_identity_count += usize::from(prose_shaped);
+                        document.diagnostics.push(Diagnostic::TranslationIdentity {
+                            page_index: page.index,
+                            paragraph_index,
+                            request_characters: prepared.request_text().chars().count(),
+                        });
                     }
-                    Err(_) => {
-                        paragraph.translated_text = None;
-                        paragraph.preserved = Some(il::PreservedReason::PlaceholderViolation);
+                    crate::translate::TranslationOutcome::Translated(validated) => {
+                        match prepared.restore(&validated) {
+                            Ok(restored) => {
+                                paragraph.translated_text = Some(restored.plain_text());
+                                document.restored_translations.insert(key, restored);
+                            }
+                            Err(violation) => preserve_placeholder_violation(
+                                paragraph,
+                                &mut document.diagnostics,
+                                &mut document.placeholder_violations,
+                                page.index,
+                                paragraph_index,
+                                violation,
+                                &output,
+                            ),
+                        }
+                    }
+                    crate::translate::TranslationOutcome::PlaceholderViolation(violation) => {
+                        preserve_placeholder_violation(
+                            paragraph,
+                            &mut document.diagnostics,
+                            &mut document.placeholder_violations,
+                            page.index,
+                            paragraph_index,
+                            violation,
+                            &output,
+                        );
                     }
                 }
                 continue;
@@ -1607,7 +1642,48 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
             paragraph.translated_text = Some(translated);
         }
     }
+    if prose_paragraph_count > 0 && prose_identity_count * 2 > prose_paragraph_count {
+        document
+            .diagnostics
+            .push(Diagnostic::SuspiciousTranslationEchoRate {
+                identity_count: prose_identity_count,
+                prose_paragraph_count,
+            });
+    }
     Ok(())
+}
+
+fn translation_request_is_prose_shaped(request: &str) -> bool {
+    let characters = request.chars().count();
+    characters >= 40 && request.chars().filter(char::is_ascii_alphabetic).count() * 2 >= characters
+}
+
+fn preserve_placeholder_violation(
+    paragraph: &mut Paragraph,
+    diagnostics: &mut Diagnostics,
+    placeholder_violations: &mut BTreeMap<(usize, usize), crate::translate::PlaceholderViolation>,
+    page_index: usize,
+    paragraph_index: usize,
+    violation: crate::translate::PlaceholderViolation,
+    output: &str,
+) {
+    paragraph.translated_text = None;
+    paragraph.preserved = Some(il::PreservedReason::PlaceholderViolation);
+    placeholder_violations.insert((page_index, paragraph_index), violation);
+    diagnostics.push(Diagnostic::PlaceholderViolation {
+        page_index,
+        paragraph_index,
+        violation,
+    });
+    let profile = crate::translate::redacted_translation_profile(output);
+    diagnostics.push_debug(Diagnostic::TranslationFailureProfile {
+        page_index,
+        paragraph_index,
+        response_bytes: profile.response_bytes,
+        response_characters: profile.response_characters,
+        token_count: profile.token_count,
+        token_scan_valid: profile.token_scan_valid,
+    });
 }
 
 fn prepare_translations(document: &mut Document) -> Result<()> {
@@ -4998,13 +5074,37 @@ mod tests {
 
     #[test]
     fn every_placeholder_protocol_failure_preserves_the_whole_paragraph() {
-        for output in [
-            "<b1>Translated</b1>",
-            "<b1>Translated</b1>{v1}{v1}",
-            "<b1>Translated</b1>{v1}{v2}",
-            "</b1>Translated<b1>{v1}",
-            "<b1>Translated</b1>{v1",
-            "<b1>MI</b1>{v1}US",
+        for (output, expected, formula_count) in [
+            (
+                "<b1>Translated</b1>",
+                crate::translate::PlaceholderViolation::Missing,
+                1,
+            ),
+            (
+                "<b1>Translated</b1>{v1}{v1}",
+                crate::translate::PlaceholderViolation::Duplicate,
+                1,
+            ),
+            (
+                "<b1>Translated</b1>{v1}{v2}",
+                crate::translate::PlaceholderViolation::Unknown,
+                1,
+            ),
+            (
+                "</b1>Translated<b1>{v1}",
+                crate::translate::PlaceholderViolation::TagNesting,
+                1,
+            ),
+            (
+                "<b1>Translated</b1>{v1",
+                crate::translate::PlaceholderViolation::PartialToken,
+                1,
+            ),
+            (
+                "<b1>Translated</b1>{v2}U{v1}",
+                crate::translate::PlaceholderViolation::FormulaOrder,
+                2,
+            ),
         ] {
             let mut document = Document::for_inspection(fixture());
             let engine = FakeEngine::default();
@@ -5029,6 +5129,11 @@ mod tests {
             let layout = chars[2].layout.as_mut().unwrap();
             layout.label = LayoutLabel::InlineFormula;
             layout.policy = TranslationPolicy::Passthrough;
+            if formula_count == 2 {
+                let layout = chars[4].layout.as_mut().unwrap();
+                layout.label = LayoutLabel::InlineFormula;
+                layout.policy = TranslationPolicy::Passthrough;
+            }
 
             styles_and_formulas(&mut document, &context).unwrap();
             translate(&mut document, &context).unwrap();
@@ -5045,7 +5150,130 @@ mod tests {
                 1,
                 "output {output}"
             );
+            assert!(
+                document.diagnostics.entries().iter().any(|diagnostic| {
+                    matches!(
+                        diagnostic,
+                        Diagnostic::PlaceholderViolation {
+                            page_index: 0,
+                            paragraph_index: 0,
+                            violation,
+                        } if *violation == expected
+                    )
+                }),
+                "output {output}, expected {expected:?}, diagnostics {:?}",
+                document.diagnostics.entries()
+            );
+            assert!(
+                document
+                    .diagnostics
+                    .debug_events()
+                    .iter()
+                    .any(|diagnostic| {
+                        matches!(
+                            diagnostic,
+                            crate::event::DiagnosticEvent::TranslationFailureProfile {
+                                page_index: 0,
+                                paragraph_index: 0,
+                                ..
+                            }
+                        )
+                    })
+            );
+            push_degradation_summary(&mut document);
+            assert!(document.diagnostics.entries().iter().any(|diagnostic| {
+                matches!(
+                    diagnostic,
+                    Diagnostic::DegradationSummary {
+                        preserved_paragraphs,
+                        ..
+                    } if preserved_paragraphs.len() == 1
+                        && preserved_paragraphs[0].placeholder_violation == Some(expected)
+                )
+            }));
         }
+    }
+
+    #[test]
+    fn backend_echo_is_identity_output_without_degradation_or_warning() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: "MIMUS",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        styles_and_formulas(&mut document, &context).unwrap();
+
+        translate(&mut document, &context).unwrap();
+
+        let paragraph = &document.il.pages[0].paragraphs[0];
+        assert_eq!(paragraph.translated_text.as_deref(), Some("MIMUS"));
+        assert_eq!(paragraph.preserved, None);
+        assert_eq!(document.diagnostics.warning_count(), 0);
+        assert!(matches!(
+            document.diagnostics.entries(),
+            [Diagnostic::TranslationIdentity {
+                page_index: 0,
+                paragraph_index: 0,
+                request_characters: 5,
+            }]
+        ));
+    }
+
+    #[test]
+    fn prose_shaped_echo_rate_emits_one_document_warning() {
+        const PROSE: &str = "MIMUSMIMUSMIMUSMIMUSMIMUSMIMUSMIMUSMIMUS";
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: PROSE,
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let original = paragraph.chars().to_vec();
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars.clear();
+        for _ in 0..8 {
+            chars.extend(original.iter().cloned());
+        }
+        styles_and_formulas(&mut document, &context).unwrap();
+
+        translate(&mut document, &context).unwrap();
+
+        assert_eq!(document.diagnostics.warning_count(), 1);
+        assert!(
+            document
+                .diagnostics
+                .entries()
+                .iter()
+                .any(|diagnostic| matches!(
+                    diagnostic,
+                    Diagnostic::SuspiciousTranslationEchoRate {
+                        identity_count: 1,
+                        prose_paragraph_count: 1,
+                    }
+                ))
+        );
     }
 
     #[test]
@@ -5143,6 +5371,7 @@ mod tests {
                         page_index: 0,
                         paragraph_index: 0,
                         reason: il::PreservedReason::UnreliableUnicode,
+                        placeholder_violation: None,
                     }]
                 ))
         );
@@ -5272,6 +5501,7 @@ mod tests {
                         page_index: 0,
                         paragraph_index: 0,
                         reason: il::PreservedReason::UnreliableUnicode,
+                        placeholder_violation: None,
                     }]
         )));
     }

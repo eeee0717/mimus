@@ -79,6 +79,8 @@ pub struct Document {
         std::collections::BTreeMap<(usize, usize), PreparedTranslation>,
     pub(crate) restored_translations:
         std::collections::BTreeMap<(usize, usize), crate::translate::RestoredTranslation>,
+    pub(crate) placeholder_violations:
+        std::collections::BTreeMap<(usize, usize), crate::translate::PlaceholderViolation>,
     pub(crate) extracted_pages: Vec<ExtractedPage>,
     pub(crate) rewrites: Vec<PageRewrite>,
     pub(crate) write_report: Option<WriteReport>,
@@ -104,6 +106,7 @@ impl Document {
             diagnostics: Diagnostics::default(),
             prepared_translations: std::collections::BTreeMap::new(),
             restored_translations: std::collections::BTreeMap::new(),
+            placeholder_violations: std::collections::BTreeMap::new(),
             extracted_pages: Vec::new(),
             rewrites: Vec::new(),
             write_report: None,
@@ -121,6 +124,7 @@ impl Document {
             diagnostics: Diagnostics::default(),
             prepared_translations: std::collections::BTreeMap::new(),
             restored_translations: std::collections::BTreeMap::new(),
+            placeholder_violations: std::collections::BTreeMap::new(),
             extracted_pages: Vec::new(),
             rewrites: Vec::new(),
             write_report: None,

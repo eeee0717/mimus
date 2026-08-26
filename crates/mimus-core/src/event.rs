@@ -196,6 +196,10 @@ pub enum DiagnosticId {
     PageDegraded,
     ContentRecovered,
     DegradationSummary,
+    TranslationIdentity,
+    SuspiciousTranslationEchoRate,
+    PlaceholderViolation,
+    TranslationFailureProfile,
     UnsupportedOutputGlyph,
     DroppedDiagnostics,
 }
@@ -289,6 +293,8 @@ pub struct PreservedParagraph {
     pub page_index: usize,
     pub paragraph_index: usize,
     pub reason: il::PreservedReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder_violation: Option<crate::translate::PlaceholderViolation>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -350,6 +356,28 @@ pub enum Diagnostic {
         preserved_paragraphs: Vec<PreservedParagraph>,
         total_pages: usize,
     },
+    TranslationIdentity {
+        page_index: usize,
+        paragraph_index: usize,
+        request_characters: usize,
+    },
+    SuspiciousTranslationEchoRate {
+        identity_count: usize,
+        prose_paragraph_count: usize,
+    },
+    PlaceholderViolation {
+        page_index: usize,
+        paragraph_index: usize,
+        violation: crate::translate::PlaceholderViolation,
+    },
+    TranslationFailureProfile {
+        page_index: usize,
+        paragraph_index: usize,
+        response_bytes: usize,
+        response_characters: usize,
+        token_count: usize,
+        token_scan_valid: bool,
+    },
     UnsupportedOutputGlyph {
         page_index: usize,
         reading_order: usize,
@@ -370,8 +398,22 @@ impl Diagnostic {
             Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
             Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
             Self::DegradationSummary { .. } => DiagnosticId::DegradationSummary,
+            Self::TranslationIdentity { .. } => DiagnosticId::TranslationIdentity,
+            Self::SuspiciousTranslationEchoRate { .. } => {
+                DiagnosticId::SuspiciousTranslationEchoRate
+            }
+            Self::PlaceholderViolation { .. } => DiagnosticId::PlaceholderViolation,
+            Self::TranslationFailureProfile { .. } => DiagnosticId::TranslationFailureProfile,
             Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
         }
+    }
+
+    #[must_use]
+    const fn is_warning(&self) -> bool {
+        !matches!(
+            self,
+            Self::TranslationIdentity { .. } | Self::TranslationFailureProfile { .. }
+        )
     }
 
     /// 汇总和页级降级无条件入库且不占普通诊断预算——逐字符/逐段明细可能被截断，
@@ -444,6 +486,28 @@ pub enum DiagnosticEvent {
         preserved_paragraphs: Vec<PreservedParagraph>,
         total_pages: usize,
     },
+    TranslationIdentity {
+        page_index: usize,
+        paragraph_index: usize,
+        request_characters: usize,
+    },
+    SuspiciousTranslationEchoRate {
+        identity_count: usize,
+        prose_paragraph_count: usize,
+    },
+    PlaceholderViolation {
+        page_index: usize,
+        paragraph_index: usize,
+        violation: crate::translate::PlaceholderViolation,
+    },
+    TranslationFailureProfile {
+        page_index: usize,
+        paragraph_index: usize,
+        response_bytes: usize,
+        response_characters: usize,
+        token_count: usize,
+        token_scan_valid: bool,
+    },
     UnsupportedOutputGlyph {
         page_index: usize,
         reading_order: usize,
@@ -468,6 +532,12 @@ impl DiagnosticEvent {
             Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
             Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
             Self::DegradationSummary { .. } => DiagnosticId::DegradationSummary,
+            Self::TranslationIdentity { .. } => DiagnosticId::TranslationIdentity,
+            Self::SuspiciousTranslationEchoRate { .. } => {
+                DiagnosticId::SuspiciousTranslationEchoRate
+            }
+            Self::PlaceholderViolation { .. } => DiagnosticId::PlaceholderViolation,
+            Self::TranslationFailureProfile { .. } => DiagnosticId::TranslationFailureProfile,
             Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
             Self::DroppedDiagnostics { .. } => DiagnosticId::DroppedDiagnostics,
         }
@@ -571,6 +641,46 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 preserved_paragraphs: preserved_paragraphs.clone(),
                 total_pages: *total_pages,
             },
+            Diagnostic::TranslationIdentity {
+                page_index,
+                paragraph_index,
+                request_characters,
+            } => Self::TranslationIdentity {
+                page_index: *page_index,
+                paragraph_index: *paragraph_index,
+                request_characters: *request_characters,
+            },
+            Diagnostic::SuspiciousTranslationEchoRate {
+                identity_count,
+                prose_paragraph_count,
+            } => Self::SuspiciousTranslationEchoRate {
+                identity_count: *identity_count,
+                prose_paragraph_count: *prose_paragraph_count,
+            },
+            Diagnostic::PlaceholderViolation {
+                page_index,
+                paragraph_index,
+                violation,
+            } => Self::PlaceholderViolation {
+                page_index: *page_index,
+                paragraph_index: *paragraph_index,
+                violation: *violation,
+            },
+            Diagnostic::TranslationFailureProfile {
+                page_index,
+                paragraph_index,
+                response_bytes,
+                response_characters,
+                token_count,
+                token_scan_valid,
+            } => Self::TranslationFailureProfile {
+                page_index: *page_index,
+                paragraph_index: *paragraph_index,
+                response_bytes: *response_bytes,
+                response_characters: *response_characters,
+                token_count: *token_count,
+                token_scan_valid: *token_scan_valid,
+            },
             Diagnostic::UnsupportedOutputGlyph {
                 page_index,
                 reading_order,
@@ -636,6 +746,27 @@ impl Diagnostics {
     #[must_use]
     pub fn total_count(&self) -> usize {
         self.entries.len() + self.dropped
+    }
+
+    #[must_use]
+    pub fn warning_count(&self) -> usize {
+        let visible = self
+            .entries
+            .iter()
+            .filter(|entry| entry.is_warning())
+            .count();
+        let dropped = self
+            .dropped_by_id
+            .iter()
+            .filter(|(id, _)| {
+                !matches!(
+                    id,
+                    DiagnosticId::TranslationIdentity | DiagnosticId::TranslationFailureProfile
+                )
+            })
+            .map(|(_, count)| count)
+            .sum::<usize>();
+        visible + dropped
     }
 
     #[must_use]
@@ -973,6 +1104,7 @@ mod tests {
                 page_index: 4,
                 paragraph_index: 0,
                 reason: il::PreservedReason::UnreliableUnicode,
+                placeholder_violation: None,
             }],
             total_pages: 6,
         });
@@ -1034,5 +1166,90 @@ mod tests {
             serde_json::to_value(Event::new(EventKind::from_error(&unsupported))).unwrap();
         assert!(unsupported.get("scanned_pages").is_none());
         assert!(unsupported.get("total_pages").is_none());
+    }
+
+    #[test]
+    fn translation_identity_is_informational_while_suspicious_echo_rate_is_a_warning() {
+        let mut diagnostics = Diagnostics::default();
+        diagnostics.push(Diagnostic::TranslationIdentity {
+            page_index: 0,
+            paragraph_index: 2,
+            request_characters: 18,
+        });
+        diagnostics.push(Diagnostic::SuspiciousTranslationEchoRate {
+            identity_count: 3,
+            prose_paragraph_count: 4,
+        });
+
+        assert_eq!(diagnostics.total_count(), 2);
+        assert_eq!(diagnostics.warning_count(), 1);
+        assert!(matches!(
+            diagnostics.events().as_slice(),
+            [
+                DiagnosticEvent::TranslationIdentity { .. },
+                DiagnosticEvent::SuspiciousTranslationEchoRate { .. }
+            ]
+        ));
+    }
+
+    #[test]
+    fn placeholder_subtypes_and_failure_profiles_have_redacted_wire_shapes() {
+        let violation = Event::new(EventKind::Diagnostic {
+            diagnostic: DiagnosticEvent::from(&Diagnostic::PlaceholderViolation {
+                page_index: 1,
+                paragraph_index: 3,
+                violation: crate::translate::PlaceholderViolation::FormulaOrder,
+            }),
+        });
+        let violation = String::from_utf8(serialize_line(&violation).unwrap()).unwrap();
+        assert!(violation.contains("\"id\":\"placeholder_violation\""));
+        assert!(violation.contains("\"violation\":\"formula_order\""));
+
+        let canary = "response-secret-canary";
+        let profile = Event::new(EventKind::Diagnostic {
+            diagnostic: DiagnosticEvent::from(&Diagnostic::TranslationFailureProfile {
+                page_index: 1,
+                paragraph_index: 3,
+                response_bytes: canary.len(),
+                response_characters: canary.chars().count(),
+                token_count: 2,
+                token_scan_valid: false,
+            }),
+        });
+        let profile = String::from_utf8(serialize_line(&profile).unwrap()).unwrap();
+        assert!(profile.contains("\"id\":\"translation_failure_profile\""));
+        assert!(profile.contains("\"response_characters\":22"));
+        assert!(!profile.contains(canary));
+        assert!(!profile.contains("response_text"));
+    }
+
+    #[test]
+    fn failure_profiles_are_debug_only() {
+        let mut diagnostics = Diagnostics::default();
+        diagnostics.push(Diagnostic::PlaceholderViolation {
+            page_index: 1,
+            paragraph_index: 3,
+            violation: crate::translate::PlaceholderViolation::PartialToken,
+        });
+        diagnostics.push_debug(Diagnostic::TranslationFailureProfile {
+            page_index: 1,
+            paragraph_index: 3,
+            response_bytes: 23,
+            response_characters: 23,
+            token_count: 1,
+            token_scan_valid: false,
+        });
+
+        assert!(matches!(
+            diagnostics.events().as_slice(),
+            [DiagnosticEvent::PlaceholderViolation { .. }]
+        ));
+        assert!(matches!(
+            diagnostics.debug_events().as_slice(),
+            [
+                DiagnosticEvent::PlaceholderViolation { .. },
+                DiagnosticEvent::TranslationFailureProfile { .. }
+            ]
+        ));
     }
 }

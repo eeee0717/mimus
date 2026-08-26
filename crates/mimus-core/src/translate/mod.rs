@@ -24,6 +24,13 @@ pub(crate) struct PreparedTranslation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ValidatedTranslation(String);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TranslationOutcome {
+    Translated(ValidatedTranslation),
+    Identity,
+    PlaceholderViolation(PlaceholderViolation),
+}
+
 impl ValidatedTranslation {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
@@ -102,6 +109,16 @@ impl PreparedTranslation {
 
     pub(crate) fn request_text(&self) -> &str {
         &self.request_text
+    }
+
+    pub(crate) fn classify(&self, output: &str) -> TranslationOutcome {
+        if output == self.request_text {
+            return TranslationOutcome::Identity;
+        }
+        match self.validate(output, true) {
+            Ok(validated) => TranslationOutcome::Translated(validated),
+            Err(violation) => TranslationOutcome::PlaceholderViolation(violation),
+        }
     }
 
     pub(crate) fn validate(
@@ -254,8 +271,9 @@ impl ProtocolToken {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PlaceholderViolation {
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaceholderViolation {
     Missing,
     Duplicate,
     Unknown,
@@ -265,11 +283,44 @@ pub(crate) enum PlaceholderViolation {
     BackendEcho,
 }
 
+impl PlaceholderViolation {
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Duplicate => "duplicate",
+            Self::Unknown => "unknown",
+            Self::TagNesting => "tag_nesting",
+            Self::FormulaOrder => "formula_order",
+            Self::PartialToken => "partial_token",
+            Self::BackendEcho => "backend_echo",
+        }
+    }
+}
+
 struct ScannedToken {
     literal: String,
     kind: ScannedTokenKind,
     start: usize,
     end: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RedactedTranslationProfile {
+    pub response_bytes: usize,
+    pub response_characters: usize,
+    pub token_count: usize,
+    pub token_scan_valid: bool,
+}
+
+pub(crate) fn redacted_translation_profile(output: &str) -> RedactedTranslationProfile {
+    let tokens = scan_tokens(output);
+    RedactedTranslationProfile {
+        response_bytes: output.len(),
+        response_characters: output.chars().count(),
+        token_count: tokens.as_ref().map_or(0, Vec::len),
+        token_scan_valid: tokens.is_ok(),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -837,5 +888,22 @@ mod tests {
         ] {
             assert_eq!(protocol.validate(output, false), Err(expected), "{output}");
         }
+    }
+
+    #[test]
+    fn backend_echo_is_an_identity_outcome_instead_of_a_placeholder_violation() {
+        let prepared = PreparedTranslation::new([PreparedPart::Text {
+            text: "user@example.com".to_owned(),
+            bold: false,
+        }]);
+
+        assert_eq!(
+            prepared.classify("user@example.com"),
+            TranslationOutcome::Identity
+        );
+        assert!(matches!(
+            prepared.classify("translated"),
+            TranslationOutcome::Translated(_)
+        ));
     }
 }
