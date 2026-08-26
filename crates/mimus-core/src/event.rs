@@ -225,6 +225,7 @@ pub enum DiagnosticId {
     SuspiciousTranslationEchoRate,
     PlaceholderViolation,
     TranslationFailureProfile,
+    MathPassthrough,
     UnsupportedOutputGlyph,
     DroppedDiagnostics,
 }
@@ -411,6 +412,12 @@ pub enum Diagnostic {
         token_count: usize,
         token_scan_valid: bool,
     },
+    MathPassthrough {
+        page_index: usize,
+        paragraph_index: usize,
+        reading_order: usize,
+        source_characters: usize,
+    },
     UnsupportedOutputGlyph {
         page_index: usize,
         reading_order: usize,
@@ -438,6 +445,7 @@ impl Diagnostic {
             }
             Self::PlaceholderViolation { .. } => DiagnosticId::PlaceholderViolation,
             Self::TranslationFailureProfile { .. } => DiagnosticId::TranslationFailureProfile,
+            Self::MathPassthrough { .. } => DiagnosticId::MathPassthrough,
             Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
         }
     }
@@ -446,7 +454,9 @@ impl Diagnostic {
     const fn is_warning(&self) -> bool {
         !matches!(
             self,
-            Self::TranslationIdentity { .. } | Self::TranslationFailureProfile { .. }
+            Self::TranslationIdentity { .. }
+                | Self::TranslationFailureProfile { .. }
+                | Self::MathPassthrough { .. }
         )
     }
 
@@ -550,6 +560,12 @@ pub enum DiagnosticEvent {
         token_count: usize,
         token_scan_valid: bool,
     },
+    MathPassthrough {
+        page_index: usize,
+        paragraph_index: usize,
+        reading_order: usize,
+        source_characters: usize,
+    },
     UnsupportedOutputGlyph {
         page_index: usize,
         reading_order: usize,
@@ -581,6 +597,7 @@ impl DiagnosticEvent {
             }
             Self::PlaceholderViolation { .. } => DiagnosticId::PlaceholderViolation,
             Self::TranslationFailureProfile { .. } => DiagnosticId::TranslationFailureProfile,
+            Self::MathPassthrough { .. } => DiagnosticId::MathPassthrough,
             Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
             Self::DroppedDiagnostics { .. } => DiagnosticId::DroppedDiagnostics,
         }
@@ -739,6 +756,17 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 token_count: *token_count,
                 token_scan_valid: *token_scan_valid,
             },
+            Diagnostic::MathPassthrough {
+                page_index,
+                paragraph_index,
+                reading_order,
+                source_characters,
+            } => Self::MathPassthrough {
+                page_index: *page_index,
+                paragraph_index: *paragraph_index,
+                reading_order: *reading_order,
+                source_characters: *source_characters,
+            },
             Diagnostic::UnsupportedOutputGlyph {
                 page_index,
                 reading_order,
@@ -819,7 +847,9 @@ impl Diagnostics {
             .filter(|(id, _)| {
                 !matches!(
                     id,
-                    DiagnosticId::TranslationIdentity | DiagnosticId::TranslationFailureProfile
+                    DiagnosticId::TranslationIdentity
+                        | DiagnosticId::TranslationFailureProfile
+                        | DiagnosticId::MathPassthrough
                 )
             })
             .map(|(_, count)| count)
@@ -1270,6 +1300,42 @@ mod tests {
                 DiagnosticEvent::TranslationIdentity { .. },
                 DiagnosticEvent::SuspiciousTranslationEchoRate { .. }
             ]
+        ));
+    }
+
+    #[test]
+    fn math_passthrough_is_informational_typed_and_budgeted_per_id() {
+        let mut diagnostics = Diagnostics::default();
+        for reading_order in 0..(MAX_DIAGNOSTICS_PER_ID + 3) {
+            diagnostics.push(Diagnostic::MathPassthrough {
+                page_index: 1,
+                paragraph_index: 2,
+                reading_order,
+                source_characters: 7,
+            });
+        }
+
+        assert_eq!(diagnostics.entries().len(), MAX_DIAGNOSTICS_PER_ID);
+        assert_eq!(diagnostics.dropped(), 3);
+        assert_eq!(diagnostics.warning_count(), 0);
+        let first = serde_json::to_value(Event::new(EventKind::Diagnostic {
+            diagnostic: DiagnosticEvent::from(&diagnostics.entries()[0]),
+        }))
+        .unwrap();
+        assert_eq!(first["id"], "math_passthrough");
+        assert_eq!(first["page_index"], 1);
+        assert_eq!(first["paragraph_index"], 2);
+        assert_eq!(first["reading_order"], 0);
+        assert_eq!(first["source_characters"], 7);
+        assert!(matches!(
+            diagnostics.events().last(),
+            Some(DiagnosticEvent::DroppedDiagnostics {
+                count: 3,
+                counts_by_id,
+            }) if counts_by_id == &[DroppedDiagnosticCount {
+                id: DiagnosticId::MathPassthrough,
+                count: 3,
+            }]
         ));
     }
 

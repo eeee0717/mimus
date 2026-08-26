@@ -430,6 +430,19 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 paragraph_index + 1
             );
         }
+        DiagnosticEvent::MathPassthrough {
+            page_index,
+            paragraph_index,
+            reading_order,
+            source_characters,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "info[math_passthrough]: page {} paragraph {} layout unit {reading_order} kept source text ({source_characters} characters)",
+                page_index + 1,
+                paragraph_index + 1
+            );
+        }
         DiagnosticEvent::UnsupportedOutputGlyph {
             page_index,
             reading_order,

@@ -1,0 +1,90 @@
+# unit-form-01-math-shapes -- expected manifest
+#
+# This fixture is intentionally replayed without model layout labels. Every
+# line therefore reaches the fallback detector as ordinary translatable text.
+
+schema_version = 1
+
+[identity]
+id = "unit-form-01-math-shapes"
+name = "Math-shaped fallback text with a prose negative control"
+class = "unit"
+legality = "legal"
+cases = ["FORM-01"]
+priority = "M3"
+variable = "Four high-risk math shapes and one prose line all carry the fallback text label"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-form-01-math-shapes.typ"
+pdf = "unit-form-01-math-shapes.pdf"
+pdf_sha256 = "868490835e74986eea31c3db0f30f2fa171857140d159e2ae393e8d52fb7b18c"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 500.0, 220.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 5
+columns = 1
+
+[[expected.block]]
+key = "F1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "Attention(Q,K,V) = softmax(QK^T / sqrt(dk))V (1)"
+
+[[expected.block]]
+key = "F2"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "Q"
+
+[[expected.block]]
+key = "F3"
+page = 0
+column = "full"
+draw_order = 3
+reading_order = 3
+text = "dmodel×dk"
+
+[[expected.block]]
+key = "F4"
+page = 0
+column = "full"
+draw_order = 4
+reading_order = 4
+text = "MultiHead(Q,K,V) = Concat(head1,...,headh)WO"
+
+[[expected.block]]
+key = "T1"
+page = 0
+column = "full"
+draw_order = 5
+reading_order = 5
+text = "This method improves translation quality across documents."
+
+[[expected.behaviour]]
+id = "FORM-01-fallback-math-passthrough"
+assertion = "The four math-shaped lines are kept byte-for-byte and never enter a translation request despite fallback text labels"
+observable_via = "mimus fake-backend request capture, typed diagnostic, and dual PDF text extraction"
+
+[[expected.behaviour]]
+id = "FORM-01-prose-negative-control"
+assertion = "The prose-shaped final line remains eligible for translation"
+observable_via = "mimus fake-backend request capture and Translate IL"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "glyphs", "render"]
