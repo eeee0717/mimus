@@ -226,6 +226,7 @@ pub enum DiagnosticId {
     PlaceholderViolation,
     TranslationFailureProfile,
     UnsupportedOutputGlyph,
+    SingleLineBoundsExpanded,
     DroppedDiagnostics,
 }
 
@@ -418,6 +419,12 @@ pub enum Diagnostic {
         font_source: String,
         font_sha256: String,
     },
+    SingleLineBoundsExpanded {
+        page_index: usize,
+        reading_order: usize,
+        overflow_top_pt: f64,
+        overflow_bottom_pt: f64,
+    },
 }
 
 impl Diagnostic {
@@ -439,6 +446,7 @@ impl Diagnostic {
             Self::PlaceholderViolation { .. } => DiagnosticId::PlaceholderViolation,
             Self::TranslationFailureProfile { .. } => DiagnosticId::TranslationFailureProfile,
             Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
+            Self::SingleLineBoundsExpanded { .. } => DiagnosticId::SingleLineBoundsExpanded,
         }
     }
 
@@ -446,7 +454,9 @@ impl Diagnostic {
     const fn is_warning(&self) -> bool {
         !matches!(
             self,
-            Self::TranslationIdentity { .. } | Self::TranslationFailureProfile { .. }
+            Self::TranslationIdentity { .. }
+                | Self::TranslationFailureProfile { .. }
+                | Self::SingleLineBoundsExpanded { .. }
         )
     }
 
@@ -557,6 +567,12 @@ pub enum DiagnosticEvent {
         font_source: String,
         font_sha256: String,
     },
+    SingleLineBoundsExpanded {
+        page_index: usize,
+        reading_order: usize,
+        overflow_top_pt: f64,
+        overflow_bottom_pt: f64,
+    },
     DroppedDiagnostics {
         count: usize,
         counts_by_id: Vec<DroppedDiagnosticCount>,
@@ -582,6 +598,7 @@ impl DiagnosticEvent {
             Self::PlaceholderViolation { .. } => DiagnosticId::PlaceholderViolation,
             Self::TranslationFailureProfile { .. } => DiagnosticId::TranslationFailureProfile,
             Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
+            Self::SingleLineBoundsExpanded { .. } => DiagnosticId::SingleLineBoundsExpanded,
             Self::DroppedDiagnostics { .. } => DiagnosticId::DroppedDiagnostics,
         }
     }
@@ -752,6 +769,17 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 font_source: font_source.clone(),
                 font_sha256: font_sha256.clone(),
             },
+            Diagnostic::SingleLineBoundsExpanded {
+                page_index,
+                reading_order,
+                overflow_top_pt,
+                overflow_bottom_pt,
+            } => Self::SingleLineBoundsExpanded {
+                page_index: *page_index,
+                reading_order: *reading_order,
+                overflow_top_pt: *overflow_top_pt,
+                overflow_bottom_pt: *overflow_bottom_pt,
+            },
         }
     }
 }
@@ -819,7 +847,9 @@ impl Diagnostics {
             .filter(|(id, _)| {
                 !matches!(
                     id,
-                    DiagnosticId::TranslationIdentity | DiagnosticId::TranslationFailureProfile
+                    DiagnosticId::TranslationIdentity
+                        | DiagnosticId::TranslationFailureProfile
+                        | DiagnosticId::SingleLineBoundsExpanded
                 )
             })
             .map(|(_, count)| count)

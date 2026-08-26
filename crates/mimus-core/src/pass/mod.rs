@@ -2173,6 +2173,12 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 ),
             ));
         }
+        let page_bounds = extracted.frame.map(|frame| frame.crop_box).ok_or_else(|| {
+            MimusError::internal(
+                InternalReason::InvariantViolation,
+                format!("Typeset page {} has no resolved page frame", page.index),
+            )
+        })?;
         let has_preserved = page
             .paragraphs
             .iter()
@@ -2245,12 +2251,15 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
             let restored = document
                 .restored_translations
                 .get(&(page.index, paragraph.reading_order));
+            let obstacles = paragraph_typeset_obstacles(page, extracted, paragraph);
             match plan_paragraph(
                 paragraph,
                 translated,
                 restored,
                 &content_objects,
                 output_fonts,
+                page_bounds,
+                &obstacles,
             ) {
                 Ok(paragraph_plans) => {
                     planned_paragraphs.push((paragraph.reading_order, paragraph_plans));
@@ -2330,19 +2339,35 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 let restored = document
                     .restored_translations
                     .get(&(page.index, paragraph.reading_order));
+                let obstacles = paragraph_typeset_obstacles(page, extracted, paragraph);
                 match plan_paragraph(
                     paragraph,
                     translated,
                     restored,
                     &content_objects,
                     output_fonts,
+                    page_bounds,
+                    &obstacles,
                 ) {
                     Ok(paragraph_plans) => {
                         planned_paragraphs.push((paragraph.reading_order, paragraph_plans));
                     }
-                    Err(_) => {
-                        blocked_spans.extend(identity_spans.iter().copied());
-                    }
+                    Err(_) => match plan_shared_number_identity(
+                        paragraph,
+                        translated,
+                        &content_objects,
+                        output_fonts,
+                        page_bounds,
+                        &obstacles,
+                    ) {
+                        Ok(paragraph_plan) => {
+                            planned_paragraphs
+                                .push((paragraph.reading_order, vec![paragraph_plan]));
+                        }
+                        Err(_) => {
+                            blocked_spans.extend(identity_spans.iter().copied());
+                        }
+                    },
                 }
                 continue;
             }
@@ -2400,6 +2425,18 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 }
                 false
             });
+        }
+        for (reading_order, plans) in &planned_paragraphs {
+            for expansion in plans.iter().filter_map(|plan| plan.single_line_expansion) {
+                document
+                    .diagnostics
+                    .push(Diagnostic::SingleLineBoundsExpanded {
+                        page_index: page.index,
+                        reading_order: *reading_order,
+                        overflow_top_pt: expansion.top_pt,
+                        overflow_bottom_pt: expansion.bottom_pt,
+                    });
+            }
         }
         planned_paragraphs.sort_by_key(|(reading_order, _)| *reading_order);
         let plans = planned_paragraphs
@@ -2482,6 +2519,38 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
     Ok(())
 }
 
+fn paragraph_typeset_obstacles(
+    page: &il::Page,
+    extracted: &ExtractedPage,
+    paragraph: &Paragraph,
+) -> Vec<Rect> {
+    let mut obstacles = page
+        .paragraphs
+        .iter()
+        .filter(|candidate| candidate.reading_order != paragraph.reading_order)
+        .flat_map(Paragraph::chars)
+        .filter(|character| character.visible && rect_is_finite(character.visual_bbox))
+        .map(|character| character.visual_bbox)
+        .collect::<Vec<_>>();
+    obstacles.extend(
+        extracted
+            .layout_regions
+            .iter()
+            .filter(|region| {
+                !paragraph.chars().iter().any(|character| {
+                    character.layout.is_some_and(|assignment| {
+                        assignment.bounds == region.bounds
+                            && assignment.reading_order == region.reading_order
+                            && assignment.source == region.source
+                    })
+                })
+            })
+            .map(|region| region.bounds)
+            .filter(|bounds| rect_is_finite(*bounds)),
+    );
+    obstacles
+}
+
 pub fn font_embed(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
     if document
         .rewrites
@@ -2504,6 +2573,13 @@ struct TypesetPlan {
     lines: Vec<Vec<crate::translate::StyledCharacter>>,
     baselines: Vec<(f64, f64)>,
     font_size: f64,
+    single_line_expansion: Option<SingleLineBoundsExpansion>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SingleLineBoundsExpansion {
+    top_pt: f64,
+    bottom_pt: f64,
 }
 
 struct BuiltOutputFont {
@@ -2513,6 +2589,8 @@ struct BuiltOutputFont {
 
 const MIN_FONT_SIZE_PT: f64 = 8.0;
 const LINE_ADVANCE_EM: f64 = 1.5;
+const SINGLE_LINE_MAX_VERTICAL_OVERFLOW_EM: f64 = 0.25;
+const SINGLE_LINE_MAX_VERTICAL_OVERFLOW_PT: f64 = 3.0;
 
 enum TypesetPlanError<'a> {
     Preserved(il::PreservedReason),
@@ -2573,6 +2651,8 @@ fn plan_paragraph<'a>(
     restored: Option<&crate::translate::RestoredTranslation>,
     content_objects: &BTreeSet<lopdf::ObjectId>,
     output_fonts: &'a crate::context::OutputFonts,
+    page_bounds: Rect,
+    obstacles: &[Rect],
 ) -> std::result::Result<Vec<TypesetPlan>, TypesetPlanError<'a>> {
     let all_chars = paragraph.chars();
     let content_object_numbers = content_objects
@@ -2608,9 +2688,54 @@ fn plan_paragraph<'a>(
         .zip(translated_segments)
         .filter(|(source, translated)| !source.is_empty() || !translated.is_empty())
         .map(|(source, translated)| {
-            plan_text_segment(&source, &translated, content_objects, output_fonts)
+            plan_text_segment(
+                &source,
+                &translated,
+                content_objects,
+                output_fonts,
+                page_bounds,
+                obstacles,
+            )
         })
         .collect()
+}
+
+fn plan_shared_number_identity<'a>(
+    paragraph: &Paragraph,
+    translated: &str,
+    content_objects: &BTreeSet<lopdf::ObjectId>,
+    output_fonts: &'a crate::context::OutputFonts,
+    page_bounds: Rect,
+    obstacles: &[Rect],
+) -> std::result::Result<TypesetPlan, TypesetPlanError<'a>> {
+    let chars = paragraph.chars();
+    if chars.is_empty()
+        || chars.iter().any(|character| {
+            !character.visible
+                || character.text_transform != TextTransform::Upright
+                || !character.layout.is_some_and(|layout| {
+                    layout.label == LayoutLabel::Number
+                        && layout.policy == TranslationPolicy::Passthrough
+                })
+        })
+    {
+        return Err(TypesetPlanError::Preserved(
+            il::PreservedReason::TypesetProtocol,
+        ));
+    }
+    let chars = chars.iter().collect::<Vec<_>>();
+    let translated = translated
+        .chars()
+        .map(|value| crate::translate::StyledCharacter { value, bold: false })
+        .collect::<Vec<_>>();
+    plan_text_segment(
+        &chars,
+        &translated,
+        content_objects,
+        output_fonts,
+        page_bounds,
+        obstacles,
+    )
 }
 
 fn source_text_segments<'a>(
@@ -2642,6 +2767,8 @@ fn plan_text_segment<'a>(
     translated: &[crate::translate::StyledCharacter],
     content_objects: &BTreeSet<lopdf::ObjectId>,
     output_fonts: &'a crate::context::OutputFonts,
+    page_bounds: Rect,
+    obstacles: &[Rect],
 ) -> std::result::Result<TypesetPlan, TypesetPlanError<'a>> {
     if chars.is_empty() {
         return Err(TypesetPlanError::Preserved(
@@ -2671,6 +2798,7 @@ fn plan_text_segment<'a>(
             lines: Vec::new(),
             baselines: Vec::new(),
             font_size: chars[0].font_size.max(MIN_FONT_SIZE_PT),
+            single_line_expansion: None,
         });
     }
     let regular = ttf_parser::Face::parse(&output_fonts.regular.bytes, 0)
@@ -2710,8 +2838,10 @@ fn plan_text_segment<'a>(
         .sum::<f64>()
         / chars.len() as f64;
     let first = chars[0];
+    let source_is_single_line = source_is_single_line(chars);
+    let single_line_start_x = first.baseline_origin.x.max(container.left);
     let mut size = preferred.max(MIN_FONT_SIZE_PT);
-    while size + 0.001 >= MIN_FONT_SIZE_PT {
+    loop {
         if let Some(lines) = wrap_styled_text(
             &translated,
             &regular,
@@ -2719,6 +2849,28 @@ fn plan_text_segment<'a>(
             size,
             container.right - container.left,
         ) {
+            if source_is_single_line
+                && lines.len() == 1
+                && let Some(expansion) = single_line_ink_fit(
+                    &lines[0],
+                    &regular,
+                    &bold,
+                    size,
+                    single_line_start_x,
+                    first.baseline_origin.y,
+                    container,
+                    page_bounds,
+                    obstacles,
+                )
+            {
+                return Ok(TypesetPlan {
+                    spans,
+                    lines,
+                    baselines: vec![(single_line_start_x, first.baseline_origin.y)],
+                    font_size: size,
+                    single_line_expansion: expansion,
+                });
+            }
             let ascent = f64::from(regular.ascender().max(bold.ascender()))
                 / f64::from(regular.units_per_em())
                 * size;
@@ -2743,14 +2895,96 @@ fn plan_text_segment<'a>(
                     lines,
                     baselines,
                     font_size: size,
+                    single_line_expansion: None,
                 });
             }
         }
-        size -= 0.5;
+        if size <= MIN_FONT_SIZE_PT + 0.001 {
+            break;
+        }
+        size = (size - 0.5).max(MIN_FONT_SIZE_PT);
     }
     Err(TypesetPlanError::Preserved(
         il::PreservedReason::TypesetOverflow,
     ))
+}
+
+fn source_is_single_line(chars: &[&Char]) -> bool {
+    let baseline = chars[0].baseline_origin.y;
+    chars
+        .iter()
+        .all(|character| (character.baseline_origin.y - baseline).abs() <= 0.01)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn single_line_ink_fit(
+    line: &[crate::translate::StyledCharacter],
+    regular: &ttf_parser::Face<'_>,
+    bold: &ttf_parser::Face<'_>,
+    size: f64,
+    start_x: f64,
+    baseline_y: f64,
+    container: Rect,
+    page_bounds: Rect,
+    obstacles: &[Rect],
+) -> Option<Option<SingleLineBoundsExpansion>> {
+    let ink = styled_line_ink_bounds(line, regular, bold, size, start_x, baseline_y)?;
+    if ink.left < container.left - 0.01 || ink.right > container.right + 0.01 {
+        return None;
+    }
+    let top_pt = (ink.top - container.top).max(0.0);
+    let bottom_pt = (container.bottom - ink.bottom).max(0.0);
+    let allowance =
+        (size * SINGLE_LINE_MAX_VERTICAL_OVERFLOW_EM).min(SINGLE_LINE_MAX_VERTICAL_OVERFLOW_PT);
+    if top_pt > allowance + 0.01 || bottom_pt > allowance + 0.01 {
+        return None;
+    }
+    if !rect_contains(page_bounds, ink, 0.01)
+        || obstacles
+            .iter()
+            .any(|obstacle| intersection_area(ink, *obstacle) > 0.0001)
+    {
+        return None;
+    }
+    Some(
+        (top_pt > 0.01 || bottom_pt > 0.01)
+            .then_some(SingleLineBoundsExpansion { top_pt, bottom_pt }),
+    )
+}
+
+fn styled_line_ink_bounds(
+    line: &[crate::translate::StyledCharacter],
+    regular: &ttf_parser::Face<'_>,
+    bold: &ttf_parser::Face<'_>,
+    size: f64,
+    start_x: f64,
+    baseline_y: f64,
+) -> Option<Rect> {
+    let mut x = start_x;
+    let mut ink = None;
+    for character in line {
+        let face = if character.bold { bold } else { regular };
+        let glyph = face.glyph_index(character.value)?;
+        let scale = size / f64::from(face.units_per_em());
+        if let Some(bounds) = face.glyph_bounding_box(glyph) {
+            let bounds = Rect {
+                left: x + f64::from(bounds.x_min) * scale,
+                bottom: baseline_y + f64::from(bounds.y_min) * scale,
+                right: x + f64::from(bounds.x_max) * scale,
+                top: baseline_y + f64::from(bounds.y_max) * scale,
+            };
+            ink = Some(ink.map_or(bounds, |current: Rect| current.union(bounds)));
+        }
+        x += f64::from(face.glyph_hor_advance(glyph)?) * scale;
+    }
+    ink
+}
+
+fn rect_contains(outer: Rect, inner: Rect, tolerance: f64) -> bool {
+    inner.left >= outer.left - tolerance
+        && inner.bottom >= outer.bottom - tolerance
+        && inner.right <= outer.right + tolerance
+        && inner.top <= outer.top + tolerance
 }
 
 fn normalize_typeset_whitespace(
@@ -5361,6 +5595,162 @@ mod tests {
     }
 
     #[test]
+    fn single_line_ink_expansion_is_bounded_by_obstacles_and_page() {
+        let output_fonts = test_output_fonts();
+        let regular = ttf_parser::Face::parse(&output_fonts.regular.bytes, 0).unwrap();
+        let bold = ttf_parser::Face::parse(&output_fonts.bold.bytes, 0).unwrap();
+        let line = "中文"
+            .chars()
+            .map(|value| crate::translate::StyledCharacter { value, bold: true })
+            .collect::<Vec<_>>();
+        let container = Rect {
+            left: 72.0,
+            bottom: 119.0,
+            right: 122.0,
+            top: 129.0,
+        };
+        let page = Rect {
+            left: 0.0,
+            bottom: 0.0,
+            right: 300.0,
+            top: 200.0,
+        };
+        let expansion = single_line_ink_fit(
+            &line,
+            &regular,
+            &bold,
+            12.0,
+            container.left,
+            120.0,
+            container,
+            page,
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+        assert!(expansion.top_pt <= SINGLE_LINE_MAX_VERTICAL_OVERFLOW_PT);
+        assert!(expansion.bottom_pt <= SINGLE_LINE_MAX_VERTICAL_OVERFLOW_PT);
+
+        let ink =
+            styled_line_ink_bounds(&line, &regular, &bold, 12.0, container.left, 120.0).unwrap();
+        assert!(
+            single_line_ink_fit(
+                &line,
+                &regular,
+                &bold,
+                12.0,
+                container.left,
+                120.0,
+                container,
+                page,
+                &[ink],
+            )
+            .is_none()
+        );
+        let prefix_obstacle = Rect {
+            left: container.left,
+            bottom: ink.bottom,
+            right: container.left + 12.0,
+            top: ink.top,
+        };
+        assert!(
+            single_line_ink_fit(
+                &line,
+                &regular,
+                &bold,
+                12.0,
+                container.left,
+                120.0,
+                container,
+                page,
+                &[prefix_obstacle],
+            )
+            .is_none()
+        );
+        assert!(
+            single_line_ink_fit(
+                &line,
+                &regular,
+                &bold,
+                12.0,
+                container.left + 14.0,
+                120.0,
+                container,
+                page,
+                &[prefix_obstacle],
+            )
+            .is_some()
+        );
+        assert!(
+            single_line_ink_fit(
+                &line,
+                &regular,
+                &bold,
+                12.0,
+                container.left,
+                120.0,
+                container,
+                Rect {
+                    top: ink.top - 0.1,
+                    ..page
+                },
+                &[],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn single_line_fit_always_tests_the_exact_minimum_font_size() {
+        let translator = StaticTranslator {
+            output: "中文测试中文测试",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let mut document =
+            translate_fixture_once(&translator, &events, config_with_test_output_fonts()).unwrap();
+        for character in match &mut document.il.pages[0].paragraphs[0].text {
+            TextCarrier::Chars { chars } => chars,
+        } {
+            character.font_size = 9.9626;
+            character.layout.as_mut().unwrap().bounds = Rect {
+                left: 72.0,
+                bottom: 119.0,
+                right: 136.2,
+                top: 129.0,
+            };
+        }
+        let layout = document.il.pages[0].paragraphs[0].chars()[0]
+            .layout
+            .unwrap();
+        document.extracted_pages[0].layout_regions[0].bounds = layout.bounds;
+        document.extracted_pages[0].layout_regions[0].reading_order = layout.reading_order;
+        document.extracted_pages[0].layout_regions[0].label = layout.label;
+        document.extracted_pages[0].layout_regions[0].source = layout.source;
+        let engine = FakeEngine::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+
+        typeset(&mut document, &context).unwrap();
+
+        assert_eq!(document.il.pages[0].paragraphs[0].preserved, None);
+        assert_eq!(
+            document.rewrites[0]
+                .typeset_characters
+                .iter()
+                .map(|character| character.unicode)
+                .collect::<String>(),
+            "中文测试中文测试"
+        );
+    }
+
+    #[test]
     fn unsafe_fit_preserves_the_paragraph_without_tiny_text() {
         let mut document = Document::new(fixture(), "unused.pdf");
         let engine = FakeEngine::default();
@@ -5598,6 +5988,7 @@ mod tests {
             }]],
             baselines: vec![(25.0, 100.0)],
             font_size: 8.0,
+            single_line_expansion: None,
         };
         let mut replacements = BTreeMap::new();
 
@@ -5683,6 +6074,80 @@ mod tests {
         typeset(&mut document, &context).unwrap();
 
         assert_eq!(document.rewrites.len(), 1);
+        let values = document.rewrites[0]
+            .typeset_characters
+            .iter()
+            .map(|character| character.unicode)
+            .collect::<String>();
+        assert_eq!(values, "M中文");
+    }
+
+    #[test]
+    fn typeset_combines_passthrough_identity_prefix_with_shared_translated_text() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let paragraph = document.il.pages[0].paragraphs.pop().unwrap();
+        let TextCarrier::Chars { mut chars } = paragraph.text;
+        let layout_bounds = Rect {
+            left: 72.0,
+            bottom: 119.0,
+            right: 172.0,
+            top: 129.0,
+        };
+        for character in &mut chars {
+            character.layout.as_mut().unwrap().bounds = layout_bounds;
+        }
+        chars[0].layout.as_mut().unwrap().label = LayoutLabel::Number;
+        chars[0].layout.as_mut().unwrap().policy = TranslationPolicy::Passthrough;
+        let number_layout = chars[0].layout.unwrap();
+        document.extracted_pages[0].layout_regions[0].bounds = layout_bounds;
+        document.extracted_pages[0].layout_regions[0].reading_order = number_layout.reading_order;
+        document.extracted_pages[0].layout_regions[0].source = number_layout.source;
+        document.extracted_pages[0].layout_regions[0].label = LayoutLabel::Text;
+        document.il.pages[0].paragraphs = vec![
+            Paragraph {
+                reading_order: 0,
+                bounds: chars[0].r#box,
+                text: TextCarrier::Chars {
+                    chars: chars[..1].to_vec(),
+                },
+                translated_text: Some("M".to_owned()),
+                preserved: None,
+            },
+            Paragraph {
+                reading_order: 1,
+                bounds: chars[1..]
+                    .iter()
+                    .map(|character| character.r#box)
+                    .reduce(Rect::union)
+                    .unwrap(),
+                text: TextCarrier::Chars {
+                    chars: chars[1..].to_vec(),
+                },
+                translated_text: Some("中文".to_owned()),
+                preserved: None,
+            },
+        ];
+
+        typeset(&mut document, &context).unwrap();
+
+        assert!(
+            document.il.pages[0]
+                .paragraphs
+                .iter()
+                .all(|paragraph| paragraph.preserved.is_none())
+        );
         let values = document.rewrites[0]
             .typeset_characters
             .iter()
