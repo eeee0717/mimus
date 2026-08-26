@@ -62,8 +62,9 @@
 临时公式止血政策（#35）：在生产 layout 模型接入（#84）前，对仍被标为
 `Translate` 的单元执行偏保守的数学形状启发式；命中单元所在的整个自然段改为
 passthrough，不进入翻译请求，并按命中单元发出不计 degradation、不影响 strict 的
-`math_passthrough` info 诊断。整段保留避免将去除公式后的新请求错配到旧 cache 语义。
-该政策宁可将少量散文留为原文，也不允许公式内容被译坏；#84 提供真实
+`math_passthrough` info 诊断。自然段是当前远端翻译与 cache 的原子；整段保留避免把
+含公式段裁成未经验证的新请求，并在重组时误处理公式邻接文本。该政策宁可将少量散文
+留为原文，也不允许公式内容被译坏；#84 提供真实
 `display_formula` / `inline_formula` 标签后，由标签政策取代本启发式。
 
 政策表按**版面类别**划分，生效前提是 layout detector 已给出对应标签。PP-DocLayoutV3
