@@ -78,6 +78,8 @@ pub enum PreservedReason {
     TypesetOverflow,
     /// 段落结构不满足翻译到排版的协议不变量。
     TypesetProtocol,
+    /// 翻译后端破坏了公式或富文本占位符协议。
+    PlaceholderViolation,
 }
 
 impl Paragraph {

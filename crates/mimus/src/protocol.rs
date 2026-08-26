@@ -342,6 +342,55 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 preserved_paragraphs.len()
             );
         }
+        DiagnosticEvent::TranslationIdentity {
+            page_index,
+            paragraph_index,
+            request_characters,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "info[translation_identity]: page {} paragraph {} kept the source text ({request_characters} request characters)",
+                page_index + 1,
+                paragraph_index + 1
+            );
+        }
+        DiagnosticEvent::SuspiciousTranslationEchoRate {
+            identity_count,
+            prose_paragraph_count,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[suspicious_translation_echo_rate]: {identity_count} of {prose_paragraph_count} prose-shaped paragraphs were returned unchanged"
+            );
+        }
+        DiagnosticEvent::PlaceholderViolation {
+            page_index,
+            paragraph_index,
+            violation,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[placeholder_violation]: page {} paragraph {} kept as source text ({})",
+                page_index + 1,
+                paragraph_index + 1,
+                violation.wire_name()
+            );
+        }
+        DiagnosticEvent::TranslationFailureProfile {
+            page_index,
+            paragraph_index,
+            response_bytes,
+            response_characters,
+            token_count,
+            token_scan_valid,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "debug[translation_failure_profile]: page {} paragraph {} response_bytes={response_bytes} response_characters={response_characters} token_count={token_count} token_scan_valid={token_scan_valid}",
+                page_index + 1,
+                paragraph_index + 1
+            );
+        }
         DiagnosticEvent::UnsupportedOutputGlyph {
             page_index,
             reading_order,

@@ -86,7 +86,7 @@ pub fn run(document: &mut Document, context: &PassContext<'_>) -> Result<Transla
     Ok(TranslationResult {
         output: output.to_string_lossy().into_owned(),
         pages: document.il.pages.len(),
-        warnings: document.diagnostics.total_count(),
+        warnings: document.diagnostics.warning_count(),
         appended_bytes: write_report.appended_bytes,
     })
 }
@@ -96,7 +96,7 @@ pub fn inspect(document: &mut Document, context: &PassContext<'_>) -> Result<Ins
     let il = il::snapshot(&document.il);
     Ok(InspectionResult {
         pages: il.pages.len(),
-        warnings: document.diagnostics.total_count(),
+        warnings: document.diagnostics.warning_count(),
         il,
     })
 }
@@ -132,6 +132,7 @@ fn push_degradation_summary(document: &mut Document) {
         .filter(|page| page.degraded.is_some())
         .map(|page| page.index)
         .collect::<Vec<_>>();
+    let placeholder_violations = &document.placeholder_violations;
     let preserved_paragraphs = document
         .il
         .pages
@@ -145,6 +146,9 @@ fn push_degradation_summary(document: &mut Document) {
                         page_index: page.index,
                         paragraph_index,
                         reason,
+                        placeholder_violation: placeholder_violations
+                            .get(&(page.index, paragraph_index))
+                            .copied(),
                     })
                 })
         })
@@ -1511,7 +1515,8 @@ fn paragraph_from_lines(
     }
 }
 
-pub fn styles_and_formulas(_document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
+pub fn styles_and_formulas(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
+    prepare_translations(document)?;
     Ok(())
 }
 
@@ -1530,6 +1535,12 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                 .collect::<BTreeSet<_>>()
         })
         .collect::<Vec<_>>();
+    if document.prepared_translations.is_empty() {
+        prepare_translations(document)?;
+    }
+    document.placeholder_violations.clear();
+    let mut prose_paragraph_count = 0;
+    let mut prose_identity_count = 0;
     for page in &mut document.il.pages {
         let content_objects = page_content_objects.get(page.index).ok_or_else(|| {
             MimusError::internal(
@@ -1537,9 +1548,71 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                 format!("Translate could not find extracted page {}", page.index),
             )
         })?;
-        for paragraph in &mut page.paragraphs {
+        for (paragraph_index, paragraph) in page.paragraphs.iter_mut().enumerate() {
             if paragraph.preserved.is_some() {
                 paragraph.translated_text = None;
+                continue;
+            }
+            if context.translator.model_id() != "none" {
+                let key = (page.index, paragraph.reading_order);
+                let prepared = document.prepared_translations.get(&key).ok_or_else(|| {
+                    MimusError::internal(
+                        InternalReason::InvariantViolation,
+                        format!("Translate could not find prepared paragraph {key:?}"),
+                    )
+                })?;
+                if prepared.request_text().is_empty() {
+                    paragraph.translated_text = Some(paragraph.source_text());
+                    continue;
+                }
+                let prose_shaped = translation_request_is_prose_shaped(prepared.request_text());
+                prose_paragraph_count += usize::from(prose_shaped);
+                let output =
+                    context
+                        .translator
+                        .translate(&crate::translate::TranslationRequest {
+                            text: prepared.request_text(),
+                            target_language: &context.config.target_language,
+                        })?;
+                match prepared.classify(&output) {
+                    crate::translate::TranslationOutcome::Identity => {
+                        paragraph.translated_text = Some(paragraph.source_text());
+                        prose_identity_count += usize::from(prose_shaped);
+                        document.diagnostics.push(Diagnostic::TranslationIdentity {
+                            page_index: page.index,
+                            paragraph_index,
+                            request_characters: prepared.request_text().chars().count(),
+                        });
+                    }
+                    crate::translate::TranslationOutcome::Translated(validated) => {
+                        match prepared.restore(&validated) {
+                            Ok(restored) => {
+                                paragraph.translated_text = Some(restored.plain_text());
+                                document.restored_translations.insert(key, restored);
+                            }
+                            Err(violation) => preserve_placeholder_violation(
+                                paragraph,
+                                &mut document.diagnostics,
+                                &mut document.placeholder_violations,
+                                page.index,
+                                paragraph_index,
+                                violation,
+                                &output,
+                            ),
+                        }
+                    }
+                    crate::translate::TranslationOutcome::PlaceholderViolation(violation) => {
+                        preserve_placeholder_violation(
+                            paragraph,
+                            &mut document.diagnostics,
+                            &mut document.placeholder_violations,
+                            page.index,
+                            paragraph_index,
+                            violation,
+                            &output,
+                        );
+                    }
+                }
                 continue;
             }
             let chars = paragraph.chars();
@@ -1569,7 +1642,146 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
             paragraph.translated_text = Some(translated);
         }
     }
+    if prose_paragraph_count > 0 && prose_identity_count * 2 > prose_paragraph_count {
+        document
+            .diagnostics
+            .push(Diagnostic::SuspiciousTranslationEchoRate {
+                identity_count: prose_identity_count,
+                prose_paragraph_count,
+            });
+    }
     Ok(())
+}
+
+fn translation_request_is_prose_shaped(request: &str) -> bool {
+    let characters = request.chars().count();
+    characters >= 40 && request.chars().filter(char::is_ascii_alphabetic).count() * 2 >= characters
+}
+
+fn preserve_placeholder_violation(
+    paragraph: &mut Paragraph,
+    diagnostics: &mut Diagnostics,
+    placeholder_violations: &mut BTreeMap<(usize, usize), crate::translate::PlaceholderViolation>,
+    page_index: usize,
+    paragraph_index: usize,
+    violation: crate::translate::PlaceholderViolation,
+    output: &str,
+) {
+    paragraph.translated_text = None;
+    paragraph.preserved = Some(il::PreservedReason::PlaceholderViolation);
+    placeholder_violations.insert((page_index, paragraph_index), violation);
+    diagnostics.push(Diagnostic::PlaceholderViolation {
+        page_index,
+        paragraph_index,
+        violation,
+    });
+    let profile = crate::translate::redacted_translation_profile(output);
+    diagnostics.push_debug(Diagnostic::TranslationFailureProfile {
+        page_index,
+        paragraph_index,
+        response_bytes: profile.response_bytes,
+        response_characters: profile.response_characters,
+        token_count: profile.token_count,
+        token_scan_valid: profile.token_scan_valid,
+    });
+}
+
+fn prepare_translations(document: &mut Document) -> Result<()> {
+    let page_content_objects = document
+        .extracted_pages
+        .iter()
+        .map(|page| {
+            page.content_streams
+                .iter()
+                .map(|stream| stream.object_id.0)
+                .collect::<BTreeSet<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut prepared = BTreeMap::new();
+    for page in &document.il.pages {
+        let content_objects = page_content_objects.get(page.index).ok_or_else(|| {
+            MimusError::internal(
+                InternalReason::InvariantViolation,
+                format!(
+                    "StylesAndFormulas could not find extracted page {}",
+                    page.index
+                ),
+            )
+        })?;
+        for paragraph in &page.paragraphs {
+            if paragraph.preserved.is_some() {
+                continue;
+            }
+            let chars = paragraph.chars();
+            let mut parts = Vec::new();
+            let mut start = 0;
+            while start < chars.len() {
+                let class = prepared_character_class(&chars[start], content_objects);
+                let mut end = start + 1;
+                while end < chars.len()
+                    && prepared_character_class(&chars[end], content_objects) == class
+                {
+                    end += 1;
+                }
+                match class {
+                    PreparedCharacterClass::Text { bold } => {
+                        let text = request_text(&chars[start..end]);
+                        if !text.is_empty() {
+                            parts.push(crate::translate::PreparedPart::Text { text, bold });
+                        }
+                    }
+                    PreparedCharacterClass::Formula => {
+                        parts.push(crate::translate::PreparedPart::Formula);
+                    }
+                    PreparedCharacterClass::Passthrough => {}
+                }
+                start = end;
+            }
+            prepared.insert(
+                (page.index, paragraph.reading_order),
+                crate::translate::PreparedTranslation::new(parts),
+            );
+        }
+    }
+    document.prepared_translations = prepared;
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PreparedCharacterClass {
+    Text { bold: bool },
+    Formula,
+    Passthrough,
+}
+
+fn prepared_character_class(
+    character: &Char,
+    content_objects: &BTreeSet<u32>,
+) -> PreparedCharacterClass {
+    if character.visible
+        && character.text_transform == TextTransform::Upright
+        && character
+            .layout
+            .is_some_and(|layout| layout.label == LayoutLabel::InlineFormula)
+        && content_objects.contains(&character.passthrough.content_object)
+    {
+        return PreparedCharacterClass::Formula;
+    }
+    if character_is_translatable(character, content_objects) {
+        let bold = character.layout.is_some_and(|layout| {
+            matches!(
+                layout.label,
+                LayoutLabel::DocTitle | LayoutLabel::ParagraphTitle
+            )
+        }) || character
+            .font
+            .resource_name
+            .to_ascii_lowercase()
+            .contains("bold");
+        PreparedCharacterClass::Text { bold }
+    } else {
+        PreparedCharacterClass::Passthrough
+    }
 }
 
 fn request_text(chars: &[Char]) -> String {
@@ -1711,8 +1923,17 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 .output_fonts
                 .as_ref()
                 .expect("non-identity output font requirement was checked");
-            match plan_paragraph(paragraph, translated, &content_objects, output_fonts) {
-                Ok(plan) => plans.push(plan),
+            let restored = document
+                .restored_translations
+                .get(&(page.index, paragraph.reading_order));
+            match plan_paragraph(
+                paragraph,
+                translated,
+                restored,
+                &content_objects,
+                output_fonts,
+            ) {
+                Ok(paragraph_plans) => plans.extend(paragraph_plans),
                 Err(TypesetPlanError::Preserved(reason)) => {
                     preserved.push((page.index, paragraph.reading_order, reason));
                 }
@@ -1738,20 +1959,18 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
             }
         }
 
-        let mut embedded_fonts = Vec::new();
+        let mut output_fonts = BTreeMap::new();
         let mut typeset_characters = Vec::new();
         for bold in [false, true] {
-            let matching = plans
+            let used = plans
                 .iter()
-                .filter(|plan| plan.bold == bold)
-                .collect::<Vec<_>>();
-            if matching.is_empty() {
+                .flat_map(|plan| plan.lines.iter().flatten())
+                .filter(|character| character.bold == bold)
+                .map(|character| character.value)
+                .collect::<BTreeSet<_>>();
+            if used.is_empty() {
                 continue;
             }
-            let used = matching
-                .iter()
-                .flat_map(|plan| plan.lines.iter().flatten().copied())
-                .collect::<BTreeSet<_>>();
             let source_font = if bold {
                 &context.config.output_fonts.as_ref().unwrap().bold
             } else {
@@ -1763,12 +1982,16 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                     "validated output font could not be subset for translated text",
                 )
             })?;
-            for plan in matching {
-                install_typeset_replacements(plan, &font.resource_name, &cids, &mut replacements)?;
-                typeset_characters.extend(planned_characters(plan, &font));
-            }
-            embedded_fonts.push(font);
+            output_fonts.insert(bold, BuiltOutputFont { font, cids });
         }
+        for plan in &plans {
+            install_typeset_replacements(plan, &output_fonts, &mut replacements)?;
+            typeset_characters.extend(planned_characters(plan, &output_fonts));
+        }
+        let embedded_fonts = output_fonts
+            .into_values()
+            .map(|output| output.font)
+            .collect();
         if replacements.is_empty() {
             continue;
         }
@@ -1824,10 +2047,14 @@ type SpanKey = (lopdf::ObjectId, usize, usize);
 #[derive(Debug)]
 struct TypesetPlan {
     spans: Vec<SpanKey>,
-    lines: Vec<Vec<char>>,
+    lines: Vec<Vec<crate::translate::StyledCharacter>>,
     baselines: Vec<(f64, f64)>,
     font_size: f64,
-    bold: bool,
+}
+
+struct BuiltOutputFont {
+    font: EmbeddedFont,
+    cids: BTreeMap<char, u16>,
 }
 
 const MIN_FONT_SIZE_PT: f64 = 8.0;
@@ -1889,13 +2116,80 @@ fn span_out_of_bounds(
 fn plan_paragraph<'a>(
     paragraph: &Paragraph,
     translated: &str,
+    restored: Option<&crate::translate::RestoredTranslation>,
+    content_objects: &BTreeSet<lopdf::ObjectId>,
+    output_fonts: &'a crate::context::OutputFonts,
+) -> std::result::Result<Vec<TypesetPlan>, TypesetPlanError<'a>> {
+    let all_chars = paragraph.chars();
+    let content_object_numbers = content_objects
+        .iter()
+        .map(|id| id.0)
+        .collect::<BTreeSet<_>>();
+    let source_segments = source_text_segments(all_chars, &content_object_numbers);
+    let translated_segments = if let Some(restored) = restored {
+        restored.segments().to_vec()
+    } else {
+        let bold = all_chars.iter().any(|character| {
+            character.layout.is_some_and(|layout| {
+                matches!(
+                    layout.label,
+                    LayoutLabel::DocTitle | LayoutLabel::ParagraphTitle
+                )
+            })
+        });
+        vec![
+            translated
+                .chars()
+                .map(|value| crate::translate::StyledCharacter { value, bold })
+                .collect(),
+        ]
+    };
+    if source_segments.len() != translated_segments.len() {
+        return Err(TypesetPlanError::Preserved(
+            il::PreservedReason::TypesetProtocol,
+        ));
+    }
+    source_segments
+        .into_iter()
+        .zip(translated_segments)
+        .filter(|(source, translated)| !source.is_empty() || !translated.is_empty())
+        .map(|(source, translated)| {
+            plan_text_segment(&source, &translated, content_objects, output_fonts)
+        })
+        .collect()
+}
+
+fn source_text_segments<'a>(
+    chars: &'a [Char],
+    content_objects: &BTreeSet<u32>,
+) -> Vec<Vec<&'a Char>> {
+    let mut segments = vec![Vec::new()];
+    let mut start = 0;
+    while start < chars.len() {
+        let class = prepared_character_class(&chars[start], content_objects);
+        let mut end = start + 1;
+        while end < chars.len() && prepared_character_class(&chars[end], content_objects) == class {
+            end += 1;
+        }
+        match class {
+            PreparedCharacterClass::Text { .. } => {
+                segments.last_mut().unwrap().extend(&chars[start..end]);
+            }
+            PreparedCharacterClass::Formula => segments.push(Vec::new()),
+            PreparedCharacterClass::Passthrough => {}
+        }
+        start = end;
+    }
+    segments
+}
+
+fn plan_text_segment<'a>(
+    chars: &[&Char],
+    translated: &[crate::translate::StyledCharacter],
     content_objects: &BTreeSet<lopdf::ObjectId>,
     output_fonts: &'a crate::context::OutputFonts,
 ) -> std::result::Result<TypesetPlan, TypesetPlanError<'a>> {
-    let chars = paragraph.chars();
-    if chars.iter().any(|character| {
-        !character_is_translatable(character, &content_objects.iter().map(|id| id.0).collect())
-    }) {
+    if chars.is_empty() {
         return Err(TypesetPlanError::Preserved(
             il::PreservedReason::TypesetProtocol,
         ));
@@ -1916,50 +2210,66 @@ fn plan_paragraph<'a>(
             il::PreservedReason::Unlocatable,
         ));
     }
-    let bold = chars.iter().any(|character| {
-        character.layout.is_some_and(|layout| {
-            matches!(
-                layout.label,
-                LayoutLabel::DocTitle | LayoutLabel::ParagraphTitle
-            )
-        })
-    });
-    let font = if bold {
-        &output_fonts.bold
-    } else {
-        &output_fonts.regular
-    };
-    let face = ttf_parser::Face::parse(&font.bytes, 0)
-        .map_err(|_| TypesetPlanError::Preserved(il::PreservedReason::UnsupportedFont))?;
-    let missing_characters = translated
-        .chars()
-        .filter(|value| face.glyph_index(*value).is_none())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .take(16)
-        .collect::<String>();
-    if !missing_characters.is_empty() {
-        return Err(TypesetPlanError::MissingGlyphs {
-            missing_characters,
-            font,
+    if translated.is_empty() {
+        return Ok(TypesetPlan {
+            spans,
+            lines: Vec::new(),
+            baselines: Vec::new(),
+            font_size: chars[0].font_size.max(MIN_FONT_SIZE_PT),
         });
+    }
+    let regular = ttf_parser::Face::parse(&output_fonts.regular.bytes, 0)
+        .map_err(|_| TypesetPlanError::Preserved(il::PreservedReason::UnsupportedFont))?;
+    let bold = ttf_parser::Face::parse(&output_fonts.bold.bytes, 0)
+        .map_err(|_| TypesetPlanError::Preserved(il::PreservedReason::UnsupportedFont))?;
+    for (is_bold, face, font) in [
+        (false, &regular, &output_fonts.regular),
+        (true, &bold, &output_fonts.bold),
+    ] {
+        let missing_characters = translated
+            .iter()
+            .filter(|character| character.bold == is_bold)
+            .map(|character| character.value)
+            .filter(|value| face.glyph_index(*value).is_none())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .take(16)
+            .collect::<String>();
+        if !missing_characters.is_empty() {
+            return Err(TypesetPlanError::MissingGlyphs {
+                missing_characters,
+                font,
+            });
+        }
     }
     let container = chars
         .iter()
         .filter_map(|character| character.layout.map(|layout| layout.bounds))
         .reduce(Rect::union)
-        .unwrap_or(paragraph.bounds);
+        .ok_or(TypesetPlanError::Preserved(
+            il::PreservedReason::TypesetOverflow,
+        ))?;
     let preferred = chars
         .iter()
         .map(|character| character.font_size)
         .sum::<f64>()
         / chars.len() as f64;
-    let first = &chars[0];
+    let first = chars[0];
     let mut size = preferred.max(MIN_FONT_SIZE_PT);
     while size + 0.001 >= MIN_FONT_SIZE_PT {
-        if let Some(lines) = wrap_text(translated, &face, size, container.right - container.left) {
-            let ascent = f64::from(face.ascender()) / f64::from(face.units_per_em()) * size;
-            let descent = f64::from(face.descender()) / f64::from(face.units_per_em()) * size;
+        if let Some(lines) = wrap_styled_text(
+            translated,
+            &regular,
+            &bold,
+            size,
+            container.right - container.left,
+        ) {
+            let ascent = f64::from(regular.ascender().max(bold.ascender()))
+                / f64::from(regular.units_per_em())
+                * size;
+            let descent = f64::from(regular.descender().min(bold.descender()))
+                / f64::from(regular.units_per_em())
+                * size;
             let first_y = first.baseline_origin.y.min(container.top - ascent);
             let baselines = lines
                 .iter()
@@ -1978,7 +2288,6 @@ fn plan_paragraph<'a>(
                     lines,
                     baselines,
                     font_size: size,
-                    bold,
                 });
             }
         }
@@ -1989,19 +2298,23 @@ fn plan_paragraph<'a>(
     ))
 }
 
-fn wrap_text(
-    text: &str,
-    face: &ttf_parser::Face<'_>,
+fn wrap_styled_text(
+    text: &[crate::translate::StyledCharacter],
+    regular: &ttf_parser::Face<'_>,
+    bold: &ttf_parser::Face<'_>,
     size: f64,
     width: f64,
-) -> Option<Vec<Vec<char>>> {
-    let units_per_em = f64::from(face.units_per_em());
+) -> Option<Vec<Vec<crate::translate::StyledCharacter>>> {
     let mut lines = vec![Vec::new()];
     let mut line_width = 0.0;
-    for token in text_tokens(text) {
+    for token in styled_text_tokens(text) {
         let token_width = token.iter().try_fold(0.0, |sum, character| {
-            let glyph = face.glyph_index(*character)?;
-            Some(sum + f64::from(face.glyph_hor_advance(glyph)?) / units_per_em * size)
+            let face = if character.bold { bold } else { regular };
+            let glyph = face.glyph_index(character.value)?;
+            Some(
+                sum + f64::from(face.glyph_hor_advance(glyph)?) / f64::from(face.units_per_em())
+                    * size,
+            )
         })?;
         if token_width > width + 0.01 {
             return None;
@@ -2016,14 +2329,16 @@ fn wrap_text(
     Some(lines)
 }
 
-fn text_tokens(text: &str) -> Vec<Vec<char>> {
-    let mut tokens = Vec::<Vec<char>>::new();
-    for character in text.chars() {
-        let joins_ascii_word = character.is_ascii_alphanumeric()
+fn styled_text_tokens(
+    text: &[crate::translate::StyledCharacter],
+) -> Vec<Vec<crate::translate::StyledCharacter>> {
+    let mut tokens = Vec::<Vec<crate::translate::StyledCharacter>>::new();
+    for &character in text {
+        let joins_ascii_word = character.value.is_ascii_alphanumeric()
             && tokens
                 .last()
                 .and_then(|token| token.last())
-                .is_some_and(char::is_ascii_alphanumeric);
+                .is_some_and(|previous| previous.value.is_ascii_alphanumeric());
         if joins_ascii_word {
             tokens.last_mut().unwrap().push(character);
         } else {
@@ -2089,27 +2404,58 @@ fn subset_tag(used: &BTreeSet<char>, bold: bool) -> String {
 
 fn install_typeset_replacements(
     plan: &TypesetPlan,
-    resource_name: &str,
-    cids: &BTreeMap<char, u16>,
+    fonts: &BTreeMap<bool, BuiltOutputFont>,
     replacements: &mut BTreeMap<SpanKey, Vec<u8>>,
 ) -> Result<()> {
-    let mut command = format!("/{resource_name} {} Tf ", pdf_number(plan.font_size));
+    if plan.lines.is_empty() {
+        replacements.insert(plan.spans[0], Vec::new());
+        for span in &plan.spans[1..] {
+            replacements.insert(*span, Vec::new());
+        }
+        return Ok(());
+    }
+    let mut command = String::new();
+    let mut emitted_run = false;
     for (index, line) in plan.lines.iter().enumerate() {
         let (x, y) = plan.baselines[index];
-        if index > 0 {
+        if emitted_run {
             command.push_str(" Tj\n");
         }
-        command.push_str(&format!("1 0 0 1 {} {} Tm <", pdf_number(x), pdf_number(y)));
-        for character in line {
-            let cid = cids.get(character).ok_or_else(|| {
+        command.push_str(&format!("1 0 0 1 {} {} Tm ", pdf_number(x), pdf_number(y)));
+        let mut run_start = 0;
+        while run_start < line.len() {
+            let bold = line[run_start].bold;
+            let mut run_end = run_start + 1;
+            while run_end < line.len() && line[run_end].bold == bold {
+                run_end += 1;
+            }
+            if emitted_run && run_start > 0 {
+                command.push_str(" Tj ");
+            }
+            let output_font = fonts.get(&bold).ok_or_else(|| {
                 MimusError::internal(
                     InternalReason::InvariantViolation,
-                    "typeset glyph has no output CID",
+                    "typeset style has no embedded font",
                 )
             })?;
-            command.push_str(&format!("{cid:04X}"));
+            command.push_str(&format!(
+                "/{} {} Tf <",
+                output_font.font.resource_name,
+                pdf_number(plan.font_size)
+            ));
+            for character in &line[run_start..run_end] {
+                let cid = output_font.cids.get(&character.value).ok_or_else(|| {
+                    MimusError::internal(
+                        InternalReason::InvariantViolation,
+                        "typeset glyph has no output CID",
+                    )
+                })?;
+                command.push_str(&format!("{cid:04X}"));
+            }
+            command.push('>');
+            emitted_run = true;
+            run_start = run_end;
         }
-        command.push('>');
     }
     replacements.insert(plan.spans[0], command.into_bytes());
     for span in &plan.spans[1..] {
@@ -2118,21 +2464,25 @@ fn install_typeset_replacements(
     Ok(())
 }
 
-fn planned_characters(plan: &TypesetPlan, font: &EmbeddedFont) -> Vec<TypesetCharacter> {
-    let advances = font
-        .glyphs
-        .iter()
-        .map(|(_, character, advance)| (*character, *advance))
-        .collect::<BTreeMap<_, _>>();
+fn planned_characters(
+    plan: &TypesetPlan,
+    fonts: &BTreeMap<bool, BuiltOutputFont>,
+) -> Vec<TypesetCharacter> {
     let mut output = Vec::new();
     for (line, &(start_x, baseline_y)) in plan.lines.iter().zip(&plan.baselines) {
         let mut x = start_x;
         for character in line {
+            let font = &fonts[&character.bold].font;
+            let advance = font
+                .glyphs
+                .iter()
+                .find_map(|(_, value, advance)| (*value == character.value).then_some(*advance))
+                .expect("typeset glyph exists in its embedded font");
             output.push(TypesetCharacter {
-                unicode: *character,
+                unicode: character.value,
                 baseline_origin: il::Point { x, y: baseline_y },
             });
-            x += f64::from(advances[character]) / f64::from(font.units_per_em) * plan.font_size;
+            x += f64::from(advance) / f64::from(font.units_per_em) * plan.font_size;
         }
     }
     output
@@ -3008,6 +3358,10 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(request.text.to_owned())
         }
+
+        fn model_id(&self) -> &str {
+            "none"
+        }
     }
 
     #[derive(Default)]
@@ -3035,6 +3389,18 @@ mod tests {
     impl Translator for CjkTranslator {
         fn translate(&self, _request: &crate::translate::TranslationRequest<'_>) -> Result<String> {
             Ok("MIMUS中文测试".to_owned())
+        }
+    }
+
+    struct StaticTranslator {
+        output: &'static str,
+        calls: AtomicUsize,
+    }
+
+    impl Translator for StaticTranslator {
+        fn translate(&self, _request: &crate::translate::TranslationRequest<'_>) -> Result<String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.output.to_owned())
         }
     }
 
@@ -4548,12 +4914,365 @@ mod tests {
 
         translate(&mut document, &context).unwrap();
 
-        assert_eq!(translator.inputs.lock().unwrap().as_slice(), ["MI", "!"]);
+        assert_eq!(translator.inputs.lock().unwrap().as_slice(), ["MI!"]);
         assert_eq!(
             document.il.pages[0].paragraphs[0]
                 .translated_text
                 .as_deref(),
-            Some("[MI]MUS[!]")
+            Some("[MI!]")
+        );
+    }
+
+    #[test]
+    fn inline_formula_uses_one_placeholder_and_its_source_span_is_never_replaced() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("inline-formula.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        pdf.get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(
+                b"BT /F1 12 Tf\n1 0 0 1 72 120 Tm\n(MI) Tj (M) Tj (US) Tj\nET\n".to_vec(),
+            );
+        pdf.save(&input).unwrap();
+        let mut document = Document::for_inspection(&input);
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: "\u{4e2d}{v1}\u{6587}",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let TextCarrier::Chars { chars } = &mut document.il.pages[0].paragraphs[0].text;
+        for character in &mut chars[..2] {
+            character.layout.as_mut().unwrap().bounds = Rect {
+                left: 72.0,
+                bottom: 90.0,
+                right: 122.0,
+                top: 135.0,
+            };
+        }
+        for character in &mut chars[3..] {
+            character.layout.as_mut().unwrap().bounds = Rect {
+                left: 130.0,
+                bottom: 90.0,
+                right: 180.0,
+                top: 135.0,
+            };
+        }
+        let formula_span = (
+            chars[2].passthrough.content_object,
+            chars[2].passthrough.byte_start,
+            chars[2].passthrough.byte_end,
+        );
+        let layout = chars[2].layout.as_mut().unwrap();
+        layout.label = LayoutLabel::InlineFormula;
+        layout.policy = TranslationPolicy::Passthrough;
+
+        styles_and_formulas(&mut document, &context).unwrap();
+        assert_eq!(
+            document
+                .prepared_translations
+                .get(&(0, 0))
+                .unwrap()
+                .request_text(),
+            "MI{v1}US"
+        );
+        translate(&mut document, &context).unwrap();
+        assert_eq!(
+            document.il.pages[0].paragraphs[0]
+                .translated_text
+                .as_deref(),
+            Some("\u{4e2d}\u{6587}")
+        );
+
+        typeset(&mut document, &context).unwrap();
+        assert!(
+            document.il.pages[0].paragraphs[0].preserved.is_none(),
+            "{:?}",
+            document.il.pages[0].paragraphs[0].preserved
+        );
+        assert_eq!(document.rewrites.len(), 1);
+        assert!(document.rewrites[0].replacements.len() >= 2);
+        assert!(document.rewrites.iter().all(|rewrite| {
+            rewrite.replacements.iter().all(|replacement| {
+                (
+                    replacement.content_object.0,
+                    replacement.byte_start,
+                    replacement.byte_end,
+                ) != formula_span
+            })
+        }));
+    }
+
+    #[test]
+    fn restored_body_bold_ranges_use_distinct_embedded_fonts() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: "\u{4e2d}<b1>\u{6587}</b1>\u{6d4b}",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let TextCarrier::Chars { chars } = &mut document.il.pages[0].paragraphs[0].text;
+        for character in chars.iter_mut() {
+            character.layout.as_mut().unwrap().bounds = Rect {
+                left: 72.0,
+                bottom: 90.0,
+                right: 172.0,
+                top: 135.0,
+            };
+        }
+        chars[1].font.resource_name = "BodyBold".to_owned();
+
+        styles_and_formulas(&mut document, &context).unwrap();
+        assert_eq!(
+            document
+                .prepared_translations
+                .get(&(0, 0))
+                .unwrap()
+                .request_text(),
+            "M<b1>I</b1>MUS"
+        );
+        translate(&mut document, &context).unwrap();
+        typeset(&mut document, &context).unwrap();
+
+        assert!(
+            document.il.pages[0].paragraphs[0].preserved.is_none(),
+            "{:?}",
+            document.il.pages[0].paragraphs[0].preserved
+        );
+        let fonts = &document.rewrites[0].embedded_fonts;
+        assert_eq!(fonts.len(), 2);
+        assert!(
+            fonts
+                .iter()
+                .any(|font| font.base_font.ends_with("-Regular"))
+        );
+        assert!(fonts.iter().any(|font| font.base_font.ends_with("-Bold")));
+        assert_eq!(document.rewrites[0].typeset_characters.len(), 3);
+    }
+
+    #[test]
+    fn every_placeholder_protocol_failure_preserves_the_whole_paragraph() {
+        for (output, expected, formula_count) in [
+            (
+                "<b1>Translated</b1>",
+                crate::translate::PlaceholderViolation::Missing,
+                1,
+            ),
+            (
+                "<b1>Translated</b1>{v1}{v1}",
+                crate::translate::PlaceholderViolation::Duplicate,
+                1,
+            ),
+            (
+                "<b1>Translated</b1>{v1}{v2}",
+                crate::translate::PlaceholderViolation::Unknown,
+                1,
+            ),
+            (
+                "</b1>Translated<b1>{v1}",
+                crate::translate::PlaceholderViolation::TagNesting,
+                1,
+            ),
+            (
+                "<b1>Translated</b1>{v1",
+                crate::translate::PlaceholderViolation::PartialToken,
+                1,
+            ),
+            (
+                "<b1>Translated</b1>{v2}U{v1}",
+                crate::translate::PlaceholderViolation::FormulaOrder,
+                2,
+            ),
+        ] {
+            let mut document = Document::for_inspection(fixture());
+            let engine = FakeEngine::default();
+            let translator = StaticTranslator {
+                output,
+                calls: AtomicUsize::new(0),
+            };
+            let events = RecordingEventSink::default();
+            let context = PassContext {
+                engine: &engine,
+                layout_detector: &SingleLineLayoutDetector,
+                translator: &translator,
+                events: &events,
+                snapshots: None,
+                config: crate::context::PipelineConfig::default(),
+            };
+            inspect(&mut document, &context).unwrap();
+            let TextCarrier::Chars { chars } = &mut document.il.pages[0].paragraphs[0].text;
+            for character in &mut chars[..2] {
+                character.font.resource_name = "BodyBold".to_owned();
+            }
+            let layout = chars[2].layout.as_mut().unwrap();
+            layout.label = LayoutLabel::InlineFormula;
+            layout.policy = TranslationPolicy::Passthrough;
+            if formula_count == 2 {
+                let layout = chars[4].layout.as_mut().unwrap();
+                layout.label = LayoutLabel::InlineFormula;
+                layout.policy = TranslationPolicy::Passthrough;
+            }
+
+            styles_and_formulas(&mut document, &context).unwrap();
+            translate(&mut document, &context).unwrap();
+
+            let paragraph = &document.il.pages[0].paragraphs[0];
+            assert_eq!(
+                paragraph.preserved,
+                Some(il::PreservedReason::PlaceholderViolation),
+                "output {output}"
+            );
+            assert!(paragraph.translated_text.is_none(), "output {output}");
+            assert_eq!(
+                translator.calls.load(Ordering::SeqCst),
+                1,
+                "output {output}"
+            );
+            assert!(
+                document.diagnostics.entries().iter().any(|diagnostic| {
+                    matches!(
+                        diagnostic,
+                        Diagnostic::PlaceholderViolation {
+                            page_index: 0,
+                            paragraph_index: 0,
+                            violation,
+                        } if *violation == expected
+                    )
+                }),
+                "output {output}, expected {expected:?}, diagnostics {:?}",
+                document.diagnostics.entries()
+            );
+            assert!(
+                document
+                    .diagnostics
+                    .debug_events()
+                    .iter()
+                    .any(|diagnostic| {
+                        matches!(
+                            diagnostic,
+                            crate::event::DiagnosticEvent::TranslationFailureProfile {
+                                page_index: 0,
+                                paragraph_index: 0,
+                                ..
+                            }
+                        )
+                    })
+            );
+            push_degradation_summary(&mut document);
+            assert!(document.diagnostics.entries().iter().any(|diagnostic| {
+                matches!(
+                    diagnostic,
+                    Diagnostic::DegradationSummary {
+                        preserved_paragraphs,
+                        ..
+                    } if preserved_paragraphs.len() == 1
+                        && preserved_paragraphs[0].placeholder_violation == Some(expected)
+                )
+            }));
+        }
+    }
+
+    #[test]
+    fn backend_echo_is_identity_output_without_degradation_or_warning() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: "MIMUS",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        styles_and_formulas(&mut document, &context).unwrap();
+
+        translate(&mut document, &context).unwrap();
+
+        let paragraph = &document.il.pages[0].paragraphs[0];
+        assert_eq!(paragraph.translated_text.as_deref(), Some("MIMUS"));
+        assert_eq!(paragraph.preserved, None);
+        assert_eq!(document.diagnostics.warning_count(), 0);
+        assert!(matches!(
+            document.diagnostics.entries(),
+            [Diagnostic::TranslationIdentity {
+                page_index: 0,
+                paragraph_index: 0,
+                request_characters: 5,
+            }]
+        ));
+    }
+
+    #[test]
+    fn prose_shaped_echo_rate_emits_one_document_warning() {
+        const PROSE: &str = "MIMUSMIMUSMIMUSMIMUSMIMUSMIMUSMIMUSMIMUS";
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: PROSE,
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let original = paragraph.chars().to_vec();
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars.clear();
+        for _ in 0..8 {
+            chars.extend(original.iter().cloned());
+        }
+        styles_and_formulas(&mut document, &context).unwrap();
+
+        translate(&mut document, &context).unwrap();
+
+        assert_eq!(document.diagnostics.warning_count(), 1);
+        assert!(
+            document
+                .diagnostics
+                .entries()
+                .iter()
+                .any(|diagnostic| matches!(
+                    diagnostic,
+                    Diagnostic::SuspiciousTranslationEchoRate {
+                        identity_count: 1,
+                        prose_paragraph_count: 1,
+                    }
+                ))
         );
     }
 
@@ -4652,6 +5371,7 @@ mod tests {
                         page_index: 0,
                         paragraph_index: 0,
                         reason: il::PreservedReason::UnreliableUnicode,
+                        placeholder_violation: None,
                     }]
                 ))
         );
@@ -4781,6 +5501,7 @@ mod tests {
                         page_index: 0,
                         paragraph_index: 0,
                         reason: il::PreservedReason::UnreliableUnicode,
+                        placeholder_violation: None,
                     }]
         )));
     }

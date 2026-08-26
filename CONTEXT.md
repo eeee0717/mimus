@@ -26,7 +26,7 @@
 | 17 | V1 单进程；PDFium 崩溃（abort）接受，子进程隔离推 V2 | — |
 | 18 | 输出字体：Noto Sans SC 单族走运行时资产链（flag > env > config > SHA 缓存 > manifest 下载），Regular/Bold 经 `PassContext` 注入、subsetter 子集化；`--font`/`--font-bold` 逃生门；italic 映射正常字重。当前离线恢复 manifest 暂以同一份 2.004 可变字体承载两个逻辑槽，静态双字重仍是明确 follow-up | [ADR-0018](docs/adr/0018-output-font-assets.md) |
 | 19 | 术语：**保留自动术语提取**（独立 pass，LLM）+ `--glossary` 用户术语表 | — |
-| 20 | 翻译层：`Translator` trait 可扩展；V1 实现 openai 兼容 + `none` 直通；占位符协议失败降级保原文 | — |
+| 20 | 翻译层：`Translator` trait 可扩展；V1 实现 OpenAI-compatible Responses API + `none` 直通；后端原样回显是可缓存的 `Identity` 结果，不降级、不触发 strict，另以信息诊断与文档级可疑 echo 率告警观测；真正的占位符协议失败携带 subtype 并仅降级所属段落 | [ADR-0016](docs/adr/0016-responses-api-and-translation-config.md)、[ADR-0017](docs/adr/0017-translation-degradation-and-strict.md) |
 | 21 | 翻译缓存：V1 即做，redb，键含(原文,模型,目标语,prompt 版本,术语指纹)；`--no-cache` | — |
 | 22 | 推理纯 CPU（ort CPU EP）；GPU/NPU EP 不进 V1 | — |
 | 23 | 质量回归四件套：全语料 IL 快照 + 占位符守恒 + 零 panic + 几何断言；**CI 绿才能合并**；渲染像素 diff 待渲染路径稳定后加 | — |
@@ -59,7 +59,10 @@
 | 不翻·原样保留 | header, footer, header_image, footer_image, image, chart, seal, algorithm, display_formula, formula_number, number, vertical_text, reference, reference_content, table（表体，`--translate-table` 可开） |
 | 占位符处理 | inline_formula（在所属段落内以 `{v1}` 占位送翻，返回后还原） |
 
-政策表按**版面类别**划分，与之正交的还有一条按**文本朝向**的划分：**非直立文本一律不翻译、原样 passthrough**，优先于类别政策（决策 #32）。
+政策表按**版面类别**划分，生效前提是 layout detector 已给出对应标签。PP-DocLayoutV3
+接入生产前，`SingleLineLayoutDetector` / replay 只能证明已提供标签下的政策行为，不能证明
+真实论文已获得 25 类分类。与类别正交的还有一条按**文本朝向**的划分：**非直立文本一律
+不翻译、原样 passthrough**，优先于类别政策（决策 #32）。
 
 ## 术语表
 
@@ -105,7 +108,7 @@
 ### 翻译层
 
 - **Translator trait**：翻译后端抽象。V1：`openai`（endpoint+key+model）与 `none`（原文直通，离线测试排版链路）。
-- **占位符协议**：公式→`{v1}`、富文本→`<b1>…</b1>`；失败模式（占位符丢失/重复、原样回显）一律降级保原文。
+- **占位符协议**：公式→`{v1}`、富文本→`<b1>…</b1>`；缺失、重复、未知 token、标签嵌套、部分 token、公式乱序六类失败均携带稳定 subtype，并只降级所属段落。输出与请求完全相同是 `Identity`，不是协议失败；它保留原文、进入独立 identity cache、发信息诊断且不触发 strict。散文形状段的高 echo 率另发单条文档级 warning。
 - **自动术语提取（ExtractTerms）**：翻译前的独立 LLM pass，产出全文术语表注入翻译 prompt；用户 `--glossary` 优先覆盖；`--dump-glossary` 导出供人工校对后回传（`--no-auto-terms` 可关）。
 - **翻译缓存**：段落级，redb，键含 prompt 版本与术语指纹。
 

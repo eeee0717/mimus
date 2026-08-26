@@ -171,6 +171,33 @@ mod tests {
     }
 
     #[test]
+    fn failure_profiles_include_only_redacted_shape_metadata() {
+        let parent = tempfile::tempdir().unwrap();
+        let directory = parent.path().join("debug");
+        let debug = DebugArtifacts::create(directory.clone()).unwrap();
+        let response_canary = "response-secret-canary";
+
+        debug
+            .write_diagnostics(&[DiagnosticEvent::TranslationFailureProfile {
+                page_index: 1,
+                paragraph_index: 3,
+                response_bytes: response_canary.len(),
+                response_characters: response_canary.chars().count(),
+                token_count: 2,
+                token_scan_valid: false,
+            }])
+            .unwrap();
+
+        let contents =
+            String::from_utf8(std::fs::read(directory.join("diagnostics.ndjson")).unwrap())
+                .unwrap();
+        assert!(contents.contains("\"id\":\"translation_failure_profile\""));
+        assert!(contents.contains("\"response_characters\":22"));
+        assert!(!contents.contains(response_canary));
+        assert!(!contents.contains("response_text"));
+    }
+
+    #[test]
     fn empty_diagnostics_still_creates_an_empty_file() {
         let parent = tempfile::tempdir().unwrap();
         let directory = parent.path().join("debug");

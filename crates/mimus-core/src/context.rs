@@ -9,7 +9,7 @@ use crate::event::{Diagnostics, EventSink, PageDegradeReason, RecoveryKind, Stag
 use crate::geometry::PageFrame;
 use crate::il;
 use crate::scan::{PageClass, PageEvidence};
-use crate::translate::Translator;
+use crate::translate::{PreparedTranslation, Translator};
 use crate::walk::{WalkedChar, WalkedContentStream};
 use crate::write::{PageRewrite, WriteReport};
 
@@ -75,6 +75,12 @@ pub struct Document {
     pub pdf: Option<LopdfDocument>,
     pub il: il::Document,
     pub diagnostics: Diagnostics,
+    pub(crate) prepared_translations:
+        std::collections::BTreeMap<(usize, usize), PreparedTranslation>,
+    pub(crate) restored_translations:
+        std::collections::BTreeMap<(usize, usize), crate::translate::RestoredTranslation>,
+    pub(crate) placeholder_violations:
+        std::collections::BTreeMap<(usize, usize), crate::translate::PlaceholderViolation>,
     pub(crate) extracted_pages: Vec<ExtractedPage>,
     pub(crate) rewrites: Vec<PageRewrite>,
     pub(crate) write_report: Option<WriteReport>,
@@ -98,6 +104,9 @@ impl Document {
             pdf: None,
             il: il::Document::default(),
             diagnostics: Diagnostics::default(),
+            prepared_translations: std::collections::BTreeMap::new(),
+            restored_translations: std::collections::BTreeMap::new(),
+            placeholder_violations: std::collections::BTreeMap::new(),
             extracted_pages: Vec::new(),
             rewrites: Vec::new(),
             write_report: None,
@@ -113,6 +122,9 @@ impl Document {
             pdf: None,
             il: il::Document::default(),
             diagnostics: Diagnostics::default(),
+            prepared_translations: std::collections::BTreeMap::new(),
+            restored_translations: std::collections::BTreeMap::new(),
+            placeholder_violations: std::collections::BTreeMap::new(),
             extracted_pages: Vec::new(),
             rewrites: Vec::new(),
             write_report: None,
