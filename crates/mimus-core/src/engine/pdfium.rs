@@ -183,10 +183,19 @@ impl PdfInspector for PdfiumEngine {
 
 impl Rasterizer for PdfiumEngine {
     fn rasterize_page(&self, pdf: &[u8], page_index: usize) -> Result<RgbaImage> {
+        self.rasterize_page_at_scale(pdf, page_index, 1.0)
+    }
+
+    fn rasterize_page_at_scale(
+        &self,
+        pdf: &[u8],
+        page_index: usize,
+        pixels_per_point: f32,
+    ) -> Result<RgbaImage> {
         let document = self.load(pdf)?;
         let page = Self::page(&document, page_index)?;
-        let width = pixel_dimension(page.width().value, "width")?;
-        let height = pixel_dimension(page.height().value, "height")?;
+        let width = pixel_dimension(page.width().value, pixels_per_point, "width")?;
+        let height = pixel_dimension(page.height().value, pixels_per_point, "height")?;
         let bitmap = page
             .render_with_config(
                 &PdfRenderConfig::new()
@@ -230,14 +239,20 @@ fn pdfium_rect(value: PdfRect) -> Rect {
     }
 }
 
-fn pixel_dimension(points: f32, name: &str) -> Result<i32> {
-    if !points.is_finite() || points <= 0.0 || points.ceil() > i32::MAX as f32 {
+fn pixel_dimension(points: f32, pixels_per_point: f32, name: &str) -> Result<i32> {
+    let pixels = points * pixels_per_point;
+    if !points.is_finite()
+        || points <= 0.0
+        || !pixels_per_point.is_finite()
+        || pixels_per_point <= 0.0
+        || pixels.ceil() > i32::MAX as f32
+    {
         return Err(MimusError::input(
             InputReason::UnsupportedPdf,
             format!("page {name} {points} cannot be rasterized"),
         ));
     }
-    Ok(points.ceil() as i32)
+    Ok(pixels.ceil() as i32)
 }
 
 #[cfg(test)]

@@ -1539,12 +1539,11 @@ fn check_pdf_structure(manifest: &Manifest, document: &qpdf::Document) -> Result
         if dictionary.get("/Contents").and_then(pdf_text) != annotation.contents.as_deref() {
             problems.push(format!("annotation {} contents 不符", annotation.object));
         }
-        if let Some(field_name) = &annotation.field_name {
-            if dictionary.get("/T").and_then(pdf_text) != Some(field_name)
-                || dictionary.get("/FT").and_then(Value::as_str) != Some("/Tx")
-            {
-                problems.push(format!("widget {} field name/type 不符", annotation.object));
-            }
+        if let Some(field_name) = &annotation.field_name
+            && (dictionary.get("/T").and_then(pdf_text) != Some(field_name)
+                || dictionary.get("/FT").and_then(Value::as_str) != Some("/Tx"))
+        {
+            problems.push(format!("widget {} field name/type 不符", annotation.object));
         }
     }
 
@@ -1560,7 +1559,7 @@ fn check_pdf_structure(manifest: &Manifest, document: &qpdf::Document) -> Result
                 .context("destination name tree /Names is not an array")?,
             None => &[],
         };
-        if names.len() % 2 != 0 {
+        if !names.len().is_multiple_of(2) {
             problems.push(format!(
                 "destination name tree has odd /Names length {}",
                 names.len()
@@ -1841,7 +1840,7 @@ fn reference_number(value: &Value) -> Option<u32> {
 }
 
 fn decode_hex(text: &str) -> Result<Vec<u8>> {
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         bail!("odd-length hex string");
     }
     (0..text.len())

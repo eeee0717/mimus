@@ -1275,7 +1275,7 @@ fn segment_codes(bytes: &[u8], spaces: &[CodeSpace]) -> Vec<Vec<u8>> {
 }
 
 fn decode_utf16be(bytes: &[u8]) -> FontResult<Vec<char>> {
-    if bytes.is_empty() || bytes.len() % 2 != 0 {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(2) {
         return Err(FontFailure);
     }
     let words = bytes

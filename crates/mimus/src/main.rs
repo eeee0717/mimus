@@ -325,16 +325,16 @@ fn finish_command(
     document: &Document,
     outcome: Result<CommandOutcome>,
 ) -> ExitCode {
-    if let Err(error) = &outcome {
-        if is_protocol_failure(error) {
-            return session.finish_error(outcome.unwrap_err());
-        }
+    if let Err(error) = &outcome
+        && is_protocol_failure(error)
+    {
+        return session.finish_error(outcome.unwrap_err());
     }
 
-    if let Some(debug) = debug {
-        if let Err(error) = debug.write_diagnostics(&document.diagnostics.debug_events()) {
-            return session.finish_error(error);
-        }
+    if let Some(debug) = debug
+        && let Err(error) = debug.write_diagnostics(&document.diagnostics.debug_events())
+    {
+        return session.finish_error(error);
     }
     let diagnostics = document.diagnostics.events();
     if let Err(error) = session.emit_diagnostics(&diagnostics) {
