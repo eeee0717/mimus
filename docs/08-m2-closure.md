@@ -54,7 +54,7 @@ disconnect 的独立 server 均为 1 次术语 + 1 次段落请求；malformed �
 保留所属段并以 `translation_failure` 汇总。prompt version 没有 CLI override，段落和
 术语 prompt 失效分别由 cache-key unit tests 直接钉死。
 
-## 真实论文失效与当前声明边界
+## 真实论文失效与 L5 结论
 
 2026-08-25 对 `1706.03762v7.pdf` 的真实运行已经确认旧实现不可用：Translate 阶段 197
 段有结果，其中 153 段含 7875 个汉字；Typeset 后只剩 36 个恒等段，汉字归零。直接原因是
@@ -63,12 +63,41 @@ disconnect 的独立 server 均为 1 次术语 + 1 次段落请求；malformed �
 `placeholder_violation`，逐字符 alignment 诊断又使全局 100 条预算丢弃 427 条后续诊断。
 
 本 stack 已分别修复输出字体资产链、echo identity 语义、placeholder subtype 保真、按 ID
-诊断预算、cache/strict 传播和上述离线回归矩阵。但 deterministic gate **只证明 fake
-Responses 后端、固定 layout 输入和测试字体下的离线闭环**。它不证明真实 provider 的
-翻译行为、真实 PP-DocLayoutV3 分类、生产字体的最终静态双字重，也不证明这篇论文已经
-恢复可用。本轮没有读取 `.env.local`，没有调用真实 API，也没有执行 L5 重跑；在经用户
-单独授权并完成真实 PDF 的逐阶段汉字守恒、双提取和视觉验收前，不得把本记录表述为
-「真实论文翻译可用」。
+诊断预算、cache/strict 传播和上述离线回归矩阵。deterministic gate 仍然**只证明 fake
+Responses 后端、固定 layout 输入和测试字体下的离线闭环**；真实 provider 必须由单独的
+L5 验收覆盖。
+
+2026-08-26 经用户明确授权，以 SHA-256
+`bdfaa68d8984f0dc02beaca527b76f207d99b666d31d1da728ee0728182df697` 的原始
+`1706.03762v7.pdf`、`gpt-5.6-luna`、Responses API、`zh-CN`、自动术语、并发 4 和
+Noto Sans SC 2.004 可变字体执行 L5。授权运行命中 189 条既有真实缓存并发出 109 个真实
+Responses 请求，最终得到 298 条完整缓存；后续修复验证把 HTTP(S) proxy 指向拒绝连接的
+loopback，并以伪 key 重放 298/298 命中，因此没有额外公网调用。真实输出先后暴露并修复了：
+共享 `TJ` operand 的 Identity/译文冲突、注入文本状态污染后续相对定位、长页跨引擎 owner
+归属、4 位 PDF 数值精度累积、模型换行误判为缺字、共享 span 失败扩大为整页回退、PDFium
+行末连字符 `U+0002` 等价类，以及 strict 在首个降级后过早终止。
+
+最终 clean replay 的 L5 checklist 全绿：
+
+- `06-translate` 为 334 个 `translated_text`、155 个含汉字段、7,881 个汉字；
+  `07-typeset`、`08-font_embed`、`09-write` 及 Poppler/MuPDF 最终提取均为 6,448 个汉字，
+  保留率 **81.82%**。1,433 个下降全部有 typed reason：94 个 `typeset_overflow` 段损失
+  1,003、6 个 `typeset_protocol` 段损失 42、6 个 `unsupported_font` 段损失 388、1 个
+  `unreliable_unicode` 段损失 0；未解释下降为 0。
+- 前两页 150 dpi 渲染可见中文；`qpdf --check` 通过且仍为 15 页。输入的 2,215,244 字节
+  与输出前缀 SHA-256 完全相同；113 个链接注释、16 个 XObject（10 Form/6 Image）、
+  22 个页级 outline 映射和 7 个顶层书签计数不变。
+- Poppler 与 MuPDF 提取均无 `{vN}`、`{lN}` 或 `<bN>` 残留；真实运行没有 placeholder
+  violation。6 个 `unsupported_output_glyph` 全部可见并各自列出孤立缺字符（`∗`、`Ł`、
+  `ϵ`）与字体 SHA；3 个 `page_degraded` 全部可见。唯一被预算截断的是 108 条额外
+  `translation_identity` 信息诊断。
+- strict 重放命中 298/298 缓存，返回 Translation/4，不发布输出，并与 normal 使用完全
+  相同的 summary：页 12–14 加 107 个保留段（94 overflow、6 protocol、6 font、1
+  unreliable Unicode）。全部 L5 产物按真实 key 固定字节扫描为零命中。
+
+据约定的 80% 门槛，这篇真实论文的 M2 路径可重新声明为可用，但不是“全文无降级”：仍有
+107 个段落和 3 个嵌套 Form 页面保留原文。真实 PP-DocLayoutV3 集成和生产静态双字重仍是
+后续范围；本结论不替代对应 issue，也不授权合并 stack。
 
 ## Acceptance evidence
 

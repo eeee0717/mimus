@@ -705,6 +705,70 @@ fn write_repeated_lines_layout(directory: &Path, line_count: usize) -> PathBuf {
     path
 }
 
+fn write_relative_tail_pdf(directory: &Path) -> PathBuf {
+    let input =
+        repo_root().join("corpus/fixtures/unit-base-01-single-line/unit-base-01-single-line.pdf");
+    let output = directory.join("relative-tail.pdf");
+    let mut document = lopdf::Document::load(input).unwrap();
+    document
+        .get_object_mut((9, 0))
+        .unwrap()
+        .as_stream_mut()
+        .unwrap()
+        .set_plain_content(
+            b"BT /F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\n0 -20 Td (TAIL) Tj\nET\n".to_vec(),
+        );
+    document.save(&output).unwrap();
+    output
+}
+
+fn write_relative_tail_layout(directory: &Path) -> PathBuf {
+    let path = directory.join("relative-tail-layout.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "pages": [{
+                "page_index": 0,
+                "geometry": {
+                    "width": 300.0,
+                    "height": 200.0,
+                    "rotate_degrees": 0
+                },
+                "regions": [
+                    {
+                        "bounds": {
+                            "left": 68.0,
+                            "bottom": 114.0,
+                            "right": 116.0,
+                            "top": 132.0
+                        },
+                        "reading_order": 0,
+                        "label": "text",
+                        "source": "model",
+                        "confidence": 1.0
+                    },
+                    {
+                        "bounds": {
+                            "left": 68.0,
+                            "bottom": 94.0,
+                            "right": 112.0,
+                            "top": 112.0
+                        },
+                        "reading_order": 1,
+                        "label": "number",
+                        "source": "model",
+                        "confidence": 1.0
+                    }
+                ]
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    path
+}
+
 fn write_nested_form_with_bad_matrix(directory: &Path) -> PathBuf {
     let input =
         repo_root().join("corpus/fixtures/unit-xobj-depth-overflow/unit-xobj-depth-overflow.pdf");
@@ -783,6 +847,42 @@ fn realistic_han_survives_every_il_stage_and_both_pdf_extractors() {
         }
     }
     assert_valid_pdf(&output_path, "unit-layout-07-policy-zones");
+    server.assert_clean();
+}
+
+#[test]
+fn translated_text_does_not_move_a_relative_passthrough_line() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = write_relative_tail_pdf(directory.path());
+    let recording = write_relative_tail_layout(directory.path());
+    let output_path = directory.path().join("relative-tail.zh.pdf");
+    let server = GateResponsesServer::start([ScriptedReply::Output("中文")]);
+    let output = run_openai_path(
+        &input,
+        Some(&recording),
+        &server,
+        RunOptions {
+            output: &output_path,
+            debug: None,
+            cache: None,
+            model: "m2-relative-tail-model",
+            target_language: "zh-CN",
+            glossary: None,
+            auto_terms: false,
+            strict: false,
+        },
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    for extractor in ["poppler", "mupdf"] {
+        let extracted = extract_pdf_text(&output_path, extractor);
+        assert!(extracted.contains("中文"), "{extractor}: {extracted:?}");
+        assert!(extracted.contains("TAIL"), "{extractor}: {extracted:?}");
+    }
     server.assert_clean();
 }
 

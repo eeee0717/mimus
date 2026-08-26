@@ -110,15 +110,16 @@ fn run_stages(
     context: &PassContext<'_>,
     stages: &[(Stage, Pass)],
 ) -> Result<()> {
+    let includes_write = stages.iter().any(|(stage, _)| *stage == Stage::Write);
     for (pass_index, &(stage, pass)) in stages.iter().enumerate() {
+        if context.config.strict && stage == Stage::Write && document_has_degradation(document) {
+            push_degradation_summary(document);
+            return Err(strict_degradation_error(document));
+        }
         context
             .events
             .emit(Event::new(EventKind::StageStarted { stage }))?;
         pass(document, context)?;
-        if context.config.strict && document_has_degradation(document) {
-            push_degradation_summary(document);
-            return Err(strict_degradation_error(document));
-        }
         if let Some(snapshots) = context.snapshots {
             let snapshot = il::snapshot(&document.il);
             snapshots.write_snapshot(pass_index, stage, &snapshot)?;
@@ -128,6 +129,9 @@ fn run_stages(
             .emit(Event::new(EventKind::StageFinished { stage }))?;
     }
     push_degradation_summary(document);
+    if context.config.strict && !includes_write && document_has_degradation(document) {
+        return Err(strict_degradation_error(document));
+    }
     Ok(())
 }
 
@@ -2204,7 +2208,7 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
             .collect::<BTreeMap<_, _>>();
         let mut replacements = BTreeMap::<(lopdf::ObjectId, usize, usize), Vec<u8>>::new();
         let mut reused_fonts = BTreeSet::new();
-        let mut plans = Vec::new();
+        let mut planned_paragraphs = Vec::<(usize, Vec<TypesetPlan>)>::new();
         for paragraph in &page.paragraphs {
             if paragraph.preserved.is_some() {
                 if paragraph.translated_text.is_some() {
@@ -2230,32 +2234,6 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 ));
             }
             if translated == source {
-                for character in chars {
-                    if character.layout.is_some_and(|layout| {
-                        layout.label == LayoutLabel::Table
-                            && layout.policy == TranslationPolicy::Passthrough
-                    }) {
-                        continue;
-                    }
-                    let Some(content_object) = unique_page_content(character, &content_objects)?
-                    else {
-                        continue;
-                    };
-                    if !character.visible || character.text_transform != TextTransform::Upright {
-                        continue;
-                    }
-                    let key = span_key(character, content_object);
-                    let bytes = streams[&content_object].get(key.1..key.2).ok_or_else(|| {
-                        span_out_of_bounds(
-                            content_object,
-                            key.1,
-                            key.2,
-                            streams[&content_object].len(),
-                        )
-                    })?;
-                    replacements.entry(key).or_insert_with(|| bytes.to_vec());
-                    reused_fonts.insert(character.font.clone());
-                }
                 continue;
             }
 
@@ -2274,7 +2252,9 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 &content_objects,
                 output_fonts,
             ) {
-                Ok(paragraph_plans) => plans.extend(paragraph_plans),
+                Ok(paragraph_plans) => {
+                    planned_paragraphs.push((paragraph.reading_order, paragraph_plans));
+                }
                 Err(TypesetPlanError::Preserved(reason)) => {
                     preserved.push((page.index, paragraph.reading_order, reason));
                 }
@@ -2299,6 +2279,133 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 }
             }
         }
+
+        let translated_spans = planned_paragraphs
+            .iter()
+            .flat_map(|(_, plans)| plans)
+            .flat_map(|plan| plan.spans.iter().copied())
+            .collect::<BTreeSet<_>>();
+        let mut blocked_spans = BTreeSet::new();
+        for paragraph in &page.paragraphs {
+            if paragraph.preserved.is_some() {
+                continue;
+            }
+            let source = paragraph.source_text();
+            let translated = paragraph.translated_text.as_deref().ok_or_else(|| {
+                MimusError::internal(
+                    InternalReason::InvariantViolation,
+                    "an unpreserved paragraph has no translated text",
+                )
+            })?;
+            if translated != source {
+                continue;
+            }
+            let mut identity_spans = Vec::new();
+            for character in paragraph.chars() {
+                if character.layout.is_some_and(|layout| {
+                    layout.label == LayoutLabel::Table
+                        && layout.policy == TranslationPolicy::Passthrough
+                }) {
+                    continue;
+                }
+                let Some(content_object) = unique_page_content(character, &content_objects)? else {
+                    continue;
+                };
+                if !character.visible || character.text_transform != TextTransform::Upright {
+                    continue;
+                }
+                identity_spans.push(span_key(character, content_object));
+            }
+            identity_spans.sort_unstable();
+            identity_spans.dedup();
+            if identity_spans
+                .iter()
+                .any(|span| translated_spans.contains(span))
+            {
+                let output_fonts = context
+                    .config
+                    .output_fonts
+                    .as_ref()
+                    .expect("non-identity output font requirement was checked");
+                let restored = document
+                    .restored_translations
+                    .get(&(page.index, paragraph.reading_order));
+                match plan_paragraph(
+                    paragraph,
+                    translated,
+                    restored,
+                    &content_objects,
+                    output_fonts,
+                ) {
+                    Ok(paragraph_plans) => {
+                        planned_paragraphs.push((paragraph.reading_order, paragraph_plans));
+                    }
+                    Err(_) => {
+                        blocked_spans.extend(identity_spans.iter().copied());
+                    }
+                }
+                continue;
+            }
+            for character in paragraph.chars() {
+                let Some(content_object) = unique_page_content(character, &content_objects)? else {
+                    continue;
+                };
+                let key = span_key(character, content_object);
+                if !identity_spans.contains(&key) {
+                    continue;
+                }
+                let bytes = streams[&content_object].get(key.1..key.2).ok_or_else(|| {
+                    span_out_of_bounds(content_object, key.1, key.2, streams[&content_object].len())
+                })?;
+                replacements.entry(key).or_insert_with(|| bytes.to_vec());
+                reused_fonts.insert(character.font.clone());
+            }
+        }
+        if !blocked_spans.is_empty() {
+            loop {
+                let previous_len = blocked_spans.len();
+                for (_, plans) in &planned_paragraphs {
+                    if plans
+                        .iter()
+                        .flat_map(|plan| &plan.spans)
+                        .any(|span| blocked_spans.contains(span))
+                    {
+                        blocked_spans
+                            .extend(plans.iter().flat_map(|plan| plan.spans.iter().copied()));
+                    }
+                }
+                if blocked_spans.len() == previous_len {
+                    break;
+                }
+            }
+            planned_paragraphs.retain(|(reading_order, plans)| {
+                let blocked = plans
+                    .iter()
+                    .flat_map(|plan| &plan.spans)
+                    .any(|span| blocked_spans.contains(span));
+                if !blocked {
+                    return true;
+                }
+                let paragraph = page
+                    .paragraphs
+                    .iter()
+                    .find(|paragraph| paragraph.reading_order == *reading_order)
+                    .expect("planned paragraph belongs to its page");
+                if paragraph.translated_text.as_deref() != Some(paragraph.source_text().as_str()) {
+                    preserved.push((
+                        page.index,
+                        *reading_order,
+                        il::PreservedReason::TypesetProtocol,
+                    ));
+                }
+                false
+            });
+        }
+        planned_paragraphs.sort_by_key(|(reading_order, _)| *reading_order);
+        let plans = planned_paragraphs
+            .into_iter()
+            .flat_map(|(_, plans)| plans)
+            .collect::<Vec<_>>();
 
         let mut output_fonts = BTreeMap::new();
         let mut typeset_characters = Vec::new();
@@ -2557,6 +2664,7 @@ fn plan_text_segment<'a>(
             il::PreservedReason::Unlocatable,
         ));
     }
+    let translated = normalize_typeset_whitespace(translated);
     if translated.is_empty() {
         return Ok(TypesetPlan {
             spans,
@@ -2605,7 +2713,7 @@ fn plan_text_segment<'a>(
     let mut size = preferred.max(MIN_FONT_SIZE_PT);
     while size + 0.001 >= MIN_FONT_SIZE_PT {
         if let Some(lines) = wrap_styled_text(
-            translated,
+            &translated,
             &regular,
             &bold,
             size,
@@ -2643,6 +2751,37 @@ fn plan_text_segment<'a>(
     Err(TypesetPlanError::Preserved(
         il::PreservedReason::TypesetOverflow,
     ))
+}
+
+fn normalize_typeset_whitespace(
+    text: &[crate::translate::StyledCharacter],
+) -> Vec<crate::translate::StyledCharacter> {
+    let mut normalized = Vec::with_capacity(text.len());
+    for &character in text {
+        if character.value.is_whitespace() {
+            if !normalized.is_empty()
+                && !normalized
+                    .last()
+                    .is_some_and(|previous: &crate::translate::StyledCharacter| {
+                        previous.value == ' '
+                    })
+            {
+                normalized.push(crate::translate::StyledCharacter {
+                    value: ' ',
+                    bold: character.bold,
+                });
+            }
+        } else {
+            normalized.push(character);
+        }
+    }
+    if normalized
+        .last()
+        .is_some_and(|character| character.value == ' ')
+    {
+        normalized.pop();
+    }
+    normalized
 }
 
 fn wrap_styled_text(
@@ -2861,8 +3000,9 @@ fn install_typeset_replacements(
             "typeset span has an incompatible existing replacement",
         ));
     }
+    replacement.extend_from_slice(b"q\n");
     replacement.extend_from_slice(command.as_bytes());
-    replacement.extend_from_slice(b" Tj\n");
+    replacement.extend_from_slice(b" Tj\nQ\n");
     replacement.extend_from_slice(&terminal);
     for span in &plan.spans[1..] {
         let empty = empty_operand(*span)?;
@@ -2920,7 +3060,7 @@ fn planned_characters(
 }
 
 fn pdf_number(value: f64) -> String {
-    let mut output = format!("{value:.4}");
+    let mut output = format!("{value:.6}");
     while output.ends_with('0') {
         output.pop();
     }
@@ -3015,7 +3155,8 @@ fn validate_output_roundtrip(
                 context.config.baseline_tolerance_pt,
             )?;
         } else {
-            let retained = retained_input_characters(expected, rewrite)?;
+            let retained =
+                retained_input_characters(expected, rewrite, context.config.baseline_tolerance_pt)?;
             if retained.is_empty() {
                 validate_typeset_characters(
                     expected.index,
@@ -3071,6 +3212,7 @@ struct ExpectedOutputCharacter {
 fn retained_input_characters(
     page: &ExtractedPage,
     rewrite: &PageRewrite,
+    baseline_tolerance_pt: f64,
 ) -> Result<Vec<ExpectedOutputCharacter>> {
     let streams = page
         .content_streams
@@ -3140,6 +3282,12 @@ fn retained_input_characters(
             }
         }
     }
+    extend_engine_owners_by_contiguous_sequence(
+        &page.walked_characters,
+        &page.engine_characters,
+        &mut engine_owners,
+        baseline_tolerance_pt,
+    );
     inherit_pdfium_utf16_surrogate_owners(
         &page.walked_characters,
         &page.engine_characters,
@@ -3254,6 +3402,73 @@ fn source_characters_correspond(
         ))
 }
 
+fn extend_engine_owners_by_contiguous_sequence(
+    walked: &[crate::walk::WalkedChar],
+    engine: &[PageCharSnapshot],
+    owners: &mut [Option<usize>],
+    baseline_tolerance_pt: f64,
+) {
+    if owners.len() != engine.len() {
+        return;
+    }
+    let anchors = owners
+        .iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(engine_index, walk_index)| {
+            walk_index.map(|walk_index| (engine_index, walk_index))
+        })
+        .collect::<Vec<_>>();
+    let mut claimed_walk = vec![false; walked.len()];
+    for &(_, walk_index) in &anchors {
+        if let Some(claimed) = claimed_walk.get_mut(walk_index) {
+            *claimed = true;
+        }
+    }
+
+    let candidates_correspond = |walk_index: usize, engine_index: usize| {
+        source_characters_correspond(&walked[walk_index], &engine[engine_index])
+            && (walked[walk_index].baseline_origin.y - engine[engine_index].baseline_origin.y).abs()
+                <= baseline_tolerance_pt
+    };
+
+    for (engine_anchor, walk_anchor) in anchors {
+        let mut engine_index = engine_anchor;
+        let mut walk_index = walk_anchor;
+        while engine_index + 1 < engine.len() && walk_index + 1 < walked.len() {
+            let next_engine = engine_index + 1;
+            let next_walk = walk_index + 1;
+            if owners[next_engine].is_some()
+                || claimed_walk[next_walk]
+                || !candidates_correspond(next_walk, next_engine)
+            {
+                break;
+            }
+            owners[next_engine] = Some(next_walk);
+            claimed_walk[next_walk] = true;
+            engine_index = next_engine;
+            walk_index = next_walk;
+        }
+
+        let mut engine_index = engine_anchor;
+        let mut walk_index = walk_anchor;
+        while engine_index > 0 && walk_index > 0 {
+            let previous_engine = engine_index - 1;
+            let previous_walk = walk_index - 1;
+            if owners[previous_engine].is_some()
+                || claimed_walk[previous_walk]
+                || !candidates_correspond(previous_walk, previous_engine)
+            {
+                break;
+            }
+            owners[previous_engine] = Some(previous_walk);
+            claimed_walk[previous_walk] = true;
+            engine_index = previous_engine;
+            walk_index = previous_walk;
+        }
+    }
+}
+
 fn inherit_pdfium_utf16_surrogate_owners(
     walked: &[crate::walk::WalkedChar],
     engine: &[PageCharSnapshot],
@@ -3311,7 +3526,7 @@ fn validate_mixed_output_characters(
             .enumerate()
             .filter(|(index, actual_character)| {
                 !matched[*index]
-                    && actual_character.unicode == expected_character.unicode
+                    && output_unicode_matches(expected_character.unicode, actual_character)
                     && point_close(
                         expected_character.baseline_origin,
                         actual_character.baseline_origin,
@@ -3335,6 +3550,10 @@ fn validate_mixed_output_characters(
         matched[owner] = true;
     }
     Ok(())
+}
+
+fn output_unicode_matches(expected: Option<char>, actual: &PageCharSnapshot) -> bool {
+    actual.unicode == expected || (expected == Some('-') && actual.unicode_value == 2)
 }
 
 fn point_distance_squared(left: il::Point, right: il::Point) -> f64 {
@@ -5091,6 +5310,57 @@ mod tests {
     }
 
     #[test]
+    fn translated_line_breaks_are_normalized_before_font_coverage() {
+        let styled = "中\n\n文\t"
+            .chars()
+            .map(|value| crate::translate::StyledCharacter { value, bold: false })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            normalize_typeset_whitespace(&styled)
+                .iter()
+                .map(|character| character.value)
+                .collect::<String>(),
+            "中 文"
+        );
+        let translator = StaticTranslator {
+            output: "中\n\n\t",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let mut document =
+            translate_fixture_once(&translator, &events, config_with_test_output_fonts()).unwrap();
+        for character in match &mut document.il.pages[0].paragraphs[0].text {
+            TextCarrier::Chars { chars } => chars,
+        } {
+            character.layout.as_mut().unwrap().bounds = Rect {
+                left: 72.0,
+                bottom: 90.0,
+                right: 122.0,
+                top: 135.0,
+            };
+        }
+        let engine = FakeEngine::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+
+        typeset(&mut document, &context).unwrap();
+
+        assert_eq!(document.il.pages[0].paragraphs[0].preserved, None);
+        let output = document.rewrites[0]
+            .typeset_characters
+            .iter()
+            .map(|character| character.unicode)
+            .collect::<String>();
+        assert_eq!(output, "中");
+    }
+
+    #[test]
     fn unsafe_fit_preserves_the_paragraph_without_tiny_text() {
         let mut document = Document::new(fixture(), "unused.pdf");
         let engine = FakeEngine::default();
@@ -5212,6 +5482,25 @@ mod tests {
     }
 
     #[test]
+    fn mixed_output_validation_accepts_pdfium_line_end_hyphen_marker() {
+        let expected = TypesetCharacter {
+            unicode: '-',
+            baseline_origin: Point { x: 10.0, y: 20.0 },
+        };
+        let actual = PageCharSnapshot {
+            index: 0,
+            unicode: Some('\u{2}'),
+            unicode_value: 2,
+            is_hyphen: None,
+            baseline_origin: expected.baseline_origin,
+            tight_box: Rect::default(),
+            loose_box: Rect::default(),
+        };
+
+        validate_mixed_output_characters(0, &[], &[expected], &[actual], 0.001).unwrap();
+    }
+
+    #[test]
     fn exact_unicode_sequences_can_attribute_rewrites_without_baseline_links() {
         let pdf = LopdfDocument::load(fixture()).unwrap();
         let page_id = pdf.get_pages()[&1];
@@ -5236,6 +5525,21 @@ mod tests {
         assert!(!exact_unicode_sequence(&walked, &engine));
         engine.pop();
         assert!(!exact_unicode_sequence(&walked, &engine));
+    }
+
+    #[test]
+    fn retained_character_owners_extend_across_same_line_width_drift() {
+        let pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        let walked = walk_page(&pdf, page_id).unwrap().characters;
+        let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap();
+        engine[1].baseline_origin.x += 1.0;
+        engine[2].baseline_origin.x += 2.0;
+        let mut owners = vec![Some(0), None, None];
+
+        extend_engine_owners_by_contiguous_sequence(&walked[..3], &engine[..3], &mut owners, 0.001);
+
+        assert_eq!(owners, [Some(0), Some(1), Some(2)]);
     }
 
     #[test]
@@ -5267,6 +5571,13 @@ mod tests {
 
         assert_eq!(matrix, [1.0, 0.0, 0.0, -1.0, -5.0, 17.0]);
         assert!(content_relative_text_matrix([1.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn pdf_numbers_preserve_sub_millipoint_typeset_precision() {
+        assert_eq!(pdf_number(107.582849), "107.582849");
+        assert_eq!(pdf_number(9.941812), "9.941812");
+        assert_eq!(pdf_number(1.0), "1");
     }
 
     #[test]
@@ -5308,6 +5619,171 @@ mod tests {
         assert!(replacement.starts_with("[] TJ\n"), "{replacement}");
         assert!(replacement.contains(" Tm "), "{replacement}");
         assert_eq!(replacement.matches("/MimusR").count(), 2, "{replacement}");
+    }
+
+    #[test]
+    fn typeset_combines_identity_and_translated_paragraphs_that_share_one_operand() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let paragraph = document.il.pages[0].paragraphs.pop().unwrap();
+        let TextCarrier::Chars { mut chars } = paragraph.text;
+        let layout_bounds = Rect {
+            left: 72.0,
+            bottom: 90.0,
+            right: 172.0,
+            top: 135.0,
+        };
+        for character in &mut chars {
+            character.layout.as_mut().unwrap().bounds = layout_bounds;
+        }
+        let shared_span = (
+            chars[0].passthrough.content_object,
+            chars[0].passthrough.byte_start,
+            chars[0].passthrough.byte_end,
+        );
+        assert!(chars.iter().all(|character| {
+            (
+                character.passthrough.content_object,
+                character.passthrough.byte_start,
+                character.passthrough.byte_end,
+            ) == shared_span
+        }));
+        document.il.pages[0].paragraphs = vec![
+            Paragraph {
+                reading_order: 0,
+                bounds: layout_bounds,
+                text: TextCarrier::Chars {
+                    chars: chars[..1].to_vec(),
+                },
+                translated_text: Some("M".to_owned()),
+                preserved: None,
+            },
+            Paragraph {
+                reading_order: 1,
+                bounds: layout_bounds,
+                text: TextCarrier::Chars {
+                    chars: chars[1..].to_vec(),
+                },
+                translated_text: Some("中文".to_owned()),
+                preserved: None,
+            },
+        ];
+
+        typeset(&mut document, &context).unwrap();
+
+        assert_eq!(document.rewrites.len(), 1);
+        let values = document.rewrites[0]
+            .typeset_characters
+            .iter()
+            .map(|character| character.unicode)
+            .collect::<String>();
+        assert_eq!(values, "M中文");
+    }
+
+    #[test]
+    fn failed_shared_identity_preserves_only_its_span_component() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("two-spans.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        pdf.get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(
+                b"BT /F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\n0 -20 Td (MIMUS) Tj\nET\n".to_vec(),
+            );
+        pdf.save(&input).unwrap();
+        let mut document = Document::for_inspection(&input);
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let mut chars = document.il.pages[0]
+            .paragraphs
+            .iter()
+            .flat_map(|paragraph| paragraph.chars().iter().cloned())
+            .collect::<Vec<_>>();
+        chars.sort_by(|left, right| {
+            right
+                .baseline_origin
+                .y
+                .total_cmp(&left.baseline_origin.y)
+                .then_with(|| left.baseline_origin.x.total_cmp(&right.baseline_origin.x))
+        });
+        assert_eq!(chars.len(), 10);
+        let normal_bounds = Rect {
+            left: 70.0,
+            bottom: 90.0,
+            right: 170.0,
+            top: 135.0,
+        };
+        for character in &mut chars {
+            character.layout.as_mut().unwrap().bounds = normal_bounds;
+        }
+        chars[0].layout.as_mut().unwrap().bounds.right = 70.1;
+        assert_eq!(span_key(&chars[0], (9, 0)), span_key(&chars[4], (9, 0)));
+        assert_ne!(span_key(&chars[0], (9, 0)), span_key(&chars[5], (9, 0)));
+        document.il.pages[0].paragraphs = vec![
+            Paragraph {
+                reading_order: 0,
+                bounds: chars[0].layout.unwrap().bounds,
+                text: TextCarrier::Chars {
+                    chars: chars[..1].to_vec(),
+                },
+                translated_text: Some("M".to_owned()),
+                preserved: None,
+            },
+            Paragraph {
+                reading_order: 1,
+                bounds: normal_bounds,
+                text: TextCarrier::Chars {
+                    chars: chars[1..5].to_vec(),
+                },
+                translated_text: Some("中文".to_owned()),
+                preserved: None,
+            },
+            Paragraph {
+                reading_order: 2,
+                bounds: normal_bounds,
+                text: TextCarrier::Chars {
+                    chars: chars[5..].to_vec(),
+                },
+                translated_text: Some("测试".to_owned()),
+                preserved: None,
+            },
+        ];
+
+        typeset(&mut document, &context).unwrap();
+
+        assert_eq!(
+            document.il.pages[0].paragraphs[1].preserved,
+            Some(il::PreservedReason::TypesetProtocol)
+        );
+        assert_eq!(document.il.pages[0].paragraphs[2].preserved, None);
+        let values = document.rewrites[0]
+            .typeset_characters
+            .iter()
+            .map(|character| character.unicode)
+            .collect::<String>();
+        assert_eq!(values, "测试");
     }
 
     #[test]
@@ -6637,6 +7113,72 @@ mod tests {
             1,
             "strict mode must not leave an output temporary"
         );
+    }
+
+    #[test]
+    fn strict_mode_accumulates_degradation_across_recoverable_stages() {
+        fn degrade_page(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
+            document.extracted_pages[0].degraded = Some(PageDegradeReason::BadFormBBox);
+            Ok(())
+        }
+
+        fn preserve_paragraph(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
+            let paragraph = &mut document.il.pages[0].paragraphs[0];
+            paragraph.translated_text = None;
+            paragraph.preserved = Some(il::PreservedReason::TypesetOverflow);
+            Ok(())
+        }
+
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let inspect_context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &inspect_context).unwrap();
+        let strict_context = PassContext {
+            config: crate::context::PipelineConfig {
+                strict: true,
+                ..crate::context::PipelineConfig::default()
+            },
+            ..inspect_context
+        };
+
+        let error = run_stages(
+            &mut document,
+            &strict_context,
+            &[
+                (Stage::ScanDetect, degrade_page),
+                (Stage::Typeset, preserve_paragraph),
+            ],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.reason(),
+            ErrorReason::Translation(TranslationReason::StrictDegradation)
+        );
+        assert!(document.diagnostics.entries().iter().any(|diagnostic| {
+            matches!(
+                diagnostic,
+                Diagnostic::DegradationSummary {
+                    degraded_page_indices,
+                    preserved_paragraphs,
+                    ..
+                } if degraded_page_indices == &[0]
+                    && preserved_paragraphs == &[PreservedParagraph {
+                        page_index: 0,
+                        paragraph_index: 0,
+                        reason: il::PreservedReason::TypesetOverflow,
+                        placeholder_violation: None,
+                    }]
+            )
+        }));
     }
 
     #[test]
