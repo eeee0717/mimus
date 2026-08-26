@@ -41,25 +41,8 @@ impl Event {
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum EventKind {
     ConfigurationResolved {
-        backend: String,
-        endpoint: Option<String>,
-        model: Option<String>,
-        target_language: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        font_regular_source: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        font_regular_sha256: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        font_bold_source: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        font_bold_sha256: Option<String>,
-        auto_terms: bool,
-        glossary_fingerprint: String,
-        cache_enabled: bool,
-        cache_path: Option<String>,
-        concurrency: usize,
-        strict: bool,
-        translate_table: bool,
+        #[serde(flatten)]
+        configuration: Box<ConfigurationResolved>,
     },
     TranslationCache {
         page_index: usize,
@@ -97,6 +80,34 @@ pub enum EventKind {
         #[serde(skip_serializing_if = "Option::is_none")]
         total_pages: Option<usize>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ConfigurationResolved {
+    pub backend: String,
+    pub endpoint: Option<String>,
+    pub model: Option<String>,
+    pub target_language: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_regular_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_regular_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_bold_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_bold_sha256: Option<String>,
+    pub layout_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout_model_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout_model_sha256: Option<String>,
+    pub auto_terms: bool,
+    pub glossary_fingerprint: String,
+    pub cache_enabled: bool,
+    pub cache_path: Option<String>,
+    pub concurrency: usize,
+    pub strict: bool,
+    pub translate_table: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]

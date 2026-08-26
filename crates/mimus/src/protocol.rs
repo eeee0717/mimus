@@ -127,10 +127,7 @@ impl<W: Write + Send> ProtocolSession<W> {
 
     fn emit_human(&self, event: Event, state: &mut SessionState<W>) -> Result<()> {
         match event.kind {
-            EventKind::ConfigurationResolved {
-                translate_table: true,
-                ..
-            } => {
+            EventKind::ConfigurationResolved { configuration } if configuration.translate_table => {
                 let _ = writeln!(
                     std::io::stderr().lock(),
                     "experimental table translation: enabled"

@@ -502,6 +502,8 @@ fn run_openai_path(
     }
     if let Some(recording) = layout_recording {
         command.arg("--layout-replay").arg(recording);
+    } else {
+        command.args(["--layout", "single-line"]);
     }
     command.arg(input).output().unwrap()
 }

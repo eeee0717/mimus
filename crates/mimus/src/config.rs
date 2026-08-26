@@ -34,6 +34,7 @@ pub(crate) struct ConfigOverrides {
     pub target_language: Option<String>,
     pub font_regular: Option<PathBuf>,
     pub font_bold: Option<PathBuf>,
+    pub layout_model: Option<PathBuf>,
     pub asset_mirror: Option<String>,
     pub glossary: Option<PathBuf>,
     pub dump_glossary: Option<PathBuf>,
@@ -51,6 +52,12 @@ pub(crate) struct FontPathSelection {
     pub source: &'static str,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct LayoutModelPathSelection {
+    pub path: PathBuf,
+    pub source: &'static str,
+}
+
 pub(crate) struct ResolvedConfig {
     pub backend: Backend,
     pub base_url: String,
@@ -58,8 +65,10 @@ pub(crate) struct ResolvedConfig {
     pub target_language: String,
     pub font_regular: Option<FontPathSelection>,
     pub font_bold: Option<FontPathSelection>,
+    pub layout_model: Option<LayoutModelPathSelection>,
     pub asset_mirror: Option<String>,
     pub font_cache_dir: PathBuf,
+    pub layout_model_cache_dir: PathBuf,
     pub user_glossary: Glossary,
     pub dump_glossary: Option<PathBuf>,
     pub auto_terms: bool,
@@ -68,6 +77,12 @@ pub(crate) struct ResolvedConfig {
     pub strict: bool,
     pub translate_table: bool,
     api_key: Option<SecretString>,
+}
+
+pub(crate) struct ResolvedLayoutConfig {
+    pub layout_model: Option<LayoutModelPathSelection>,
+    pub asset_mirror: Option<String>,
+    pub layout_model_cache_dir: PathBuf,
 }
 
 impl ResolvedConfig {
@@ -131,24 +146,33 @@ impl ResolvedConfig {
         );
         let font_bold =
             choose_font_path(overrides.font_bold, environment.font_bold, file.font_bold);
+        let layout_model = choose_layout_model_path(
+            overrides.layout_model,
+            environment.layout_model,
+            file.layout_model,
+        );
         let asset_mirror = choose_optional(
             overrides.asset_mirror,
             environment.asset_mirror,
             file.asset_mirror,
             "asset mirror",
         )?;
-        let font_cache_dir = environment
+        let asset_cache_root = environment
             .cache_dir
             .or(file.cache_dir)
-            .map(|root| root.join("fonts/noto-sans-sc-2.004"))
-            .or_else(default_cache_dir)
+            .or_else(default_asset_cache_root)
             .ok_or_else(|| {
                 MimusError::asset(
                     mimus_core::error::AssetReason::OutputFontUnavailable,
-                    "could not determine the output-font cache directory",
+                    "could not determine the asset cache directory",
                 )
-                .with_hint("set MIMUS_CACHE_DIR or provide --font and --font-bold")
+                .with_hint("set MIMUS_CACHE_DIR or provide explicit font and layout-model paths")
             })?;
+        let font_cache_dir = asset_cache_root.join("fonts/noto-sans-sc-2.004");
+        let layout_model_cache_dir = asset_cache_root.join(format!(
+            "models/pp-doclayoutv3-{}",
+            crate::layout_assets::MODEL_COMMIT
+        ));
         let user_glossary = overrides
             .glossary
             .as_deref()
@@ -187,8 +211,10 @@ impl ResolvedConfig {
             target_language,
             font_regular,
             font_bold,
+            layout_model,
             asset_mirror,
             font_cache_dir,
+            layout_model_cache_dir,
             user_glossary,
             dump_glossary: overrides.dump_glossary,
             auto_terms: !overrides.no_auto_terms,
@@ -215,6 +241,44 @@ impl ResolvedConfig {
     }
 }
 
+impl ResolvedLayoutConfig {
+    pub(crate) fn load(
+        layout_model: Option<PathBuf>,
+        asset_mirror: Option<String>,
+    ) -> Result<Self> {
+        load_dotenv_local()?;
+        let file = read_file_config()?;
+        let environment = EnvironmentConfig::read();
+        let layout_model =
+            choose_layout_model_path(layout_model, environment.layout_model, file.layout_model);
+        let asset_mirror = choose_optional(
+            asset_mirror,
+            environment.asset_mirror,
+            file.asset_mirror,
+            "asset mirror",
+        )?;
+        let asset_cache_root = environment
+            .cache_dir
+            .or(file.cache_dir)
+            .or_else(default_asset_cache_root)
+            .ok_or_else(|| {
+                MimusError::asset(
+                    mimus_core::error::AssetReason::LayoutModelUnavailable,
+                    "could not determine the layout-model cache directory",
+                )
+                .with_hint("set MIMUS_CACHE_DIR or provide --layout-model")
+            })?;
+        Ok(Self {
+            layout_model,
+            asset_mirror,
+            layout_model_cache_dir: asset_cache_root.join(format!(
+                "models/pp-doclayoutv3-{}",
+                crate::layout_assets::MODEL_COMMIT
+            )),
+        })
+    }
+}
+
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
@@ -227,6 +291,7 @@ struct FileConfig {
     api_key: Option<String>,
     font_regular: Option<PathBuf>,
     font_bold: Option<PathBuf>,
+    layout_model: Option<PathBuf>,
     asset_mirror: Option<String>,
     cache_dir: Option<PathBuf>,
     cache: Option<PathBuf>,
@@ -241,6 +306,7 @@ struct EnvironmentConfig {
     api_key: Option<String>,
     font_regular: Option<PathBuf>,
     font_bold: Option<PathBuf>,
+    layout_model: Option<PathBuf>,
     asset_mirror: Option<String>,
     cache_dir: Option<PathBuf>,
     cache_path: Option<PathBuf>,
@@ -264,6 +330,7 @@ impl EnvironmentConfig {
             api_key: first_nonempty_env(&["MIMUS_OPENAI_API_KEY", "OPENAI_API_KEY", "API_KEY"]),
             font_regular: first_env(&["MIMUS_FONT_REGULAR"]).map(PathBuf::from),
             font_bold: first_env(&["MIMUS_FONT_BOLD"]).map(PathBuf::from),
+            layout_model: first_env(&["MIMUS_LAYOUT_MODEL"]).map(PathBuf::from),
             asset_mirror: first_env(&["MIMUS_ASSET_MIRROR"]),
             cache_dir: first_env(&["MIMUS_CACHE_DIR"]).map(PathBuf::from),
             cache_path: first_env(&["MIMUS_CACHE"])
@@ -297,9 +364,9 @@ fn choose_optional(
     Ok(value)
 }
 
-fn default_cache_dir() -> Option<PathBuf> {
+fn default_asset_cache_root() -> Option<PathBuf> {
     if let Some(root) = first_env(&["XDG_CACHE_HOME"]) {
-        return Some(PathBuf::from(root).join("mimus/fonts/noto-sans-sc-2.004"));
+        return Some(PathBuf::from(root).join("mimus"));
     }
     let home = first_env(&["HOME"])?;
     let root = if cfg!(target_os = "macos") {
@@ -307,7 +374,7 @@ fn default_cache_dir() -> Option<PathBuf> {
     } else {
         PathBuf::from(home).join(".cache/mimus")
     };
-    Some(root.join("fonts/noto-sans-sc-2.004"))
+    Some(root)
 }
 
 fn choose_font_path(
@@ -327,6 +394,29 @@ fn choose_font_path(
     })
     .or_else(|| {
         file.map(|path| FontPathSelection {
+            path,
+            source: "config",
+        })
+    })
+}
+
+fn choose_layout_model_path(
+    flag: Option<PathBuf>,
+    environment: Option<PathBuf>,
+    file: Option<PathBuf>,
+) -> Option<LayoutModelPathSelection> {
+    flag.map(|path| LayoutModelPathSelection {
+        path,
+        source: "flag",
+    })
+    .or_else(|| {
+        environment.map(|path| LayoutModelPathSelection {
+            path,
+            source: "environment",
+        })
+    })
+    .or_else(|| {
+        file.map(|path| LayoutModelPathSelection {
             path,
             source: "config",
         })
@@ -469,5 +559,31 @@ mod tests {
     fn malformed_or_unknown_file_fields_are_rejected() {
         assert!(toml::from_str::<FileConfig>("model = [1]").is_err());
         assert!(toml::from_str::<FileConfig>("secret = 'value'").is_err());
+    }
+
+    #[test]
+    fn layout_model_path_uses_flag_then_environment_then_config() {
+        let chosen = choose_layout_model_path(
+            Some(PathBuf::from("flag.onnx")),
+            Some(PathBuf::from("env.onnx")),
+            Some(PathBuf::from("config.onnx")),
+        )
+        .unwrap();
+        assert_eq!(chosen.path, PathBuf::from("flag.onnx"));
+        assert_eq!(chosen.source, "flag");
+
+        let chosen = choose_layout_model_path(
+            None,
+            Some(PathBuf::from("env.onnx")),
+            Some(PathBuf::from("config.onnx")),
+        )
+        .unwrap();
+        assert_eq!(chosen.path, PathBuf::from("env.onnx"));
+        assert_eq!(chosen.source, "environment");
+
+        let chosen =
+            choose_layout_model_path(None, None, Some(PathBuf::from("config.onnx"))).unwrap();
+        assert_eq!(chosen.path, PathBuf::from("config.onnx"));
+        assert_eq!(chosen.source, "config");
     }
 }
