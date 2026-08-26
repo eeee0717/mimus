@@ -20,6 +20,11 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
     match fixture_id {
         "unit-base-01-single-line" => single_line(repo_root),
+        "unit-type-01-single-line-tight" => basic_text(
+            fixture_id,
+            repo_root,
+            b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS MIMUS) Tj\nET\n",
+        ),
         "unit-base-03-structured" => structured(repo_root),
         "unit-parse-01-ascii85" => filtered_text(fixture_id, repo_root, FilterRecipe::Ascii85),
         "unit-parse-02-cascade" => filtered_text(fixture_id, repo_root, FilterRecipe::Ascii85Flate),

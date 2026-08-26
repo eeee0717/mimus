@@ -1151,6 +1151,79 @@ fn cjk_translation_overflow_preserves_the_original_paragraph() {
 }
 
 #[test]
+fn short_cjk_title_fits_a_tight_single_line_container() {
+    let directory = tempfile::tempdir().unwrap();
+    let debug = directory.path().join("debug");
+    let output_path = directory.path().join("tight-title.pdf");
+    let server = GateResponsesServer::start([]);
+    let output = run_openai(
+        "unit-type-01-single-line-tight",
+        &server,
+        RunOptions {
+            output: &output_path,
+            debug: Some(&debug),
+            cache: None,
+            model: "m3-tight-title-model",
+            target_language: "zh-CN",
+            glossary: None,
+            auto_terms: false,
+            strict: false,
+        },
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    let expected = deterministic_translation(&requests[0].input)
+        .replace("<b1>", "")
+        .replace("</b1>", "");
+    assert_eq!(
+        translated_han_strings(&debug.join("06-translate.il.json")),
+        std::slice::from_ref(&expected)
+    );
+    assert_eq!(
+        translated_han_strings(&debug.join("07-typeset.il.json")),
+        [expected]
+    );
+    let events = parse_events(&output.stdout);
+    let expansion = events
+        .iter()
+        .find(|event| event["id"] == "single_line_bounds_expanded")
+        .unwrap();
+    assert_eq!(expansion["page_index"], 0);
+    assert_eq!(expansion["reading_order"], 0);
+    assert!(expansion["overflow_top_pt"].as_f64().unwrap() <= 3.0);
+    assert!(expansion["overflow_bottom_pt"].as_f64().unwrap() <= 3.0);
+    assert!(
+        events
+            .iter()
+            .all(|event| event["id"] != "degradation_summary"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_valid_pdf(&output_path, "unit-type-01-single-line-tight");
+    let pdf = lopdf::Document::load(&output_path).unwrap();
+    let page = pdf.get_pages()[&1];
+    assert!(
+        pdf.get_page_fonts(page)
+            .unwrap()
+            .contains_key(b"MimusB".as_slice())
+    );
+    assert_ne!(
+        std::fs::read(&output_path).unwrap(),
+        std::fs::read(repo_root().join(
+            "corpus/fixtures/unit-type-01-single-line-tight/unit-type-01-single-line-tight.pdf"
+        ))
+        .unwrap()
+    );
+    server.assert_clean();
+}
+
+#[test]
 fn malformed_nested_form_degrades_the_page_without_calling_the_backend() {
     let directory = tempfile::tempdir().unwrap();
     let input = write_nested_form_with_bad_matrix(directory.path());
@@ -1217,9 +1290,9 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
         "unit-scan-01-image-only".to_owned(),
         "unit-scan-02-invisible-ocr".to_owned(),
     ]);
-    assert_eq!(ids.len(), 142, "Corpus fixture inventory changed");
-    assert_eq!(unique_cases.len(), 80, "Corpus case inventory changed");
-    assert_eq!(legal.len(), 102, "legal fixture inventory changed");
+    assert_eq!(ids.len(), 143, "Corpus fixture inventory changed");
+    assert_eq!(unique_cases.len(), 81, "Corpus case inventory changed");
+    assert_eq!(legal.len(), 103, "legal fixture inventory changed");
     assert!(rejected.is_subset(&legal));
 
     let directory = tempfile::tempdir().unwrap();
@@ -1298,10 +1371,10 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
             output_count += 1;
         }
     }
-    assert_eq!(output_count, 95);
+    assert_eq!(output_count, 96);
     assert_eq!(
         server.request_count(),
-        131,
+        132,
         "eligible corpus request inventory changed"
     );
     assert!(server.requests().iter().all(|request| {
