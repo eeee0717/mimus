@@ -26,6 +26,7 @@ pub struct PipelineConfig {
     pub max_concurrency: usize,
     pub sleeper: Arc<dyn Sleeper>,
     pub strict: bool,
+    pub translate_table: bool,
 }
 
 impl Default for PipelineConfig {
@@ -41,6 +42,7 @@ impl Default for PipelineConfig {
             max_concurrency: 4,
             sleeper: Arc::new(ThreadSleeper),
             strict: false,
+            translate_table: false,
         }
     }
 }

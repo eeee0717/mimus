@@ -1,7 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
@@ -9,6 +15,124 @@ use serde::Deserialize;
 
 const BIN: &str = env!("CARGO_BIN_EXE_mimus");
 const PDFIUM_ENV: &str = "MIMUS_PDFIUM_LIBRARY";
+
+struct FakeResponsesServer {
+    endpoint: String,
+    requests: Arc<Mutex<Vec<String>>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl FakeResponsesServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            let mut handlers = Vec::new();
+            while !stopped.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let requests = Arc::clone(&captured);
+                        handlers.push(thread::spawn(move || {
+                            handle_responses_request(&mut stream, &requests);
+                        }));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("fake Responses server accept failed: {error}"),
+                }
+            }
+            for handler in handlers {
+                handler.join().unwrap();
+            }
+        });
+        Self {
+            endpoint: format!("http://{address}"),
+            requests,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn requests(&self) -> Vec<String> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl Drop for FakeResponsesServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect(self.endpoint.trim_start_matches("http://"));
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
+}
+
+fn handle_responses_request(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<String>>>) {
+    let request = read_http_request(stream);
+    if request.is_empty() {
+        return;
+    }
+    let header_end = request
+        .windows(4)
+        .position(|part| part == b"\r\n\r\n")
+        .unwrap()
+        + 4;
+    let payload: serde_json::Value = serde_json::from_slice(&request[header_end..]).unwrap();
+    let input = payload["input"].as_str().unwrap().to_owned();
+    requests.lock().unwrap().push(input.clone());
+    let (status, body) = if input == "first" {
+        (
+            "400 Bad Request",
+            r#"{"error":"injected table-cell failure"}"#,
+        )
+    } else {
+        ("200 OK", r#"{"output_text":"M"}"#)
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).unwrap();
+}
+
+fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let read = stream.read(&mut buffer).unwrap_or(0);
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..read]);
+        let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length: ")
+                    .and_then(|value| value.parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        if request.len() >= header_end + 4 + content_length {
+            break;
+        }
+    }
+    request
+}
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -1748,6 +1872,169 @@ fn recorded_layout_policy_drives_production_il_candidates_and_passthrough() {
     assert!(labels.contains("reference_content"));
     assert!(labels.contains("seal"));
     assert!(labels.contains("number"));
+}
+
+#[test]
+fn table_translation_is_experimental_reported_and_off_without_remote_calls() {
+    let help = Command::new(BIN)
+        .args(["translate", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("--translate-table"));
+    assert!(help.contains("Experimental:"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("default-table.pdf");
+    let server = FakeResponsesServer::start();
+    let output = Command::new(BIN)
+        .env(PDFIUM_ENV, pdfium_library())
+        .env("API_KEY", "mimus-table-test-key")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "openai",
+            "--endpoint",
+            &server.endpoint,
+            "--model",
+            "table-test-model",
+            "--no-cache",
+            "--strict",
+            "--layout-replay",
+        ])
+        .arg(layout_recording_path("unit-layout-02-table-only"))
+        .arg("--output")
+        .arg(&output_path)
+        .arg(fixture_path("unit-layout-02-table-only"))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert!(server.requests().is_empty());
+    assert_eq!(
+        std::fs::read(&output_path).unwrap(),
+        std::fs::read(fixture_path("unit-layout-02-table-only")).unwrap()
+    );
+    let events = parse_events(&output.stdout);
+    let resolved = events
+        .iter()
+        .find(|event| event["event"] == "configuration_resolved")
+        .unwrap();
+    assert_eq!(resolved["translate_table"], false);
+    assert_eq!(events.last().unwrap()["translate_table"], false);
+}
+
+#[test]
+fn enabled_table_translation_uses_cells_and_preserves_only_the_failed_cell() {
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("translated-table.pdf");
+    let debug = directory.path().join("debug");
+    let server = FakeResponsesServer::start();
+    let output = Command::new(BIN)
+        .env(PDFIUM_ENV, pdfium_library())
+        .env("API_KEY", "mimus-table-test-key")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "openai",
+            "--endpoint",
+            &server.endpoint,
+            "--model",
+            "table-test-model",
+            "--no-auto-terms",
+            "--no-cache",
+            "--translate-table",
+            "--layout-replay",
+        ])
+        .arg(layout_recording_path("unit-layout-02-table-only"))
+        .arg("--debug")
+        .arg(&debug)
+        .arg("--output")
+        .arg(&output_path)
+        .arg(fixture_path("unit-layout-02-table-only"))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(output.stderr.is_empty());
+    assert!(output_path.is_file());
+    let mut requests = server.requests();
+    requests.sort();
+    let mut expected = vec![
+        "Run",
+        "Throughput",
+        "Latency",
+        "first",
+        "1204 ops",
+        "8.1 ms",
+        "second",
+        "1198 ops",
+        "8.3 ms",
+    ];
+    expected.sort_unstable();
+    assert_eq!(requests, expected);
+
+    let events = parse_events(&output.stdout);
+    let resolved = events
+        .iter()
+        .find(|event| event["event"] == "configuration_resolved")
+        .unwrap();
+    assert_eq!(resolved["translate_table"], true);
+    assert_eq!(events.last().unwrap()["translate_table"], true);
+    let summary = events
+        .iter()
+        .find(|event| event["id"] == "degradation_summary")
+        .unwrap();
+    assert_eq!(summary["preserved_paragraph_count"], 1, "{summary}");
+    assert_eq!(
+        summary["preserved_paragraphs"][0]["reason"],
+        "translation_failure"
+    );
+
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(debug.join("06-translate.il.json")).unwrap())
+            .unwrap();
+    let paragraphs = snapshot["pages"][0]["paragraphs"].as_array().unwrap();
+    assert_eq!(paragraphs.len(), 9);
+    assert!(paragraphs.iter().all(|paragraph| {
+        paragraph["text"]["chars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|character| {
+                character["layout"]["label"] == "table"
+                    && character["layout"]["policy"] == "translate"
+            })
+    }));
+    let preserved = paragraphs
+        .iter()
+        .filter(|paragraph| paragraph.get("preserved").is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(preserved.len(), 1);
+    assert_eq!(il_paragraph_text(preserved[0]), "first");
+    assert_eq!(preserved[0]["preserved"], "translation_failure");
+    assert!(preserved[0]["translated_text"].is_null());
+    assert!(
+        paragraphs
+            .iter()
+            .filter(|paragraph| paragraph.get("preserved").is_none())
+            .all(|paragraph| paragraph["translated_text"] == "M")
+    );
 }
 
 #[test]

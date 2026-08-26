@@ -42,6 +42,7 @@ pub(crate) struct ConfigOverrides {
     pub no_cache: bool,
     pub concurrency: Option<usize>,
     pub strict: bool,
+    pub translate_table: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +66,7 @@ pub(crate) struct ResolvedConfig {
     pub cache_path: Option<PathBuf>,
     pub max_concurrency: usize,
     pub strict: bool,
+    pub translate_table: bool,
     api_key: Option<SecretString>,
 }
 
@@ -193,6 +195,7 @@ impl ResolvedConfig {
             cache_path,
             max_concurrency,
             strict: overrides.strict,
+            translate_table: overrides.translate_table,
             api_key,
         })
     }
