@@ -122,5 +122,5 @@ ADR-0018（输出字体资产链）。placeholder 编码、glossary canonicaliza
 
 门禁不验证真实公网 provider 的可用性、质量、费率限制差异或翻译质量，也不执行真实
 PP-DocLayoutV3 模型；普通 CI 继续使用 deterministic detector / replay。PP-DocLayoutV3
-生产集成属于 M3，统一 `assets pull` 与模型资产属于 M4；两者均需独立 issue 跟踪。真实
+生产集成由 #84 跟踪，统一 `assets pull` 与模型资产由既有 #39 跟踪。真实
 论文 L5 复验是重新声明可用性的前置条件，不得推迟为合并后的普通运营反馈。
