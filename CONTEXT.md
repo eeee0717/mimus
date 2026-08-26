@@ -50,6 +50,7 @@
 | 41 | 写回改为**区间替换**（只替换被翻译单元的 text-show 操作数区间，其余原样透传），取代整流重建——这是拆除三堵 fail-closed 守卫而不破坏 Write 像素等值合同的前提；走查从白名单 fail-closed 变为有界宽容（恢复语义与边界数值见 ADR）；降级分文档/页/段三级，页级=不产生 rewrite 天然保留原流、段级=`Paragraph.preserved` 且区间不替换；「单元」是段内连续同因字符区间的**派生分组**，不是 IL 层级；非直立判定输入改为 `R(/Rotate)∘CTM∘Tm` 线性部分，页面几何事实层改由 lopdf 提供、engine 几何降为交叉证据 | [ADR-0013](docs/adr/0013-bounded-walk-and-graded-degradation.md) |
 | 42 | 字体/CMap 可靠性判定链：ToUnicode → 嵌入字体 cmap → 标准编码链，任一层失败即 `unicode=None`，链中**无「CID 当 Unicode」分支**；段内存在不可解码字符、advance 非正或字体不可解析即整段保留原文；M1 预定义 CMap 只支持 Identity 及别名，其余显式降级；缺 `/Widths` 走段级降级（PDFium 虽有 glyph-width getter，但没有 text-page 字符到源 glyph 的反查桥）；CJK 输入 fixture 用 Noto Sans SC 确定性子集入库 | [ADR-0014](docs/adr/0014-font-decoding-reliability.md) |
 | 43 | 跨引擎字符对齐改为**分类交叉校验**：撤销 `engine_mismatch` 文档级硬失败（严格数组相等的前提被实验 5 在真实语料上证伪——PDFium text page 是提取视图，不是绘制序枚举）；几何锚定多重集匹配 + 提取视图等价类（空白/离页/控制符标记/UTF-16 代理项/连字折叠/`ActualText` 或 generated 提取展开/顺序）；已配对 Unicode 冲突按走查解码链强弱分级——弱链段级保留、强链走查胜出记诊断；非直立/未解析/advance 不可靠 walk 字符先以唯一几何解释边吸收 engine 观测但不获得翻译或 `tight_box` 权限；PDFium 可做内部对象/字体归组，但公共 API 无源 charcode 或 byte range，跨引擎只能用 walk-owned source run 做有歧义即放弃的保守相关；engine-only 墨迹残差的段级保留以 fixture 钉死的逐 run 动态误差包络 + 保守相关 + 真正额外墨迹 fixture 为生效前提，须在 M2 前完成；ToUnicode→非字符视为未映射（ADR-0014 修订）；页级/文档级不再由跨引擎分歧触发 | [ADR-0015](docs/adr/0015-classified-cross-engine-alignment.md) |
+| 44 | 生产 layout detector 默认使用 PP-DocLayoutV3 官方 ONNX + ort CPU EP；模型资产按 flag > env > config > SHA 缓存 > 钉死 manifest 解析，缺失/损坏启动期 Asset/3，禁止静默回退。`--layout-replay` 最高优先保留为 CI 接缝，`--layout single-line` 仅作显式降级；模型栅格为 200 DPI，真实模型资格由 `MIMUS_LAYOUT_MODEL` 显式门禁 | [ADR-0019](docs/adr/0019-production-layout-detector.md) |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
@@ -59,17 +60,17 @@
 | 不翻·原样保留 | header, footer, header_image, footer_image, image, chart, seal, algorithm, display_formula, formula_number, number, vertical_text, reference, reference_content, table（表体，`--translate-table` 可开） |
 | 占位符处理 | inline_formula（在所属段落内以 `{v1}` 占位送翻，返回后还原） |
 
-临时公式止血政策（#35）：在生产 layout 模型接入（#84）前，对仍被标为
-`Translate` 的单元执行偏保守的数学形状启发式；命中单元所在的整个自然段改为
+公式漏检兜底政策（#35）：生产 layout 模型接入（#84）后，偏保守的数学形状启发式仅对
+`fallback_line`（即无模型覆盖区域）生效；任何真实 model label 优先。命中单元所在的整个自然段改为
 passthrough，不进入翻译请求，并按命中单元发出不计 degradation、不影响 strict 的
 `math_passthrough` info 诊断。自然段是当前远端翻译与 cache 的原子；整段保留避免把
 含公式段裁成未经验证的新请求，并在重组时误处理公式邻接文本。该政策宁可将少量散文
-留为原文，也不允许公式内容被译坏；#84 提供真实
-`display_formula` / `inline_formula` 标签后，由标签政策取代本启发式。
+留为原文，也不允许模型漏检区的公式内容被译坏；真实 `display_formula` passthrough 与
+`inline_formula` `{vN}` 占位符协议不经过该启发式。
 
 政策表按**版面类别**划分，生效前提是 layout detector 已给出对应标签。PP-DocLayoutV3
-接入生产前，`SingleLineLayoutDetector` / replay 只能证明已提供标签下的政策行为，不能证明
-真实论文已获得 25 类分类。与类别正交的还有一条按**文本朝向**的划分：**非直立文本一律
+接入生产后，recording replay 仍只证明已提供标签下的确定性政策行为；真实模型资格测试与
+真实论文离线报告分别证明推理合同和语料分类表现。与类别正交的还有一条按**文本朝向**的划分：**非直立文本一律
 不翻译、原样 passthrough**，优先于类别政策（决策 #32）。
 
 ## 术语表
