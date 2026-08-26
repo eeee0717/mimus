@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "pages": [
+    {
+      "page_index": 0,
+      "geometry": { "width": 300.0, "height": 200.0, "rotate_degrees": 0 },
+      "regions": [
+        {
+          "bounds": {
+            "left": 73.177734,
+            "bottom": 119.830078,
+            "right": 156.457219,
+            "top": 128.90625
+          },
+          "reading_order": 0,
+          "label": "doc_title",
+          "source": "model",
+          "confidence": 1.0
+        }
+      ]
+    }
+  ]
+}
