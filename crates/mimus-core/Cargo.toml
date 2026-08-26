@@ -10,6 +10,7 @@ description = "Layout-preserving PDF translation core: IL, pass chain, engine tr
 [dependencies]
 lopdf.workspace = true
 pdfium-render.workspace = true
+rayon.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 redb.workspace = true
 secrecy.workspace = true

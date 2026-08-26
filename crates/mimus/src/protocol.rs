@@ -2,7 +2,7 @@ use std::io::{ErrorKind, Write};
 use std::process::ExitCode;
 use std::sync::Mutex;
 
-use mimus_core::error::{ErrorReason, InternalReason, IoReason, MimusError, Result};
+use mimus_core::error::{ErrorReason, InternalReason, IoReason, MimusError, Result, RetryReason};
 use mimus_core::event::{
     DiagnosticEvent, Event, EventKind, EventSink, MINIMAL_SERIALIZATION_ERROR_LINE,
     PageDegradeReason, RecoveryKind, ResultPayload, Stage, serialize_line,
@@ -326,6 +326,21 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 human_recovery_kind(recovery)
             );
         }
+        DiagnosticEvent::TranslationRetry {
+            page_index,
+            paragraph_index,
+            attempt,
+            delay_ms,
+            reason,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[translation_retry]: page {} paragraph {} attempt {attempt} failed ({}); retrying in {delay_ms}ms",
+                page_index + 1,
+                paragraph_index + 1,
+                human_retry_reason(reason)
+            );
+        }
         DiagnosticEvent::DegradationSummary {
             degraded_page_indices,
             degraded_pages,
@@ -414,6 +429,14 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 "warning[dropped_diagnostics]: {count} additional diagnostics dropped; by id: {counts_by_id:?}"
             );
         }
+    }
+}
+
+const fn human_retry_reason(reason: RetryReason) -> &'static str {
+    match reason {
+        RetryReason::RateLimited => "rate limited",
+        RetryReason::Timeout => "timeout",
+        RetryReason::ServerError => "temporary server error",
     }
 }
 

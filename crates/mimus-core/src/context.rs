@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use lopdf::Document as LopdfDocument;
 
@@ -9,7 +10,7 @@ use crate::event::{Diagnostics, EventSink, PageDegradeReason, RecoveryKind, Stag
 use crate::geometry::PageFrame;
 use crate::il;
 use crate::scan::{PageClass, PageEvidence};
-use crate::translate::{Glossary, PreparedTranslation, Translator};
+use crate::translate::{Glossary, PreparedTranslation, Sleeper, ThreadSleeper, Translator};
 use crate::walk::{WalkedChar, WalkedContentStream};
 use crate::write::{PageRewrite, WriteReport};
 
@@ -22,6 +23,8 @@ pub struct PipelineConfig {
     pub auto_terms: bool,
     pub dump_glossary: Option<PathBuf>,
     pub cache_path: Option<PathBuf>,
+    pub max_concurrency: usize,
+    pub sleeper: Arc<dyn Sleeper>,
 }
 
 impl Default for PipelineConfig {
@@ -34,6 +37,8 @@ impl Default for PipelineConfig {
             auto_terms: true,
             dump_glossary: None,
             cache_path: None,
+            max_concurrency: 4,
+            sleeper: Arc::new(ThreadSleeper),
         }
     }
 }

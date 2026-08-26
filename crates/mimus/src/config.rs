@@ -40,6 +40,7 @@ pub(crate) struct ConfigOverrides {
     pub no_auto_terms: bool,
     pub cache: Option<PathBuf>,
     pub no_cache: bool,
+    pub concurrency: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +62,7 @@ pub(crate) struct ResolvedConfig {
     pub dump_glossary: Option<PathBuf>,
     pub auto_terms: bool,
     pub cache_path: Option<PathBuf>,
+    pub max_concurrency: usize,
     api_key: Option<SecretString>,
 }
 
@@ -100,6 +102,20 @@ impl ResolvedConfig {
             DEFAULT_TARGET_LANGUAGE,
             "target language",
         )?;
+        let max_concurrency = match overrides.concurrency {
+            Some(value) => value,
+            None => environment
+                .concurrency
+                .transpose()?
+                .or(file.concurrency)
+                .unwrap_or(4),
+        };
+        if max_concurrency == 0 {
+            return Err(MimusError::usage(
+                UsageReason::InvalidArguments,
+                "translation concurrency must be at least 1",
+            ));
+        }
         let api_key = environment
             .api_key
             .or_else(|| file.api_key.filter(|value| !value.trim().is_empty()))
@@ -173,6 +189,7 @@ impl ResolvedConfig {
             dump_glossary: overrides.dump_glossary,
             auto_terms: !overrides.no_auto_terms,
             cache_path,
+            max_concurrency,
             api_key,
         })
     }
@@ -207,6 +224,7 @@ struct FileConfig {
     asset_mirror: Option<String>,
     cache_dir: Option<PathBuf>,
     cache: Option<PathBuf>,
+    concurrency: Option<usize>,
 }
 
 struct EnvironmentConfig {
@@ -220,6 +238,7 @@ struct EnvironmentConfig {
     asset_mirror: Option<String>,
     cache_dir: Option<PathBuf>,
     cache_path: Option<PathBuf>,
+    concurrency: Option<Result<usize>>,
 }
 
 impl EnvironmentConfig {
@@ -244,6 +263,14 @@ impl EnvironmentConfig {
             cache_path: first_env(&["MIMUS_CACHE"])
                 .filter(|value| !value.trim().is_empty())
                 .map(PathBuf::from),
+            concurrency: first_env(&["MIMUS_CONCURRENCY"]).map(|value| {
+                value.parse::<usize>().map_err(|_| {
+                    MimusError::usage(
+                        UsageReason::InvalidArguments,
+                        "MIMUS_CONCURRENCY must be a positive integer",
+                    )
+                })
+            }),
         }
     }
 }

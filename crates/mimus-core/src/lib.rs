@@ -18,7 +18,7 @@ pub use context::{
 };
 pub use error::{
     AssetReason, ErrorReason, ExitCategory, InputReason, InternalReason, IoReason, MimusError,
-    Result, TranslationReason, UsageReason,
+    Result, RetryReason, TranslationReason, UsageReason,
 };
 
 /// Core version used by the CLI as its version source of truth.
