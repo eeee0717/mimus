@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use lopdf::{Document as LopdfDocument, Object, ObjectId};
 
-use crate::context::{CharacterAlignment, Document, ExtractedPage, PassContext};
+use crate::context::{CharacterAlignment, Document, ExtractedPage, OutputFont, PassContext};
 use crate::engine::{PageCharSnapshot, RgbaImage};
-use crate::error::{InputReason, InternalReason, IoReason, MimusError, Result};
+use crate::error::{AssetReason, InputReason, InternalReason, IoReason, MimusError, Result};
 use crate::event::{
     Diagnostic, Diagnostics, Event, EventKind, PageDegradeReason, PreservedParagraph, RecoveryKind,
     Stage,
@@ -1599,7 +1599,22 @@ fn character_is_translatable(character: &Char, content_objects: &BTreeSet<u32>) 
         && content_objects.contains(&character.passthrough.content_object)
 }
 
-pub fn typeset(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
+pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
+    let needs_output_fonts = document.il.pages.iter().any(|page| {
+        page.paragraphs.iter().any(|paragraph| {
+            paragraph.preserved.is_none()
+                && paragraph
+                    .translated_text
+                    .as_deref()
+                    .is_some_and(|translated| translated != paragraph.source_text())
+        })
+    });
+    if needs_output_fonts && context.config.output_fonts.is_none() {
+        return Err(MimusError::asset(
+            AssetReason::OutputFontUnavailable,
+            "translated text requires resolved output fonts",
+        ));
+    }
     let mut rewrites = Vec::with_capacity(document.il.pages.len());
     let mut preserved = Vec::new();
     for page in &document.il.pages {
@@ -1691,9 +1706,35 @@ pub fn typeset(document: &mut Document, _context: &PassContext<'_>) -> Result<()
                 continue;
             }
 
-            match plan_paragraph(paragraph, translated, &content_objects) {
+            let output_fonts = context
+                .config
+                .output_fonts
+                .as_ref()
+                .expect("non-identity output font requirement was checked");
+            match plan_paragraph(paragraph, translated, &content_objects, output_fonts) {
                 Ok(plan) => plans.push(plan),
-                Err(reason) => preserved.push((page.index, paragraph.reading_order, reason)),
+                Err(TypesetPlanError::Preserved(reason)) => {
+                    preserved.push((page.index, paragraph.reading_order, reason));
+                }
+                Err(TypesetPlanError::MissingGlyphs {
+                    missing_characters,
+                    font,
+                }) => {
+                    document
+                        .diagnostics
+                        .push(Diagnostic::UnsupportedOutputGlyph {
+                            page_index: page.index,
+                            reading_order: paragraph.reading_order,
+                            missing_characters,
+                            font_source: font.source.clone(),
+                            font_sha256: font.sha256.clone(),
+                        });
+                    preserved.push((
+                        page.index,
+                        paragraph.reading_order,
+                        il::PreservedReason::UnsupportedFont,
+                    ));
+                }
             }
         }
 
@@ -1711,10 +1752,15 @@ pub fn typeset(document: &mut Document, _context: &PassContext<'_>) -> Result<()
                 .iter()
                 .flat_map(|plan| plan.lines.iter().flatten().copied())
                 .collect::<BTreeSet<_>>();
-            let (font, cids) = build_embedded_font(&used, bold).map_err(|_| {
-                MimusError::input(
-                    InputReason::UnsupportedPdf,
-                    "translated text contains a glyph absent from the pinned Noto Sans SC asset",
+            let source_font = if bold {
+                &context.config.output_fonts.as_ref().unwrap().bold
+            } else {
+                &context.config.output_fonts.as_ref().unwrap().regular
+            };
+            let (font, cids) = build_embedded_font(&used, source_font, bold).map_err(|_| {
+                MimusError::internal(
+                    InternalReason::InvariantViolation,
+                    "validated output font could not be subset for translated text",
                 )
             })?;
             for plan in matching {
@@ -1786,14 +1832,14 @@ struct TypesetPlan {
 
 const MIN_FONT_SIZE_PT: f64 = 8.0;
 const LINE_ADVANCE_EM: f64 = 1.5;
-const REGULAR_FONT: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../corpus/fonts/MimusCJK.ttf"
-));
-const BOLD_FONT: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../corpus/fonts/MimusCJKBold.ttf"
-));
+
+enum TypesetPlanError<'a> {
+    Preserved(il::PreservedReason),
+    MissingGlyphs {
+        missing_characters: String,
+        font: &'a OutputFont,
+    },
+}
 
 fn unique_page_content(
     character: &Char,
@@ -1840,16 +1886,19 @@ fn span_out_of_bounds(
     )
 }
 
-fn plan_paragraph(
+fn plan_paragraph<'a>(
     paragraph: &Paragraph,
     translated: &str,
     content_objects: &BTreeSet<lopdf::ObjectId>,
-) -> std::result::Result<TypesetPlan, il::PreservedReason> {
+    output_fonts: &'a crate::context::OutputFonts,
+) -> std::result::Result<TypesetPlan, TypesetPlanError<'a>> {
     let chars = paragraph.chars();
     if chars.iter().any(|character| {
         !character_is_translatable(character, &content_objects.iter().map(|id| id.0).collect())
     }) {
-        return Err(il::PreservedReason::UnsupportedFont);
+        return Err(TypesetPlanError::Preserved(
+            il::PreservedReason::TypesetProtocol,
+        ));
     }
     let mut spans = chars
         .iter()
@@ -1863,7 +1912,9 @@ fn plan_paragraph(
     spans.sort_unstable();
     spans.dedup();
     if spans.is_empty() {
-        return Err(il::PreservedReason::UnsupportedFont);
+        return Err(TypesetPlanError::Preserved(
+            il::PreservedReason::Unlocatable,
+        ));
     }
     let bold = chars.iter().any(|character| {
         character.layout.is_some_and(|layout| {
@@ -1873,14 +1924,25 @@ fn plan_paragraph(
             )
         })
     });
-    let font_bytes = if bold { BOLD_FONT } else { REGULAR_FONT };
-    let face =
-        ttf_parser::Face::parse(font_bytes, 0).map_err(|_| il::PreservedReason::UnsupportedFont)?;
-    if translated
+    let font = if bold {
+        &output_fonts.bold
+    } else {
+        &output_fonts.regular
+    };
+    let face = ttf_parser::Face::parse(&font.bytes, 0)
+        .map_err(|_| TypesetPlanError::Preserved(il::PreservedReason::UnsupportedFont))?;
+    let missing_characters = translated
         .chars()
-        .any(|value| face.glyph_index(value).is_none())
-    {
-        return Err(il::PreservedReason::UnsupportedFont);
+        .filter(|value| face.glyph_index(*value).is_none())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .take(16)
+        .collect::<String>();
+    if !missing_characters.is_empty() {
+        return Err(TypesetPlanError::MissingGlyphs {
+            missing_characters,
+            font,
+        });
     }
     let container = chars
         .iter()
@@ -1922,7 +1984,9 @@ fn plan_paragraph(
         }
         size -= 0.5;
     }
-    Err(il::PreservedReason::TypesetOverflow)
+    Err(TypesetPlanError::Preserved(
+        il::PreservedReason::TypesetOverflow,
+    ))
 }
 
 fn wrap_text(
@@ -1971,9 +2035,10 @@ fn text_tokens(text: &str) -> Vec<Vec<char>> {
 
 fn build_embedded_font(
     used: &BTreeSet<char>,
+    source_font: &OutputFont,
     bold: bool,
 ) -> std::result::Result<(EmbeddedFont, BTreeMap<char, u16>), ()> {
-    let bytes = if bold { BOLD_FONT } else { REGULAR_FONT };
+    let bytes = &source_font.bytes;
     let face = ttf_parser::Face::parse(bytes, 0).map_err(|_| ())?;
     let mut remapper = subsetter::GlyphRemapper::new();
     let mut original = Vec::new();
@@ -1999,7 +2064,7 @@ fn build_embedded_font(
     Ok((
         EmbeddedFont {
             resource_name: if bold { "MimusB" } else { "MimusR" }.to_owned(),
-            base_font: format!("{tag}+NotoSansSC-{weight}"),
+            base_font: format!("{tag}+{}-{weight}", source_font.postscript_name),
             font_bytes,
             units_per_em: face.units_per_em(),
             ascent: face.ascender(),
@@ -2961,7 +3026,7 @@ mod tests {
 
     impl Translator for NonIdentityTranslator {
         fn translate(&self, request: &crate::translate::TranslationRequest<'_>) -> Result<String> {
-            Ok(format!("{}!", request.text))
+            Ok(format!("{}龘", request.text))
         }
     }
 
@@ -3019,6 +3084,40 @@ mod tests {
     fn fixture() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus/fixtures/unit-base-01-single-line/unit-base-01-single-line.pdf")
+    }
+
+    fn test_output_fonts() -> crate::context::OutputFonts {
+        let regular = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../mimus/tests/assets/fonts/MimusTestGB2312-Regular.ttf"
+        ));
+        let bold = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../mimus/tests/assets/fonts/MimusTestGB2312-Bold.ttf"
+        ));
+        crate::context::OutputFonts {
+            regular: crate::context::OutputFont {
+                bytes: regular.to_vec(),
+                postscript_name: "NotoSansSC".to_owned(),
+                source: "test:regular".to_owned(),
+                sha256: "510d0470ca8b77f035fe8e7143526207088c1bdad017451cf253020f72397d63"
+                    .to_owned(),
+            },
+            bold: crate::context::OutputFont {
+                bytes: bold.to_vec(),
+                postscript_name: "NotoSansSC".to_owned(),
+                source: "test:bold".to_owned(),
+                sha256: "1a917349eb06866f5701532f0cea586d184edadbd1cfdd3f034f3a18f2ff5316"
+                    .to_owned(),
+            },
+        }
+    }
+
+    fn config_with_test_output_fonts() -> crate::context::PipelineConfig {
+        crate::context::PipelineConfig {
+            output_fonts: Some(test_output_fonts()),
+            ..crate::context::PipelineConfig::default()
+        }
     }
 
     fn scan_fixture() -> PathBuf {
@@ -3550,7 +3649,7 @@ mod tests {
             translator: &NonIdentityTranslator,
             events: &events,
             snapshots: None,
-            config: crate::context::PipelineConfig::default(),
+            config: config_with_test_output_fonts(),
         };
 
         run(&mut document, &context).unwrap();
@@ -3576,7 +3675,7 @@ mod tests {
             translator: &CjkTranslator,
             events: &events,
             snapshots: None,
-            config: crate::context::PipelineConfig::default(),
+            config: config_with_test_output_fonts(),
         };
         for pass in [parse as Pass, scan_detect, layout, paragraph_find] {
             pass(&mut document, &context).unwrap();
@@ -3647,11 +3746,102 @@ mod tests {
         baselines.dedup_by(|left, right| (*left - *right).abs() < 0.001);
         assert_eq!(baselines.len(), 2);
         assert!(baselines[1] - baselines[0] >= MIN_FONT_SIZE_PT * LINE_ADVANCE_EM);
+        let bold_source = &context.config.output_fonts.as_ref().unwrap().bold;
         let (bold, bold_cids) =
-            build_embedded_font(&"MIMUS中文测试".chars().collect(), true).unwrap();
+            build_embedded_font(&"MIMUS中文测试".chars().collect(), bold_source, true).unwrap();
         assert!(bold.base_font.ends_with("+NotoSansSC-Bold"));
         assert_eq!(bold_cids.len(), font.glyphs.len());
         assert_ne!(bold.font_bytes, font.font_bytes);
+    }
+
+    #[test]
+    fn translated_text_requires_output_fonts_from_the_pass_context() {
+        let mut document = Document::new(fixture(), "unused.pdf");
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CjkTranslator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        for pass in [
+            parse as Pass,
+            scan_detect,
+            layout,
+            paragraph_find,
+            translate,
+        ] {
+            pass(&mut document, &context).unwrap();
+        }
+
+        let error = typeset(&mut document, &context).unwrap_err();
+
+        assert_eq!(
+            error.reason(),
+            crate::error::ErrorReason::Asset(crate::error::AssetReason::OutputFontUnavailable)
+        );
+    }
+
+    #[test]
+    fn missing_output_glyphs_preserve_only_the_paragraph_and_identify_the_font() {
+        let mut document = Document::new(fixture(), "unused.pdf");
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let font_bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../corpus/fonts/MimusExact.ttf"
+        ));
+        let output_font = crate::context::OutputFont {
+            bytes: font_bytes.to_vec(),
+            postscript_name: "MimusExact".to_owned(),
+            source: "test:missing-glyph".to_owned(),
+            sha256: "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735".to_owned(),
+        };
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CjkTranslator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig {
+                output_fonts: Some(crate::context::OutputFonts {
+                    regular: output_font.clone(),
+                    bold: output_font,
+                }),
+                ..crate::context::PipelineConfig::default()
+            },
+        };
+        for pass in [
+            parse as Pass,
+            scan_detect,
+            layout,
+            paragraph_find,
+            translate,
+        ] {
+            pass(&mut document, &context).unwrap();
+        }
+
+        typeset(&mut document, &context).unwrap();
+
+        assert_eq!(
+            document.il.pages[0].paragraphs[0].preserved,
+            Some(il::PreservedReason::UnsupportedFont)
+        );
+        assert!(document.diagnostics.entries().iter().any(|diagnostic| matches!(
+            diagnostic,
+            Diagnostic::UnsupportedOutputGlyph {
+                page_index: 0,
+                reading_order: 0,
+                missing_characters,
+                font_source,
+                font_sha256,
+            } if missing_characters == "中文测试"
+                && font_source == "test:missing-glyph"
+                && font_sha256 == "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735"
+        )));
     }
 
     #[test]
@@ -3665,7 +3855,7 @@ mod tests {
             translator: &CjkTranslator,
             events: &events,
             snapshots: None,
-            config: crate::context::PipelineConfig::default(),
+            config: config_with_test_output_fonts(),
         };
         for pass in [parse as Pass, scan_detect, layout, paragraph_find] {
             pass(&mut document, &context).unwrap();

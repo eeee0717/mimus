@@ -342,6 +342,19 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 preserved_paragraphs.len()
             );
         }
+        DiagnosticEvent::UnsupportedOutputGlyph {
+            page_index,
+            reading_order,
+            missing_characters,
+            font_source,
+            font_sha256,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[unsupported_output_glyph]: page {} paragraph {reading_order} missing {missing_characters:?} in {font_source} ({font_sha256})",
+                page_index + 1
+            );
+        }
         DiagnosticEvent::DroppedDiagnostics {
             count,
             counts_by_id,

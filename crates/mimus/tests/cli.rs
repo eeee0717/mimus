@@ -38,6 +38,17 @@ fn layout_recording_path(id: &str) -> PathBuf {
         .join(format!("{id}.json"))
 }
 
+fn test_font_path(weight: &str) -> PathBuf {
+    repo_root()
+        .join("crates/mimus/tests/assets/fonts")
+        .join(format!("MimusTestGB2312-{weight}.ttf"))
+}
+
+fn configure_test_fonts(command: &mut Command) {
+    command.env("MIMUS_FONT_REGULAR", test_font_path("Regular"));
+    command.env("MIMUS_FONT_BOLD", test_font_path("Bold"));
+}
+
 #[derive(Debug, Deserialize)]
 struct FixtureManifest {
     identity: ManifestIdentity,
@@ -289,6 +300,7 @@ fn run_none_with_output_flag(
 ) -> Output {
     let mut command = Command::new(BIN);
     command.env(PDFIUM_ENV, pdfium_library());
+    configure_test_fonts(&mut command);
     command.env("HTTP_PROXY", "http://127.0.0.1:9");
     command.env("HTTPS_PROXY", "http://127.0.0.1:9");
     command.env("OPENAI_API_KEY", "must-not-be-used");
@@ -305,6 +317,7 @@ fn run_none_with_output_flag(
 fn run_inspect(input: &Path, json: bool, debug: Option<&Path>) -> Output {
     let mut command = Command::new(BIN);
     command.env(PDFIUM_ENV, pdfium_library());
+    configure_test_fonts(&mut command);
     if json {
         command.arg("--json");
     }
@@ -329,6 +342,7 @@ fn run_inspect_with_layout(id: &str) -> Output {
 fn run_none_with_debug(input: &Path, output: &Path, debug: &Path, json: bool) -> Output {
     let mut command = Command::new(BIN);
     command.env(PDFIUM_ENV, pdfium_library());
+    configure_test_fonts(&mut command);
     if json {
         command.arg("--json");
     }
@@ -568,7 +582,7 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
     let config = directory.path().join("config.toml");
     std::fs::write(
         &config,
-        "backend = 'none'\nbase_url = 'https://file.invalid'\nmodel = 'file-model'\ntarget_language = 'file-language'\n",
+        "backend = 'none'\nbase_url = 'https://file.invalid'\nmodel = 'file-model'\ntarget_language = 'file-language'\nfont_regular = 'file-regular.ttf'\nfont_bold = 'file-bold.ttf'\n",
     )
     .unwrap();
     let output_path = directory.path().join("translated.pdf");
@@ -579,6 +593,8 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
         .env("MODEL_ID", "env-model")
         .env("TARGET_LANGUAGE", "env-language")
         .env("MIMUS_BACKEND", "invalid-but-overridden")
+        .env("MIMUS_FONT_REGULAR", "env-regular.ttf")
+        .env("MIMUS_FONT_BOLD", "env-bold.ttf")
         .args([
             "--json",
             "translate",
@@ -590,8 +606,12 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
             "flag-model",
             "--target-language",
             "flag-language",
-            "--output",
         ])
+        .arg("--font")
+        .arg(test_font_path("Regular"))
+        .arg("--font-bold")
+        .arg(test_font_path("Bold"))
+        .arg("--output")
         .arg(&output_path)
         .arg(fixture())
         .output()
@@ -610,6 +630,26 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
     assert_eq!(resolved["endpoint"], "http://flag.invalid");
     assert_eq!(resolved["model"], "flag-model");
     assert_eq!(resolved["target_language"], "flag-language");
+    assert!(
+        resolved["font_regular_source"]
+            .as_str()
+            .unwrap()
+            .starts_with("flag:")
+    );
+    assert_eq!(
+        resolved["font_regular_sha256"],
+        "510d0470ca8b77f035fe8e7143526207088c1bdad017451cf253020f72397d63"
+    );
+    assert!(
+        resolved["font_bold_source"]
+            .as_str()
+            .unwrap()
+            .starts_with("flag:")
+    );
+    assert_eq!(
+        resolved["font_bold_sha256"],
+        "1a917349eb06866f5701532f0cea586d184edadbd1cfdd3f034f3a18f2ff5316"
+    );
     assert!(events.iter().all(|event| event.get("api_key").is_none()));
 }
 
@@ -655,6 +695,8 @@ fn empty_secret_alias_falls_through_to_the_next_nonempty_alias() {
         .env("API_KEY", "fallback-secret-canary")
         .env("BASE_URL", "http://127.0.0.1:9")
         .env("MODEL_ID", "test-model")
+        .env("MIMUS_FONT_REGULAR", test_font_path("Regular"))
+        .env("MIMUS_FONT_BOLD", test_font_path("Bold"))
         .args(["--json", "translate"])
         .arg(fixture())
         .output()
@@ -667,6 +709,32 @@ fn empty_secret_alias_falls_through_to_the_next_nonempty_alias() {
     );
     assert!(!rendered.contains("fallback-secret-canary"));
     assert!(!rendered.contains("API key is required"));
+}
+
+#[test]
+fn missing_output_fonts_fail_fast_as_asset_without_contacting_a_public_endpoint() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = Command::new(BIN)
+        .env("MIMUS_CONFIG_FILE", directory.path().join("missing.toml"))
+        .env("MIMUS_CACHE_DIR", directory.path().join("cache"))
+        .env("MIMUS_ASSET_MIRROR", "http://127.0.0.1:9")
+        .env_remove("MIMUS_FONT_REGULAR")
+        .env_remove("MIMUS_FONT_BOLD")
+        .args(["--json", "translate", "--backend", "none"])
+        .arg(fixture())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(3));
+    let events = parse_events(&output.stdout);
+    assert_one_terminal_last(&events, "error");
+    assert_eq!(events.last().unwrap()["reason"], "output_font_unavailable");
+    assert!(
+        events.last().unwrap()["hint"]
+            .as_str()
+            .unwrap()
+            .contains("--font")
+    );
 }
 
 #[test]
@@ -2635,6 +2703,8 @@ fn missing_pdfium_uses_asset_exit_code_three() {
     let translated = directory.path().join("missing-pdfium.pdf");
     let result = Command::new(BIN)
         .env(PDFIUM_ENV, directory.path().join("missing-libpdfium.dylib"))
+        .env("MIMUS_FONT_REGULAR", test_font_path("Regular"))
+        .env("MIMUS_FONT_BOLD", test_font_path("Bold"))
         .args(["translate", "--backend", "none", "--output"])
         .arg(&translated)
         .arg(fixture())
@@ -2651,6 +2721,8 @@ fn a_closed_stdout_pipe_does_not_turn_success_into_a_panic() {
     let translated = directory.path().join("broken-pipe.pdf");
     let mut child = Command::new(BIN)
         .env(PDFIUM_ENV, pdfium_library())
+        .env("MIMUS_FONT_REGULAR", test_font_path("Regular"))
+        .env("MIMUS_FONT_BOLD", test_font_path("Bold"))
         .args(["--json", "translate", "--backend", "none", "--output"])
         .arg(&translated)
         .arg(fixture())

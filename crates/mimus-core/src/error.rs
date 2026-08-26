@@ -78,6 +78,7 @@ reason_enum!(InputReason {
 
 reason_enum!(AssetReason {
     PdfiumUnavailable => "pdfium_unavailable",
+    OutputFontUnavailable => "output_font_unavailable",
 });
 
 reason_enum!(TranslationReason {

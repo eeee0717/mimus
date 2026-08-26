@@ -45,6 +45,14 @@ pub enum EventKind {
         endpoint: Option<String>,
         model: Option<String>,
         target_language: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        font_regular_source: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        font_regular_sha256: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        font_bold_source: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        font_bold_sha256: Option<String>,
     },
     StageStarted {
         stage: Stage,
@@ -188,6 +196,7 @@ pub enum DiagnosticId {
     PageDegraded,
     ContentRecovered,
     DegradationSummary,
+    UnsupportedOutputGlyph,
     DroppedDiagnostics,
 }
 
@@ -341,6 +350,13 @@ pub enum Diagnostic {
         preserved_paragraphs: Vec<PreservedParagraph>,
         total_pages: usize,
     },
+    UnsupportedOutputGlyph {
+        page_index: usize,
+        reading_order: usize,
+        missing_characters: String,
+        font_source: String,
+        font_sha256: String,
+    },
 }
 
 impl Diagnostic {
@@ -354,6 +370,7 @@ impl Diagnostic {
             Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
             Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
             Self::DegradationSummary { .. } => DiagnosticId::DegradationSummary,
+            Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
         }
     }
 
@@ -427,6 +444,13 @@ pub enum DiagnosticEvent {
         preserved_paragraphs: Vec<PreservedParagraph>,
         total_pages: usize,
     },
+    UnsupportedOutputGlyph {
+        page_index: usize,
+        reading_order: usize,
+        missing_characters: String,
+        font_source: String,
+        font_sha256: String,
+    },
     DroppedDiagnostics {
         count: usize,
         counts_by_id: Vec<DroppedDiagnosticCount>,
@@ -444,6 +468,7 @@ impl DiagnosticEvent {
             Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
             Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
             Self::DegradationSummary { .. } => DiagnosticId::DegradationSummary,
+            Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
             Self::DroppedDiagnostics { .. } => DiagnosticId::DroppedDiagnostics,
         }
     }
@@ -545,6 +570,19 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 degraded_pages: *degraded_pages,
                 preserved_paragraphs: preserved_paragraphs.clone(),
                 total_pages: *total_pages,
+            },
+            Diagnostic::UnsupportedOutputGlyph {
+                page_index,
+                reading_order,
+                missing_characters,
+                font_source,
+                font_sha256,
+            } => Self::UnsupportedOutputGlyph {
+                page_index: *page_index,
+                reading_order: *reading_order,
+                missing_characters: missing_characters.clone(),
+                font_source: font_source.clone(),
+                font_sha256: font_sha256.clone(),
             },
         }
     }
@@ -841,6 +879,26 @@ mod tests {
         assert_eq!(value["baseline_residual_count"], 8);
         assert_eq!(value["baseline_residual_max_delta_x_pt"], 0.125);
         assert_eq!(value["baseline_residual_max_delta_y_pt"], 0.25);
+    }
+
+    #[test]
+    fn missing_output_glyphs_have_a_typed_font_identity_wire_shape() {
+        let value = serde_json::to_value(Event::new(EventKind::Diagnostic {
+            diagnostic: DiagnosticEvent::from(&Diagnostic::UnsupportedOutputGlyph {
+                page_index: 3,
+                reading_order: 7,
+                missing_characters: "龘".to_owned(),
+                font_source: "flag:/tmp/font.ttf".to_owned(),
+                font_sha256: "abc123".to_owned(),
+            }),
+        }))
+        .unwrap();
+        assert_eq!(value["id"], "unsupported_output_glyph");
+        assert_eq!(value["page_index"], 3);
+        assert_eq!(value["reading_order"], 7);
+        assert_eq!(value["missing_characters"], "龘");
+        assert_eq!(value["font_source"], "flag:/tmp/font.ttf");
+        assert_eq!(value["font_sha256"], "abc123");
     }
 
     #[test]

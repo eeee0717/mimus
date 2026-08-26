@@ -71,6 +71,8 @@ CLI 机器协议版本升为 2；IL 的 `schema_version` 独立保持 1。每行
 - ADR-0013 §3（#18）：`content_recovered` diagnostic。与 `page_degraded` 相反的一侧——这一页照常翻译，但走查为此偏离了输入的字面结构，所以偏离本身必须出线。每页每类恢复只报一条：恢复决定是页级一致的，报告次数不应随内容长度漂移。
 - ADR-0015（#67/#68/#70 前置决策）：`engine_character_alignment` 逐页聚合分类交叉校验的等价差异、解释边、Unicode 冲突及 D/E/F 残差；`explained_count` 是 v2 的 additive 字段，不升 schema；既有 `engine_character_mismatch` 保留为分类器不可用时的兜底。
 - 2026-08-26 真实论文恢复：诊断预算改为总量 500 + 每 ID 25，`dropped_diagnostics.counts_by_id` 为 additive 字段；baseline 残差计数与最大偏移并入逐页 `engine_character_alignment`，逐字符明细降为 debug-only。公开协议仍为 v2。
+- ADR-0018：`configuration_resolved` 增加 Regular/Bold 输出字体的 source 与 SHA-256；
+  `unsupported_output_glyph` 增加缺字符样本与字体身份。两者均为 additive v2 扩展。
 
 ## 后果
 

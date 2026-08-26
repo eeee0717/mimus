@@ -2,6 +2,7 @@
 
 mod config;
 mod debug;
+mod font_assets;
 mod protocol;
 
 use std::ffi::{OsStr, OsString};
@@ -63,6 +64,15 @@ struct TranslateArgs {
     /// Translation target language.
     #[arg(long)]
     target_language: Option<String>,
+    /// Regular output font file.
+    #[arg(long, value_name = "TTF_OR_OTF")]
+    font: Option<PathBuf>,
+    /// Bold output font file.
+    #[arg(long, value_name = "TTF_OR_OTF")]
+    font_bold: Option<PathBuf>,
+    /// Base URL used to mirror output-font assets.
+    #[arg(long, value_name = "URL")]
+    asset_mirror: Option<String>,
     /// New directory for per-pass IL snapshots and diagnostics.
     #[arg(long, value_name = "NEW_DIR")]
     debug: Option<PathBuf>,
@@ -144,6 +154,9 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         base_url: args.endpoint,
         model: args.model,
         target_language: args.target_language,
+        font_regular: args.font,
+        font_bold: args.font_bold,
+        asset_mirror: args.asset_mirror,
     }) {
         Ok(value) => value,
         Err(error) => return session.finish_error(error),
@@ -152,6 +165,19 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
     let backend = resolved.backend.as_str().to_owned();
     let endpoint = resolved.base_url.clone();
     let model = resolved.model.clone();
+    let output_fonts = match font_assets::resolve_fonts(
+        resolved.font_regular.as_ref(),
+        resolved.font_bold.as_ref(),
+        &resolved.font_cache_dir,
+        resolved.asset_mirror.as_deref(),
+    ) {
+        Ok(value) => value,
+        Err(error) => return session.finish_error(error),
+    };
+    let font_regular_source = output_fonts.regular.source.clone();
+    let font_regular_sha256 = output_fonts.regular.sha256.clone();
+    let font_bold_source = output_fonts.bold.source.clone();
+    let font_bold_sha256 = output_fonts.bold.sha256.clone();
     let translator = match resolved.into_translator() {
         Ok(value) => value,
         Err(error) => return session.finish_error(error),
@@ -161,6 +187,10 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         endpoint: Some(endpoint),
         model: Some(model),
         target_language: target_language.clone(),
+        font_regular_source: Some(font_regular_source),
+        font_regular_sha256: Some(font_regular_sha256),
+        font_bold_source: Some(font_bold_source),
+        font_bold_sha256: Some(font_bold_sha256),
     })) {
         return session.finish_error(error);
     }
@@ -184,6 +214,7 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         snapshots: debug.as_ref().map(|value| value as &dyn PassSnapshotSink),
         config: PipelineConfig {
             target_language,
+            output_fonts: Some(output_fonts),
             ..PipelineConfig::default()
         },
     };

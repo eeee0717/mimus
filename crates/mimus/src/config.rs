@@ -32,6 +32,15 @@ pub(crate) struct ConfigOverrides {
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub target_language: Option<String>,
+    pub font_regular: Option<PathBuf>,
+    pub font_bold: Option<PathBuf>,
+    pub asset_mirror: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FontPathSelection {
+    pub path: PathBuf,
+    pub source: &'static str,
 }
 
 pub(crate) struct ResolvedConfig {
@@ -39,6 +48,10 @@ pub(crate) struct ResolvedConfig {
     pub base_url: String,
     pub model: String,
     pub target_language: String,
+    pub font_regular: Option<FontPathSelection>,
+    pub font_bold: Option<FontPathSelection>,
+    pub asset_mirror: Option<String>,
+    pub font_cache_dir: PathBuf,
     api_key: Option<SecretString>,
 }
 
@@ -82,6 +95,31 @@ impl ResolvedConfig {
             .api_key
             .or_else(|| file.api_key.filter(|value| !value.trim().is_empty()))
             .map(SecretString::from);
+        let font_regular = choose_font_path(
+            overrides.font_regular,
+            environment.font_regular,
+            file.font_regular,
+        );
+        let font_bold =
+            choose_font_path(overrides.font_bold, environment.font_bold, file.font_bold);
+        let asset_mirror = choose_optional(
+            overrides.asset_mirror,
+            environment.asset_mirror,
+            file.asset_mirror,
+            "asset mirror",
+        )?;
+        let font_cache_dir = environment
+            .cache_dir
+            .or(file.cache_dir)
+            .map(|root| root.join("fonts/noto-sans-sc-2.004"))
+            .or_else(default_cache_dir)
+            .ok_or_else(|| {
+                MimusError::asset(
+                    mimus_core::error::AssetReason::OutputFontUnavailable,
+                    "could not determine the output-font cache directory",
+                )
+                .with_hint("set MIMUS_CACHE_DIR or provide --font and --font-bold")
+            })?;
 
         if backend == Backend::Openai && api_key.is_none() {
             return Err(MimusError::usage(
@@ -96,6 +134,10 @@ impl ResolvedConfig {
             base_url,
             model,
             target_language,
+            font_regular,
+            font_bold,
+            asset_mirror,
+            font_cache_dir,
             api_key,
         })
     }
@@ -124,6 +166,10 @@ struct FileConfig {
     model: Option<String>,
     target_language: Option<String>,
     api_key: Option<String>,
+    font_regular: Option<PathBuf>,
+    font_bold: Option<PathBuf>,
+    asset_mirror: Option<String>,
+    cache_dir: Option<PathBuf>,
 }
 
 struct EnvironmentConfig {
@@ -132,6 +178,10 @@ struct EnvironmentConfig {
     model: Option<String>,
     target_language: Option<String>,
     api_key: Option<String>,
+    font_regular: Option<PathBuf>,
+    font_bold: Option<PathBuf>,
+    asset_mirror: Option<String>,
+    cache_dir: Option<PathBuf>,
 }
 
 impl EnvironmentConfig {
@@ -149,8 +199,64 @@ impl EnvironmentConfig {
             model: first_env(&["MIMUS_OPENAI_MODEL", "OPENAI_MODEL", "MODEL_ID"]),
             target_language: first_env(&["MIMUS_TARGET_LANGUAGE", "TARGET_LANGUAGE"]),
             api_key: first_nonempty_env(&["MIMUS_OPENAI_API_KEY", "OPENAI_API_KEY", "API_KEY"]),
+            font_regular: first_env(&["MIMUS_FONT_REGULAR"]).map(PathBuf::from),
+            font_bold: first_env(&["MIMUS_FONT_BOLD"]).map(PathBuf::from),
+            asset_mirror: first_env(&["MIMUS_ASSET_MIRROR"]),
+            cache_dir: first_env(&["MIMUS_CACHE_DIR"]).map(PathBuf::from),
         }
     }
+}
+
+fn choose_optional(
+    flag: Option<String>,
+    environment: Option<String>,
+    file: Option<String>,
+    name: &str,
+) -> Result<Option<String>> {
+    let value = flag.or(environment).or(file);
+    if value.as_ref().is_some_and(|value| value.trim().is_empty()) {
+        return Err(MimusError::usage(
+            UsageReason::InvalidArguments,
+            format!("{name} must not be empty"),
+        ));
+    }
+    Ok(value)
+}
+
+fn default_cache_dir() -> Option<PathBuf> {
+    if let Some(root) = first_env(&["XDG_CACHE_HOME"]) {
+        return Some(PathBuf::from(root).join("mimus/fonts/noto-sans-sc-2.004"));
+    }
+    let home = first_env(&["HOME"])?;
+    let root = if cfg!(target_os = "macos") {
+        PathBuf::from(home).join("Library/Caches/mimus")
+    } else {
+        PathBuf::from(home).join(".cache/mimus")
+    };
+    Some(root.join("fonts/noto-sans-sc-2.004"))
+}
+
+fn choose_font_path(
+    flag: Option<PathBuf>,
+    environment: Option<PathBuf>,
+    file: Option<PathBuf>,
+) -> Option<FontPathSelection> {
+    flag.map(|path| FontPathSelection {
+        path,
+        source: "flag",
+    })
+    .or_else(|| {
+        environment.map(|path| FontPathSelection {
+            path,
+            source: "environment",
+        })
+    })
+    .or_else(|| {
+        file.map(|path| FontPathSelection {
+            path,
+            source: "config",
+        })
+    })
 }
 
 fn choose(

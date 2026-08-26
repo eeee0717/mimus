@@ -491,7 +491,7 @@ mod tests {
     fn embedded_test_font() -> EmbeddedFont {
         let bytes = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../corpus/fonts/MimusCJK.ttf"
+            "/../mimus/tests/assets/fonts/MimusTestGB2312-Regular.ttf"
         ));
         let face = ttf_parser::Face::parse(bytes, 0).unwrap();
         let glyph = face.glyph_index('M').unwrap();
