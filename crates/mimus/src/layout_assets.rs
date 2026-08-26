@@ -172,12 +172,12 @@ fn missing_model_error() -> MimusError {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read as _, Write as _};
+    use std::io::Write as _;
     use std::net::TcpListener;
     use std::thread;
 
     use mimus_core::error::{AssetReason, ErrorReason};
-    use sha2::{Digest as _, Sha256};
+    use sha2::Sha256;
 
     use super::*;
 
