@@ -89,6 +89,7 @@ reason_enum!(TranslationReason {
     TransportFailure => "transport_failure",
     TranslationFailed => "translation_failed",
     RetryExhausted => "retry_exhausted",
+    StrictDegradation => "strict_degradation",
 });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -471,6 +472,11 @@ mod tests {
                 "retry_exhausted",
             ),
             (
+                MimusError::translation(TranslationReason::StrictDegradation, "test"),
+                ExitCategory::Translation,
+                "strict_degradation",
+            ),
+            (
                 MimusError::io(IoReason::InputRead, "test"),
                 ExitCategory::Io,
                 "input_read",
@@ -539,7 +545,7 @@ mod tests {
             assert!(wire_values.insert(*wire), "duplicate reason {wire}");
         }
 
-        assert_eq!(cases.len(), 26, "new reasons must be added to this matrix");
+        assert_eq!(cases.len(), 27, "new reasons must be added to this matrix");
         assert_eq!(wire_values.len(), cases.len());
     }
 }

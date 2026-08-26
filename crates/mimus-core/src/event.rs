@@ -58,6 +58,7 @@ pub enum EventKind {
         cache_enabled: bool,
         cache_path: Option<String>,
         concurrency: usize,
+        strict: bool,
     },
     TranslationCache {
         page_index: usize,
@@ -379,6 +380,7 @@ pub enum Diagnostic {
         degraded_page_indices: Vec<usize>,
         degraded_pages: usize,
         preserved_paragraphs: Vec<PreservedParagraph>,
+        preserved_paragraph_count: usize,
         total_pages: usize,
     },
     TranslationIdentity {
@@ -517,6 +519,7 @@ pub enum DiagnosticEvent {
         degraded_page_indices: Vec<usize>,
         degraded_pages: usize,
         preserved_paragraphs: Vec<PreservedParagraph>,
+        preserved_paragraph_count: usize,
         total_pages: usize,
     },
     TranslationIdentity {
@@ -681,11 +684,13 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 degraded_page_indices,
                 degraded_pages,
                 preserved_paragraphs,
+                preserved_paragraph_count,
                 total_pages,
             } => Self::DegradationSummary {
                 degraded_page_indices: degraded_page_indices.clone(),
                 degraded_pages: *degraded_pages,
                 preserved_paragraphs: preserved_paragraphs.clone(),
+                preserved_paragraph_count: *preserved_paragraph_count,
                 total_pages: *total_pages,
             },
             Diagnostic::TranslationIdentity {
@@ -1174,6 +1179,7 @@ mod tests {
                 reason: il::PreservedReason::UnreliableUnicode,
                 placeholder_violation: None,
             }],
+            preserved_paragraph_count: 1,
             total_pages: 6,
         });
 
@@ -1196,6 +1202,7 @@ mod tests {
                 degraded_pages: 1,
                 total_pages: 6,
                 preserved_paragraphs,
+                preserved_paragraph_count: 1,
             } if degraded_page_indices == &[2] && preserved_paragraphs.len() == 1
         )));
         assert!(matches!(

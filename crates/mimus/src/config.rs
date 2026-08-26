@@ -41,6 +41,7 @@ pub(crate) struct ConfigOverrides {
     pub cache: Option<PathBuf>,
     pub no_cache: bool,
     pub concurrency: Option<usize>,
+    pub strict: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +64,7 @@ pub(crate) struct ResolvedConfig {
     pub auto_terms: bool,
     pub cache_path: Option<PathBuf>,
     pub max_concurrency: usize,
+    pub strict: bool,
     api_key: Option<SecretString>,
 }
 
@@ -190,6 +192,7 @@ impl ResolvedConfig {
             auto_terms: !overrides.no_auto_terms,
             cache_path,
             max_concurrency,
+            strict: overrides.strict,
             api_key,
         })
     }

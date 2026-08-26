@@ -25,6 +25,7 @@ pub struct PipelineConfig {
     pub cache_path: Option<PathBuf>,
     pub max_concurrency: usize,
     pub sleeper: Arc<dyn Sleeper>,
+    pub strict: bool,
 }
 
 impl Default for PipelineConfig {
@@ -39,6 +40,7 @@ impl Default for PipelineConfig {
             cache_path: None,
             max_concurrency: 4,
             sleeper: Arc::new(ThreadSleeper),
+            strict: false,
         }
     }
 }

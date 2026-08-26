@@ -7,6 +7,7 @@ use mimus_core::event::{
     DiagnosticEvent, Event, EventKind, EventSink, MINIMAL_SERIALIZATION_ERROR_LINE,
     PageDegradeReason, RecoveryKind, ResultPayload, Stage, serialize_line,
 };
+use mimus_core::il::PreservedReason;
 
 type Serializer = fn(&Event) -> Result<Vec<u8>>;
 
@@ -345,6 +346,7 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
             degraded_page_indices,
             degraded_pages,
             preserved_paragraphs,
+            preserved_paragraph_count,
             total_pages,
         } => {
             let pages = degraded_page_indices
@@ -352,10 +354,22 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 .map(|index| (index + 1).to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
+            let paragraphs = preserved_paragraphs
+                .iter()
+                .map(|paragraph| {
+                    format!(
+                        "page {} paragraph {} ({})",
+                        paragraph.page_index + 1,
+                        paragraph.paragraph_index + 1,
+                        human_preserved_reason(paragraph.reason)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "warning[degradation_summary]: {degraded_pages} of {total_pages} pages kept as-is [{pages}]; {} paragraphs kept as source text",
-                preserved_paragraphs.len()
+                "warning[degradation_summary]: {degraded_pages} of {total_pages} pages kept as-is [{pages}]; {} paragraphs kept as source text [{paragraphs}]",
+                preserved_paragraph_count,
             );
         }
         DiagnosticEvent::TranslationIdentity {
@@ -429,6 +443,19 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 "warning[dropped_diagnostics]: {count} additional diagnostics dropped; by id: {counts_by_id:?}"
             );
         }
+    }
+}
+
+const fn human_preserved_reason(reason: PreservedReason) -> &'static str {
+    match reason {
+        PreservedReason::UnreliableUnicode => "unreliable_unicode",
+        PreservedReason::UnsupportedFont => "unsupported_font",
+        PreservedReason::NonPositiveAdvance => "non_positive_advance",
+        PreservedReason::Unlocatable => "unlocatable",
+        PreservedReason::TypesetOverflow => "typeset_overflow",
+        PreservedReason::TypesetProtocol => "typeset_protocol",
+        PreservedReason::PlaceholderViolation => "placeholder_violation",
+        PreservedReason::TranslationFailure => "translation_failure",
     }
 }
 
