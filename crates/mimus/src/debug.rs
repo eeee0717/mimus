@@ -79,6 +79,7 @@ fn debug_write_error(message: impl Into<String>) -> MimusError {
 #[cfg(test)]
 mod tests {
     use mimus_core::error::ErrorReason;
+    use mimus_core::event::{DiagnosticId, DroppedDiagnosticCount};
 
     use super::*;
 
@@ -142,7 +143,13 @@ mod tests {
                 delta_x_pt: 0.01,
                 delta_y_pt: 0.02,
             },
-            DiagnosticEvent::DroppedDiagnostics { count: 7 },
+            DiagnosticEvent::DroppedDiagnostics {
+                count: 7,
+                counts_by_id: vec![DroppedDiagnosticCount {
+                    id: DiagnosticId::EngineBaselineMismatch,
+                    count: 7,
+                }],
+            },
         ];
 
         debug.write_diagnostics(&diagnostics).unwrap();

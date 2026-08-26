@@ -2347,6 +2347,13 @@ struct AlignmentCounts {
     residual: usize,
 }
 
+#[derive(Debug, Default)]
+struct BaselineResiduals {
+    count: usize,
+    max_delta_x_pt: f64,
+    max_delta_y_pt: f64,
+}
+
 impl AlignmentCounts {
     fn has_diagnostic(&self) -> bool {
         self.extraction_equivalent
@@ -2470,7 +2477,7 @@ fn validate_character_alignment(
         }
     }
 
-    emit_residual_baseline_diagnostics(
+    let baseline_residuals = collect_residual_baselines(
         page_index,
         walked,
         engine,
@@ -2479,7 +2486,7 @@ fn validate_character_alignment(
         &engine_matched,
         diagnostics,
     );
-    if counts.has_diagnostic() {
+    if counts.has_diagnostic() || baseline_residuals.count > 0 {
         diagnostics.push(Diagnostic::EngineCharacterAlignment {
             page_index,
             walked_character_count: walked.len(),
@@ -2492,6 +2499,9 @@ fn validate_character_alignment(
             walk_only_count: counts.walk_only,
             engine_only_count: counts.engine_only,
             residual_count: counts.residual,
+            baseline_residual_count: baseline_residuals.count,
+            baseline_residual_max_delta_x_pt: baseline_residuals.max_delta_x_pt,
+            baseline_residual_max_delta_y_pt: baseline_residuals.max_delta_y_pt,
         });
     }
     alignment
@@ -2737,7 +2747,7 @@ fn engine_character_is_outside_page(
             || character.tight_box.bottom >= geometry.height)
 }
 
-fn emit_residual_baseline_diagnostics(
+fn collect_residual_baselines(
     page_index: usize,
     walked: &[crate::walk::WalkedChar],
     engine: &[crate::engine::PageCharSnapshot],
@@ -2745,7 +2755,8 @@ fn emit_residual_baseline_diagnostics(
     walk_matched: &[bool],
     engine_matched: &[bool],
     diagnostics: &mut Diagnostics,
-) {
+) -> BaselineResiduals {
+    let mut residuals = BaselineResiduals::default();
     for (index, walk) in walked.iter().enumerate() {
         let Some(engine_character) = engine.get(index) else {
             continue;
@@ -2761,7 +2772,10 @@ fn emit_residual_baseline_diagnostics(
         let delta_x = (walk.baseline_origin.x - engine_character.baseline_origin.x).abs();
         let delta_y = (walk.baseline_origin.y - engine_character.baseline_origin.y).abs();
         if delta_x > tolerance || delta_y > tolerance {
-            diagnostics.push(Diagnostic::EngineBaselineMismatch {
+            residuals.count += 1;
+            residuals.max_delta_x_pt = residuals.max_delta_x_pt.max(delta_x);
+            residuals.max_delta_y_pt = residuals.max_delta_y_pt.max(delta_y);
+            diagnostics.push_debug(Diagnostic::EngineBaselineMismatch {
                 page_index,
                 character_index: index,
                 delta_x_pt: delta_x,
@@ -2769,6 +2783,7 @@ fn emit_residual_baseline_diagnostics(
             });
         }
     }
+    residuals
 }
 
 fn encrypted_pdf_error() -> MimusError {
@@ -3717,7 +3732,7 @@ mod tests {
     }
 
     #[test]
-    fn finite_pdfium_baseline_differences_become_bounded_diagnostics() {
+    fn finite_pdfium_baseline_differences_become_one_page_alignment_diagnostic() {
         let pdf = LopdfDocument::load(fixture()).unwrap();
         let page_id = pdf.get_pages()[&1];
         let walked = walk_page(&pdf, page_id).unwrap().characters;
@@ -3735,25 +3750,44 @@ mod tests {
             &mut diagnostics,
         );
         assert_eq!(alignment.engine_indices_by_walk[0], None);
-        let (page_index, character_index, delta_x_pt, delta_y_pt) = diagnostics
-            .entries()
-            .iter()
-            .find_map(|diagnostic| match diagnostic {
-                Diagnostic::EngineBaselineMismatch {
-                    page_index,
-                    character_index,
-                    delta_x_pt,
-                    delta_y_pt,
-                } => Some((*page_index, *character_index, *delta_x_pt, *delta_y_pt)),
-                _ => None,
-            })
-            .expect("expected an engine baseline diagnostic");
-        assert_eq!(page_index, 0);
-        assert_eq!(character_index, 0);
-        assert!((delta_x_pt - 0.01).abs() < 1e-12);
-        assert!((delta_y_pt - 0.02).abs() < 1e-12);
-        assert!(delta_x_pt >= 0.0);
-        assert!(delta_y_pt >= 0.0);
+        assert!(
+            diagnostics
+                .entries()
+                .iter()
+                .all(|diagnostic| !matches!(diagnostic, Diagnostic::EngineBaselineMismatch { .. }))
+        );
+        assert_eq!(
+            diagnostics
+                .entries()
+                .iter()
+                .filter(|diagnostic| matches!(
+                    diagnostic,
+                    Diagnostic::EngineCharacterAlignment { page_index: 0, .. }
+                ))
+                .count(),
+            1
+        );
+        assert!(diagnostics.entries().iter().any(|diagnostic| matches!(
+            diagnostic,
+            Diagnostic::EngineCharacterAlignment {
+                page_index: 0,
+                baseline_residual_count: 1,
+                baseline_residual_max_delta_x_pt,
+                baseline_residual_max_delta_y_pt,
+                ..
+            } if (*baseline_residual_max_delta_x_pt - 0.01).abs() < 1e-12
+                && (*baseline_residual_max_delta_y_pt - 0.02).abs() < 1e-12
+        )));
+        assert!(diagnostics.debug_events().iter().any(|diagnostic| matches!(
+            diagnostic,
+            crate::event::DiagnosticEvent::EngineBaselineMismatch {
+                page_index: 0,
+                character_index: 0,
+                delta_x_pt,
+                delta_y_pt,
+            } if (delta_x_pt - 0.01).abs() < 1e-12
+                && (delta_y_pt - 0.02).abs() < 1e-12
+        )));
 
         engine[0].baseline_origin.x = f64::NAN;
         diagnostics = Diagnostics::default();
@@ -3809,6 +3843,9 @@ mod tests {
                 walk_only_count: 0,
                 engine_only_count: 0,
                 residual_count: 0,
+                baseline_residual_count: 0,
+                baseline_residual_max_delta_x_pt: 0.0,
+                baseline_residual_max_delta_y_pt: 0.0,
             }]
         ));
     }

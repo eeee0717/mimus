@@ -241,12 +241,12 @@ fn finish_command(
         }
     }
 
-    let diagnostics = document.diagnostics.events();
     if let Some(debug) = debug {
-        if let Err(error) = debug.write_diagnostics(&diagnostics) {
+        if let Err(error) = debug.write_diagnostics(&document.diagnostics.debug_events()) {
             return session.finish_error(error);
         }
     }
+    let diagnostics = document.diagnostics.events();
     if let Err(error) = session.emit_diagnostics(&diagnostics) {
         return session.finish_error(error);
     }
