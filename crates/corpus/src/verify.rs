@@ -1572,7 +1572,9 @@ fn check_pdf_structure(manifest: &Manifest, document: &qpdf::Document) -> Result
             .map(|destination| destination.name.clone())
             .collect();
         let actual_names: Vec<String> = names
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .filter_map(|pair| pdf_text(&pair[0]).map(str::to_string))
             .collect();
         compare_string_set(
@@ -1583,7 +1585,7 @@ fn check_pdf_structure(manifest: &Manifest, document: &qpdf::Document) -> Result
         );
         for expected in &manifest.expected.named_destination {
             let mut found = false;
-            for pair in names.chunks_exact(2) {
+            for pair in names.as_chunks::<2>().0 {
                 if pdf_text(&pair[0]) == Some(expected.name.as_str()) {
                     found = destination_matches(
                         &pair[1],

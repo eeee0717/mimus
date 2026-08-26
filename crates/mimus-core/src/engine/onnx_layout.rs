@@ -143,7 +143,9 @@ fn preprocess(raster: &RgbaImage) -> Result<PreprocessedPage> {
     }
     let rgb = raster
         .rgba8()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|pixel| pixel[..3].iter().copied())
         .collect::<Vec<_>>();
     let image =
@@ -173,9 +175,12 @@ fn output_rows(shape: &[i64], data: &[f32], bbox_count: i32) -> Result<Vec<[f32;
     if bbox_count > row_count || data.len() != row_count.saturating_mul(7) {
         return Err(model_error());
     }
-    data.chunks_exact(7)
+    data.as_chunks::<7>()
+        .0
+        .iter()
         .take(bbox_count)
-        .map(|row| <[f32; 7]>::try_from(row).map_err(|_| model_error()))
+        .copied()
+        .map(Ok)
         .collect()
 }
 
@@ -186,7 +191,7 @@ fn normalize_rgb_to_chw(rgb: &[u8], width: usize, height: usize) -> Result<Vec<f
         return Err(model_error());
     }
     let mut chw = vec![0.0; expected];
-    for (pixel_index, pixel) in rgb.chunks_exact(3).enumerate() {
+    for (pixel_index, pixel) in rgb.as_chunks::<3>().0.iter().enumerate() {
         for channel in 0..3 {
             chw[channel * pixels + pixel_index] = f32::from(pixel[channel]) / 255.0;
         }
