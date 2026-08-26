@@ -59,6 +59,14 @@
 | 不翻·原样保留 | header, footer, header_image, footer_image, image, chart, seal, algorithm, display_formula, formula_number, number, vertical_text, reference, reference_content, table（表体，`--translate-table` 可开） |
 | 占位符处理 | inline_formula（在所属段落内以 `{v1}` 占位送翻，返回后还原） |
 
+临时公式止血政策（#35）：在生产 layout 模型接入（#84）前，对仍被标为
+`Translate` 的单元执行偏保守的数学形状启发式；命中单元所在的整个自然段改为
+passthrough，不进入翻译请求，并按命中单元发出不计 degradation、不影响 strict 的
+`math_passthrough` info 诊断。自然段是当前远端翻译与 cache 的原子；整段保留避免把
+含公式段裁成未经验证的新请求，并在重组时误处理公式邻接文本。该政策宁可将少量散文
+留为原文，也不允许公式内容被译坏；#84 提供真实
+`display_formula` / `inline_formula` 标签后，由标签政策取代本启发式。
+
 政策表按**版面类别**划分，生效前提是 layout detector 已给出对应标签。PP-DocLayoutV3
 接入生产前，`SingleLineLayoutDetector` / replay 只能证明已提供标签下的政策行为，不能证明
 真实论文已获得 25 类分类。与类别正交的还有一条按**文本朝向**的划分：**非直立文本一律

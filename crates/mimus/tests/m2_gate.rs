@@ -619,6 +619,24 @@ fn extract_pdf_text(path: &Path, extractor: &str) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+fn decoded_page_streams(path: &Path, page_number: u32) -> Vec<Vec<u8>> {
+    let document = lopdf::Document::load(path).unwrap();
+    let page = document.get_pages()[&page_number];
+    document
+        .get_page_contents(page)
+        .into_iter()
+        .map(|object| {
+            document
+                .get_object(object)
+                .unwrap()
+                .as_stream()
+                .unwrap()
+                .decompressed_content()
+                .unwrap()
+        })
+        .collect()
+}
+
 fn translated_han_strings(snapshot: &Path) -> Vec<String> {
     let value: serde_json::Value =
         serde_json::from_slice(&std::fs::read(snapshot).unwrap()).unwrap();
@@ -1151,6 +1169,120 @@ fn cjk_translation_overflow_preserves_the_original_paragraph() {
 }
 
 #[test]
+fn math_shaped_fallback_text_bypasses_translation_without_hiding_prose() {
+    const MATH_LINES: [&str; 4] = [
+        "Attention(Q,K,V) = softmax(QK^T / sqrt(dk))V (1)",
+        "Q",
+        "dmodel×dk",
+        "MultiHead(Q,K,V) = Concat(head1,...,headh)WO",
+    ];
+    const PROSE: &str = "This method improves translation quality across documents.";
+
+    let directory = tempfile::tempdir().unwrap();
+    let debug = directory.path().join("debug");
+    let output_path = directory.path().join("math-passthrough.pdf");
+    let server = GateResponsesServer::start([ScriptedReply::Echo]);
+    let output = run_openai(
+        "unit-form-01-math-shapes",
+        &server,
+        RunOptions {
+            output: &output_path,
+            debug: Some(&debug),
+            cache: None,
+            model: "m3-math-passthrough-model",
+            target_language: "zh-CN",
+            glossary: None,
+            auto_terms: false,
+            strict: true,
+        },
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let requests = server
+        .requests()
+        .into_iter()
+        .filter(|request| request.kind == RequestKind::ParagraphTranslation)
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].input.trim(), PROSE);
+    for math in MATH_LINES {
+        assert!(!requests[0].input.contains(math));
+    }
+
+    let events = parse_events(&output.stdout);
+    let passthrough = events
+        .iter()
+        .filter(|event| event["id"] == "math_passthrough")
+        .collect::<Vec<_>>();
+    assert_eq!(passthrough.len(), MATH_LINES.len());
+    for (reading_order, event) in passthrough.into_iter().enumerate() {
+        assert_eq!(event["page_index"], 0);
+        assert_eq!(event["paragraph_index"], reading_order);
+        assert_eq!(event["reading_order"], reading_order);
+        assert_eq!(
+            event["source_characters"],
+            MATH_LINES[reading_order].chars().count()
+        );
+    }
+    assert!(
+        events
+            .iter()
+            .all(|event| event["id"] != "degradation_summary"),
+        "{}",
+        serde_json::to_string_pretty(&events).unwrap()
+    );
+
+    let translate_il: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(debug.join("06-translate.il.json")).unwrap())
+            .unwrap();
+    let paragraphs = translate_il["pages"][0]["paragraphs"].as_array().unwrap();
+    assert_eq!(paragraphs.len(), MATH_LINES.len() + 1);
+    for (paragraph, expected) in paragraphs.iter().zip(MATH_LINES) {
+        assert_eq!(paragraph["translated_text"], expected);
+        let policies = paragraph["text"]["chars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|character| character["layout"]["policy"].as_str().unwrap().to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(policies, BTreeSet::from(["passthrough".to_owned()]));
+    }
+    let prose = paragraphs.last().unwrap();
+    assert_eq!(prose["translated_text"], PROSE);
+    assert_eq!(
+        prose["text"]["chars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|character| character["layout"]["policy"].as_str().unwrap().to_owned())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["translate".to_owned()])
+    );
+
+    for extractor in ["poppler", "mupdf"] {
+        let text = extract_pdf_text(&output_path, extractor);
+        for expected in MATH_LINES {
+            assert!(
+                text.contains(expected),
+                "{extractor} did not preserve {expected:?}: {text:?}"
+            );
+        }
+    }
+    let input_path =
+        repo_root().join("corpus/fixtures/unit-form-01-math-shapes/unit-form-01-math-shapes.pdf");
+    assert_eq!(
+        decoded_page_streams(&output_path, 1),
+        decoded_page_streams(&input_path, 1)
+    );
+    assert_valid_pdf(&output_path, "unit-form-01-math-shapes");
+    server.assert_clean();
+}
+
+#[test]
 fn short_cjk_title_fits_a_tight_single_line_container() {
     let directory = tempfile::tempdir().unwrap();
     let debug = directory.path().join("debug");
@@ -1290,9 +1422,9 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
         "unit-scan-01-image-only".to_owned(),
         "unit-scan-02-invisible-ocr".to_owned(),
     ]);
-    assert_eq!(ids.len(), 143, "Corpus fixture inventory changed");
-    assert_eq!(unique_cases.len(), 81, "Corpus case inventory changed");
-    assert_eq!(legal.len(), 103, "legal fixture inventory changed");
+    assert_eq!(ids.len(), 144, "Corpus fixture inventory changed");
+    assert_eq!(unique_cases.len(), 82, "Corpus case inventory changed");
+    assert_eq!(legal.len(), 104, "legal fixture inventory changed");
     assert!(rejected.is_subset(&legal));
 
     let directory = tempfile::tempdir().unwrap();
@@ -1371,10 +1503,10 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
             output_count += 1;
         }
     }
-    assert_eq!(output_count, 96);
+    assert_eq!(output_count, 97);
     assert_eq!(
         server.request_count(),
-        132,
+        129,
         "eligible corpus request inventory changed"
     );
     assert!(server.requests().iter().all(|request| {

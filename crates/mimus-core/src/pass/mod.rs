@@ -2023,7 +2023,8 @@ fn prepare_translations(document: &mut Document) -> Result<()> {
         })
         .collect::<Vec<_>>();
     let mut prepared = BTreeMap::new();
-    for page in &document.il.pages {
+    let mut math_diagnostics = Vec::new();
+    for page in &mut document.il.pages {
         let content_objects = page_content_objects.get(page.index).ok_or_else(|| {
             MimusError::internal(
                 InternalReason::InvariantViolation,
@@ -2033,10 +2034,17 @@ fn prepare_translations(document: &mut Document) -> Result<()> {
                 ),
             )
         })?;
-        for paragraph in &page.paragraphs {
+        for (paragraph_index, paragraph) in page.paragraphs.iter_mut().enumerate() {
             if paragraph.preserved.is_some() {
                 continue;
             }
+            mark_math_passthrough_units(
+                paragraph,
+                content_objects,
+                page.index,
+                paragraph_index,
+                &mut math_diagnostics,
+            );
             let chars = paragraph.chars();
             let mut parts = Vec::new();
             let mut start = 0;
@@ -2069,7 +2077,152 @@ fn prepare_translations(document: &mut Document) -> Result<()> {
         }
     }
     document.prepared_translations = prepared;
+    for diagnostic in math_diagnostics {
+        document.diagnostics.push(diagnostic);
+    }
     Ok(())
+}
+
+fn mark_math_passthrough_units(
+    paragraph: &mut Paragraph,
+    content_objects: &BTreeSet<u32>,
+    page_index: usize,
+    paragraph_index: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let TextCarrier::Chars { chars } = &mut paragraph.text;
+    let mut math_units = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let layout = chars[start].layout;
+        let mut end = start + 1;
+        while end < chars.len() && chars[end].layout == layout {
+            end += 1;
+        }
+        let Some(layout) = layout else {
+            start = end;
+            continue;
+        };
+        let source = request_text(&chars[start..end]);
+        if math_shape_is_passthrough(&source)
+            && chars[start..end]
+                .iter()
+                .any(|character| character_is_translatable(character, content_objects))
+        {
+            math_units.push((layout.reading_order, source.trim().chars().count()));
+        }
+        start = end;
+    }
+    if math_units.is_empty() {
+        return;
+    }
+    for character in chars {
+        if character_is_translatable(character, content_objects) {
+            character.layout.as_mut().unwrap().policy = TranslationPolicy::Passthrough;
+        }
+    }
+    for (reading_order, source_characters) in math_units {
+        diagnostics.push(Diagnostic::MathPassthrough {
+            page_index,
+            paragraph_index,
+            reading_order,
+            source_characters,
+        });
+    }
+}
+
+fn math_shape_is_passthrough(source: &str) -> bool {
+    let text = source.trim();
+    if text.is_empty() {
+        return false;
+    }
+    if text
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .is_some_and(|value| {
+            !value.is_empty() && value.chars().all(|character| character.is_ascii_digit())
+        })
+    {
+        return true;
+    }
+
+    let characters = text
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<Vec<_>>();
+    if characters.len() == 1 {
+        let character = characters[0];
+        if matches!(
+            character,
+            'Q' | 'K'
+                | 'V'
+                | 'W'
+                | 'X'
+                | 'Y'
+                | 'Z'
+                | 'q'
+                | 'k'
+                | 'v'
+                | 'w'
+                | 'x'
+                | 'y'
+                | 'z'
+                | 'i'
+                | 'j'
+        ) || ('Ͱ'..='Ͽ').contains(&character)
+        {
+            return true;
+        }
+    }
+
+    let has_operand = characters
+        .iter()
+        .any(|character| character.is_alphanumeric());
+    let has_strong_operator = characters.iter().any(|character| {
+        matches!(
+            character,
+            '=' | '×'
+                | '÷'
+                | '±'
+                | '∓'
+                | '∑'
+                | '∏'
+                | '∫'
+                | '√'
+                | '∈'
+                | '∉'
+                | '≤'
+                | '≥'
+                | '≠'
+                | '≈'
+                | '∞'
+                | '∂'
+                | '∇'
+                | '⊗'
+                | '⋅'
+        )
+    });
+    if has_operand && has_strong_operator {
+        return true;
+    }
+
+    let has_script = characters
+        .iter()
+        .any(|character| matches!(character, '²' | '³' | '¹') || ('⁰'..='₟').contains(character));
+    if has_operand && has_script {
+        return true;
+    }
+
+    let syntax_characters = characters
+        .iter()
+        .filter(|character| {
+            matches!(
+                character,
+                '(' | ')' | '[' | ']' | '{' | '}' | ',' | '+' | '-' | '*' | '/' | '^' | '_'
+            )
+        })
+        .count();
+    has_operand && syntax_characters >= 3 && syntax_characters.saturating_mul(5) >= characters.len()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -6885,6 +7038,31 @@ mod tests {
                 .as_deref(),
             Some("[MI!]")
         );
+    }
+
+    #[test]
+    fn math_shape_heuristic_prefers_source_without_hiding_plain_prose() {
+        for math in [
+            "(1)",
+            "Q",
+            "dmodel×dk",
+            "Attention(Q,K,V) = softmax(QK^T / sqrt(dk))V (1)",
+            "MultiHead(Q,K,V) = Concat(head1,...,headh)WO",
+            "PE(pos,2i+1) = cos(pos/10000)",
+            "x² + y₁",
+        ] {
+            assert!(math_shape_is_passthrough(math), "missed {math:?}");
+        }
+        for prose in [
+            "M",
+            "I",
+            "This method improves translation quality across documents.",
+            "Attention Is All You Need",
+            "Figure 1: Overview",
+            "In 2024, we measured 3.14 and reported the result.",
+        ] {
+            assert!(!math_shape_is_passthrough(prose), "matched {prose:?}");
+        }
     }
 
     #[test]
