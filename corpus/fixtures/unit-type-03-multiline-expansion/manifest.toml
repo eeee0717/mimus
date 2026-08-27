@@ -1,0 +1,181 @@
+# unit-type-03-multiline-expansion -- expected manifest
+#
+# This specification precedes the exact writer recipe. Geometry is derived
+# from the pinned font's TrueType tables (2048 units/em) and PDF text-state
+# arithmetic at the three declared baselines.
+
+schema_version = 1
+
+[identity]
+id = "unit-type-03-multiline-expansion"
+name = "Bounded multiline block expansion"
+class = "unit"
+legality = "legal"
+cases = ["TYPE-03"]
+priority = "M3"
+variable = "An over-wide two-line owner region with retained same-row ink and bounded whitespace above a lower obstacle"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-type-03-multiline-expansion.pdf"
+pdf_sha256 = "471bc9c335bf04c2f081e0ad8e276ffdc85c5aff43d72e1be2b71a8b07776a3b"
+font_provenance = "vendored"
+fonts = [
+    { file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" },
+]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d747970652d30332d6d756c"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 3
+columns = 1
+bookmarks = 0
+bookmark_depth = 0
+annotations = 0
+form_fields = 0
+optional_content_groups = 0
+named_destinations = 0
+uri_actions = 0
+
+[[expected.block]]
+key = "SAME_ROW_OBSTACLE"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS\nMIMUS"
+baseline_origin = [72.0, 140.0]
+metric_box = [72.0, 123.168, 112.656, 151.136]
+visual_bbox = [73.177734, 125.830078, 111.985219, 148.90625]
+
+[[expected.block]]
+key = "OWNER"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "MIMUS\nMIMUS"
+baseline_origin = [220.0, 140.0]
+metric_box = [220.0, 123.168, 260.656, 151.136]
+visual_bbox = [221.177734, 125.830078, 259.985219, 148.90625]
+
+[[expected.block]]
+key = "LOWER_OBSTACLE"
+page = 0
+column = "full"
+draw_order = 3
+reading_order = 3
+text = "MIMUS"
+baseline_origin = [72.0, 92.0]
+metric_box = [72.0, 89.168, 112.656, 103.136]
+visual_bbox = [73.177734, 91.830078, 111.985219, 100.90625]
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 140 Tm
+(MIMUS) Tj
+1 0 0 1 72 126 Tm
+(MIMUS) Tj
+1 0 0 1 220 140 Tm
+(MIMUS) Tj
+1 0 0 1 220 126 Tm
+(MIMUS) Tj
+1 0 0 1 72 92 Tm
+(MIMUS) Tj
+ET
+"""
+
+[[expected.reference]]
+from_object = 1
+path = ["/Pages"]
+to_object = 2
+
+[[expected.reference]]
+from_object = 2
+path = ["/Kids", "0"]
+to_object = 3
+
+[[expected.reference]]
+from_object = 3
+path = ["/Parent"]
+to_object = 2
+
+[[expected.reference]]
+from_object = 3
+path = ["/Resources"]
+to_object = 4
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 9
+
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 5
+
+[[expected.reference]]
+from_object = 5
+path = ["/FontDescriptor"]
+to_object = 6
+
+[[expected.reference]]
+from_object = 5
+path = ["/ToUnicode"]
+to_object = 8
+
+[[expected.reference]]
+from_object = 6
+path = ["/FontFile2"]
+to_object = 7
+
+[[expected.behaviour]]
+id = "TYPE-03-bounded-growth"
+assertion = "A multiline translation may flow through obstacle-free row slots and use the blank vertical interval below its recorded owner bounds"
+observable_via = "recorded layout, typed expansion diagnostic, final typeset ink bounds, and both retained obstacle ink bounds"
+
+[[expected.behaviour]]
+id = "TYPE-03-collision-degradation"
+assertion = "A translation requiring rows through the lower obstacle is preserved as one typeset_overflow paragraph instead of intersecting retained ink"
+observable_via = "typeset-stage IL, degradation_summary, and final output ink geometry"
+
+[oracle]
+checks = [
+    "determinism",
+    "legality",
+    "page-geometry",
+    "structure",
+    "hand-written-geometry",
+    "pdf-bytes",
+    "pdf-structure",
+    "render",
+]
+
+[[adjudication]]
+date = "2026-08-27"
+issue = "MuPDF stext character quads use horizontal advance bounds, not outline ink bounds"
+resolution = "Keep the hand-derived visual bboxes and validate them from MuPDF SVG glyph paths with exact Bezier extrema"

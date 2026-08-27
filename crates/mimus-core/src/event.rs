@@ -249,6 +249,7 @@ pub enum DiagnosticId {
     MathPassthrough,
     UnsupportedOutputGlyph,
     SingleLineBoundsExpanded,
+    MultiLineBoundsExpanded,
     DroppedDiagnostics,
 }
 
@@ -474,6 +475,12 @@ pub enum Diagnostic {
         overflow_top_pt: f64,
         overflow_bottom_pt: f64,
     },
+    MultiLineBoundsExpanded {
+        page_index: usize,
+        reading_order: usize,
+        overflow_top_pt: f64,
+        overflow_bottom_pt: f64,
+    },
 }
 
 impl Diagnostic {
@@ -499,6 +506,7 @@ impl Diagnostic {
             Self::MathPassthrough { .. } => DiagnosticId::MathPassthrough,
             Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
             Self::SingleLineBoundsExpanded { .. } => DiagnosticId::SingleLineBoundsExpanded,
+            Self::MultiLineBoundsExpanded { .. } => DiagnosticId::MultiLineBoundsExpanded,
         }
     }
 
@@ -510,6 +518,7 @@ impl Diagnostic {
                 | Self::TranslationFailureProfile { .. }
                 | Self::MathPassthrough { .. }
                 | Self::SingleLineBoundsExpanded { .. }
+                | Self::MultiLineBoundsExpanded { .. }
         )
     }
 
@@ -647,6 +656,12 @@ pub enum DiagnosticEvent {
         overflow_top_pt: f64,
         overflow_bottom_pt: f64,
     },
+    MultiLineBoundsExpanded {
+        page_index: usize,
+        reading_order: usize,
+        overflow_top_pt: f64,
+        overflow_bottom_pt: f64,
+    },
     DroppedDiagnostics {
         count: usize,
         counts_by_id: Vec<DroppedDiagnosticCount>,
@@ -676,6 +691,7 @@ impl DiagnosticEvent {
             Self::MathPassthrough { .. } => DiagnosticId::MathPassthrough,
             Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
             Self::SingleLineBoundsExpanded { .. } => DiagnosticId::SingleLineBoundsExpanded,
+            Self::MultiLineBoundsExpanded { .. } => DiagnosticId::MultiLineBoundsExpanded,
             Self::DroppedDiagnostics { .. } => DiagnosticId::DroppedDiagnostics,
         }
     }
@@ -896,6 +912,17 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 overflow_top_pt: *overflow_top_pt,
                 overflow_bottom_pt: *overflow_bottom_pt,
             },
+            Diagnostic::MultiLineBoundsExpanded {
+                page_index,
+                reading_order,
+                overflow_top_pt,
+                overflow_bottom_pt,
+            } => Self::MultiLineBoundsExpanded {
+                page_index: *page_index,
+                reading_order: *reading_order,
+                overflow_top_pt: *overflow_top_pt,
+                overflow_bottom_pt: *overflow_bottom_pt,
+            },
         }
     }
 }
@@ -967,6 +994,7 @@ impl Diagnostics {
                         | DiagnosticId::TranslationFailureProfile
                         | DiagnosticId::MathPassthrough
                         | DiagnosticId::SingleLineBoundsExpanded
+                        | DiagnosticId::MultiLineBoundsExpanded
                 )
             })
             .map(|(_, count)| count)

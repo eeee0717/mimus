@@ -506,6 +506,18 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 page_index + 1
             );
         }
+        DiagnosticEvent::MultiLineBoundsExpanded {
+            page_index,
+            reading_order,
+            overflow_top_pt,
+            overflow_bottom_pt,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "info[multi_line_bounds_expanded]: page {} paragraph {reading_order} overflow_top={overflow_top_pt:.6}pt overflow_bottom={overflow_bottom_pt:.6}pt",
+                page_index + 1
+            );
+        }
         DiagnosticEvent::DroppedDiagnostics {
             count,
             counts_by_id,
