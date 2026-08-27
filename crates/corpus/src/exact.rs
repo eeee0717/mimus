@@ -25,6 +25,11 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
             repo_root,
             b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS MIMUS) Tj\nET\n",
         ),
+        "unit-type-02-mixed-formula-slots" => basic_text(
+            fixture_id,
+            repo_root,
+            b"BT\n/F1 12 Tf\n1 0 0 1 72 140 Tm\n(MIMUS) Tj\n1 0 0 1 72 100 Tm\n(MIMUS) Tj\nET\n",
+        ),
         "unit-base-03-structured" => structured(repo_root),
         "unit-parse-01-ascii85" => filtered_text(fixture_id, repo_root, FilterRecipe::Ascii85),
         "unit-parse-02-cascade" => filtered_text(fixture_id, repo_root, FilterRecipe::Ascii85Flate),

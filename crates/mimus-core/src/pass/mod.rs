@@ -2690,6 +2690,10 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
             .into_values()
             .map(|output| output.font)
             .collect();
+        let typeset_ink_bounds = plans
+            .iter()
+            .flat_map(|plan| plan.ink_bounds.iter().copied())
+            .collect();
         if replacements.is_empty() {
             continue;
         }
@@ -2710,6 +2714,7 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
             reused_fonts: reused_fonts.into_iter().collect(),
             embedded_fonts,
             typeset_characters,
+            typeset_ink_bounds,
         });
     }
     for (page_index, reading_order, reason) in preserved {
@@ -2734,8 +2739,15 @@ fn paragraph_typeset_obstacles(
     let mut obstacles = page
         .paragraphs
         .iter()
-        .filter(|candidate| candidate.reading_order != paragraph.reading_order)
-        .flat_map(Paragraph::chars)
+        .flat_map(|candidate| {
+            candidate.chars().iter().filter(move |character| {
+                candidate.reading_order != paragraph.reading_order
+                    || character.layout.is_some_and(|layout| {
+                        layout.label == LayoutLabel::InlineFormula
+                            && layout.policy == TranslationPolicy::Passthrough
+                    })
+            })
+        })
         .filter(|character| character.visible && rect_is_finite(character.visual_bbox))
         .map(|character| character.visual_bbox)
         .collect::<Vec<_>>();
@@ -2745,11 +2757,12 @@ fn paragraph_typeset_obstacles(
             .iter()
             .filter(|region| {
                 !paragraph.chars().iter().any(|character| {
-                    character.layout.is_some_and(|assignment| {
-                        assignment.bounds == region.bounds
-                            && assignment.reading_order == region.reading_order
-                            && assignment.source == region.source
-                    })
+                    point_in_rect(character.baseline_origin, region.bounds)
+                        || character.layout.is_some_and(|assignment| {
+                            assignment.bounds == region.bounds
+                                && assignment.reading_order == region.reading_order
+                                && assignment.source == region.source
+                        })
                 })
             })
             .map(|region| region.bounds)
@@ -2779,8 +2792,16 @@ struct TypesetPlan {
     spans: Vec<SpanKey>,
     lines: Vec<Vec<crate::translate::StyledCharacter>>,
     baselines: Vec<(f64, f64)>,
+    ink_bounds: Vec<Rect>,
     font_size: f64,
     single_line_expansion: Option<SingleLineBoundsExpansion>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TypesetLineSlot {
+    left: f64,
+    right: f64,
+    baseline_y: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2890,11 +2911,13 @@ fn plan_paragraph<'a>(
             il::PreservedReason::TypesetProtocol,
         ));
     }
-    source_segments
+    let mixed_with_formula = source_segments.len() > 1;
+    let plans = source_segments
         .into_iter()
         .zip(translated_segments)
         .filter(|(source, translated)| !source.is_empty() || !translated.is_empty())
         .map(|(source, translated)| {
+            let line_slots = mixed_with_formula.then(|| source_text_line_slots(paragraph, &source));
             plan_text_segment(
                 &source,
                 &translated,
@@ -2902,9 +2925,20 @@ fn plan_paragraph<'a>(
                 output_fonts,
                 page_bounds,
                 obstacles,
+                line_slots.as_deref(),
             )
         })
-        .collect()
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let paragraph_ink = plans
+        .iter()
+        .flat_map(|plan| plan.ink_bounds.iter().copied())
+        .collect::<Vec<_>>();
+    if rects_intersect_each_other(&paragraph_ink) {
+        return Err(TypesetPlanError::Preserved(
+            il::PreservedReason::TypesetOverflow,
+        ));
+    }
+    Ok(plans)
 }
 
 fn plan_shared_number_identity<'a>(
@@ -2942,7 +2976,74 @@ fn plan_shared_number_identity<'a>(
         output_fonts,
         page_bounds,
         obstacles,
+        None,
     )
+}
+
+fn source_text_line_slots(paragraph: &Paragraph, chars: &[&Char]) -> Vec<TypesetLineSlot> {
+    let Some(container) = chars
+        .iter()
+        .filter_map(|character| character.layout.map(|layout| layout.bounds))
+        .reduce(Rect::union)
+    else {
+        return Vec::new();
+    };
+    let formula_ink = paragraph
+        .chars()
+        .iter()
+        .filter(|character| {
+            character.visible
+                && character.layout.is_some_and(|layout| {
+                    layout.label == LayoutLabel::InlineFormula
+                        && layout.policy == TranslationPolicy::Passthrough
+                })
+                && rect_is_finite(character.visual_bbox)
+        })
+        .map(|character| character.visual_bbox)
+        .collect::<Vec<_>>();
+    let mut source_lines = Vec::<Vec<&Char>>::new();
+    for character in chars {
+        if let Some(line) = source_lines
+            .last_mut()
+            .filter(|line| (line[0].baseline_origin.y - character.baseline_origin.y).abs() <= 0.01)
+        {
+            line.push(character);
+        } else {
+            source_lines.push(vec![character]);
+        }
+    }
+    source_lines
+        .into_iter()
+        .filter_map(|line| {
+            let line_box = line
+                .iter()
+                .map(|character| character.r#box)
+                .reduce(Rect::union)?;
+            let source_center_x = (line_box.left + line_box.right) / 2.0;
+            let mut left = line[0].baseline_origin.x.max(container.left);
+            let mut right = container.right;
+            let mut line_formula_ink = formula_ink
+                .iter()
+                .copied()
+                .filter(|ink| ink.top > line_box.bottom + 0.01 && ink.bottom < line_box.top - 0.01)
+                .collect::<Vec<_>>();
+            line_formula_ink.sort_by(|left, right| left.left.total_cmp(&right.left));
+            for ink in line_formula_ink {
+                let formula_center_x = (ink.left + ink.right) / 2.0;
+                if formula_center_x < source_center_x {
+                    left = left.max(ink.right);
+                } else {
+                    right = right.min(ink.left);
+                    break;
+                }
+            }
+            (right > left + 0.01).then_some(TypesetLineSlot {
+                left,
+                right,
+                baseline_y: line[0].baseline_origin.y,
+            })
+        })
+        .collect()
 }
 
 fn source_text_segments<'a>(
@@ -2976,6 +3077,7 @@ fn plan_text_segment<'a>(
     output_fonts: &'a crate::context::OutputFonts,
     page_bounds: Rect,
     obstacles: &[Rect],
+    line_slots: Option<&[TypesetLineSlot]>,
 ) -> std::result::Result<TypesetPlan, TypesetPlanError<'a>> {
     if chars.is_empty() {
         return Err(TypesetPlanError::Preserved(
@@ -3004,6 +3106,7 @@ fn plan_text_segment<'a>(
             spans,
             lines: Vec::new(),
             baselines: Vec::new(),
+            ink_bounds: Vec::new(),
             font_size: chars[0].font_size.max(MIN_FONT_SIZE_PT),
             single_line_expansion: None,
         });
@@ -3049,13 +3152,51 @@ fn plan_text_segment<'a>(
     let single_line_start_x = first.baseline_origin.x.max(container.left);
     let mut size = preferred.max(MIN_FONT_SIZE_PT);
     loop {
-        if let Some(lines) = wrap_styled_text(
-            &translated,
-            &regular,
-            &bold,
-            size,
-            container.right - container.left,
-        ) {
+        if let Some(slots) = line_slots
+            && let Some(slotted_lines) =
+                wrap_styled_text_in_slots(&translated, &regular, &bold, size, slots)
+        {
+            let lines = slotted_lines
+                .iter()
+                .map(|(_, line)| line.clone())
+                .collect::<Vec<_>>();
+            let baselines = slotted_lines
+                .iter()
+                .map(|(slot_index, _)| {
+                    let slot = slots[*slot_index];
+                    (slot.left, slot.baseline_y)
+                })
+                .collect::<Vec<_>>();
+            if let Some(ink_bounds) =
+                planned_line_ink_bounds(&lines, &baselines, &regular, &bold, size)
+                && ink_bounds
+                    .iter()
+                    .zip(&slotted_lines)
+                    .all(|(ink, (slot_index, _))| {
+                        let slot = slots[*slot_index];
+                        ink.left >= slot.left - 0.01 && ink.right <= slot.right + 0.01
+                    })
+                && ink_bounds_are_safe(&ink_bounds, page_bounds, obstacles)
+            {
+                return Ok(TypesetPlan {
+                    spans,
+                    lines,
+                    baselines,
+                    ink_bounds,
+                    font_size: size,
+                    single_line_expansion: None,
+                });
+            }
+        }
+        if line_slots.is_none()
+            && let Some(lines) = wrap_styled_text(
+                &translated,
+                &regular,
+                &bold,
+                size,
+                container.right - container.left,
+            )
+        {
             if source_is_single_line
                 && lines.len() == 1
                 && let Some(expansion) = single_line_ink_fit(
@@ -3070,10 +3211,19 @@ fn plan_text_segment<'a>(
                     obstacles,
                 )
             {
+                let ink_bounds = planned_line_ink_bounds(
+                    &lines,
+                    &[(single_line_start_x, first.baseline_origin.y)],
+                    &regular,
+                    &bold,
+                    size,
+                )
+                .expect("single-line ink fit already resolved every output glyph");
                 return Ok(TypesetPlan {
                     spans,
                     lines,
                     baselines: vec![(single_line_start_x, first.baseline_origin.y)],
+                    ink_bounds,
                     font_size: size,
                     single_line_expansion: expansion,
                 });
@@ -3096,11 +3246,16 @@ fn plan_text_segment<'a>(
                 })
                 .collect::<Vec<_>>();
             let last_y = baselines.last().unwrap().1;
-            if last_y + descent >= container.bottom - 0.01 {
+            if last_y + descent >= container.bottom - 0.01
+                && let Some(ink_bounds) =
+                    planned_line_ink_bounds(&lines, &baselines, &regular, &bold, size)
+                && ink_bounds_are_safe(&ink_bounds, page_bounds, obstacles)
+            {
                 return Ok(TypesetPlan {
                     spans,
                     lines,
                     baselines,
+                    ink_bounds,
                     font_size: size,
                     single_line_expansion: None,
                 });
@@ -3114,6 +3269,37 @@ fn plan_text_segment<'a>(
     Err(TypesetPlanError::Preserved(
         il::PreservedReason::TypesetOverflow,
     ))
+}
+
+fn planned_line_ink_bounds(
+    lines: &[Vec<crate::translate::StyledCharacter>],
+    baselines: &[(f64, f64)],
+    regular: &ttf_parser::Face<'_>,
+    bold: &ttf_parser::Face<'_>,
+    size: f64,
+) -> Option<Vec<Rect>> {
+    lines
+        .iter()
+        .zip(baselines)
+        .map(|(line, &(x, y))| styled_line_ink_bounds(line, regular, bold, size, x, y))
+        .collect()
+}
+
+fn ink_bounds_are_safe(ink_bounds: &[Rect], page_bounds: Rect, obstacles: &[Rect]) -> bool {
+    ink_bounds.iter().all(|ink| {
+        rect_contains(page_bounds, *ink, 0.01)
+            && obstacles
+                .iter()
+                .all(|obstacle| intersection_area(*ink, *obstacle) <= 0.0001)
+    }) && !rects_intersect_each_other(ink_bounds)
+}
+
+fn rects_intersect_each_other(rects: &[Rect]) -> bool {
+    rects.iter().enumerate().any(|(index, left)| {
+        rects[index + 1..]
+            .iter()
+            .any(|right| intersection_area(*left, *right) > 0.0001)
+    })
 }
 
 fn source_is_single_line(chars: &[&Char]) -> bool {
@@ -3252,6 +3438,53 @@ fn wrap_styled_text(
         }
         lines.last_mut().unwrap().extend(token);
         line_width += token_width;
+    }
+    Some(lines)
+}
+
+fn wrap_styled_text_in_slots(
+    text: &[crate::translate::StyledCharacter],
+    regular: &ttf_parser::Face<'_>,
+    bold: &ttf_parser::Face<'_>,
+    size: f64,
+    slots: &[TypesetLineSlot],
+) -> Option<Vec<(usize, Vec<crate::translate::StyledCharacter>)>> {
+    let mut lines = Vec::<(usize, Vec<crate::translate::StyledCharacter>)>::new();
+    let mut slot_index = 0_usize;
+    let mut line_width = 0.0;
+    for token in styled_text_tokens(text) {
+        let token_width = token.iter().try_fold(0.0, |sum, character| {
+            let face = if character.bold { bold } else { regular };
+            let glyph = face.glyph_index(character.value)?;
+            Some(
+                sum + f64::from(face.glyph_hor_advance(glyph)?) / f64::from(face.units_per_em())
+                    * size,
+            )
+        })?;
+        loop {
+            let slot = slots.get(slot_index)?;
+            let slot_width = slot.right - slot.left;
+            if token_width > slot_width + 0.01 {
+                if line_width > 0.0 {
+                    slot_index += 1;
+                    line_width = 0.0;
+                    continue;
+                }
+                slot_index += 1;
+                continue;
+            }
+            if line_width > 0.0 && line_width + token_width > slot_width + 0.01 {
+                slot_index += 1;
+                line_width = 0.0;
+                continue;
+            }
+            if lines.last().is_none_or(|(index, _)| *index != slot_index) {
+                lines.push((slot_index, Vec::new()));
+            }
+            lines.last_mut().unwrap().1.extend(token);
+            line_width += token_width;
+            break;
+        }
     }
     Some(lines)
 }
@@ -5007,6 +5240,22 @@ mod tests {
         }
     }
 
+    fn assert_typeset_ink_is_disjoint(typeset_ink: &[Rect], retained_ink: &[Rect]) {
+        assert!(!typeset_ink.is_empty(), "expected planned typeset ink");
+        assert!(
+            !rects_intersect_each_other(typeset_ink),
+            "typeset lines or segments intersect: {typeset_ink:?}"
+        );
+        for typeset in typeset_ink {
+            for retained in retained_ink {
+                assert!(
+                    intersection_area(*typeset, *retained) <= 0.0001,
+                    "typeset ink {typeset:?} intersects retained ink {retained:?}"
+                );
+            }
+        }
+    }
+
     fn config_with_test_output_fonts() -> crate::context::PipelineConfig {
         crate::context::PipelineConfig {
             output_fonts: Some(test_output_fonts()),
@@ -5611,6 +5860,12 @@ mod tests {
                 top: 135.0,
             };
         }
+        document.extracted_pages[0].layout_regions[0].bounds = Rect {
+            left: 72.0,
+            bottom: 90.0,
+            right: 122.0,
+            top: 135.0,
+        };
         translate(&mut document, &context).unwrap();
         typeset(&mut document, &context).unwrap();
         font_embed(&mut document, &context).unwrap();
@@ -5798,6 +6053,12 @@ mod tests {
                 top: 135.0,
             };
         }
+        document.extracted_pages[0].layout_regions[0].bounds = Rect {
+            left: 72.0,
+            bottom: 90.0,
+            right: 122.0,
+            top: 135.0,
+        };
         let engine = FakeEngine::default();
         let context = PassContext {
             engine: &engine,
@@ -6281,6 +6542,7 @@ mod tests {
                 bold: false,
             }]],
             baselines: vec![(25.0, 100.0)],
+            ink_bounds: Vec::new(),
             font_size: 8.0,
             single_line_expansion: None,
         };
@@ -6332,6 +6594,7 @@ mod tests {
         for character in &mut chars {
             character.layout.as_mut().unwrap().bounds = layout_bounds;
         }
+        document.extracted_pages[0].layout_regions[0].bounds = layout_bounds;
         let shared_span = (
             chars[0].passthrough.content_object,
             chars[0].passthrough.byte_start,
@@ -6497,6 +6760,7 @@ mod tests {
         for character in &mut chars {
             character.layout.as_mut().unwrap().bounds = normal_bounds;
         }
+        document.extracted_pages[0].layout_regions.clear();
         chars[0].layout.as_mut().unwrap().bounds.right = 70.1;
         assert_eq!(span_key(&chars[0], (9, 0)), span_key(&chars[4], (9, 0)));
         assert_ne!(span_key(&chars[0], (9, 0)), span_key(&chars[5], (9, 0)));
@@ -7416,6 +7680,171 @@ mod tests {
     }
 
     #[test]
+    fn mixed_formula_text_that_cannot_fit_its_own_slots_is_preserved() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("mixed-formula-slots.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        pdf.get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(
+                b"BT /F1 12 Tf\n1 0 0 1 72 120 Tm\n(M) Tj (I) Tj (M) Tj (U) Tj (S) Tj\nET\n"
+                    .to_vec(),
+            );
+        pdf.save(&input).unwrap();
+        let mut document = Document::for_inspection(&input);
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: "\u{6a21}\u{578b}\u{6570}\u{636e}\u{9a8c}\u{8bc1}{v1}\u{7ffb}\u{8bd1}\u{7ed3}\u{679c}\u{4fdd}\u{6301}{v2}\u{7ed3}\u{6784}\u{6d41}\u{7a0b}\u{7a33}\u{5b9a}",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let TextCarrier::Chars { chars } = &mut document.il.pages[0].paragraphs[0].text;
+        assert_eq!(chars.len(), 5);
+        for character in chars.iter_mut() {
+            character.layout.as_mut().unwrap().bounds = Rect {
+                left: 72.0,
+                bottom: 90.0,
+                right: 260.0,
+                top: 135.0,
+            };
+        }
+        document.extracted_pages[0].layout_regions[0].bounds = Rect {
+            left: 72.0,
+            bottom: 90.0,
+            right: 260.0,
+            top: 135.0,
+        };
+        for index in [1, 3] {
+            let layout = chars[index].layout.as_mut().unwrap();
+            layout.label = LayoutLabel::InlineFormula;
+            layout.policy = TranslationPolicy::Passthrough;
+        }
+
+        styles_and_formulas(&mut document, &context).unwrap();
+        assert_eq!(
+            document
+                .prepared_translations
+                .values()
+                .next()
+                .unwrap()
+                .request_text(),
+            "M{v1}M{v2}S"
+        );
+        translate(&mut document, &context).unwrap();
+        typeset(&mut document, &context).unwrap();
+
+        assert_eq!(
+            document.il.pages[0].paragraphs[0].preserved,
+            Some(il::PreservedReason::TypesetOverflow)
+        );
+        assert!(document.rewrites.is_empty());
+    }
+
+    #[test]
+    fn mixed_formula_text_uses_formula_separated_slots() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("mixed-formula-wide-slots.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        pdf.get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(
+                b"BT /F1 12 Tf\n1 0 0 1 72 120 Tm\n(M) Tj (I) Tj (M) Tj (U) Tj (S) Tj\nET\n"
+                    .to_vec(),
+            );
+        pdf.save(&input).unwrap();
+        let mut document = Document::for_inspection(&input);
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: "M{v1}M{v2}\u{7ed3}\u{6784}\u{7a33}\u{5b9a}",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let TextCarrier::Chars { chars } = &mut document.il.pages[0].paragraphs[0].text;
+        assert_eq!(chars.len(), 5);
+        for character in chars.iter_mut() {
+            character.layout.as_mut().unwrap().bounds = Rect {
+                left: 72.0,
+                bottom: 90.0,
+                right: 260.0,
+                top: 135.0,
+            };
+        }
+        document.extracted_pages[0].layout_regions[0].bounds = Rect {
+            left: 72.0,
+            bottom: 90.0,
+            right: 260.0,
+            top: 135.0,
+        };
+        for index in [1, 3] {
+            let layout = chars[index].layout.as_mut().unwrap();
+            layout.label = LayoutLabel::InlineFormula;
+            layout.policy = TranslationPolicy::Passthrough;
+        }
+
+        styles_and_formulas(&mut document, &context).unwrap();
+        assert_eq!(
+            document
+                .prepared_translations
+                .values()
+                .next()
+                .unwrap()
+                .request_text(),
+            "M{v1}M{v2}S"
+        );
+        translate(&mut document, &context).unwrap();
+        typeset(&mut document, &context).unwrap();
+
+        assert_eq!(document.il.pages[0].paragraphs[0].preserved, None);
+        assert_eq!(
+            document.rewrites[0]
+                .typeset_characters
+                .iter()
+                .map(|character| character.unicode)
+                .collect::<String>(),
+            "MM\u{7ed3}\u{6784}\u{7a33}\u{5b9a}"
+        );
+        let retained_formula_ink = document.il.pages[0].paragraphs[0]
+            .chars()
+            .iter()
+            .filter(|character| {
+                character.layout.is_some_and(|layout| {
+                    layout.label == LayoutLabel::InlineFormula
+                        && layout.policy == TranslationPolicy::Passthrough
+                })
+            })
+            .map(|character| character.visual_bbox)
+            .collect::<Vec<_>>();
+        assert_typeset_ink_is_disjoint(
+            &document.rewrites[0].typeset_ink_bounds,
+            &retained_formula_ink,
+        );
+    }
+
+    #[test]
     fn restored_body_bold_ranges_use_distinct_embedded_fonts() {
         let mut document = Document::for_inspection(fixture());
         let engine = FakeEngine::default();
@@ -7442,6 +7871,12 @@ mod tests {
                 top: 135.0,
             };
         }
+        document.extracted_pages[0].layout_regions[0].bounds = Rect {
+            left: 72.0,
+            bottom: 90.0,
+            right: 172.0,
+            top: 135.0,
+        };
         chars[1].font.resource_name = "BodyBold".to_owned();
 
         styles_and_formulas(&mut document, &context).unwrap();
@@ -8397,6 +8832,7 @@ mod tests {
             reused_fonts: Vec::new(),
             embedded_fonts: Vec::new(),
             typeset_characters: Vec::new(),
+            typeset_ink_bounds: Vec::new(),
         }];
         let error = font_embed(&mut document, &context).unwrap_err();
         assert_eq!(error.category().code(), 2);

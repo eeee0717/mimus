@@ -6,7 +6,7 @@ use std::path::Path;
 use lopdf::{Dictionary, Document, IncrementalDocument, Object, ObjectId, Stream, dictionary};
 
 use crate::error::{InternalReason, IoReason, MimusError, Result};
-use crate::il::{FontRef, Point};
+use crate::il::{FontRef, Point, Rect};
 use crate::pdf_stream;
 use crate::walk::MAX_STREAM_BYTES;
 
@@ -25,6 +25,7 @@ pub(crate) struct PageRewrite {
     pub reused_fonts: Vec<FontRef>,
     pub embedded_fonts: Vec<EmbeddedFont>,
     pub typeset_characters: Vec<TypesetCharacter>,
+    pub typeset_ink_bounds: Vec<Rect>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -523,6 +524,7 @@ mod tests {
             }],
             embedded_fonts: Vec::new(),
             typeset_characters: Vec::new(),
+            typeset_ink_bounds: Vec::new(),
         }
     }
 
@@ -634,6 +636,7 @@ mod tests {
             reused_fonts: Vec::new(),
             embedded_fonts: Vec::new(),
             typeset_characters: Vec::new(),
+            typeset_ink_bounds: Vec::new(),
         };
 
         let (output, report) = build_incremental(&input, &document, &[rewrite]).unwrap();
@@ -706,6 +709,7 @@ mod tests {
                 reused_fonts: Vec::new(),
                 embedded_fonts: Vec::new(),
                 typeset_characters: Vec::new(),
+                typeset_ink_bounds: Vec::new(),
             };
 
             let (output, _) = build_incremental(&input, &document, &[rewrite]).unwrap();
@@ -762,6 +766,7 @@ mod tests {
                 reused_fonts: Vec::new(),
                 embedded_fonts: vec![embedded_test_font()],
                 typeset_characters: Vec::new(),
+                typeset_ink_bounds: Vec::new(),
             };
 
             let (bytes, report) = build_incremental(&input, &original, &[rewrite]).unwrap();

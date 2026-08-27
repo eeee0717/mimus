@@ -1358,6 +1358,75 @@ fn short_cjk_title_fits_a_tight_single_line_container() {
 }
 
 #[test]
+fn mixed_formula_slots_write_the_wide_line_and_preserve_the_narrow_line() {
+    const TRANSLATION: &str = "M{v1}M{v2}\u{7ed3}\u{6784}\u{7a33}\u{5b9a}";
+    const RESTORED: &str = "MM\u{7ed3}\u{6784}\u{7a33}\u{5b9a}";
+
+    let directory = tempfile::tempdir().unwrap();
+    let debug = directory.path().join("debug");
+    let output_path = directory.path().join("mixed-formula-slots.pdf");
+    let server = GateResponsesServer::start([
+        ScriptedReply::Output(TRANSLATION),
+        ScriptedReply::Output(TRANSLATION),
+    ]);
+    let output = run_openai(
+        "unit-type-02-mixed-formula-slots",
+        &server,
+        RunOptions {
+            output: &output_path,
+            debug: Some(&debug),
+            cache: None,
+            model: "m3-mixed-formula-slots-model",
+            target_language: "zh-CN",
+            glossary: None,
+            auto_terms: false,
+            strict: false,
+        },
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.input == "M{v1}M{v2}S")
+    );
+    assert_eq!(
+        translated_han_strings(&debug.join("06-translate.il.json")),
+        [RESTORED, RESTORED]
+    );
+    assert_eq!(
+        translated_han_strings(&debug.join("07-typeset.il.json")),
+        [RESTORED]
+    );
+    let events = parse_events(&output.stdout);
+    let summary = events
+        .iter()
+        .find(|event| event["id"] == "degradation_summary")
+        .unwrap();
+    assert_eq!(summary["preserved_paragraph_count"], 1);
+    assert_eq!(
+        summary["preserved_paragraphs"][0]["reason"],
+        "typeset_overflow"
+    );
+    for extractor in ["poppler", "mupdf"] {
+        let extracted = extract_pdf_text(&output_path, extractor);
+        assert!(
+            extracted.contains("\u{7ed3}\u{6784}\u{7a33}\u{5b9a}"),
+            "{extractor}: {extracted:?}"
+        );
+        assert!(extracted.contains("MIMUS"), "{extractor}: {extracted:?}");
+    }
+    assert_valid_pdf(&output_path, "unit-type-02-mixed-formula-slots");
+    server.assert_clean();
+}
+
+#[test]
 fn malformed_nested_form_degrades_the_page_without_calling_the_backend() {
     let directory = tempfile::tempdir().unwrap();
     let input = write_nested_form_with_bad_matrix(directory.path());
@@ -1424,9 +1493,9 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
         "unit-scan-01-image-only".to_owned(),
         "unit-scan-02-invisible-ocr".to_owned(),
     ]);
-    assert_eq!(ids.len(), 144, "Corpus fixture inventory changed");
-    assert_eq!(unique_cases.len(), 82, "Corpus case inventory changed");
-    assert_eq!(legal.len(), 104, "legal fixture inventory changed");
+    assert_eq!(ids.len(), 145, "Corpus fixture inventory changed");
+    assert_eq!(unique_cases.len(), 83, "Corpus case inventory changed");
+    assert_eq!(legal.len(), 105, "legal fixture inventory changed");
     assert!(rejected.is_subset(&legal));
 
     let directory = tempfile::tempdir().unwrap();
@@ -1505,10 +1574,10 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
             output_count += 1;
         }
     }
-    assert_eq!(output_count, 97);
+    assert_eq!(output_count, 98);
     assert_eq!(
         server.request_count(),
-        129,
+        131,
         "eligible corpus request inventory changed"
     );
     assert!(server.requests().iter().all(|request| {
