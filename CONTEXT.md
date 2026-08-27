@@ -51,6 +51,7 @@
 | 42 | 字体/CMap 可靠性判定链：ToUnicode → 嵌入字体 cmap → 标准编码链，任一层失败即 `unicode=None`，链中**无「CID 当 Unicode」分支**；段内存在不可解码字符、advance 非正或字体不可解析即整段保留原文；M1 预定义 CMap 只支持 Identity 及别名，其余显式降级；缺 `/Widths` 走段级降级（PDFium 虽有 glyph-width getter，但没有 text-page 字符到源 glyph 的反查桥）；CJK 输入 fixture 用 Noto Sans SC 确定性子集入库 | [ADR-0014](docs/adr/0014-font-decoding-reliability.md) |
 | 43 | 跨引擎字符对齐改为**分类交叉校验**：撤销 `engine_mismatch` 文档级硬失败（严格数组相等的前提被实验 5 在真实语料上证伪——PDFium text page 是提取视图，不是绘制序枚举）；几何锚定多重集匹配 + 提取视图等价类（空白/离页/控制符标记/UTF-16 代理项/连字折叠/`ActualText` 或 generated 提取展开/顺序）；已配对 Unicode 冲突按走查解码链强弱分级——弱链段级保留、强链走查胜出记诊断；非直立/未解析/advance 不可靠 walk 字符先以唯一几何解释边吸收 engine 观测但不获得翻译或 `tight_box` 权限；PDFium 可做内部对象/字体归组，但公共 API 无源 charcode 或 byte range，跨引擎只能用 walk-owned source run 做有歧义即放弃的保守相关；engine-only 墨迹残差的段级保留以 fixture 钉死的逐 run 动态误差包络 + 保守相关 + 真正额外墨迹 fixture 为生效前提，须在 M2 前完成；ToUnicode→非字符视为未映射（ADR-0014 修订）；页级/文档级不再由跨引擎分歧触发 | [ADR-0015](docs/adr/0015-classified-cross-engine-alignment.md) |
 | 44 | 生产 layout detector 默认使用 PP-DocLayoutV3 官方 ONNX + ort CPU EP；模型资产按 flag > env > config > SHA 缓存 > 钉死 manifest 解析，缺失/损坏启动期 Asset/3，禁止静默回退。`--layout-replay` 最高优先保留为 CI 接缝，`--layout single-line` 仅作显式降级；模型栅格为 200 DPI，真实模型资格由 `MIMUS_LAYOUT_MODEL` 显式门禁 | [ADR-0019](docs/adr/0019-production-layout-detector.md) |
+| 45 | 已翻译多行段内、独占 text-show operand span 的 inline formula 可与译文共同进入行流：原 operand 字节、源字体对象/子集标签及单元内部相对几何不变，只允许整体平移；display formula、段外/未翻译段公式及共享 operand 继续透传或段级 fail closed。L5-2 离线回放恢复 9/11 个混排段，双提取器 Han 保留率 96.82% | [ADR-0020](docs/adr/0020-inline-formula-flow-relocation.md) |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
