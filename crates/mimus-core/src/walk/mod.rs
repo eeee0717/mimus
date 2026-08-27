@@ -33,6 +33,9 @@ pub struct WalkedChar {
     pub metric_box: Rect,
     pub text_transform: TextTransform,
     pub content_transform: [f64; 6],
+    pub text_line_matrix: [f64; 6],
+    pub text_matrix_after_show: [f64; 6],
+    pub horizontal_scale: f64,
     pub content_object: ObjectId,
     pub byte_start: usize,
     pub byte_end: usize,
@@ -392,7 +395,10 @@ impl Walker<'_> {
                 self.enter_text_phase();
                 if let Some(tail) = self.operand_tail(operands, 1) {
                     if let TokenKind::Bytes(bytes) = &tail[0].kind {
+                        let first_character = self.characters.len();
+                        let line_matrix = self.state.line_matrix;
                         self.show_text(bytes, tail[0].span.start, tail[0].span.end)?;
+                        self.finish_text_show(first_character, line_matrix);
                     } else {
                         self.recoveries.insert(RecoveryKind::InvalidOperands);
                     }
@@ -400,7 +406,10 @@ impl Walker<'_> {
             }
             b"TJ" => {
                 self.enter_text_phase();
+                let first_character = self.characters.len();
+                let line_matrix = self.state.line_matrix;
                 self.show_text_array(operands)?;
+                self.finish_text_show(first_character, line_matrix);
             }
             b"'" => {
                 self.apply_operator(b"T*", &[])?;
@@ -865,6 +874,9 @@ impl Walker<'_> {
                     metric_box,
                     text_transform: classify_transform(self.visual_rotation.then(transform)),
                     content_transform: self.state.ctm.0,
+                    text_line_matrix: self.state.line_matrix.0,
+                    text_matrix_after_show: self.state.text_matrix.0,
+                    horizontal_scale: self.state.horizontal_scale,
                     content_object: self.content_object,
                     byte_start,
                     byte_end,
@@ -873,6 +885,14 @@ impl Walker<'_> {
             }
         }
         Ok(())
+    }
+
+    fn finish_text_show(&mut self, first_character: usize, line_matrix: Matrix) {
+        let text_matrix_after_show = self.state.text_matrix.0;
+        for character in &mut self.characters[first_character..] {
+            character.text_line_matrix = line_matrix.0;
+            character.text_matrix_after_show = text_matrix_after_show;
+        }
     }
 
     /// STREAM-05：文本状态/显示操作符出现在 `BT` 外时按隐式 `BT` 处理。每次只在

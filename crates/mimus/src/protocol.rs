@@ -348,11 +348,27 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 human_retry_reason(reason)
             );
         }
+        DiagnosticEvent::PlaceholderRetry {
+            page_index,
+            paragraph_index,
+            attempt,
+            violation,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[placeholder_retry]: page {} paragraph {} response attempt {attempt} violated {}; retrying once",
+                page_index + 1,
+                paragraph_index + 1,
+                violation.wire_name()
+            );
+        }
         DiagnosticEvent::DegradationSummary {
             degraded_page_indices,
             degraded_pages,
             preserved_paragraphs,
             preserved_paragraph_count,
+            suspicious_echoes,
+            suspicious_echo_count,
             total_pages,
         } => {
             let pages = degraded_page_indices
@@ -372,9 +388,20 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
+            let echoes = suspicious_echoes
+                .iter()
+                .map(|paragraph| {
+                    format!(
+                        "page {} paragraph {}",
+                        paragraph.page_index + 1,
+                        paragraph.paragraph_index + 1
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "warning[degradation_summary]: {degraded_pages} of {total_pages} pages kept as-is [{pages}]; {} paragraphs kept as source text [{paragraphs}]",
+                "warning[degradation_summary]: {degraded_pages} of {total_pages} pages kept as-is [{pages}]; {} paragraphs kept as source text [{paragraphs}]; {suspicious_echo_count} suspicious echoes [{echoes}]",
                 preserved_paragraph_count,
             );
         }
@@ -386,6 +413,18 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
             let _ = writeln!(
                 std::io::stderr().lock(),
                 "info[translation_identity]: page {} paragraph {} kept the source text ({request_characters} request characters)",
+                page_index + 1,
+                paragraph_index + 1
+            );
+        }
+        DiagnosticEvent::SuspiciousEcho {
+            page_index,
+            paragraph_index,
+            request_characters,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[suspicious_echo]: page {} paragraph {} remained unchanged after one semantic retry ({request_characters} request characters)",
                 page_index + 1,
                 paragraph_index + 1
             );

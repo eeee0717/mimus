@@ -1,0 +1,21 @@
+# 本文件由 `corpus adjudicate` 生成，**不要手工编辑**。
+# 它只保存独立工具测得的结果，与先行手写的 manifest.toml 分开：
+# 现实排版 fixture 可按 §2.1 唯一例外记录双解析器裁定的 [[block]]；
+# 精确 fixture 的 baseline/metric/visual 三种几何仍以 manifest 为准，
+# 本文件只为它记录独立渲染器的 [[render]] 哈希。
+#
+#   metric_box      ← poppler pdftotext -bbox-layout（现实排版裁定）
+#   visual_bbox     ← mutool draw -F stext 字形 quad（现实排版近似值）
+#   baseline_origin ← mutool stext 首字符 origin（现实排版裁定）
+#
+# 坐标一律在 PDF 页面空间：单位 pt、原点左下、/Rotate 之前（§2.2）。
+
+schema_version = 1
+fixture = "unit-translation-01-section-title-number"
+tolerance_pt = 0.001000
+
+[[render]]
+page = 0
+dpi = 150
+poppler_sha256 = "7e007dde6bc0c4c18627468719fcb228cc538aa8d2c9c7f5aef6a16c30bc1577"
+mutool_md5 = "7d7d42528d74f712aeb90fb98e422620"

@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use quick_xml::events::Event as XmlEvent;
+use quick_xml::{Reader as XmlReader, XmlVersion};
 use serde::Deserialize;
 
 const BIN: &str = env!("CARGO_BIN_EXE_mimus");
@@ -621,6 +623,66 @@ fn extract_pdf_text(path: &Path, extractor: &str) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+fn poppler_word_box(path: &Path, expected: &str) -> [f64; 4] {
+    let output = Command::new("pdftotext")
+        .arg("-bbox")
+        .arg(path)
+        .arg("-")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Poppler bbox extraction failed for {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut reader = XmlReader::from_reader(output.stdout.as_slice());
+    let mut word = None::<([f64; 4], String)>;
+    loop {
+        match reader.read_event().unwrap() {
+            XmlEvent::Start(element) if element.local_name().as_ref() == b"word" => {
+                let attributes = element
+                    .attributes()
+                    .map(|attribute| {
+                        let attribute = attribute.unwrap();
+                        (
+                            attribute.key.local_name().as_ref().to_vec(),
+                            attribute
+                                .normalized_value(XmlVersion::Implicit1_0)
+                                .unwrap()
+                                .into_owned(),
+                        )
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                word = Some((
+                    [b"xMin", b"yMin", b"xMax", b"yMax"].map(|name| {
+                        attributes
+                            .get(name.as_slice())
+                            .unwrap()
+                            .parse::<f64>()
+                            .unwrap()
+                    }),
+                    String::new(),
+                ));
+            }
+            XmlEvent::Text(text) => {
+                if let Some((_, value)) = &mut word {
+                    value.push_str(&text.decode().unwrap());
+                }
+            }
+            XmlEvent::End(element) if element.local_name().as_ref() == b"word" => {
+                let (bounds, value) = word.take().unwrap();
+                if value == expected {
+                    return bounds;
+                }
+            }
+            XmlEvent::Eof => panic!("word {expected:?} not found in {}", path.display()),
+            _ => {}
+        }
+    }
+}
+
 fn decoded_page_streams(path: &Path, page_number: u32) -> Vec<Vec<u8>> {
     let document = lopdf::Document::load(path).unwrap();
     let page = document.get_pages()[&page_number];
@@ -898,6 +960,14 @@ fn translated_text_does_not_move_a_relative_passthrough_line() {
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );
+    let source_tail = poppler_word_box(&input, "TAIL");
+    let output_tail = poppler_word_box(&output_path, "TAIL");
+    for (source, output) in source_tail.into_iter().zip(output_tail) {
+        assert!(
+            (source - output).abs() <= 0.01,
+            "relative passthrough geometry moved: source={source_tail:?}, output={output_tail:?}"
+        );
+    }
     for extractor in ["poppler", "mupdf"] {
         let extracted = extract_pdf_text(&output_path, extractor);
         assert!(extracted.contains("中文"), "{extractor}: {extracted:?}");
@@ -972,7 +1042,12 @@ fn output_font_coverage_miss_degrades_only_the_affected_paragraph() {
 fn echo_is_identity_in_strict_mode_and_is_reused_from_cache() {
     let directory = tempfile::tempdir().unwrap();
     let cache = directory.path().join("identities.redb");
-    let server = GateResponsesServer::start([ScriptedReply::Echo, ScriptedReply::Echo]);
+    let server = GateResponsesServer::start([
+        ScriptedReply::Echo,
+        ScriptedReply::Echo,
+        ScriptedReply::Echo,
+        ScriptedReply::Echo,
+    ]);
     let first = run_openai(
         "unit-layout-07-policy-zones",
         &server,
@@ -1009,7 +1084,7 @@ fn echo_is_identity_in_strict_mode_and_is_reused_from_cache() {
                 .unwrap_or_default()
                 > 0
     }));
-    assert_eq!(server.request_count(), 2);
+    assert_eq!(server.request_count(), 4);
 
     let calls_before = server.request_count();
     let second = run_openai(
@@ -1056,10 +1131,7 @@ fn diagnostic_flood_keeps_other_ids_visible_and_reports_counts_by_id() {
     let directory = tempfile::tempdir().unwrap();
     let input = write_repeated_lines_pdf(directory.path(), 30);
     let layout = write_repeated_lines_layout(directory.path(), 30);
-    let mut replies = vec![ScriptedReply::Echo; 28];
-    replies.push(ScriptedReply::Output("龘"));
-    replies.push(ScriptedReply::Output("{v999}"));
-    let server = GateResponsesServer::start(replies);
+    let server = GateResponsesServer::start(vec![ScriptedReply::Echo; 60]);
     let output = run_openai_path(
         &input,
         Some(&layout),
@@ -1092,41 +1164,33 @@ fn diagnostic_flood_keeps_other_ids_visible_and_reports_counts_by_id() {
         server.request_count(),
         String::from_utf8_lossy(&output.stdout)
     );
-    assert!(
+    assert_eq!(
         events
             .iter()
-            .any(|event| event["id"] == "unsupported_output_glyph")
-    );
-    assert!(
-        events
-            .iter()
-            .any(|event| event["id"] == "placeholder_violation")
+            .filter(|event| event["id"] == "suspicious_echo")
+            .count(),
+        25
     );
     let dropped = events
         .iter()
         .find(|event| event["id"] == "dropped_diagnostics")
         .unwrap();
-    assert_eq!(dropped["count"], 3);
+    assert_eq!(dropped["count"], 10);
     assert_eq!(
         dropped["counts_by_id"],
-        serde_json::json!([{ "id": "translation_identity", "count": 3 }])
+        serde_json::json!([
+            { "id": "translation_identity", "count": 5 },
+            { "id": "suspicious_echo", "count": 5 }
+        ])
     );
     let summary = events
         .iter()
         .find(|event| event["id"] == "degradation_summary")
         .unwrap();
-    assert_eq!(summary["preserved_paragraph_count"], 2);
-    let reasons = summary["preserved_paragraphs"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|paragraph| paragraph["reason"].as_str().unwrap())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        reasons,
-        BTreeSet::from(["placeholder_violation", "unsupported_font"])
-    );
-    assert_eq!(server.request_count(), 30);
+    assert_eq!(summary["preserved_paragraph_count"], 0);
+    assert_eq!(summary["suspicious_echo_count"], 30);
+    assert_eq!(summary["suspicious_echoes"].as_array().unwrap().len(), 30);
+    assert_eq!(server.request_count(), 60);
     server.assert_clean();
 }
 
@@ -1183,7 +1247,7 @@ fn math_shaped_fallback_text_bypasses_translation_without_hiding_prose() {
     let directory = tempfile::tempdir().unwrap();
     let debug = directory.path().join("debug");
     let output_path = directory.path().join("math-passthrough.pdf");
-    let server = GateResponsesServer::start([ScriptedReply::Echo]);
+    let server = GateResponsesServer::start([ScriptedReply::Echo, ScriptedReply::Echo]);
     let output = run_openai(
         "unit-form-01-math-shapes",
         &server,
@@ -1209,10 +1273,10 @@ fn math_shaped_fallback_text_bypasses_translation_without_hiding_prose() {
         .into_iter()
         .filter(|request| request.kind == RequestKind::ParagraphTranslation)
         .collect::<Vec<_>>();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].input.trim(), PROSE);
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| request.input.trim() == PROSE));
     for math in MATH_LINES {
-        assert!(!requests[0].input.contains(math));
+        assert!(requests.iter().all(|request| !request.input.contains(math)));
     }
 
     let events = parse_events(&output.stdout);
@@ -1230,13 +1294,12 @@ fn math_shaped_fallback_text_bypasses_translation_without_hiding_prose() {
             MATH_LINES[reading_order].chars().count()
         );
     }
-    assert!(
-        events
-            .iter()
-            .all(|event| event["id"] != "degradation_summary"),
-        "{}",
-        serde_json::to_string_pretty(&events).unwrap()
-    );
+    let summary = events
+        .iter()
+        .find(|event| event["id"] == "degradation_summary")
+        .unwrap();
+    assert_eq!(summary["preserved_paragraph_count"], 0);
+    assert_eq!(summary["suspicious_echo_count"], 1);
 
     let translate_il: serde_json::Value =
         serde_json::from_slice(&std::fs::read(debug.join("06-translate.il.json")).unwrap())
@@ -1427,6 +1490,61 @@ fn mixed_formula_slots_write_the_wide_line_and_preserve_the_narrow_line() {
 }
 
 #[test]
+fn page_top_section_title_translates_without_sending_its_leading_number() {
+    let directory = tempfile::tempdir().unwrap();
+    let debug = directory.path().join("debug");
+    let output_path = directory.path().join("section-title.pdf");
+    let server = GateResponsesServer::start([ScriptedReply::Output("<b1>标题</b1>")]);
+    let output = run_openai(
+        "unit-translation-01-section-title-number",
+        &server,
+        RunOptions {
+            output: &output_path,
+            debug: Some(&debug),
+            cache: None,
+            model: "m3-section-title-model",
+            target_language: "zh-CN",
+            glossary: None,
+            auto_terms: false,
+            strict: false,
+        },
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].input, "<b1>MIMUS</b1>");
+
+    let paragraph_find: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(debug.join("03-paragraph_find.il.json")).unwrap())
+            .unwrap();
+    let characters = paragraph_find["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|paragraph| paragraph["text"]["chars"].as_array().unwrap())
+        .collect::<Vec<_>>();
+    let section_number = characters
+        .iter()
+        .find(|character| character["unicode"] == "I" && character["box"]["left"] == 108.0)
+        .unwrap();
+    assert_eq!(section_number["layout"]["label"], "number");
+    assert_eq!(section_number["layout"]["policy"], "passthrough");
+
+    for extractor in ["poppler", "mupdf"] {
+        let extracted = extract_pdf_text(&output_path, extractor);
+        assert!(extracted.contains("标题"), "{extractor}: {extracted:?}");
+        assert!(extracted.contains('I'), "{extractor}: {extracted:?}");
+    }
+    assert_valid_pdf(&output_path, "unit-translation-01-section-title-number");
+    server.assert_clean();
+}
+
+#[test]
 fn malformed_nested_form_degrades_the_page_without_calling_the_backend() {
     let directory = tempfile::tempdir().unwrap();
     let input = write_nested_form_with_bad_matrix(directory.path());
@@ -1493,9 +1611,9 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
         "unit-scan-01-image-only".to_owned(),
         "unit-scan-02-invisible-ocr".to_owned(),
     ]);
-    assert_eq!(ids.len(), 145, "Corpus fixture inventory changed");
-    assert_eq!(unique_cases.len(), 83, "Corpus case inventory changed");
-    assert_eq!(legal.len(), 105, "legal fixture inventory changed");
+    assert_eq!(ids.len(), 146, "Corpus fixture inventory changed");
+    assert_eq!(unique_cases.len(), 84, "Corpus case inventory changed");
+    assert_eq!(legal.len(), 106, "legal fixture inventory changed");
     assert!(rejected.is_subset(&legal));
 
     let directory = tempfile::tempdir().unwrap();
@@ -1574,10 +1692,10 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
             output_count += 1;
         }
     }
-    assert_eq!(output_count, 98);
+    assert_eq!(output_count, 99);
     assert_eq!(
         server.request_count(),
-        131,
+        132,
         "eligible corpus request inventory changed"
     );
     assert!(server.requests().iter().all(|request| {
@@ -1742,7 +1860,10 @@ fn cache_retry_invalidation_degradation_events_and_secrets_close_the_m2_matrix()
     server.assert_clean();
 
     let violation_debug = directory.path().join("violation-debug");
-    let violation_server = GateResponsesServer::start([ScriptedReply::Output("{v999}")]);
+    let violation_server = GateResponsesServer::start([
+        ScriptedReply::Output("{v999}"),
+        ScriptedReply::Output("{v999}"),
+    ]);
     let violation = run_openai(
         "unit-base-01-single-line",
         &violation_server,
@@ -1781,7 +1902,12 @@ fn cache_retry_invalidation_degradation_events_and_secrets_close_the_m2_matrix()
         )
         .unwrap()
     );
-    assert_eq!(violation_server.request_count(), 2);
+    assert_eq!(violation_server.request_count(), 3);
+    assert!(violation_events.iter().any(|event| {
+        event["id"] == "placeholder_retry"
+            && event["attempt"] == 1
+            && event["violation"] == "unknown"
+    }));
     violation_server.assert_clean();
 
     let delayed_server = GateResponsesServer::start([ScriptedReply::DelayedOutput(
@@ -1861,5 +1987,151 @@ fn cache_retry_invalidation_degradation_events_and_secrets_close_the_m2_matrix()
     ] {
         assert_secret_absent(output, name);
     }
+    assert_tree_has_no_secret(directory.path());
+}
+
+#[test]
+fn semantic_retries_recover_once_and_never_cache_invalid_placeholder_responses() {
+    let directory = tempfile::tempdir().unwrap();
+    let recovered_server =
+        GateResponsesServer::start([ScriptedReply::Output("{v999}"), ScriptedReply::Output("中")]);
+    let recovered = run_openai(
+        "unit-base-01-single-line",
+        &recovered_server,
+        RunOptions {
+            output: &directory.path().join("recovered.pdf"),
+            debug: None,
+            cache: None,
+            model: "m3-placeholder-recovery-model",
+            target_language: "zh-CN",
+            glossary: None,
+            auto_terms: false,
+            strict: false,
+        },
+    );
+    assert!(recovered.status.success());
+    let recovered_events = parse_events(&recovered.stdout);
+    assert!(recovered_events.iter().any(|event| {
+        event["id"] == "placeholder_retry"
+            && event["attempt"] == 1
+            && event["violation"] == "unknown"
+    }));
+    assert!(
+        recovered_events
+            .iter()
+            .all(|event| event["id"] != "placeholder_violation")
+    );
+    assert_eq!(recovered_server.request_count(), 2);
+    recovered_server.assert_clean();
+
+    let cache = directory.path().join("invalid.redb");
+    let invalid_server = GateResponsesServer::start([
+        ScriptedReply::Output("{v999}"),
+        ScriptedReply::Output("{v999}"),
+        ScriptedReply::Output("{v999}"),
+        ScriptedReply::Output("{v999}"),
+    ]);
+    for run in 0..2 {
+        let invalid = run_openai(
+            "unit-base-01-single-line",
+            &invalid_server,
+            RunOptions {
+                output: &directory.path().join(format!("invalid-{run}.pdf")),
+                debug: None,
+                cache: Some(&cache),
+                model: "m3-placeholder-invalid-model",
+                target_language: "zh-CN",
+                glossary: None,
+                auto_terms: false,
+                strict: false,
+            },
+        );
+        assert_single_preserved_paragraph(&invalid, "placeholder_violation");
+        let events = parse_events(&invalid.stdout);
+        assert!(
+            events
+                .iter()
+                .any(|event| event["id"] == "placeholder_retry")
+        );
+        assert!(
+            events.iter().any(|event| {
+                event["event"] == "translation_cache" && event["status"] == "miss"
+            })
+        );
+    }
+    assert_eq!(
+        invalid_server.request_count(),
+        4,
+        "an invalid response entered the translation cache"
+    );
+    invalid_server.assert_clean();
+    assert_tree_has_no_secret(directory.path());
+}
+
+#[test]
+fn echo_retries_are_visible_and_cached_identities_do_not_call_the_provider() {
+    let directory = tempfile::tempdir().unwrap();
+    let recovered_server =
+        GateResponsesServer::start([ScriptedReply::Echo, ScriptedReply::Output("中")]);
+    let recovered = run_openai(
+        "unit-base-01-single-line",
+        &recovered_server,
+        RunOptions {
+            output: &directory.path().join("echo-recovered.pdf"),
+            debug: None,
+            cache: None,
+            model: "m3-echo-recovered-model",
+            target_language: "zh-CN",
+            glossary: None,
+            auto_terms: false,
+            strict: false,
+        },
+    );
+    assert!(recovered.status.success());
+    assert_eq!(recovered_server.request_count(), 2);
+    assert!(
+        parse_events(&recovered.stdout)
+            .iter()
+            .all(|event| event["id"] != "suspicious_echo")
+    );
+    recovered_server.assert_clean();
+
+    let cache = directory.path().join("identity.redb");
+    let echo_server = GateResponsesServer::start([ScriptedReply::Echo, ScriptedReply::Echo]);
+    for run in 0..2 {
+        let output = run_openai(
+            "unit-base-01-single-line",
+            &echo_server,
+            RunOptions {
+                output: &directory.path().join(format!("echo-{run}.pdf")),
+                debug: None,
+                cache: Some(&cache),
+                model: "m3-echo-model",
+                target_language: "zh-CN",
+                glossary: None,
+                auto_terms: false,
+                strict: false,
+            },
+        );
+        assert!(output.status.success());
+        let events = parse_events(&output.stdout);
+        assert!(events.iter().any(|event| event["id"] == "suspicious_echo"));
+        let summary = events
+            .iter()
+            .find(|event| event["id"] == "degradation_summary")
+            .unwrap();
+        assert_eq!(summary["preserved_paragraph_count"], 0);
+        assert_eq!(summary["suspicious_echo_count"], 1);
+        let expected_status = if run == 0 { "miss" } else { "hit" };
+        assert!(events.iter().any(|event| {
+            event["event"] == "translation_cache" && event["status"] == expected_status
+        }));
+    }
+    assert_eq!(
+        echo_server.request_count(),
+        2,
+        "cached identity made another provider request"
+    );
+    echo_server.assert_clean();
     assert_tree_has_no_secret(directory.path());
 }

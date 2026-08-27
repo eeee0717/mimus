@@ -231,8 +231,10 @@ pub enum DiagnosticId {
     PageDegraded,
     ContentRecovered,
     TranslationRetry,
+    PlaceholderRetry,
     DegradationSummary,
     TranslationIdentity,
+    SuspiciousEcho,
     SuspiciousTranslationEchoRate,
     PlaceholderViolation,
     TranslationFailureProfile,
@@ -335,6 +337,12 @@ pub struct PreservedParagraph {
     pub placeholder_violation: Option<crate::translate::PlaceholderViolation>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct SuspiciousEchoParagraph {
+    pub page_index: usize,
+    pub paragraph_index: usize,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "id", rename_all = "snake_case")]
 pub enum Diagnostic {
@@ -395,14 +403,27 @@ pub enum Diagnostic {
         delay_ms: u64,
         reason: RetryReason,
     },
+    PlaceholderRetry {
+        page_index: usize,
+        paragraph_index: usize,
+        attempt: usize,
+        violation: crate::translate::PlaceholderViolation,
+    },
     DegradationSummary {
         degraded_page_indices: Vec<usize>,
         degraded_pages: usize,
         preserved_paragraphs: Vec<PreservedParagraph>,
         preserved_paragraph_count: usize,
+        suspicious_echoes: Vec<SuspiciousEchoParagraph>,
+        suspicious_echo_count: usize,
         total_pages: usize,
     },
     TranslationIdentity {
+        page_index: usize,
+        paragraph_index: usize,
+        request_characters: usize,
+    },
+    SuspiciousEcho {
         page_index: usize,
         paragraph_index: usize,
         request_characters: usize,
@@ -456,8 +477,10 @@ impl Diagnostic {
             Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
             Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
             Self::TranslationRetry { .. } => DiagnosticId::TranslationRetry,
+            Self::PlaceholderRetry { .. } => DiagnosticId::PlaceholderRetry,
             Self::DegradationSummary { .. } => DiagnosticId::DegradationSummary,
             Self::TranslationIdentity { .. } => DiagnosticId::TranslationIdentity,
+            Self::SuspiciousEcho { .. } => DiagnosticId::SuspiciousEcho,
             Self::SuspiciousTranslationEchoRate { .. } => {
                 DiagnosticId::SuspiciousTranslationEchoRate
             }
@@ -551,14 +574,27 @@ pub enum DiagnosticEvent {
         delay_ms: u64,
         reason: RetryReason,
     },
+    PlaceholderRetry {
+        page_index: usize,
+        paragraph_index: usize,
+        attempt: usize,
+        violation: crate::translate::PlaceholderViolation,
+    },
     DegradationSummary {
         degraded_page_indices: Vec<usize>,
         degraded_pages: usize,
         preserved_paragraphs: Vec<PreservedParagraph>,
         preserved_paragraph_count: usize,
+        suspicious_echoes: Vec<SuspiciousEchoParagraph>,
+        suspicious_echo_count: usize,
         total_pages: usize,
     },
     TranslationIdentity {
+        page_index: usize,
+        paragraph_index: usize,
+        request_characters: usize,
+    },
+    SuspiciousEcho {
         page_index: usize,
         paragraph_index: usize,
         request_characters: usize,
@@ -616,8 +652,10 @@ impl DiagnosticEvent {
             Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
             Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
             Self::TranslationRetry { .. } => DiagnosticId::TranslationRetry,
+            Self::PlaceholderRetry { .. } => DiagnosticId::PlaceholderRetry,
             Self::DegradationSummary { .. } => DiagnosticId::DegradationSummary,
             Self::TranslationIdentity { .. } => DiagnosticId::TranslationIdentity,
+            Self::SuspiciousEcho { .. } => DiagnosticId::SuspiciousEcho,
             Self::SuspiciousTranslationEchoRate { .. } => {
                 DiagnosticId::SuspiciousTranslationEchoRate
             }
@@ -730,17 +768,32 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 delay_ms: *delay_ms,
                 reason: *reason,
             },
+            Diagnostic::PlaceholderRetry {
+                page_index,
+                paragraph_index,
+                attempt,
+                violation,
+            } => Self::PlaceholderRetry {
+                page_index: *page_index,
+                paragraph_index: *paragraph_index,
+                attempt: *attempt,
+                violation: *violation,
+            },
             Diagnostic::DegradationSummary {
                 degraded_page_indices,
                 degraded_pages,
                 preserved_paragraphs,
                 preserved_paragraph_count,
+                suspicious_echoes,
+                suspicious_echo_count,
                 total_pages,
             } => Self::DegradationSummary {
                 degraded_page_indices: degraded_page_indices.clone(),
                 degraded_pages: *degraded_pages,
                 preserved_paragraphs: preserved_paragraphs.clone(),
                 preserved_paragraph_count: *preserved_paragraph_count,
+                suspicious_echoes: suspicious_echoes.clone(),
+                suspicious_echo_count: *suspicious_echo_count,
                 total_pages: *total_pages,
             },
             Diagnostic::TranslationIdentity {
@@ -748,6 +801,15 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 paragraph_index,
                 request_characters,
             } => Self::TranslationIdentity {
+                page_index: *page_index,
+                paragraph_index: *paragraph_index,
+                request_characters: *request_characters,
+            },
+            Diagnostic::SuspiciousEcho {
+                page_index,
+                paragraph_index,
+                request_characters,
+            } => Self::SuspiciousEcho {
                 page_index: *page_index,
                 paragraph_index: *paragraph_index,
                 request_characters: *request_characters,
@@ -1095,6 +1157,35 @@ mod tests {
     }
 
     #[test]
+    fn semantic_retry_and_suspicious_echo_have_paragraph_typed_wire_shapes() {
+        let retry = DiagnosticEvent::from(&Diagnostic::PlaceholderRetry {
+            page_index: 1,
+            paragraph_index: 3,
+            attempt: 1,
+            violation: crate::translate::PlaceholderViolation::FormulaOrder,
+        });
+        let retry =
+            serde_json::to_value(Event::new(EventKind::Diagnostic { diagnostic: retry })).unwrap();
+        assert_eq!(retry["id"], "placeholder_retry");
+        assert_eq!(retry["page_index"], 1);
+        assert_eq!(retry["paragraph_index"], 3);
+        assert_eq!(retry["attempt"], 1);
+        assert_eq!(retry["violation"], "formula_order");
+
+        let echo = DiagnosticEvent::from(&Diagnostic::SuspiciousEcho {
+            page_index: 2,
+            paragraph_index: 5,
+            request_characters: 17,
+        });
+        let echo =
+            serde_json::to_value(Event::new(EventKind::Diagnostic { diagnostic: echo })).unwrap();
+        assert_eq!(echo["id"], "suspicious_echo");
+        assert_eq!(echo["page_index"], 2);
+        assert_eq!(echo["paragraph_index"], 5);
+        assert_eq!(echo["request_characters"], 17);
+    }
+
+    #[test]
     fn recovered_character_mismatches_have_a_typed_additive_wire_shape() {
         let diagnostic = Diagnostic::EngineCharacterMismatch {
             page_index: 2,
@@ -1255,6 +1346,8 @@ mod tests {
                 placeholder_violation: None,
             }],
             preserved_paragraph_count: 1,
+            suspicious_echoes: Vec::new(),
+            suspicious_echo_count: 0,
             total_pages: 6,
         });
 
@@ -1278,6 +1371,7 @@ mod tests {
                 total_pages: 6,
                 preserved_paragraphs,
                 preserved_paragraph_count: 1,
+                ..
             } if degraded_page_indices == &[2] && preserved_paragraphs.len() == 1
         )));
         assert!(matches!(

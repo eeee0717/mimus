@@ -1,0 +1,207 @@
+# unit-translation-01-section-title-number -- expected manifest
+#
+# This specification predates the exact writer recipe. Geometry is derived
+# from MimusExact.ttf's pinned 2048-unit TrueType tables at a 12pt baseline.
+
+schema_version = 1
+
+[identity]
+id = "unit-translation-01-section-title-number"
+name = "Page-top section title with a retained leading number"
+class = "unit"
+legality = "legal"
+cases = ["TRANS-01"]
+priority = "M3"
+variable = "A page-top paragraph_title region whose left section number is painted after the title in content order"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-translation-01-section-title-number.pdf"
+pdf_sha256 = "c5018183b489ec476a4f7bfbda61d3c0a16ad432400dc2bc3e75051cdf458e73"
+font_provenance = "vendored"
+fonts = [
+    { file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" },
+]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 220.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d7472616e736c6174696f6e"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 6
+columns = 1
+bookmarks = 0
+bookmark_depth = 0
+annotations = 0
+form_fields = 0
+optional_content_groups = 0
+named_destinations = 0
+uri_actions = 0
+
+[[expected.block]]
+key = "TITLE_M1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "M"
+baseline_origin = [125.0, 195.0]
+metric_box = [125.0, 192.168, 135.356, 206.136]
+visual_bbox = [126.177734, 195.0, 134.181641, 203.748047]
+
+[[expected.block]]
+key = "TITLE_I"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "I"
+baseline_origin = [135.356, 195.0]
+metric_box = [135.356, 192.168, 138.896, 206.136]
+visual_bbox = [136.533734, 195.0, 137.717328, 203.748047]
+
+[[expected.block]]
+key = "TITLE_M2"
+page = 0
+column = "full"
+draw_order = 3
+reading_order = 3
+text = "M"
+baseline_origin = [138.896, 195.0]
+metric_box = [138.896, 192.168, 149.252, 206.136]
+visual_bbox = [140.073734, 195.0, 148.077641, 203.748047]
+
+[[expected.block]]
+key = "TITLE_U"
+page = 0
+column = "full"
+draw_order = 4
+reading_order = 4
+text = "U"
+baseline_origin = [149.252, 195.0]
+metric_box = [149.252, 192.168, 158.036, 206.136]
+visual_bbox = [150.294969, 194.830078, 156.992235, 203.748047]
+
+[[expected.block]]
+key = "TITLE_S"
+page = 0
+column = "full"
+draw_order = 5
+reading_order = 5
+text = "S"
+baseline_origin = [158.036, 195.0]
+metric_box = [158.036, 192.168, 165.656, 206.136]
+visual_bbox = [158.827016, 194.830078, 164.985219, 203.90625]
+
+[[expected.block]]
+key = "SECTION_I"
+page = 0
+column = "full"
+draw_order = 6
+reading_order = 6
+text = "I"
+baseline_origin = [108.0, 195.0]
+metric_box = [108.0, 192.168, 111.54, 206.136]
+visual_bbox = [109.177734, 195.0, 110.361328, 203.748047]
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 125 195 Tm
+(MIMUS) Tj
+1 0 0 1 108 195 Tm
+(I) Tj
+ET
+"""
+
+[[expected.reference]]
+from_object = 1
+path = ["/Pages"]
+to_object = 2
+
+[[expected.reference]]
+from_object = 2
+path = ["/Kids", "0"]
+to_object = 3
+
+[[expected.reference]]
+from_object = 3
+path = ["/Parent"]
+to_object = 2
+
+[[expected.reference]]
+from_object = 3
+path = ["/Resources"]
+to_object = 4
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 9
+
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 5
+
+[[expected.reference]]
+from_object = 5
+path = ["/FontDescriptor"]
+to_object = 6
+
+[[expected.reference]]
+from_object = 5
+path = ["/ToUnicode"]
+to_object = 8
+
+[[expected.reference]]
+from_object = 6
+path = ["/FontFile2"]
+to_object = 7
+
+[[expected.behaviour]]
+id = "TRANS-01-title-policy"
+assertion = "A model paragraph_title remains translatable even when its region is in the top twelve percent of the page"
+observable_via = "recorded layout, translation request, and paragraph-find IL"
+
+[[expected.behaviour]]
+id = "TRANS-01-section-number"
+assertion = "The geometrically leading section number is reclassified as number passthrough, omitted from the translation request, and retained at its original position"
+observable_via = "paragraph-find IL, captured translation request, final content spans, and dual-extractor output"
+
+[oracle]
+checks = [
+    "determinism",
+    "legality",
+    "page-geometry",
+    "glyphs",
+    "transformed-text-geometry",
+    "pdf-bytes",
+    "pdf-structure",
+    "render",
+]
+
+[[adjudication]]
+date = "2026-08-27"
+issue = "The same-baseline title and geometrically leading section marker are one text block (MIMUSI) in MuPDF and two blocks in Poppler, so parser block structure cannot represent the section-ownership boundary consistently."
+resolution = "Keep the exact geometry because the same-line left marker is the production shape under test. Do not claim parser-agreed structure or block geometry; assert all six glyphs independently with MuPDF trace origins, qpdf font metrics, and SVG outlines, plus the page glyph multiset. The recorded layout and M2 production-path test own the title/number policy assertion."
