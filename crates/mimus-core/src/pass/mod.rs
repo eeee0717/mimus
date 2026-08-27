@@ -2622,16 +2622,17 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
             let restored = document
                 .restored_translations
                 .get(&(page.index, paragraph.reading_order));
-            let obstacles = paragraph_typeset_obstacles(page, extracted, paragraph);
-            match plan_paragraph(
-                paragraph,
-                translated,
-                restored,
-                &content_objects,
-                output_fonts,
+            let obstacles = paragraph_typeset_obstacles(page, extracted, paragraph, true);
+            let relocation_obstacles =
+                paragraph_typeset_obstacles(page, extracted, paragraph, false);
+            let geometry = ParagraphPlanningGeometry {
+                extracted,
+                content_objects: &content_objects,
                 page_bounds,
-                &obstacles,
-            ) {
+                obstacles: &obstacles,
+                relocation_obstacles: &relocation_obstacles,
+            };
+            match plan_paragraph(paragraph, translated, restored, output_fonts, &geometry) {
                 Ok(paragraph_plans) => {
                     planned_paragraphs.push((paragraph.reading_order, paragraph_plans));
                 }
@@ -2666,7 +2667,7 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
         let translated_spans = planned_paragraphs
             .iter()
             .flat_map(|(_, plans)| plans)
-            .flat_map(|plan| plan.spans.iter().copied())
+            .flat_map(plan_modified_spans)
             .collect::<BTreeSet<_>>();
         let mut blocked_spans = BTreeSet::new();
         for paragraph in &page.paragraphs {
@@ -2713,16 +2714,17 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 let restored = document
                     .restored_translations
                     .get(&(page.index, paragraph.reading_order));
-                let obstacles = paragraph_typeset_obstacles(page, extracted, paragraph);
-                match plan_paragraph(
-                    paragraph,
-                    translated,
-                    restored,
-                    &content_objects,
-                    output_fonts,
+                let obstacles = paragraph_typeset_obstacles(page, extracted, paragraph, true);
+                let relocation_obstacles =
+                    paragraph_typeset_obstacles(page, extracted, paragraph, false);
+                let geometry = ParagraphPlanningGeometry {
+                    extracted,
+                    content_objects: &content_objects,
                     page_bounds,
-                    &obstacles,
-                ) {
+                    obstacles: &obstacles,
+                    relocation_obstacles: &relocation_obstacles,
+                };
+                match plan_paragraph(paragraph, translated, restored, output_fonts, &geometry) {
                     Ok(paragraph_plans) => {
                         planned_paragraphs.push((paragraph.reading_order, paragraph_plans));
                     }
@@ -2766,11 +2768,10 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 for (_, plans) in &planned_paragraphs {
                     if plans
                         .iter()
-                        .flat_map(|plan| &plan.spans)
-                        .any(|span| blocked_spans.contains(span))
+                        .flat_map(plan_modified_spans)
+                        .any(|span| blocked_spans.contains(&span))
                     {
-                        blocked_spans
-                            .extend(plans.iter().flat_map(|plan| plan.spans.iter().copied()));
+                        blocked_spans.extend(plans.iter().flat_map(plan_modified_spans));
                     }
                 }
                 if blocked_spans.len() == previous_len {
@@ -2780,8 +2781,8 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
             planned_paragraphs.retain(|(reading_order, plans)| {
                 let blocked = plans
                     .iter()
-                    .flat_map(|plan| &plan.spans)
-                    .any(|span| blocked_spans.contains(span));
+                    .flat_map(plan_modified_spans)
+                    .any(|span| blocked_spans.contains(&span));
                 if !blocked {
                     return true;
                 }
@@ -2869,6 +2870,11 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
             }
         }
         for plan in &plans {
+            reused_fonts.extend(
+                plan.formula_relocations
+                    .iter()
+                    .flat_map(|relocation| relocation.source_fonts.iter().cloned()),
+            );
             install_typeset_replacements(
                 plan,
                 &output_fonts,
@@ -2928,6 +2934,7 @@ fn paragraph_typeset_obstacles(
     page: &il::Page,
     extracted: &ExtractedPage,
     paragraph: &Paragraph,
+    include_owner_formula: bool,
 ) -> Vec<Rect> {
     let mut obstacles = page
         .paragraphs
@@ -2935,10 +2942,11 @@ fn paragraph_typeset_obstacles(
         .flat_map(|candidate| {
             candidate.chars().iter().filter(move |character| {
                 candidate.reading_order != paragraph.reading_order
-                    || character.layout.is_some_and(|layout| {
-                        layout.label == LayoutLabel::InlineFormula
-                            && layout.policy == TranslationPolicy::Passthrough
-                    })
+                    || (include_owner_formula
+                        && character.layout.is_some_and(|layout| {
+                            layout.label == LayoutLabel::InlineFormula
+                                && layout.policy == TranslationPolicy::Passthrough
+                        }))
             })
         })
         .filter(|character| character.visible && rect_is_finite(character.visual_bbox))
@@ -2962,6 +2970,14 @@ fn paragraph_typeset_obstacles(
             .filter(|bounds| rect_is_finite(*bounds)),
     );
     obstacles
+}
+
+fn plan_modified_spans(plan: &TypesetPlan) -> impl Iterator<Item = SpanKey> + '_ {
+    plan.spans.iter().copied().chain(
+        plan.formula_relocations
+            .iter()
+            .flat_map(|relocation| relocation.spans.iter().copied()),
+    )
 }
 
 pub fn font_embed(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
@@ -2993,10 +3009,20 @@ struct TypesetPlan {
     spans: Vec<SpanKey>,
     lines: Vec<Vec<crate::translate::StyledCharacter>>,
     baselines: Vec<(f64, f64)>,
+    formula_relocations: Vec<FormulaRelocation>,
     ink_bounds: Vec<Rect>,
     font_size: f64,
     single_line_expansion: Option<SingleLineBoundsExpansion>,
     multi_line_expansion: Option<MultiLineBoundsExpansion>,
+}
+
+#[derive(Debug)]
+struct FormulaRelocation {
+    spans: Vec<SpanKey>,
+    delta_x_pt: f64,
+    delta_y_pt: f64,
+    characters: Vec<TypesetCharacter>,
+    source_fonts: Vec<il::FontRef>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3190,17 +3216,24 @@ fn span_out_of_bounds(
     )
 }
 
+struct ParagraphPlanningGeometry<'a> {
+    extracted: &'a ExtractedPage,
+    content_objects: &'a BTreeSet<lopdf::ObjectId>,
+    page_bounds: Rect,
+    obstacles: &'a [Rect],
+    relocation_obstacles: &'a [Rect],
+}
+
 fn plan_paragraph<'a>(
     paragraph: &Paragraph,
     translated: &str,
     restored: Option<&crate::translate::RestoredTranslation>,
-    content_objects: &BTreeSet<lopdf::ObjectId>,
     output_fonts: &'a crate::context::OutputFonts,
-    page_bounds: Rect,
-    obstacles: &[Rect],
+    geometry: &ParagraphPlanningGeometry<'_>,
 ) -> std::result::Result<Vec<TypesetPlan>, TypesetPlanError<'a>> {
     let all_chars = paragraph.chars();
-    let content_object_numbers = content_objects
+    let content_object_numbers = geometry
+        .content_objects
         .iter()
         .map(|id| id.0)
         .collect::<BTreeSet<_>>();
@@ -3229,33 +3262,65 @@ fn plan_paragraph<'a>(
         ));
     }
     let mixed_with_formula = source_segments.len() > 1;
-    let plans = source_segments
-        .into_iter()
-        .zip(translated_segments)
+    let fixed_plans = source_segments
+        .iter()
+        .zip(&translated_segments)
         .filter(|(source, translated)| !source.is_empty() || !translated.is_empty())
         .map(|(source, translated)| {
-            let line_slots = mixed_with_formula.then(|| source_text_line_slots(paragraph, &source));
+            let line_slots = mixed_with_formula.then(|| source_text_line_slots(paragraph, source));
             plan_text_segment(
-                &source,
-                &translated,
-                content_objects,
+                source,
+                translated,
+                geometry.content_objects,
                 output_fonts,
-                page_bounds,
-                obstacles,
+                geometry.page_bounds,
+                geometry.obstacles,
                 line_slots.as_deref(),
             )
         })
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let paragraph_ink = plans
-        .iter()
-        .flat_map(|plan| plan.ink_bounds.iter().copied())
-        .collect::<Vec<_>>();
-    if rects_intersect_each_other(&paragraph_ink) {
-        return Err(TypesetPlanError::Preserved(
-            il::PreservedReason::TypesetOverflow,
-        ));
+        .collect::<std::result::Result<Vec<_>, _>>();
+    match fixed_plans {
+        Ok(plans) => {
+            let paragraph_ink = plans
+                .iter()
+                .flat_map(|plan| plan.ink_bounds.iter().copied())
+                .collect::<Vec<_>>();
+            if !rects_intersect_each_other(&paragraph_ink) {
+                return Ok(plans);
+            }
+        }
+        Err(TypesetPlanError::Preserved(il::PreservedReason::TypesetOverflow)) => {}
+        Err(error) => return Err(error),
     }
-    Ok(plans)
+    if mixed_with_formula && restored.is_some() && paragraph_source_line_count(paragraph) >= 2 {
+        return plan_relocated_formula_flow(
+            paragraph,
+            &source_segments,
+            &translated_segments,
+            geometry.extracted,
+            geometry.content_objects,
+            output_fonts,
+            geometry.page_bounds,
+            geometry.relocation_obstacles,
+        )
+        .map(|plan| vec![plan]);
+    }
+    Err(TypesetPlanError::Preserved(
+        il::PreservedReason::TypesetOverflow,
+    ))
+}
+
+fn paragraph_source_line_count(paragraph: &Paragraph) -> usize {
+    let mut baselines = Vec::<f64>::new();
+    for character in paragraph.chars() {
+        if !baselines
+            .iter()
+            .any(|baseline| (*baseline - character.baseline_origin.y).abs() <= 0.01)
+        {
+            baselines.push(character.baseline_origin.y);
+        }
+    }
+    baselines.len()
 }
 
 fn plan_shared_number_identity<'a>(
@@ -3387,6 +3452,462 @@ fn source_text_segments<'a>(
     segments
 }
 
+#[derive(Debug)]
+struct SourceFormulaUnit<'a> {
+    chars: Vec<&'a Char>,
+    validation_baselines: Vec<il::Point>,
+    spans: Vec<SpanKey>,
+    bounds: Rect,
+    ink_bounds: Rect,
+    source_fonts: Vec<il::FontRef>,
+}
+
+enum FormulaFlowAtom {
+    Text(Vec<crate::translate::StyledCharacter>),
+    Formula(usize),
+}
+
+struct FormulaFlowPlacement {
+    lines: Vec<Vec<crate::translate::StyledCharacter>>,
+    baselines: Vec<(f64, f64)>,
+    formula_relocations: Vec<FormulaRelocation>,
+    ink_bounds: Vec<Rect>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_relocated_formula_flow<'a>(
+    paragraph: &Paragraph,
+    source_segments: &[Vec<&Char>],
+    translated_segments: &[Vec<crate::translate::StyledCharacter>],
+    extracted: &ExtractedPage,
+    content_objects: &BTreeSet<lopdf::ObjectId>,
+    output_fonts: &'a crate::context::OutputFonts,
+    page_bounds: Rect,
+    obstacles: &[Rect],
+) -> std::result::Result<TypesetPlan, TypesetPlanError<'a>> {
+    let content_object_numbers = content_objects
+        .iter()
+        .map(|object_id| object_id.0)
+        .collect::<BTreeSet<_>>();
+    let formula_units = source_formula_units(
+        paragraph,
+        extracted,
+        content_objects,
+        &content_object_numbers,
+    )
+    .ok_or(TypesetPlanError::Preserved(
+        il::PreservedReason::TypesetProtocol,
+    ))?;
+    if formula_units.len() + 1 != source_segments.len()
+        || formula_units.len() + 1 != translated_segments.len()
+    {
+        return Err(TypesetPlanError::Preserved(
+            il::PreservedReason::TypesetProtocol,
+        ));
+    }
+    let text_chars = source_segments
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    if text_chars.is_empty() {
+        return Err(TypesetPlanError::Preserved(
+            il::PreservedReason::TypesetProtocol,
+        ));
+    }
+    let mut spans = text_chars
+        .iter()
+        .filter_map(|character| {
+            unique_page_content(character, content_objects)
+                .ok()
+                .flatten()
+                .map(|object_id| span_key(character, object_id))
+        })
+        .collect::<Vec<_>>();
+    spans.sort_unstable();
+    spans.dedup();
+    if spans.is_empty() {
+        return Err(TypesetPlanError::Preserved(
+            il::PreservedReason::Unlocatable,
+        ));
+    }
+    let container = text_chars
+        .iter()
+        .filter_map(|character| character.layout.map(|layout| layout.bounds))
+        .reduce(Rect::union)
+        .ok_or(TypesetPlanError::Preserved(
+            il::PreservedReason::TypesetOverflow,
+        ))?;
+    let translated_segments = translated_segments
+        .iter()
+        .map(|segment| normalize_typeset_whitespace(segment))
+        .collect::<Vec<_>>();
+    let faces = OutputFontFaces::parse(output_fonts)
+        .map_err(|_| TypesetPlanError::Preserved(il::PreservedReason::UnsupportedFont))?;
+    let translated = translated_segments
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    for is_bold in [false, true] {
+        let missing_characters = translated
+            .iter()
+            .filter(|character| character.bold == is_bold)
+            .map(|character| character.value)
+            .filter(|value| faces.key_for(*value, is_bold).is_none())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .take(16)
+            .collect::<String>();
+        if !missing_characters.is_empty() {
+            return Err(TypesetPlanError::MissingGlyphs {
+                missing_characters,
+                primary_font: if is_bold {
+                    &output_fonts.bold
+                } else {
+                    &output_fonts.regular
+                },
+                fallback_font: if is_bold {
+                    &output_fonts.fallback_bold
+                } else {
+                    &output_fonts.fallback_regular
+                },
+            });
+        }
+    }
+    let mut atoms = Vec::new();
+    for (segment_index, segment) in translated_segments.iter().enumerate() {
+        atoms.extend(
+            styled_text_tokens(segment)
+                .into_iter()
+                .map(FormulaFlowAtom::Text),
+        );
+        if segment_index < formula_units.len() {
+            atoms.push(FormulaFlowAtom::Formula(segment_index));
+        }
+    }
+    let preferred = text_chars
+        .iter()
+        .map(|character| character.font_size)
+        .sum::<f64>()
+        / text_chars.len() as f64;
+    let first = text_chars[0];
+    let mut size = preferred.max(MIN_FONT_SIZE_PT);
+    loop {
+        let ascent = faces.ascent_em() * size;
+        let descent = faces.descent_em() * size;
+        let first_y = first.baseline_origin.y.min(container.top - ascent);
+        let may_expand = size <= MIN_FONT_SIZE_PT + 0.001;
+        let mut slots = obstacle_aware_multiline_slots(
+            container,
+            first_y,
+            ascent,
+            descent,
+            size,
+            page_bounds,
+            obstacles,
+        );
+        if !may_expand {
+            slots.retain(|slot| slot.baseline_y + descent >= container.bottom - 0.01);
+        }
+        if let Some(placement) = place_formula_flow(&atoms, &formula_units, &faces, size, &slots)
+            && ink_bounds_are_safe(&placement.ink_bounds, page_bounds, obstacles)
+        {
+            let overflow_top = placement
+                .ink_bounds
+                .iter()
+                .map(|ink| ink.top - container.top)
+                .fold(0.0, f64::max)
+                .max(0.0);
+            let overflow_bottom = placement
+                .ink_bounds
+                .iter()
+                .map(|ink| container.bottom - ink.bottom)
+                .fold(0.0, f64::max)
+                .max(0.0);
+            let fits_container = overflow_top <= 0.01 && overflow_bottom <= 0.01;
+            if fits_container || may_expand {
+                return Ok(TypesetPlan {
+                    spans,
+                    lines: placement.lines,
+                    baselines: placement.baselines,
+                    formula_relocations: placement.formula_relocations,
+                    ink_bounds: placement.ink_bounds,
+                    font_size: size,
+                    single_line_expansion: None,
+                    multi_line_expansion: (!fits_container).then_some(MultiLineBoundsExpansion {
+                        top_pt: overflow_top,
+                        bottom_pt: overflow_bottom,
+                    }),
+                });
+            }
+        }
+        if size <= MIN_FONT_SIZE_PT + 0.001 {
+            break;
+        }
+        size = (size - 0.5).max(MIN_FONT_SIZE_PT);
+    }
+    Err(TypesetPlanError::Preserved(
+        il::PreservedReason::TypesetOverflow,
+    ))
+}
+
+fn source_formula_units<'a>(
+    paragraph: &'a Paragraph,
+    extracted: &ExtractedPage,
+    content_objects: &BTreeSet<lopdf::ObjectId>,
+    content_object_numbers: &BTreeSet<u32>,
+) -> Option<Vec<SourceFormulaUnit<'a>>> {
+    let mut span_classes = BTreeMap::<SpanKey, (bool, bool)>::new();
+    for character in paragraph.chars() {
+        let object_id = unique_page_content(character, content_objects)
+            .ok()
+            .flatten()?;
+        let entry = span_classes
+            .entry(span_key(character, object_id))
+            .or_default();
+        if prepared_character_class(character, content_object_numbers)
+            == PreparedCharacterClass::Formula
+        {
+            entry.0 = true;
+        } else {
+            entry.1 = true;
+        }
+    }
+    let mut grouped = Vec::<Vec<&Char>>::new();
+    let mut current = Vec::new();
+    for character in paragraph.chars() {
+        if prepared_character_class(character, content_object_numbers)
+            == PreparedCharacterClass::Formula
+        {
+            current.push(character);
+        } else if !current.is_empty() {
+            grouped.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        grouped.push(current);
+    }
+    grouped
+        .into_iter()
+        .map(|chars| {
+            if chars.iter().any(|character| {
+                character.unicode.is_none()
+                    || !character.visible
+                    || character.text_transform != TextTransform::Upright
+                    || !rect_is_finite(character.r#box)
+                    || !rect_is_finite(character.visual_bbox)
+                    || !character.baseline_origin.x.is_finite()
+                    || !character.baseline_origin.y.is_finite()
+            }) {
+                return None;
+            }
+            let mut spans = chars
+                .iter()
+                .filter_map(|character| {
+                    unique_page_content(character, content_objects)
+                        .ok()
+                        .flatten()
+                        .map(|object_id| span_key(character, object_id))
+                })
+                .collect::<Vec<_>>();
+            spans.sort_unstable();
+            spans.dedup();
+            if spans.is_empty()
+                || spans.iter().any(|span| {
+                    span_classes
+                        .get(span)
+                        .is_none_or(|class| !class.0 || class.1)
+                })
+            {
+                return None;
+            }
+            let metric_bounds = chars
+                .iter()
+                .map(|character| character.r#box)
+                .reduce(Rect::union)?;
+            let visual_bounds = chars
+                .iter()
+                .map(|character| character.visual_bbox)
+                .reduce(Rect::union)?;
+            let bounds = metric_bounds.union(visual_bounds);
+            if bounds.right <= bounds.left + 0.01 {
+                return None;
+            }
+            let source_fonts = chars
+                .iter()
+                .map(|character| character.font.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let validation_baselines = chars
+                .iter()
+                .map(|character| {
+                    formula_validation_baseline(extracted, character)
+                        .unwrap_or(character.baseline_origin)
+                })
+                .collect();
+            Some(SourceFormulaUnit {
+                chars,
+                validation_baselines,
+                spans,
+                bounds,
+                ink_bounds: visual_bounds,
+                source_fonts,
+            })
+        })
+        .collect()
+}
+
+fn place_formula_flow(
+    atoms: &[FormulaFlowAtom],
+    formula_units: &[SourceFormulaUnit<'_>],
+    faces: &OutputFontFaces<'_>,
+    size: f64,
+    slots: &[TypesetLineSlot],
+) -> Option<FormulaFlowPlacement> {
+    let mut lines = Vec::<Vec<crate::translate::StyledCharacter>>::new();
+    let mut baselines = Vec::<(f64, f64)>::new();
+    let mut formula_relocations = Vec::new();
+    let mut formula_ink = Vec::new();
+    let mut slot_index = 0_usize;
+    let mut cursor = slots.first()?.left;
+    let mut open_text_slot = None;
+    for atom in atoms {
+        let width = match atom {
+            FormulaFlowAtom::Text(token) => styled_token_width(token, faces, size)?,
+            FormulaFlowAtom::Formula(index) => {
+                let unit = formula_units.get(*index)?;
+                unit.bounds.right - unit.bounds.left
+            }
+        };
+        loop {
+            let slot = slots.get(slot_index)?;
+            if width <= slot.right - cursor + 0.01 {
+                break;
+            }
+            slot_index += 1;
+            cursor = slots.get(slot_index)?.left;
+            open_text_slot = None;
+        }
+        let slot = slots[slot_index];
+        match atom {
+            FormulaFlowAtom::Text(token) => {
+                if open_text_slot != Some(slot_index) {
+                    lines.push(Vec::new());
+                    baselines.push((cursor, slot.baseline_y));
+                    open_text_slot = Some(slot_index);
+                }
+                lines.last_mut()?.extend(token);
+            }
+            FormulaFlowAtom::Formula(index) => {
+                let unit = &formula_units[*index];
+                let delta_x_pt = cursor - unit.bounds.left;
+                let target_center_y =
+                    slot.baseline_y + (faces.ascent_em() + faces.descent_em()) * size / 2.0;
+                let source_center_y = (unit.bounds.bottom + unit.bounds.top) / 2.0;
+                let delta_y_pt = target_center_y - source_center_y;
+                let characters = unit
+                    .chars
+                    .iter()
+                    .zip(&unit.validation_baselines)
+                    .map(|(character, validation_baseline)| {
+                        Some(TypesetCharacter {
+                            unicode: character.unicode?,
+                            baseline_origin: il::Point {
+                                x: validation_baseline.x + delta_x_pt,
+                                y: validation_baseline.y + delta_y_pt,
+                            },
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                formula_ink.push(translated_rect(unit.ink_bounds, delta_x_pt, delta_y_pt));
+                formula_relocations.push(FormulaRelocation {
+                    spans: unit.spans.clone(),
+                    delta_x_pt,
+                    delta_y_pt,
+                    characters,
+                    source_fonts: unit.source_fonts.clone(),
+                });
+                open_text_slot = None;
+            }
+        }
+        cursor += width;
+    }
+    let mut ink_bounds = planned_line_ink_bounds(&lines, &baselines, faces, size)?;
+    ink_bounds.extend(formula_ink);
+    Some(FormulaFlowPlacement {
+        lines,
+        baselines,
+        formula_relocations,
+        ink_bounds,
+    })
+}
+
+fn formula_validation_baseline(extracted: &ExtractedPage, character: &Char) -> Option<il::Point> {
+    let walk_index = extracted
+        .walked_characters
+        .iter()
+        .enumerate()
+        .find(|(_, walked)| {
+            walked.content_object.0 == character.passthrough.content_object
+                && walked.byte_start == character.passthrough.byte_start
+                && walked.byte_end == character.passthrough.byte_end
+                && walked.code == character.code
+                && point_close(walked.baseline_origin, character.baseline_origin, 1e-7)
+        })?
+        .0;
+    let engine_index = extracted
+        .character_alignment
+        .engine_indices_by_walk
+        .get(walk_index)
+        .copied()
+        .flatten()
+        .or_else(|| {
+            sequence_engine_indices_by_walk(
+                &extracted.walked_characters,
+                &extracted.engine_characters,
+            )
+            .and_then(|indices| indices.get(walk_index).copied().flatten())
+        })
+        .or_else(|| {
+            let expected = ExpectedOutputCharacter {
+                unicode: character.unicode,
+                baseline_origin: character.baseline_origin,
+            };
+            match_output_character(
+                &expected,
+                &extracted.engine_characters,
+                &vec![false; extracted.engine_characters.len()],
+                0.25,
+            )
+        });
+    engine_index
+        .and_then(|engine_index| extracted.engine_characters.get(engine_index))
+        .map(|engine| engine.baseline_origin)
+}
+
+fn styled_token_width(
+    token: &[crate::translate::StyledCharacter],
+    faces: &OutputFontFaces<'_>,
+    size: f64,
+) -> Option<f64> {
+    token.iter().try_fold(0.0, |sum, character| {
+        let face = faces.face_for(*character)?;
+        let glyph = face.glyph_index(character.value)?;
+        Some(sum + glyph_advance_em(face, glyph)? * size)
+    })
+}
+
+fn translated_rect(rect: Rect, delta_x: f64, delta_y: f64) -> Rect {
+    Rect {
+        left: rect.left + delta_x,
+        bottom: rect.bottom + delta_y,
+        right: rect.right + delta_x,
+        top: rect.top + delta_y,
+    }
+}
+
 fn plan_text_segment<'a>(
     chars: &[&Char],
     translated: &[crate::translate::StyledCharacter],
@@ -3423,6 +3944,7 @@ fn plan_text_segment<'a>(
             spans,
             lines: Vec::new(),
             baselines: Vec::new(),
+            formula_relocations: Vec::new(),
             ink_bounds: Vec::new(),
             font_size: chars[0].font_size.max(MIN_FONT_SIZE_PT),
             single_line_expansion: None,
@@ -3502,6 +4024,7 @@ fn plan_text_segment<'a>(
                     spans,
                     lines,
                     baselines,
+                    formula_relocations: Vec::new(),
                     ink_bounds,
                     font_size: size,
                     single_line_expansion: None,
@@ -3537,6 +4060,7 @@ fn plan_text_segment<'a>(
                     spans,
                     lines,
                     baselines: vec![(single_line_start_x, first.baseline_origin.y)],
+                    formula_relocations: Vec::new(),
                     ink_bounds,
                     font_size: size,
                     single_line_expansion: expansion,
@@ -3569,6 +4093,7 @@ fn plan_text_segment<'a>(
                         spans,
                         lines,
                         baselines,
+                        formula_relocations: Vec::new(),
                         ink_bounds,
                         font_size: size,
                         single_line_expansion: None,
@@ -3618,6 +4143,7 @@ fn plan_text_segment<'a>(
                             spans,
                             lines,
                             baselines,
+                            formula_relocations: Vec::new(),
                             ink_bounds,
                             font_size: size,
                             single_line_expansion: None,
@@ -3997,6 +4523,34 @@ fn install_typeset_replacements(
     text_show_states: &BTreeMap<SpanKey, TextShowState>,
     replacements: &mut BTreeMap<SpanKey, Vec<u8>>,
 ) -> Result<()> {
+    install_text_replacements(
+        plan,
+        fonts,
+        streams,
+        content_transforms,
+        text_show_states,
+        replacements,
+    )?;
+    for relocation in &plan.formula_relocations {
+        install_formula_relocation(
+            relocation,
+            streams,
+            content_transforms,
+            text_show_states,
+            replacements,
+        )?;
+    }
+    Ok(())
+}
+
+fn install_text_replacements(
+    plan: &TypesetPlan,
+    fonts: &BTreeMap<OutputFontKey, BuiltOutputFont>,
+    streams: &BTreeMap<lopdf::ObjectId, &[u8]>,
+    content_transforms: &BTreeMap<SpanKey, [f64; 6]>,
+    text_show_states: &BTreeMap<SpanKey, TextShowState>,
+    replacements: &mut BTreeMap<SpanKey, Vec<u8>>,
+) -> Result<()> {
     let empty_operand = |span: SpanKey| -> Result<Vec<u8>> {
         let source = streams
             .get(&span.0)
@@ -4126,6 +4680,64 @@ fn install_typeset_replacements(
                 streams,
                 text_show_states,
             )?);
+        }
+    }
+    Ok(())
+}
+
+fn install_formula_relocation(
+    relocation: &FormulaRelocation,
+    streams: &BTreeMap<lopdf::ObjectId, &[u8]>,
+    content_transforms: &BTreeMap<SpanKey, [f64; 6]>,
+    text_show_states: &BTreeMap<SpanKey, TextShowState>,
+    replacements: &mut BTreeMap<SpanKey, Vec<u8>>,
+) -> Result<()> {
+    for span in &relocation.spans {
+        let source = streams
+            .get(&span.0)
+            .and_then(|stream| stream.get(span.1..span.2))
+            .ok_or_else(|| span_out_of_bounds(span.0, span.1, span.2, 0))?;
+        let (empty, operator) = if source.starts_with(b"[") && source.ends_with(b"]") {
+            (b"[]".as_slice(), b" TJ\n".as_slice())
+        } else {
+            (b"()".as_slice(), b" Tj\n".as_slice())
+        };
+        let content_transform = content_transforms.get(span).ok_or_else(|| {
+            MimusError::internal(
+                InternalReason::InvariantViolation,
+                "formula span has no active content transform",
+            )
+        })?;
+        let (delta_x, delta_y) = content_relative_delta(
+            *content_transform,
+            relocation.delta_x_pt,
+            relocation.delta_y_pt,
+        )
+        .ok_or_else(|| {
+            MimusError::internal(
+                InternalReason::InvariantViolation,
+                "formula span has a singular content transform",
+            )
+        })?;
+        let mut replacement = empty.to_vec();
+        replacement.extend_from_slice(operator);
+        replacement.extend_from_slice(
+            format!(
+                "q\n1 0 0 1 {} {} cm\n",
+                pdf_number(delta_x),
+                pdf_number(delta_y)
+            )
+            .as_bytes(),
+        );
+        replacement.extend_from_slice(source);
+        replacement.extend_from_slice(operator);
+        replacement.extend_from_slice(b"Q\n");
+        replacement.extend_from_slice(&text_show_state_tail(*span, streams, text_show_states)?);
+        if replacements.insert(*span, replacement).is_some() {
+            return Err(MimusError::internal(
+                InternalReason::InvariantViolation,
+                "formula relocation overlaps another typeset replacement",
+            ));
         }
     }
     Ok(())
@@ -4267,6 +4879,15 @@ fn content_relative_text_matrix(content: [f64; 6], x: f64, y: f64) -> Option<[f6
     ])
 }
 
+fn content_relative_delta(content: [f64; 6], x: f64, y: f64) -> Option<(f64, f64)> {
+    let [a, b, c, d, _, _] = content;
+    let determinant = a.mul_add(d, -(b * c));
+    if !determinant.is_finite() || determinant.abs() <= 1e-12 {
+        return None;
+    }
+    Some(((d * x - c * y) / determinant, (a * y - b * x) / determinant))
+}
+
 fn planned_characters(
     plan: &TypesetPlan,
     fonts: &BTreeMap<OutputFontKey, BuiltOutputFont>,
@@ -4290,6 +4911,11 @@ fn planned_characters(
             x += f64::from(glyph_width_1000(advance, font.units_per_em)) / 1000.0 * plan.font_size;
         }
     }
+    output.extend(
+        plan.formula_relocations
+            .iter()
+            .flat_map(|relocation| relocation.characters.iter().cloned()),
+    );
     output
 }
 
@@ -4762,9 +5388,29 @@ fn validate_mixed_output_characters(
             if character.unicode.is_whitespace() {
                 continue;
             }
+            let observed = actual
+                .iter()
+                .enumerate()
+                .filter(|(index, actual_character)| {
+                    !matched[*index]
+                        && output_unicode_matches(Some(character.unicode), actual_character)
+                })
+                .take(8)
+                .map(|(_, actual_character)| {
+                    format!(
+                        "({:.6}, {:.6})",
+                        actual_character.baseline_origin.x, actual_character.baseline_origin.y
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(output_mismatch(format!(
-                "output page {} is missing a typeset character",
-                page_index + 1
+                "output page {} is missing typeset character U+{:04X} at ({:.6}, {:.6}); unmatched observed baselines: [{}]",
+                page_index + 1,
+                u32::from(character.unicode),
+                character.baseline_origin.x,
+                character.baseline_origin.y,
+                observed,
             )));
         };
         matched[owner] = true;
@@ -7276,6 +7922,7 @@ mod tests {
                 bold: false,
             }]],
             baselines: vec![(25.0, 100.0)],
+            formula_relocations: Vec::new(),
             ink_bounds: Vec::new(),
             font_size: 8.0,
             single_line_expansion: None,
@@ -8499,6 +9146,116 @@ mod tests {
             Some(il::PreservedReason::TypesetOverflow)
         );
         assert!(document.rewrites.is_empty());
+    }
+
+    #[test]
+    fn multiline_mixed_formula_text_flows_with_relocated_source_operands() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("multiline-mixed-formula-flow.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        pdf.get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(
+                b"BT /F1 12 Tf\n1 0 0 1 72 140 Tm\n(M) Tj (I) Tj (M) Tj (U) Tj (S) Tj\n1 0 0 1 72 126 Tm\n(M) Tj (I) Tj (M) Tj (U) Tj (S) Tj\nET\n"
+                    .to_vec(),
+            );
+        pdf.save(&input).unwrap();
+        let mut document = Document::for_inspection(&input);
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: "\u{6a21}\u{578b}\u{6570}\u{636e}\u{9a8c}\u{8bc1}{v1}\u{7ffb}\u{8bd1}\u{7ed3}\u{679c}\u{4fdd}\u{6301}{v2}\u{7ed3}\u{6784}\u{6d41}\u{7a0b}\u{7a33}\u{5b9a}{v3}\u{7f13}\u{5b58}\u{91cd}\u{8bd5}\u{8bca}\u{65ad}\u{6392}\u{7248}",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        assert_eq!(document.il.pages[0].paragraphs.len(), 1);
+        let TextCarrier::Chars { chars } = &mut document.il.pages[0].paragraphs[0].text;
+        assert_eq!(chars.len(), 10);
+        for character in chars.iter_mut() {
+            character.layout.as_mut().unwrap().bounds = Rect {
+                left: 72.0,
+                bottom: 110.0,
+                right: 260.0,
+                top: 151.0,
+            };
+        }
+        document.extracted_pages[0].layout_regions[0].bounds = Rect {
+            left: 72.0,
+            bottom: 110.0,
+            right: 260.0,
+            top: 151.0,
+        };
+        let formula_indices = [1, 3, 6];
+        let formula_spans = formula_indices
+            .iter()
+            .map(|index| {
+                let character = &mut chars[*index];
+                let layout = character.layout.as_mut().unwrap();
+                layout.label = LayoutLabel::InlineFormula;
+                layout.policy = TranslationPolicy::Passthrough;
+                (
+                    (character.passthrough.content_object, 0),
+                    character.passthrough.byte_start,
+                    character.passthrough.byte_end,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        styles_and_formulas(&mut document, &context).unwrap();
+        translate(&mut document, &context).unwrap();
+        typeset(&mut document, &context).unwrap();
+
+        assert_eq!(document.il.pages[0].paragraphs[0].preserved, None);
+        assert_eq!(document.rewrites.len(), 1);
+        assert_typeset_ink_is_disjoint(&document.rewrites[0].typeset_ink_bounds, &[]);
+        assert_eq!(
+            document.rewrites[0]
+                .typeset_characters
+                .iter()
+                .filter(|character| character.unicode.is_ascii_uppercase())
+                .map(|character| character.unicode)
+                .collect::<String>(),
+            "IUI"
+        );
+        for span in formula_spans {
+            let replacement = document.rewrites[0]
+                .replacements
+                .iter()
+                .find(|replacement| {
+                    (
+                        replacement.content_object,
+                        replacement.byte_start,
+                        replacement.byte_end,
+                    ) == span
+                })
+                .expect("formula operand is relocated in its own span");
+            let source = document.extracted_pages[0]
+                .content_streams
+                .iter()
+                .find(|stream| stream.object_id == span.0)
+                .unwrap()
+                .decoded
+                .get(span.1..span.2)
+                .unwrap();
+            assert!(
+                replacement
+                    .replacement
+                    .windows(source.len())
+                    .any(|window| window == source),
+                "formula operand bytes were not replayed"
+            );
+        }
     }
 
     #[test]

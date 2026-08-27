@@ -1711,6 +1711,93 @@ fn mixed_formula_slots_write_the_wide_line_and_preserve_the_narrow_line() {
 }
 
 #[test]
+fn multiline_inline_formulas_flow_with_translation_and_keep_source_operands() {
+    const TRANSLATION: &str = "模型数据验证论文翻译{v1}结果保持结构流程稳定缓存重试{v2}诊断排版字体安全边界模型数据{v3}验证论文翻译结果保持结构流程稳定";
+    const RESTORED: &str = "模型数据验证论文翻译结果保持结构流程稳定缓存重试诊断排版字体安全边界模型数据验证论文翻译结果保持结构流程稳定";
+
+    let directory = tempfile::tempdir().unwrap();
+    let debug = directory.path().join("debug");
+    let output_path = directory.path().join("inline-formula-flow.pdf");
+    let server = GateResponsesServer::start([ScriptedReply::Output(TRANSLATION)]);
+    let output = run_openai(
+        "unit-type-04-inline-formula-flow",
+        &server,
+        RunOptions {
+            output: &output_path,
+            debug: Some(&debug),
+            cache: None,
+            model: "m3-inline-formula-flow-model",
+            target_language: "zh-CN",
+            glossary: None,
+            auto_terms: false,
+            strict: false,
+        },
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].input.matches("{v").count(), 3);
+    assert_eq!(
+        translated_han_strings(&debug.join("06-translate.il.json")),
+        [RESTORED]
+    );
+    assert_eq!(
+        translated_han_strings(&debug.join("07-typeset.il.json")),
+        [RESTORED]
+    );
+    let events = parse_events(&output.stdout);
+    assert!(events.iter().all(|event| {
+        event["id"] != "degradation_summary"
+            || event["preserved_paragraphs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|paragraph| paragraph["reason"] != "typeset_overflow")
+    }));
+    for extractor in ["poppler", "mupdf"] {
+        let extracted = extract_pdf_text(&output_path, extractor);
+        let han = extracted
+            .chars()
+            .filter(|character| ('\u{4e00}'..='\u{9fff}').contains(character))
+            .collect::<String>();
+        assert_eq!(han, RESTORED, "{extractor}: {extracted:?}");
+        assert_eq!(
+            extracted.matches('I').count(),
+            2,
+            "{extractor}: {extracted:?}"
+        );
+        assert_eq!(
+            extracted.matches('U').count(),
+            1,
+            "{extractor}: {extracted:?}"
+        );
+    }
+    let streams = decoded_page_streams(&output_path, 1);
+    let rewritten = streams.last().unwrap();
+    assert_eq!(
+        rewritten
+            .windows(3)
+            .filter(|window| *window == b"(I)")
+            .count(),
+        2
+    );
+    assert_eq!(
+        rewritten
+            .windows(3)
+            .filter(|window| *window == b"(U)")
+            .count(),
+        1
+    );
+    assert_valid_pdf(&output_path, "unit-type-04-inline-formula-flow");
+    server.assert_clean();
+}
+
+#[test]
 fn page_top_section_title_translates_without_sending_its_leading_number() {
     let directory = tempfile::tempdir().unwrap();
     let debug = directory.path().join("debug");
@@ -1832,9 +1919,9 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
         "unit-scan-01-image-only".to_owned(),
         "unit-scan-02-invisible-ocr".to_owned(),
     ]);
-    assert_eq!(ids.len(), 147, "Corpus fixture inventory changed");
-    assert_eq!(unique_cases.len(), 85, "Corpus case inventory changed");
-    assert_eq!(legal.len(), 107, "legal fixture inventory changed");
+    assert_eq!(ids.len(), 148, "Corpus fixture inventory changed");
+    assert_eq!(unique_cases.len(), 86, "Corpus case inventory changed");
+    assert_eq!(legal.len(), 108, "legal fixture inventory changed");
     assert!(rejected.is_subset(&legal));
 
     let directory = tempfile::tempdir().unwrap();
@@ -1913,10 +2000,10 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
             output_count += 1;
         }
     }
-    assert_eq!(output_count, 100);
+    assert_eq!(output_count, 101);
     assert_eq!(
         server.request_count(),
-        133,
+        134,
         "eligible corpus request inventory changed"
     );
     assert!(server.requests().iter().all(|request| {
