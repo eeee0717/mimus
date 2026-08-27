@@ -108,6 +108,8 @@ cargo run -p mimus -- --json translate 1706.03762v7.pdf \
   --target-language zh-CN \
   --layout-model /path/to/inference.onnx \
   --font /path/to/NotoSansSC-VF.ttf --font-bold /path/to/NotoSansSC-VF.ttf \
+  --font-fallback /path/to/DejaVuSans.ttf \
+  --font-fallback-bold /path/to/DejaVuSans-Bold.ttf \
   --glossary glossary.toml --no-auto-terms \
   --cache l5-onnx-fresh.redb --concurrency 4 \
   --debug l5-onnx-debug --output 1706.03762v7.onnx.zh.pdf

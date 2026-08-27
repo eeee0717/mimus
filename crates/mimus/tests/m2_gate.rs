@@ -412,6 +412,12 @@ fn test_font_path(weight: &str) -> PathBuf {
         .join(format!("MimusTestGB2312-{weight}.ttf"))
 }
 
+fn test_fallback_font_path(weight: &str) -> PathBuf {
+    repo_root()
+        .join("crates/mimus/tests/assets/fonts")
+        .join(format!("MimusTestFallback-{weight}.ttf"))
+}
+
 fn fixture_manifest(id: &str) -> FixtureManifest {
     let path = repo_root()
         .join("corpus/fixtures")
@@ -464,6 +470,11 @@ fn run_openai_path(
         .env(PDFIUM_ENV, pdfium_library())
         .env("MIMUS_FONT_REGULAR", test_font_path("Regular"))
         .env("MIMUS_FONT_BOLD", test_font_path("Bold"))
+        .env(
+            "MIMUS_FONT_FALLBACK_REGULAR",
+            test_fallback_font_path("Regular"),
+        )
+        .env("MIMUS_FONT_FALLBACK_BOLD", test_fallback_font_path("Bold"))
         .env("MIMUS_OPENAI_API_KEY", SECRET_CANARY)
         .env("MIMUS_CONFIG_FILE", config_file)
         .env("HTTP_PROXY", "http://127.0.0.1:9")
@@ -1035,6 +1046,95 @@ fn output_font_coverage_miss_degrades_only_the_affected_paragraph() {
         );
         assert!(!extracted.contains('龘'), "{extractor}: {extracted:?}");
     }
+    server.assert_clean();
+}
+
+#[test]
+fn fallback_font_renders_missing_primary_glyphs_for_both_extractors() {
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("fallback.pdf");
+    let server = GateResponsesServer::start([ScriptedReply::Output("中∗Łϵ")]);
+    let output = run_openai(
+        "unit-base-01-single-line",
+        &server,
+        RunOptions {
+            output: &output_path,
+            debug: None,
+            cache: None,
+            model: "m3-font-fallback-model",
+            target_language: "zh-CN",
+            glossary: None,
+            auto_terms: false,
+            strict: false,
+        },
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let events = parse_events(&output.stdout);
+    assert!(
+        events
+            .iter()
+            .all(|event| event["id"] != "unsupported_output_glyph"),
+        "{}",
+        serde_json::to_string_pretty(&events).unwrap()
+    );
+    for extractor in ["poppler", "mupdf"] {
+        let extracted = extract_pdf_text(&output_path, extractor);
+        assert!(extracted.contains("中∗Łϵ"), "{extractor}: {extracted:?}");
+    }
+    server.assert_clean();
+}
+
+#[test]
+fn glyph_missing_from_primary_and_fallback_keeps_paragraph_with_both_font_identities() {
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("missing-both.pdf");
+    let server = GateResponsesServer::start([ScriptedReply::Output("中龘")]);
+    let output = run_openai(
+        "unit-base-01-single-line",
+        &server,
+        RunOptions {
+            output: &output_path,
+            debug: None,
+            cache: None,
+            model: "m3-font-fallback-miss-model",
+            target_language: "zh-CN",
+            glossary: None,
+            auto_terms: false,
+            strict: false,
+        },
+    );
+
+    assert!(output.status.success());
+    let events = parse_events(&output.stdout);
+    let diagnostic = events
+        .iter()
+        .find(|event| event["id"] == "unsupported_output_glyph")
+        .unwrap();
+    assert_eq!(diagnostic["missing_characters"], "龘");
+    assert!(
+        diagnostic["font_source"]
+            .as_str()
+            .unwrap()
+            .contains("GB2312")
+    );
+    assert!(
+        diagnostic["fallback_font_source"]
+            .as_str()
+            .unwrap()
+            .contains("Fallback")
+    );
+    assert_eq!(
+        events
+            .iter()
+            .find(|event| event["id"] == "degradation_summary")
+            .unwrap()["preserved_paragraph_count"],
+        1
+    );
     server.assert_clean();
 }
 

@@ -19,20 +19,23 @@ def gb2312_level_one() -> list[str]:
     return values
 
 
-def build(source: Path, output: Path, family: str) -> None:
+def build(source: Path, output: Path, family: str, characters: str | None) -> None:
     font = TTFont(source, recalcBBoxes=False, recalcTimestamp=False)
     best_cmap = font.getBestCmap()
     donor_glyphs = [best_cmap[ord(value)] for value in "中文测试MIMUS "]
-    characters = [chr(value) for value in range(0x20, 0x7F)]
-    characters.extend(gb2312_level_one())
-    characters.extend("，。！？：“”‘’（）《》【】；、—…·")
+    if characters is None:
+        selected_characters = [chr(value) for value in range(0x20, 0x7F)]
+        selected_characters.extend(gb2312_level_one())
+        selected_characters.extend("，。！？：“”‘’（）《》【】；、—…·")
+    else:
+        selected_characters = list(characters)
 
     glyph_order = font.getGlyphOrder()
     glyf = font["glyf"]
     hmtx = font["hmtx"]
     vmtx = font["vmtx"] if "vmtx" in font else None
     assigned: dict[int, str] = {}
-    for index, character in enumerate(dict.fromkeys(characters)):
+    for index, character in enumerate(dict.fromkeys(selected_characters)):
         codepoint = ord(character)
         existing = best_cmap.get(codepoint)
         if existing is not None:
@@ -67,8 +70,9 @@ def main() -> None:
     parser.add_argument("source", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("family")
+    parser.add_argument("--characters")
     arguments = parser.parse_args()
-    build(arguments.source, arguments.output, arguments.family)
+    build(arguments.source, arguments.output, arguments.family, arguments.characters)
 
 
 if __name__ == "__main__":

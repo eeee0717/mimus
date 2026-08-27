@@ -23,7 +23,8 @@ use crate::scan::{PageClass, prescan_page};
 use crate::walk::walk_page;
 use crate::walk::{PageWalkError, UnicodeProvenance, walk_page_detailed_with_rotation};
 use crate::write::{
-    ContentSpanReplacement, EmbeddedFont, PageRewrite, TypesetCharacter, build_incremental, publish,
+    ContentSpanReplacement, EmbeddedFont, PageRewrite, TypesetCharacter, build_incremental,
+    glyph_width_1000, publish,
 };
 
 pub const ORDER: [Stage; 10] = [
@@ -2639,7 +2640,8 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 }
                 Err(TypesetPlanError::MissingGlyphs {
                     missing_characters,
-                    font,
+                    primary_font,
+                    fallback_font,
                 }) => {
                     document
                         .diagnostics
@@ -2647,8 +2649,10 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                             page_index: page.index,
                             reading_order: paragraph.reading_order,
                             missing_characters,
-                            font_source: font.source.clone(),
-                            font_sha256: font.sha256.clone(),
+                            font_source: primary_font.source.clone(),
+                            font_sha256: primary_font.sha256.clone(),
+                            fallback_font_source: fallback_font.source.clone(),
+                            fallback_font_sha256: fallback_font.sha256.clone(),
                         });
                     preserved.push((
                         page.index,
@@ -2816,28 +2820,43 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
 
         let mut output_fonts = BTreeMap::new();
         let mut typeset_characters = Vec::new();
-        for bold in [false, true] {
-            let used = plans
-                .iter()
-                .flat_map(|plan| plan.lines.iter().flatten())
-                .filter(|character| character.bold == bold)
-                .map(|character| character.value)
-                .collect::<BTreeSet<_>>();
-            if used.is_empty() {
-                continue;
-            }
-            let source_font = if bold {
-                &context.config.output_fonts.as_ref().unwrap().bold
-            } else {
-                &context.config.output_fonts.as_ref().unwrap().regular
-            };
-            let (font, cids) = build_embedded_font(&used, source_font, bold).map_err(|_| {
+        if !plans.is_empty() {
+            let configured_fonts = context.config.output_fonts.as_ref().ok_or_else(|| {
                 MimusError::internal(
                     InternalReason::InvariantViolation,
-                    "validated output font could not be subset for translated text",
+                    "translated text has no resolved output fonts",
                 )
             })?;
-            output_fonts.insert(bold, BuiltOutputFont { font, cids });
+            let faces = OutputFontFaces::parse(configured_fonts).map_err(|_| {
+                MimusError::internal(
+                    InternalReason::InvariantViolation,
+                    "validated output font could not be parsed for translated text",
+                )
+            })?;
+            for key in OutputFontKey::ALL {
+                let used = plans
+                    .iter()
+                    .flat_map(|plan| plan.lines.iter().flatten())
+                    .filter(|character| faces.key_for(character.value, character.bold) == Some(key))
+                    .map(|character| character.value)
+                    .collect::<BTreeSet<_>>();
+                if used.is_empty() {
+                    continue;
+                }
+                let source_font = match key {
+                    OutputFontKey::PrimaryRegular => &configured_fonts.regular,
+                    OutputFontKey::PrimaryBold => &configured_fonts.bold,
+                    OutputFontKey::FallbackRegular => &configured_fonts.fallback_regular,
+                    OutputFontKey::FallbackBold => &configured_fonts.fallback_bold,
+                };
+                let (font, cids) = build_embedded_font(&used, source_font, key).map_err(|_| {
+                    MimusError::internal(
+                        InternalReason::InvariantViolation,
+                        "validated output font could not be subset for translated text",
+                    )
+                })?;
+                output_fonts.insert(key, BuiltOutputFont { font, cids });
+            }
         }
         for plan in &plans {
             install_typeset_replacements(
@@ -2987,6 +3006,114 @@ struct BuiltOutputFont {
     cids: BTreeMap<char, u16>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum OutputFontKey {
+    PrimaryRegular,
+    PrimaryBold,
+    FallbackRegular,
+    FallbackBold,
+}
+
+impl OutputFontKey {
+    const ALL: [Self; 4] = [
+        Self::PrimaryRegular,
+        Self::PrimaryBold,
+        Self::FallbackRegular,
+        Self::FallbackBold,
+    ];
+
+    const fn is_bold(self) -> bool {
+        matches!(self, Self::PrimaryBold | Self::FallbackBold)
+    }
+
+    const fn for_style(bold: bool, fallback: bool) -> Self {
+        match (bold, fallback) {
+            (false, false) => Self::PrimaryRegular,
+            (true, false) => Self::PrimaryBold,
+            (false, true) => Self::FallbackRegular,
+            (true, true) => Self::FallbackBold,
+        }
+    }
+
+    const fn resource_name(self) -> &'static str {
+        match self {
+            Self::PrimaryRegular => "MimusR",
+            Self::PrimaryBold => "MimusB",
+            Self::FallbackRegular => "MimusFR",
+            Self::FallbackBold => "MimusFB",
+        }
+    }
+}
+
+struct OutputFontFaces<'a> {
+    primary_regular: ttf_parser::Face<'a>,
+    primary_bold: ttf_parser::Face<'a>,
+    fallback_regular: ttf_parser::Face<'a>,
+    fallback_bold: ttf_parser::Face<'a>,
+}
+
+impl<'a> OutputFontFaces<'a> {
+    fn parse(fonts: &'a crate::context::OutputFonts) -> std::result::Result<Self, ()> {
+        Ok(Self {
+            primary_regular: ttf_parser::Face::parse(&fonts.regular.bytes, 0).map_err(|_| ())?,
+            primary_bold: ttf_parser::Face::parse(&fonts.bold.bytes, 0).map_err(|_| ())?,
+            fallback_regular: ttf_parser::Face::parse(&fonts.fallback_regular.bytes, 0)
+                .map_err(|_| ())?,
+            fallback_bold: ttf_parser::Face::parse(&fonts.fallback_bold.bytes, 0)
+                .map_err(|_| ())?,
+        })
+    }
+
+    fn face(&self, key: OutputFontKey) -> &ttf_parser::Face<'a> {
+        match key {
+            OutputFontKey::PrimaryRegular => &self.primary_regular,
+            OutputFontKey::PrimaryBold => &self.primary_bold,
+            OutputFontKey::FallbackRegular => &self.fallback_regular,
+            OutputFontKey::FallbackBold => &self.fallback_bold,
+        }
+    }
+
+    fn key_for(&self, value: char, bold: bool) -> Option<OutputFontKey> {
+        let primary = OutputFontKey::for_style(bold, false);
+        if self.face(primary).glyph_index(value).is_some() {
+            return Some(primary);
+        }
+        let fallback = OutputFontKey::for_style(bold, true);
+        self.face(fallback)
+            .glyph_index(value)
+            .is_some()
+            .then_some(fallback)
+    }
+
+    fn face_for(
+        &self,
+        character: crate::translate::StyledCharacter,
+    ) -> Option<&ttf_parser::Face<'a>> {
+        self.key_for(character.value, character.bold)
+            .map(|key| self.face(key))
+    }
+
+    fn ascent_em(&self) -> f64 {
+        OutputFontKey::ALL
+            .into_iter()
+            .map(|key| {
+                let face = self.face(key);
+                f64::from(face.ascender()) / f64::from(face.units_per_em())
+            })
+            .fold(f64::NEG_INFINITY, f64::max)
+    }
+
+    fn descent_em(&self) -> f64 {
+        OutputFontKey::ALL
+            .into_iter()
+            .map(|key| {
+                let face = self.face(key);
+                f64::from(face.descender()) / f64::from(face.units_per_em())
+            })
+            .fold(f64::INFINITY, f64::min)
+    }
+}
+
 const MIN_FONT_SIZE_PT: f64 = 8.0;
 const LINE_ADVANCE_EM: f64 = 1.5;
 const SINGLE_LINE_MAX_VERTICAL_OVERFLOW_EM: f64 = 0.25;
@@ -2996,7 +3123,8 @@ enum TypesetPlanError<'a> {
     Preserved(il::PreservedReason),
     MissingGlyphs {
         missing_characters: String,
-        font: &'a OutputFont,
+        primary_font: &'a OutputFont,
+        fallback_font: &'a OutputFont,
     },
 }
 
@@ -3283,19 +3411,14 @@ fn plan_text_segment<'a>(
             single_line_expansion: None,
         });
     }
-    let regular = ttf_parser::Face::parse(&output_fonts.regular.bytes, 0)
+    let faces = OutputFontFaces::parse(output_fonts)
         .map_err(|_| TypesetPlanError::Preserved(il::PreservedReason::UnsupportedFont))?;
-    let bold = ttf_parser::Face::parse(&output_fonts.bold.bytes, 0)
-        .map_err(|_| TypesetPlanError::Preserved(il::PreservedReason::UnsupportedFont))?;
-    for (is_bold, face, font) in [
-        (false, &regular, &output_fonts.regular),
-        (true, &bold, &output_fonts.bold),
-    ] {
+    for is_bold in [false, true] {
         let missing_characters = translated
             .iter()
             .filter(|character| character.bold == is_bold)
             .map(|character| character.value)
-            .filter(|value| face.glyph_index(*value).is_none())
+            .filter(|value| faces.key_for(*value, is_bold).is_none())
             .collect::<BTreeSet<_>>()
             .into_iter()
             .take(16)
@@ -3303,7 +3426,16 @@ fn plan_text_segment<'a>(
         if !missing_characters.is_empty() {
             return Err(TypesetPlanError::MissingGlyphs {
                 missing_characters,
-                font,
+                primary_font: if is_bold {
+                    &output_fonts.bold
+                } else {
+                    &output_fonts.regular
+                },
+                fallback_font: if is_bold {
+                    &output_fonts.fallback_bold
+                } else {
+                    &output_fonts.fallback_regular
+                },
             });
         }
     }
@@ -3325,8 +3457,7 @@ fn plan_text_segment<'a>(
     let mut size = preferred.max(MIN_FONT_SIZE_PT);
     loop {
         if let Some(slots) = line_slots
-            && let Some(slotted_lines) =
-                wrap_styled_text_in_slots(&translated, &regular, &bold, size, slots)
+            && let Some(slotted_lines) = wrap_styled_text_in_slots(&translated, &faces, size, slots)
         {
             let lines = slotted_lines
                 .iter()
@@ -3339,8 +3470,7 @@ fn plan_text_segment<'a>(
                     (slot.left, slot.baseline_y)
                 })
                 .collect::<Vec<_>>();
-            if let Some(ink_bounds) =
-                planned_line_ink_bounds(&lines, &baselines, &regular, &bold, size)
+            if let Some(ink_bounds) = planned_line_ink_bounds(&lines, &baselines, &faces, size)
                 && ink_bounds
                     .iter()
                     .zip(&slotted_lines)
@@ -3361,20 +3491,14 @@ fn plan_text_segment<'a>(
             }
         }
         if line_slots.is_none()
-            && let Some(lines) = wrap_styled_text(
-                &translated,
-                &regular,
-                &bold,
-                size,
-                container.right - container.left,
-            )
+            && let Some(lines) =
+                wrap_styled_text(&translated, &faces, size, container.right - container.left)
         {
             if source_is_single_line
                 && lines.len() == 1
                 && let Some(expansion) = single_line_ink_fit(
                     &lines[0],
-                    &regular,
-                    &bold,
+                    &faces,
                     size,
                     single_line_start_x,
                     first.baseline_origin.y,
@@ -3386,8 +3510,7 @@ fn plan_text_segment<'a>(
                 let ink_bounds = planned_line_ink_bounds(
                     &lines,
                     &[(single_line_start_x, first.baseline_origin.y)],
-                    &regular,
-                    &bold,
+                    &faces,
                     size,
                 )
                 .expect("single-line ink fit already resolved every output glyph");
@@ -3400,12 +3523,8 @@ fn plan_text_segment<'a>(
                     single_line_expansion: expansion,
                 });
             }
-            let ascent = f64::from(regular.ascender().max(bold.ascender()))
-                / f64::from(regular.units_per_em())
-                * size;
-            let descent = f64::from(regular.descender().min(bold.descender()))
-                / f64::from(regular.units_per_em())
-                * size;
+            let ascent = faces.ascent_em() * size;
+            let descent = faces.descent_em() * size;
             let first_y = first.baseline_origin.y.min(container.top - ascent);
             let baselines = lines
                 .iter()
@@ -3419,8 +3538,7 @@ fn plan_text_segment<'a>(
                 .collect::<Vec<_>>();
             let last_y = baselines.last().unwrap().1;
             if last_y + descent >= container.bottom - 0.01
-                && let Some(ink_bounds) =
-                    planned_line_ink_bounds(&lines, &baselines, &regular, &bold, size)
+                && let Some(ink_bounds) = planned_line_ink_bounds(&lines, &baselines, &faces, size)
                 && ink_bounds_are_safe(&ink_bounds, page_bounds, obstacles)
             {
                 return Ok(TypesetPlan {
@@ -3446,14 +3564,13 @@ fn plan_text_segment<'a>(
 fn planned_line_ink_bounds(
     lines: &[Vec<crate::translate::StyledCharacter>],
     baselines: &[(f64, f64)],
-    regular: &ttf_parser::Face<'_>,
-    bold: &ttf_parser::Face<'_>,
+    faces: &OutputFontFaces<'_>,
     size: f64,
 ) -> Option<Vec<Rect>> {
     lines
         .iter()
         .zip(baselines)
-        .map(|(line, &(x, y))| styled_line_ink_bounds(line, regular, bold, size, x, y))
+        .map(|(line, &(x, y))| styled_line_ink_bounds(line, faces, size, x, y))
         .collect()
 }
 
@@ -3484,8 +3601,7 @@ fn source_is_single_line(chars: &[&Char]) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn single_line_ink_fit(
     line: &[crate::translate::StyledCharacter],
-    regular: &ttf_parser::Face<'_>,
-    bold: &ttf_parser::Face<'_>,
+    faces: &OutputFontFaces<'_>,
     size: f64,
     start_x: f64,
     baseline_y: f64,
@@ -3493,7 +3609,7 @@ fn single_line_ink_fit(
     page_bounds: Rect,
     obstacles: &[Rect],
 ) -> Option<Option<SingleLineBoundsExpansion>> {
-    let ink = styled_line_ink_bounds(line, regular, bold, size, start_x, baseline_y)?;
+    let ink = styled_line_ink_bounds(line, faces, size, start_x, baseline_y)?;
     if ink.left < container.left - 0.01 || ink.right > container.right + 0.01 {
         return None;
     }
@@ -3519,8 +3635,7 @@ fn single_line_ink_fit(
 
 fn styled_line_ink_bounds(
     line: &[crate::translate::StyledCharacter],
-    regular: &ttf_parser::Face<'_>,
-    bold: &ttf_parser::Face<'_>,
+    faces: &OutputFontFaces<'_>,
     size: f64,
     start_x: f64,
     baseline_y: f64,
@@ -3528,7 +3643,7 @@ fn styled_line_ink_bounds(
     let mut x = start_x;
     let mut ink = None;
     for character in line {
-        let face = if character.bold { bold } else { regular };
+        let face = faces.face_for(*character)?;
         let glyph = face.glyph_index(character.value)?;
         let scale = size / f64::from(face.units_per_em());
         if let Some(bounds) = face.glyph_bounding_box(glyph) {
@@ -3540,7 +3655,7 @@ fn styled_line_ink_bounds(
             };
             ink = Some(ink.map_or(bounds, |current: Rect| current.union(bounds)));
         }
-        x += f64::from(face.glyph_hor_advance(glyph)?) * scale;
+        x += glyph_advance_em(face, glyph)? * size;
     }
     ink
 }
@@ -3585,8 +3700,7 @@ fn normalize_typeset_whitespace(
 
 fn wrap_styled_text(
     text: &[crate::translate::StyledCharacter],
-    regular: &ttf_parser::Face<'_>,
-    bold: &ttf_parser::Face<'_>,
+    faces: &OutputFontFaces<'_>,
     size: f64,
     width: f64,
 ) -> Option<Vec<Vec<crate::translate::StyledCharacter>>> {
@@ -3594,12 +3708,9 @@ fn wrap_styled_text(
     let mut line_width = 0.0;
     for token in styled_text_tokens(text) {
         let token_width = token.iter().try_fold(0.0, |sum, character| {
-            let face = if character.bold { bold } else { regular };
+            let face = faces.face_for(*character)?;
             let glyph = face.glyph_index(character.value)?;
-            Some(
-                sum + f64::from(face.glyph_hor_advance(glyph)?) / f64::from(face.units_per_em())
-                    * size,
-            )
+            Some(sum + glyph_advance_em(face, glyph)? * size)
         })?;
         if token_width > width + 0.01 {
             return None;
@@ -3616,8 +3727,7 @@ fn wrap_styled_text(
 
 fn wrap_styled_text_in_slots(
     text: &[crate::translate::StyledCharacter],
-    regular: &ttf_parser::Face<'_>,
-    bold: &ttf_parser::Face<'_>,
+    faces: &OutputFontFaces<'_>,
     size: f64,
     slots: &[TypesetLineSlot],
 ) -> Option<Vec<(usize, Vec<crate::translate::StyledCharacter>)>> {
@@ -3626,12 +3736,9 @@ fn wrap_styled_text_in_slots(
     let mut line_width = 0.0;
     for token in styled_text_tokens(text) {
         let token_width = token.iter().try_fold(0.0, |sum, character| {
-            let face = if character.bold { bold } else { regular };
+            let face = faces.face_for(*character)?;
             let glyph = face.glyph_index(character.value)?;
-            Some(
-                sum + f64::from(face.glyph_hor_advance(glyph)?) / f64::from(face.units_per_em())
-                    * size,
-            )
+            Some(sum + glyph_advance_em(face, glyph)? * size)
         })?;
         loop {
             let slot = slots.get(slot_index)?;
@@ -3680,10 +3787,15 @@ fn styled_text_tokens(
     tokens
 }
 
+fn glyph_advance_em(face: &ttf_parser::Face<'_>, glyph: ttf_parser::GlyphId) -> Option<f64> {
+    let advance = face.glyph_hor_advance(glyph)?;
+    Some(f64::from(glyph_width_1000(advance, face.units_per_em())) / 1000.0)
+}
+
 fn build_embedded_font(
     used: &BTreeSet<char>,
     source_font: &OutputFont,
-    bold: bool,
+    key: OutputFontKey,
 ) -> std::result::Result<(EmbeddedFont, BTreeMap<char, u16>), ()> {
     let bytes = &source_font.bytes;
     let face = ttf_parser::Face::parse(bytes, 0).map_err(|_| ())?;
@@ -3706,11 +3818,11 @@ fn build_embedded_font(
         })
         .collect::<std::result::Result<Vec<_>, ()>>()?;
     glyphs.sort_by_key(|value| value.0);
-    let weight = if bold { "Bold" } else { "Regular" };
-    let tag = subset_tag(used, bold);
+    let weight = if key.is_bold() { "Bold" } else { "Regular" };
+    let tag = subset_tag(used, key);
     Ok((
         EmbeddedFont {
-            resource_name: if bold { "MimusB" } else { "MimusR" }.to_owned(),
+            resource_name: key.resource_name().to_owned(),
             base_font: format!("{tag}+{}-{weight}", source_font.postscript_name),
             font_bytes,
             units_per_em: face.units_per_em(),
@@ -3723,8 +3835,13 @@ fn build_embedded_font(
     ))
 }
 
-fn subset_tag(used: &BTreeSet<char>, bold: bool) -> String {
-    let mut hash = if bold { 0x811c9dc4u32 } else { 0x811c9dc5u32 };
+fn subset_tag(used: &BTreeSet<char>, key: OutputFontKey) -> String {
+    let mut hash = match key {
+        OutputFontKey::PrimaryRegular => 0x811c9dc5u32,
+        OutputFontKey::PrimaryBold => 0x811c9dc4u32,
+        OutputFontKey::FallbackRegular => 0x811c9dc3u32,
+        OutputFontKey::FallbackBold => 0x811c9dc2u32,
+    };
     for character in used {
         hash ^= u32::from(*character);
         hash = hash.wrapping_mul(16_777_619);
@@ -3736,7 +3853,7 @@ fn subset_tag(used: &BTreeSet<char>, bold: bool) -> String {
 
 fn install_typeset_replacements(
     plan: &TypesetPlan,
-    fonts: &BTreeMap<bool, BuiltOutputFont>,
+    fonts: &BTreeMap<OutputFontKey, BuiltOutputFont>,
     streams: &BTreeMap<lopdf::ObjectId, &[u8]>,
     content_transforms: &BTreeMap<SpanKey, [f64; 6]>,
     text_show_states: &BTreeMap<SpanKey, TextShowState>,
@@ -3795,15 +3912,20 @@ fn install_typeset_replacements(
         ));
         let mut run_start = 0;
         while run_start < line.len() {
-            let bold = line[run_start].bold;
+            let key = built_font_key(fonts, line[run_start]).ok_or_else(|| {
+                MimusError::internal(
+                    InternalReason::InvariantViolation,
+                    "typeset character has no embedded font",
+                )
+            })?;
             let mut run_end = run_start + 1;
-            while run_end < line.len() && line[run_end].bold == bold {
+            while run_end < line.len() && built_font_key(fonts, line[run_end]) == Some(key) {
                 run_end += 1;
             }
             if emitted_run && run_start > 0 {
                 command.push_str(" Tj ");
             }
-            let output_font = fonts.get(&bold).ok_or_else(|| {
+            let output_font = fonts.get(&key).ok_or_else(|| {
                 MimusError::internal(
                     InternalReason::InvariantViolation,
                     "typeset style has no embedded font",
@@ -3869,6 +3991,24 @@ fn install_typeset_replacements(
         }
     }
     Ok(())
+}
+
+fn built_font_key(
+    fonts: &BTreeMap<OutputFontKey, BuiltOutputFont>,
+    character: crate::translate::StyledCharacter,
+) -> Option<OutputFontKey> {
+    let primary = OutputFontKey::for_style(character.bold, false);
+    if fonts
+        .get(&primary)
+        .is_some_and(|font| font.cids.contains_key(&character.value))
+    {
+        return Some(primary);
+    }
+    let fallback = OutputFontKey::for_style(character.bold, true);
+    fonts
+        .get(&fallback)
+        .is_some_and(|font| font.cids.contains_key(&character.value))
+        .then_some(fallback)
 }
 
 fn state_preserving_empty_replacement(
@@ -3991,13 +4131,15 @@ fn content_relative_text_matrix(content: [f64; 6], x: f64, y: f64) -> Option<[f6
 
 fn planned_characters(
     plan: &TypesetPlan,
-    fonts: &BTreeMap<bool, BuiltOutputFont>,
+    fonts: &BTreeMap<OutputFontKey, BuiltOutputFont>,
 ) -> Vec<TypesetCharacter> {
     let mut output = Vec::new();
     for (line, &(start_x, baseline_y)) in plan.lines.iter().zip(&plan.baselines) {
         let mut x = start_x;
         for character in line {
-            let font = &fonts[&character.bold].font;
+            let key =
+                built_font_key(fonts, *character).expect("typeset character has an embedded font");
+            let font = &fonts[&key].font;
             let advance = font
                 .glyphs
                 .iter()
@@ -4007,7 +4149,7 @@ fn planned_characters(
                 unicode: character.value,
                 baseline_origin: il::Point { x, y: baseline_y },
             });
-            x += f64::from(advance) / f64::from(font.units_per_em) * plan.font_size;
+            x += f64::from(glyph_width_1000(advance, font.units_per_em)) / 1000.0 * plan.font_size;
         }
     }
     output
@@ -5502,6 +5644,14 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../mimus/tests/assets/fonts/MimusTestGB2312-Bold.ttf"
         ));
+        let fallback_regular = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../mimus/tests/assets/fonts/MimusTestFallback-Regular.ttf"
+        ));
+        let fallback_bold = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../mimus/tests/assets/fonts/MimusTestFallback-Bold.ttf"
+        ));
         crate::context::OutputFonts {
             regular: crate::context::OutputFont {
                 bytes: regular.to_vec(),
@@ -5515,6 +5665,20 @@ mod tests {
                 postscript_name: "NotoSansSC".to_owned(),
                 source: "test:bold".to_owned(),
                 sha256: "1a917349eb06866f5701532f0cea586d184edadbd1cfdd3f034f3a18f2ff5316"
+                    .to_owned(),
+            },
+            fallback_regular: crate::context::OutputFont {
+                bytes: fallback_regular.to_vec(),
+                postscript_name: "DejaVuSans".to_owned(),
+                source: "test:fallback-regular".to_owned(),
+                sha256: "3634d4b65a151c61dcb82968f6a3bdc33435d062c4c69a5ea57e3db20122ac1e"
+                    .to_owned(),
+            },
+            fallback_bold: crate::context::OutputFont {
+                bytes: fallback_bold.to_vec(),
+                postscript_name: "DejaVuSans-Bold".to_owned(),
+                source: "test:fallback-bold".to_owned(),
+                sha256: "d0f2fdc62e7cdf6e35c8b0629b19084917991603c0d51fe94109128176352b83"
                     .to_owned(),
             },
         }
@@ -6339,8 +6503,12 @@ mod tests {
         assert_eq!(baselines.len(), 2);
         assert!(baselines[1] - baselines[0] >= MIN_FONT_SIZE_PT * LINE_ADVANCE_EM);
         let bold_source = &context.config.output_fonts.as_ref().unwrap().bold;
-        let (bold, bold_cids) =
-            build_embedded_font(&"MIMUS中文测试".chars().collect(), bold_source, true).unwrap();
+        let (bold, bold_cids) = build_embedded_font(
+            &"MIMUS中文测试".chars().collect(),
+            bold_source,
+            OutputFontKey::PrimaryBold,
+        )
+        .unwrap();
         assert!(bold.base_font.ends_with("+NotoSansSC-Bold"));
         assert_eq!(bold_cids.len(), font.glyphs.len());
         assert_ne!(bold.font_bytes, font.font_bytes);
@@ -6401,7 +6569,9 @@ mod tests {
             config: crate::context::PipelineConfig {
                 output_fonts: Some(crate::context::OutputFonts {
                     regular: output_font.clone(),
-                    bold: output_font,
+                    bold: output_font.clone(),
+                    fallback_regular: output_font.clone(),
+                    fallback_bold: output_font,
                 }),
                 ..crate::context::PipelineConfig::default()
             },
@@ -6430,9 +6600,13 @@ mod tests {
                 missing_characters,
                 font_source,
                 font_sha256,
+                fallback_font_source,
+                fallback_font_sha256,
             } if missing_characters == "中文测试"
                 && font_source == "test:missing-glyph"
                 && font_sha256 == "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735"
+                && fallback_font_source == "test:missing-glyph"
+                && fallback_font_sha256 == "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735"
         )));
     }
 
@@ -6496,8 +6670,7 @@ mod tests {
     #[test]
     fn single_line_ink_expansion_is_bounded_by_obstacles_and_page() {
         let output_fonts = test_output_fonts();
-        let regular = ttf_parser::Face::parse(&output_fonts.regular.bytes, 0).unwrap();
-        let bold = ttf_parser::Face::parse(&output_fonts.bold.bytes, 0).unwrap();
+        let faces = OutputFontFaces::parse(&output_fonts).unwrap();
         let line = "中文"
             .chars()
             .map(|value| crate::translate::StyledCharacter { value, bold: true })
@@ -6516,8 +6689,7 @@ mod tests {
         };
         let expansion = single_line_ink_fit(
             &line,
-            &regular,
-            &bold,
+            &faces,
             12.0,
             container.left,
             120.0,
@@ -6530,13 +6702,11 @@ mod tests {
         assert!(expansion.top_pt <= SINGLE_LINE_MAX_VERTICAL_OVERFLOW_PT);
         assert!(expansion.bottom_pt <= SINGLE_LINE_MAX_VERTICAL_OVERFLOW_PT);
 
-        let ink =
-            styled_line_ink_bounds(&line, &regular, &bold, 12.0, container.left, 120.0).unwrap();
+        let ink = styled_line_ink_bounds(&line, &faces, 12.0, container.left, 120.0).unwrap();
         assert!(
             single_line_ink_fit(
                 &line,
-                &regular,
-                &bold,
+                &faces,
                 12.0,
                 container.left,
                 120.0,
@@ -6555,8 +6725,7 @@ mod tests {
         assert!(
             single_line_ink_fit(
                 &line,
-                &regular,
-                &bold,
+                &faces,
                 12.0,
                 container.left,
                 120.0,
@@ -6569,8 +6738,7 @@ mod tests {
         assert!(
             single_line_ink_fit(
                 &line,
-                &regular,
-                &bold,
+                &faces,
                 12.0,
                 container.left + 14.0,
                 120.0,
@@ -6583,8 +6751,7 @@ mod tests {
         assert!(
             single_line_ink_fit(
                 &line,
-                &regular,
-                &bold,
+                &faces,
                 12.0,
                 container.left,
                 120.0,
@@ -6954,9 +7121,16 @@ mod tests {
             },
         )]);
         let output_fonts = test_output_fonts();
-        let (font, cids) =
-            build_embedded_font(&BTreeSet::from(['中']), &output_fonts.regular, false).unwrap();
-        let fonts = BTreeMap::from([(false, BuiltOutputFont { font, cids })]);
+        let (font, cids) = build_embedded_font(
+            &BTreeSet::from(['中']),
+            &output_fonts.regular,
+            OutputFontKey::PrimaryRegular,
+        )
+        .unwrap();
+        let fonts = BTreeMap::from([(
+            OutputFontKey::PrimaryRegular,
+            BuiltOutputFont { font, cids },
+        )]);
         let plan = TypesetPlan {
             spans: vec![span],
             lines: vec![vec![crate::translate::StyledCharacter {

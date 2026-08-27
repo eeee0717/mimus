@@ -168,9 +168,20 @@ fn test_font_path(weight: &str) -> PathBuf {
         .join(format!("MimusTestGB2312-{weight}.ttf"))
 }
 
+fn test_fallback_font_path(weight: &str) -> PathBuf {
+    repo_root()
+        .join("crates/mimus/tests/assets/fonts")
+        .join(format!("MimusTestFallback-{weight}.ttf"))
+}
+
 fn configure_test_fonts(command: &mut Command) {
     command.env("MIMUS_FONT_REGULAR", test_font_path("Regular"));
     command.env("MIMUS_FONT_BOLD", test_font_path("Bold"));
+    command.env(
+        "MIMUS_FONT_FALLBACK_REGULAR",
+        test_fallback_font_path("Regular"),
+    );
+    command.env("MIMUS_FONT_FALLBACK_BOLD", test_fallback_font_path("Bold"));
 }
 
 #[derive(Debug, Deserialize)]
@@ -768,7 +779,7 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
     let config = directory.path().join("config.toml");
     std::fs::write(
         &config,
-        "backend = 'none'\nbase_url = 'https://file.invalid'\nmodel = 'file-model'\ntarget_language = 'file-language'\nfont_regular = 'file-regular.ttf'\nfont_bold = 'file-bold.ttf'\ncache = 'file-cache.redb'\nconcurrency = 2\n",
+        "backend = 'none'\nbase_url = 'https://file.invalid'\nmodel = 'file-model'\ntarget_language = 'file-language'\nfont_regular = 'file-regular.ttf'\nfont_bold = 'file-bold.ttf'\nfont_fallback_regular = 'file-fallback-regular.ttf'\nfont_fallback_bold = 'file-fallback-bold.ttf'\ncache = 'file-cache.redb'\nconcurrency = 2\n",
     )
     .unwrap();
     let output_path = directory.path().join("translated.pdf");
@@ -783,6 +794,8 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
         .env("MIMUS_BACKEND", "invalid-but-overridden")
         .env("MIMUS_FONT_REGULAR", "env-regular.ttf")
         .env("MIMUS_FONT_BOLD", "env-bold.ttf")
+        .env("MIMUS_FONT_FALLBACK_REGULAR", "env-fallback-regular.ttf")
+        .env("MIMUS_FONT_FALLBACK_BOLD", "env-fallback-bold.ttf")
         .args([
             "--json",
             "translate",
@@ -805,6 +818,10 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
         .arg(test_font_path("Regular"))
         .arg("--font-bold")
         .arg(test_font_path("Bold"))
+        .arg("--font-fallback")
+        .arg(test_fallback_font_path("Regular"))
+        .arg("--font-fallback-bold")
+        .arg(test_fallback_font_path("Bold"))
         .arg("--output")
         .arg(&output_path)
         .arg(fixture())
@@ -843,6 +860,26 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
     assert_eq!(
         resolved["font_bold_sha256"],
         "1a917349eb06866f5701532f0cea586d184edadbd1cfdd3f034f3a18f2ff5316"
+    );
+    assert!(
+        resolved["font_fallback_regular_source"]
+            .as_str()
+            .unwrap()
+            .starts_with("flag:")
+    );
+    assert_eq!(
+        resolved["font_fallback_regular_sha256"],
+        "3634d4b65a151c61dcb82968f6a3bdc33435d062c4c69a5ea57e3db20122ac1e"
+    );
+    assert!(
+        resolved["font_fallback_bold_source"]
+            .as_str()
+            .unwrap()
+            .starts_with("flag:")
+    );
+    assert_eq!(
+        resolved["font_fallback_bold_sha256"],
+        "d0f2fdc62e7cdf6e35c8b0629b19084917991603c0d51fe94109128176352b83"
     );
     assert_eq!(resolved["cache_enabled"], true);
     assert_eq!(resolved["cache_path"], "flag-cache.redb");
@@ -897,6 +934,11 @@ fn empty_secret_alias_falls_through_to_the_next_nonempty_alias() {
         .env("MODEL_ID", "test-model")
         .env("MIMUS_FONT_REGULAR", test_font_path("Regular"))
         .env("MIMUS_FONT_BOLD", test_font_path("Bold"))
+        .env(
+            "MIMUS_FONT_FALLBACK_REGULAR",
+            test_fallback_font_path("Regular"),
+        )
+        .env("MIMUS_FONT_FALLBACK_BOLD", test_fallback_font_path("Bold"))
         .args(["--json", "translate", "--layout", "single-line"])
         .arg(fixture())
         .output()
@@ -920,6 +962,8 @@ fn missing_output_fonts_fail_fast_as_asset_without_contacting_a_public_endpoint(
         .env("MIMUS_ASSET_MIRROR", "http://127.0.0.1:9")
         .env_remove("MIMUS_FONT_REGULAR")
         .env_remove("MIMUS_FONT_BOLD")
+        .env_remove("MIMUS_FONT_FALLBACK_REGULAR")
+        .env_remove("MIMUS_FONT_FALLBACK_BOLD")
         .args(["--json", "translate", "--backend", "none"])
         .arg(fixture())
         .output()
@@ -1954,7 +1998,9 @@ fn table_translation_is_experimental_reported_and_off_without_remote_calls() {
     let directory = tempfile::tempdir().unwrap();
     let output_path = directory.path().join("default-table.pdf");
     let server = FakeResponsesServer::start();
-    let output = Command::new(BIN)
+    let mut command = Command::new(BIN);
+    configure_test_fonts(&mut command);
+    let output = command
         .env(PDFIUM_ENV, pdfium_library())
         .env("API_KEY", "mimus-table-test-key")
         .env("NO_PROXY", "127.0.0.1,localhost")
@@ -2004,7 +2050,9 @@ fn enabled_table_translation_uses_cells_and_preserves_only_the_failed_cell() {
     let output_path = directory.path().join("translated-table.pdf");
     let debug = directory.path().join("debug");
     let server = FakeResponsesServer::start();
-    let output = Command::new(BIN)
+    let mut command = Command::new(BIN);
+    configure_test_fonts(&mut command);
+    let output = command
         .env(PDFIUM_ENV, pdfium_library())
         .env("API_KEY", "mimus-table-test-key")
         .env("NO_PROXY", "127.0.0.1,localhost")
@@ -3106,7 +3154,9 @@ fn strict_mode_turns_page_degradation_into_translation_exit_without_publishing()
     let input = fixture_path("mal-stream-10-unterminated-string");
     let output_path = directory.path().join("strict.pdf");
     std::fs::write(&output_path, b"existing destination").unwrap();
-    let output = Command::new(BIN)
+    let mut command = Command::new(BIN);
+    configure_test_fonts(&mut command);
+    let output = command
         .env(PDFIUM_ENV, pdfium_library())
         .args([
             "--json",
@@ -3149,7 +3199,9 @@ fn strict_mode_turns_page_degradation_into_translation_exit_without_publishing()
 
     let human_path = directory.path().join("strict-human.pdf");
     std::fs::write(&human_path, b"human destination").unwrap();
-    let human = Command::new(BIN)
+    let mut command = Command::new(BIN);
+    configure_test_fonts(&mut command);
+    let human = command
         .env(PDFIUM_ENV, pdfium_library())
         .args([
             "translate",
@@ -3269,6 +3321,11 @@ fn missing_pdfium_uses_asset_exit_code_three() {
         .env(PDFIUM_ENV, directory.path().join("missing-libpdfium.dylib"))
         .env("MIMUS_FONT_REGULAR", test_font_path("Regular"))
         .env("MIMUS_FONT_BOLD", test_font_path("Bold"))
+        .env(
+            "MIMUS_FONT_FALLBACK_REGULAR",
+            test_fallback_font_path("Regular"),
+        )
+        .env("MIMUS_FONT_FALLBACK_BOLD", test_fallback_font_path("Bold"))
         .args([
             "translate",
             "--backend",
@@ -3294,6 +3351,11 @@ fn a_closed_stdout_pipe_does_not_turn_success_into_a_panic() {
         .env(PDFIUM_ENV, pdfium_library())
         .env("MIMUS_FONT_REGULAR", test_font_path("Regular"))
         .env("MIMUS_FONT_BOLD", test_font_path("Bold"))
+        .env(
+            "MIMUS_FONT_FALLBACK_REGULAR",
+            test_fallback_font_path("Regular"),
+        )
+        .env("MIMUS_FONT_FALLBACK_BOLD", test_fallback_font_path("Bold"))
         .args([
             "--json",
             "translate",
