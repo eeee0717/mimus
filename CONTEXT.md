@@ -26,7 +26,7 @@
 | 17 | V1 单进程；PDFium 崩溃（abort）接受，子进程隔离推 V2 | — |
 | 18 | 输出字体按字符级走主字体 Noto Sans SC 2.004 → 回退字体 DejaVu Sans 2.35；两族各有 Regular/Bold 槽，均按 flag > env > config > SHA 缓存 > manifest 下载解析，经 `PassContext` 注入并按需子集化；主槽用 `--font`/`--font-bold`，回退槽用 `--font-fallback`/`--font-fallback-bold`。两族皆缺才整段 `unsupported_font`，诊断列出双方身份；italic 映射正常字重。Noto 主字体仍以同一份可变字体承载两个逻辑槽，静态双字重仍是 follow-up | [ADR-0018](docs/adr/0018-output-font-assets.md) |
 | 19 | 术语：**保留自动术语提取**（独立 pass，LLM）+ `--glossary` 用户术语表 | — |
-| 20 | 翻译层：`Translator` trait 可扩展；V1 实现 OpenAI-compatible Responses API + `none` 直通；可翻形状收到 echo 后单次语义重试，再次 echo 则缓存为 `Identity`、发段级 `suspicious_echo` 并进 summary，但不算硬降级、不触发 strict；数字/符号/邮箱形状保持一次 identity；六类占位符违规均单次语义重试，仍违规才仅降级所属段且无效响应不入缓存 | [ADR-0016](docs/adr/0016-responses-api-and-translation-config.md)、[ADR-0017](docs/adr/0017-translation-degradation-and-strict.md) |
+| 20 | 翻译层：`Translator` trait 可扩展；V1 实现 OpenAI-compatible Responses API + `none` 直通；可翻形状收到 echo 后单次语义重试，再次 echo 则缓存为 `Identity`、发段级 `suspicious_echo` 并进 summary，但不算硬降级、不触发 strict；数字/符号/邮箱形状保持一次 identity；六类占位符违规均单次语义重试，重试请求按子类附加缺失/重复/未知 token 或顺序纠错提示，仍违规才仅降级所属段；原请求、缓存键与 validator 不变，无效响应不入缓存 | [ADR-0016](docs/adr/0016-responses-api-and-translation-config.md)、[ADR-0017](docs/adr/0017-translation-degradation-and-strict.md) |
 | 21 | 翻译缓存：V1 即做，redb，键含(原文,模型,目标语,prompt 版本,术语指纹)；`--no-cache` | — |
 | 22 | 推理纯 CPU（ort CPU EP）；GPU/NPU EP 不进 V1 | — |
 | 23 | 质量回归四件套：全语料 IL 快照 + 占位符守恒 + 零 panic + 几何断言；**CI 绿才能合并**；渲染像素 diff 待渲染路径稳定后加 | — |
