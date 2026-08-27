@@ -3947,54 +3947,68 @@ fn validate_mixed_output_characters(
     actual: &[PageCharSnapshot],
     tolerance: f64,
 ) -> Result<()> {
-    let expected = retained
-        .iter()
-        .copied()
-        .chain(typeset.iter().map(|character| ExpectedOutputCharacter {
-            unicode: Some(character.unicode),
-            baseline_origin: character.baseline_origin,
-        }))
-        .collect::<Vec<_>>();
-    if expected.len() != actual.len() {
-        return Err(output_mismatch(format!(
-            "output page {} has {} mixed characters; expected {}",
-            page_index + 1,
-            actual.len(),
-            expected.len()
-        )));
-    }
-
     let mut matched = vec![false; actual.len()];
-    for expected_character in expected {
-        let owner = actual
-            .iter()
-            .enumerate()
-            .filter(|(index, actual_character)| {
-                !matched[*index]
-                    && output_unicode_matches(expected_character.unicode, actual_character)
-                    && point_close(
-                        expected_character.baseline_origin,
-                        actual_character.baseline_origin,
-                        tolerance,
-                    )
-            })
-            .min_by(|(_, left), (_, right)| {
-                point_distance_squared(expected_character.baseline_origin, left.baseline_origin)
-                    .total_cmp(&point_distance_squared(
-                        expected_character.baseline_origin,
-                        right.baseline_origin,
-                    ))
-            })
-            .map(|(index, _)| index)
+    for expected_character in retained {
+        let owner = match_output_character(expected_character, actual, &matched, tolerance)
             .ok_or_else(|| {
                 output_mismatch(format!(
-                    "output page {} is missing a preserved or typeset character",
+                    "output page {} is missing a preserved character",
                     page_index + 1
                 ))
             })?;
         matched[owner] = true;
     }
+    for character in typeset {
+        let expected_character = ExpectedOutputCharacter {
+            unicode: Some(character.unicode),
+            baseline_origin: character.baseline_origin,
+        };
+        let Some(owner) = match_output_character(&expected_character, actual, &matched, tolerance)
+        else {
+            // PDFium's extraction view may omit whitespace that is present in the content stream.
+            if character.unicode.is_whitespace() {
+                continue;
+            }
+            return Err(output_mismatch(format!(
+                "output page {} is missing a typeset character",
+                page_index + 1
+            )));
+        };
+        matched[owner] = true;
+    }
+    if matched.iter().any(|matched| !matched) {
+        return Err(output_mismatch(format!(
+            "output page {} has an unexpected extracted character",
+            page_index + 1
+        )));
+    }
     Ok(())
+}
+
+fn match_output_character(
+    expected: &ExpectedOutputCharacter,
+    actual: &[PageCharSnapshot],
+    matched: &[bool],
+    tolerance: f64,
+) -> Option<usize> {
+    actual
+        .iter()
+        .enumerate()
+        .filter(|(index, actual_character)| {
+            !matched[*index]
+                && output_unicode_matches(expected.unicode, actual_character)
+                && point_close(
+                    expected.baseline_origin,
+                    actual_character.baseline_origin,
+                    tolerance,
+                )
+        })
+        .min_by(|(_, left), (_, right)| {
+            point_distance_squared(expected.baseline_origin, left.baseline_origin).total_cmp(
+                &point_distance_squared(expected.baseline_origin, right.baseline_origin),
+            )
+        })
+        .map(|(index, _)| index)
 }
 
 fn output_unicode_matches(expected: Option<char>, actual: &PageCharSnapshot) -> bool {
@@ -6076,6 +6090,75 @@ mod tests {
             0.001,
         )
         .unwrap_err();
+        assert_eq!(
+            error.reason(),
+            crate::error::ErrorReason::Internal(InternalReason::OutputMismatch)
+        );
+    }
+
+    #[test]
+    fn mixed_output_validation_allows_pdfium_to_omit_typeset_whitespace() {
+        let retained = [ExpectedOutputCharacter {
+            unicode: Some('A'),
+            baseline_origin: Point { x: 10.0, y: 20.0 },
+        }];
+        let typeset = [
+            TypesetCharacter {
+                unicode: ' ',
+                baseline_origin: Point { x: 20.0, y: 20.0 },
+            },
+            TypesetCharacter {
+                unicode: '中',
+                baseline_origin: Point { x: 30.0, y: 20.0 },
+            },
+        ];
+        let template = FakeEngine::default().page_characters(&[], 0).unwrap()[0].clone();
+        let mut preserved = template.clone();
+        preserved.unicode = Some('A');
+        preserved.unicode_value = u32::from('A');
+        preserved.baseline_origin = retained[0].baseline_origin;
+        let mut translated = template;
+        translated.unicode = Some('中');
+        translated.unicode_value = u32::from('中');
+        translated.baseline_origin = typeset[1].baseline_origin;
+
+        validate_mixed_output_characters(0, &retained, &typeset, &[preserved, translated], 0.001)
+            .unwrap();
+    }
+
+    #[test]
+    fn mixed_output_validation_still_requires_retained_whitespace() {
+        let retained = [ExpectedOutputCharacter {
+            unicode: Some(' '),
+            baseline_origin: Point { x: 10.0, y: 20.0 },
+        }];
+
+        let error = validate_mixed_output_characters(0, &retained, &[], &[], 0.001).unwrap_err();
+        assert_eq!(
+            error.reason(),
+            crate::error::ErrorReason::Internal(InternalReason::OutputMismatch)
+        );
+    }
+
+    #[test]
+    fn mixed_output_validation_still_requires_non_whitespace_typeset_characters() {
+        let typeset = [TypesetCharacter {
+            unicode: '中',
+            baseline_origin: Point { x: 10.0, y: 20.0 },
+        }];
+
+        let error = validate_mixed_output_characters(0, &[], &typeset, &[], 0.001).unwrap_err();
+        assert_eq!(
+            error.reason(),
+            crate::error::ErrorReason::Internal(InternalReason::OutputMismatch)
+        );
+    }
+
+    #[test]
+    fn mixed_output_validation_rejects_unexpected_extracted_characters() {
+        let actual = FakeEngine::default().page_characters(&[], 0).unwrap();
+
+        let error = validate_mixed_output_characters(0, &[], &[], &actual, 0.001).unwrap_err();
         assert_eq!(
             error.reason(),
             crate::error::ErrorReason::Internal(InternalReason::OutputMismatch)
