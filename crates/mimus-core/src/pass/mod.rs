@@ -2811,6 +2811,16 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                         overflow_bottom_pt: expansion.bottom_pt,
                     });
             }
+            for expansion in plans.iter().filter_map(|plan| plan.multi_line_expansion) {
+                document
+                    .diagnostics
+                    .push(Diagnostic::MultiLineBoundsExpanded {
+                        page_index: page.index,
+                        reading_order: *reading_order,
+                        overflow_top_pt: expansion.top_pt,
+                        overflow_bottom_pt: expansion.bottom_pt,
+                    });
+            }
         }
         planned_paragraphs.sort_by_key(|(reading_order, _)| *reading_order);
         let plans = planned_paragraphs
@@ -2986,6 +2996,7 @@ struct TypesetPlan {
     ink_bounds: Vec<Rect>,
     font_size: f64,
     single_line_expansion: Option<SingleLineBoundsExpansion>,
+    multi_line_expansion: Option<MultiLineBoundsExpansion>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2997,6 +3008,12 @@ struct TypesetLineSlot {
 
 #[derive(Debug, Clone, Copy)]
 struct SingleLineBoundsExpansion {
+    top_pt: f64,
+    bottom_pt: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MultiLineBoundsExpansion {
     top_pt: f64,
     bottom_pt: f64,
 }
@@ -3409,6 +3426,7 @@ fn plan_text_segment<'a>(
             ink_bounds: Vec::new(),
             font_size: chars[0].font_size.max(MIN_FONT_SIZE_PT),
             single_line_expansion: None,
+            multi_line_expansion: None,
         });
     }
     let faces = OutputFontFaces::parse(output_fonts)
@@ -3487,6 +3505,7 @@ fn plan_text_segment<'a>(
                     ink_bounds,
                     font_size: size,
                     single_line_expansion: None,
+                    multi_line_expansion: None,
                 });
             }
         }
@@ -3521,6 +3540,7 @@ fn plan_text_segment<'a>(
                     ink_bounds,
                     font_size: size,
                     single_line_expansion: expansion,
+                    multi_line_expansion: None,
                 });
             }
             let ascent = faces.ascent_em() * size;
@@ -3537,18 +3557,78 @@ fn plan_text_segment<'a>(
                 })
                 .collect::<Vec<_>>();
             let last_y = baselines.last().unwrap().1;
-            if last_y + descent >= container.bottom - 0.01
-                && let Some(ink_bounds) = planned_line_ink_bounds(&lines, &baselines, &faces, size)
+            if let Some(ink_bounds) = planned_line_ink_bounds(&lines, &baselines, &faces, size)
                 && ink_bounds_are_safe(&ink_bounds, page_bounds, obstacles)
             {
-                return Ok(TypesetPlan {
-                    spans,
-                    lines,
-                    baselines,
-                    ink_bounds,
-                    font_size: size,
-                    single_line_expansion: None,
-                });
+                let overflow_top = (first_y + ascent - container.top).max(0.0);
+                let overflow_bottom = (container.bottom - (last_y + descent)).max(0.0);
+                let fits_container = overflow_top <= 0.01 && overflow_bottom <= 0.01;
+                let may_expand = !source_is_single_line && size <= MIN_FONT_SIZE_PT + 0.001;
+                if fits_container || may_expand {
+                    return Ok(TypesetPlan {
+                        spans,
+                        lines,
+                        baselines,
+                        ink_bounds,
+                        font_size: size,
+                        single_line_expansion: None,
+                        multi_line_expansion: (!fits_container).then_some(
+                            MultiLineBoundsExpansion {
+                                top_pt: overflow_top,
+                                bottom_pt: overflow_bottom,
+                            },
+                        ),
+                    });
+                }
+            }
+            if !source_is_single_line && size <= MIN_FONT_SIZE_PT + 0.001 {
+                let slots = obstacle_aware_multiline_slots(
+                    container,
+                    first_y,
+                    ascent,
+                    descent,
+                    size,
+                    page_bounds,
+                    obstacles,
+                );
+                if let Some(slotted_lines) =
+                    wrap_styled_text_in_slots(&translated, &faces, size, &slots)
+                {
+                    let lines = slotted_lines
+                        .iter()
+                        .map(|(_, line)| line.clone())
+                        .collect::<Vec<_>>();
+                    let baselines = slotted_lines
+                        .iter()
+                        .map(|(slot_index, _)| {
+                            let slot = slots[*slot_index];
+                            (slot.left, slot.baseline_y)
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(ink_bounds) =
+                        planned_line_ink_bounds(&lines, &baselines, &faces, size)
+                        && ink_bounds_are_safe(&ink_bounds, page_bounds, obstacles)
+                    {
+                        let first_baseline = baselines.first().unwrap().1;
+                        let last_baseline = baselines.last().unwrap().1;
+                        let overflow_top = (first_baseline + ascent - container.top).max(0.0);
+                        let overflow_bottom =
+                            (container.bottom - (last_baseline + descent)).max(0.0);
+                        return Ok(TypesetPlan {
+                            spans,
+                            lines,
+                            baselines,
+                            ink_bounds,
+                            font_size: size,
+                            single_line_expansion: None,
+                            multi_line_expansion: (overflow_top > 0.01 || overflow_bottom > 0.01)
+                                .then_some(MultiLineBoundsExpansion {
+                                    top_pt: overflow_top,
+                                    bottom_pt: overflow_bottom,
+                                }),
+                        });
+                    }
+                }
             }
         }
         if size <= MIN_FONT_SIZE_PT + 0.001 {
@@ -3581,6 +3661,64 @@ fn ink_bounds_are_safe(ink_bounds: &[Rect], page_bounds: Rect, obstacles: &[Rect
                 .iter()
                 .all(|obstacle| intersection_area(*ink, *obstacle) <= 0.0001)
     }) && !rects_intersect_each_other(ink_bounds)
+}
+
+fn obstacle_aware_multiline_slots(
+    container: Rect,
+    first_baseline_y: f64,
+    ascent: f64,
+    descent: f64,
+    size: f64,
+    page_bounds: Rect,
+    obstacles: &[Rect],
+) -> Vec<TypesetLineSlot> {
+    let left = container.left.max(page_bounds.left);
+    let right = container.right.min(page_bounds.right);
+    if right <= left + 0.01 {
+        return Vec::new();
+    }
+    let mut slots = Vec::new();
+    let mut baseline_y = first_baseline_y;
+    while baseline_y + descent >= page_bounds.bottom - 0.01 {
+        let line_bottom = baseline_y + descent;
+        let line_top = baseline_y + ascent;
+        let mut gaps = vec![(left, right)];
+        for obstacle in obstacles.iter().filter(|obstacle| {
+            obstacle.top > line_bottom + 0.01 && obstacle.bottom < line_top - 0.01
+        }) {
+            let mut remaining = Vec::new();
+            for (gap_left, gap_right) in gaps {
+                if obstacle.right <= gap_left + 0.01 || obstacle.left >= gap_right - 0.01 {
+                    remaining.push((gap_left, gap_right));
+                    continue;
+                }
+                if obstacle.left > gap_left + 0.01 {
+                    remaining.push((gap_left, obstacle.left.min(gap_right)));
+                }
+                if obstacle.right < gap_right - 0.01 {
+                    remaining.push((obstacle.right.max(gap_left), gap_right));
+                }
+            }
+            gaps = remaining;
+            if gaps.is_empty() {
+                break;
+            }
+        }
+        if gaps.is_empty() {
+            break;
+        }
+        slots.extend(
+            gaps.into_iter()
+                .filter(|(gap_left, gap_right)| gap_right > &(gap_left + 0.01))
+                .map(|(gap_left, gap_right)| TypesetLineSlot {
+                    left: gap_left,
+                    right: gap_right,
+                    baseline_y,
+                }),
+        );
+        baseline_y -= size * LINE_ADVANCE_EM;
+    }
+    slots
 }
 
 fn rects_intersect_each_other(rects: &[Rect]) -> bool {
@@ -7141,6 +7279,7 @@ mod tests {
             ink_bounds: Vec::new(),
             font_size: 8.0,
             single_line_expansion: None,
+            multi_line_expansion: None,
         };
         let mut replacements = BTreeMap::new();
 
