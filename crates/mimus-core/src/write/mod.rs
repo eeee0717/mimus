@@ -302,10 +302,12 @@ fn append_embedded_font(
         .glyphs
         .iter()
         .flat_map(|(cid, _, advance)| {
-            let width = i64::from(*advance) * 1000 / i64::from(font.units_per_em);
             [
                 Object::Integer(i64::from(*cid)),
-                Object::Array(vec![Object::Integer(width)]),
+                Object::Array(vec![Object::Integer(i64::from(glyph_width_1000(
+                    *advance,
+                    font.units_per_em,
+                )))]),
             ]
         })
         .collect::<Vec<_>>();
@@ -332,6 +334,13 @@ fn append_embedded_font(
     });
     ensure_appended(type0_id, object_ceiling)?;
     Ok(type0_id)
+}
+
+/// Normalizes source-font advances to the integer 1000-em widths stored in PDF `/W`.
+pub(crate) fn glyph_width_1000(advance: u16, units_per_em: u16) -> u32 {
+    let numerator = u64::from(advance) * 1000 + u64::from(units_per_em) / 2;
+    let denominator = u64::from(units_per_em);
+    u32::try_from(numerator / denominator).expect("font width fits in a PDF width integer")
 }
 
 fn to_unicode_cmap(font: &EmbeddedFont) -> Vec<u8> {

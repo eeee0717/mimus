@@ -96,6 +96,14 @@ pub struct ConfigurationResolved {
     pub font_bold_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_bold_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_fallback_regular_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_fallback_regular_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_fallback_bold_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_fallback_bold_sha256: Option<String>,
     pub layout_mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layout_model_source: Option<String>,
@@ -457,6 +465,8 @@ pub enum Diagnostic {
         missing_characters: String,
         font_source: String,
         font_sha256: String,
+        fallback_font_source: String,
+        fallback_font_sha256: String,
     },
     SingleLineBoundsExpanded {
         page_index: usize,
@@ -628,6 +638,8 @@ pub enum DiagnosticEvent {
         missing_characters: String,
         font_source: String,
         font_sha256: String,
+        fallback_font_source: String,
+        fallback_font_sha256: String,
     },
     SingleLineBoundsExpanded {
         page_index: usize,
@@ -862,12 +874,16 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 missing_characters,
                 font_source,
                 font_sha256,
+                fallback_font_source,
+                fallback_font_sha256,
             } => Self::UnsupportedOutputGlyph {
                 page_index: *page_index,
                 reading_order: *reading_order,
                 missing_characters: missing_characters.clone(),
                 font_source: font_source.clone(),
                 font_sha256: font_sha256.clone(),
+                fallback_font_source: fallback_font_source.clone(),
+                fallback_font_sha256: fallback_font_sha256.clone(),
             },
             Diagnostic::SingleLineBoundsExpanded {
                 page_index,
@@ -1260,6 +1276,8 @@ mod tests {
                 missing_characters: "龘".to_owned(),
                 font_source: "flag:/tmp/font.ttf".to_owned(),
                 font_sha256: "abc123".to_owned(),
+                fallback_font_source: "flag:/tmp/fallback.ttf".to_owned(),
+                fallback_font_sha256: "def456".to_owned(),
             }),
         }))
         .unwrap();
@@ -1269,6 +1287,8 @@ mod tests {
         assert_eq!(value["missing_characters"], "龘");
         assert_eq!(value["font_source"], "flag:/tmp/font.ttf");
         assert_eq!(value["font_sha256"], "abc123");
+        assert_eq!(value["fallback_font_source"], "flag:/tmp/fallback.ttf");
+        assert_eq!(value["fallback_font_sha256"], "def456");
     }
 
     #[test]

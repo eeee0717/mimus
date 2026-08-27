@@ -59,6 +59,8 @@ pub struct OutputFont {
 pub struct OutputFonts {
     pub regular: OutputFont,
     pub bold: OutputFont,
+    pub fallback_regular: OutputFont,
+    pub fallback_bold: OutputFont,
 }
 
 pub struct PassContext<'a> {

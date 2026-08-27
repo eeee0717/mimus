@@ -34,6 +34,8 @@ pub(crate) struct ConfigOverrides {
     pub target_language: Option<String>,
     pub font_regular: Option<PathBuf>,
     pub font_bold: Option<PathBuf>,
+    pub font_fallback_regular: Option<PathBuf>,
+    pub font_fallback_bold: Option<PathBuf>,
     pub layout_model: Option<PathBuf>,
     pub asset_mirror: Option<String>,
     pub glossary: Option<PathBuf>,
@@ -65,6 +67,8 @@ pub(crate) struct ResolvedConfig {
     pub target_language: String,
     pub font_regular: Option<FontPathSelection>,
     pub font_bold: Option<FontPathSelection>,
+    pub font_fallback_regular: Option<FontPathSelection>,
+    pub font_fallback_bold: Option<FontPathSelection>,
     pub layout_model: Option<LayoutModelPathSelection>,
     pub asset_mirror: Option<String>,
     pub font_cache_dir: PathBuf,
@@ -146,6 +150,16 @@ impl ResolvedConfig {
         );
         let font_bold =
             choose_font_path(overrides.font_bold, environment.font_bold, file.font_bold);
+        let font_fallback_regular = choose_font_path(
+            overrides.font_fallback_regular,
+            environment.font_fallback_regular,
+            file.font_fallback_regular,
+        );
+        let font_fallback_bold = choose_font_path(
+            overrides.font_fallback_bold,
+            environment.font_fallback_bold,
+            file.font_fallback_bold,
+        );
         let layout_model = choose_layout_model_path(
             overrides.layout_model,
             environment.layout_model,
@@ -211,6 +225,8 @@ impl ResolvedConfig {
             target_language,
             font_regular,
             font_bold,
+            font_fallback_regular,
+            font_fallback_bold,
             layout_model,
             asset_mirror,
             font_cache_dir,
@@ -291,6 +307,8 @@ struct FileConfig {
     api_key: Option<String>,
     font_regular: Option<PathBuf>,
     font_bold: Option<PathBuf>,
+    font_fallback_regular: Option<PathBuf>,
+    font_fallback_bold: Option<PathBuf>,
     layout_model: Option<PathBuf>,
     asset_mirror: Option<String>,
     cache_dir: Option<PathBuf>,
@@ -306,6 +324,8 @@ struct EnvironmentConfig {
     api_key: Option<String>,
     font_regular: Option<PathBuf>,
     font_bold: Option<PathBuf>,
+    font_fallback_regular: Option<PathBuf>,
+    font_fallback_bold: Option<PathBuf>,
     layout_model: Option<PathBuf>,
     asset_mirror: Option<String>,
     cache_dir: Option<PathBuf>,
@@ -330,6 +350,8 @@ impl EnvironmentConfig {
             api_key: first_nonempty_env(&["MIMUS_OPENAI_API_KEY", "OPENAI_API_KEY", "API_KEY"]),
             font_regular: first_env(&["MIMUS_FONT_REGULAR"]).map(PathBuf::from),
             font_bold: first_env(&["MIMUS_FONT_BOLD"]).map(PathBuf::from),
+            font_fallback_regular: first_env(&["MIMUS_FONT_FALLBACK_REGULAR"]).map(PathBuf::from),
+            font_fallback_bold: first_env(&["MIMUS_FONT_FALLBACK_BOLD"]).map(PathBuf::from),
             layout_model: first_env(&["MIMUS_LAYOUT_MODEL"]).map(PathBuf::from),
             asset_mirror: first_env(&["MIMUS_ASSET_MIRROR"]),
             cache_dir: first_env(&["MIMUS_CACHE_DIR"]).map(PathBuf::from),
