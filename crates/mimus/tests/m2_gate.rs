@@ -2391,7 +2391,9 @@ fn semantic_retries_recover_once_and_never_cache_invalid_placeholder_responses()
         "an invalid response entered the translation cache"
     );
     let invalid_requests = invalid_server.requests();
-    for requests in invalid_requests.chunks_exact(2) {
+    let (request_pairs, remainder) = invalid_requests.as_chunks::<2>();
+    assert!(remainder.is_empty());
+    for requests in request_pairs {
         assert!(!requests[0].instructions.contains("previous response"));
         assert!(
             requests[1]
