@@ -118,3 +118,17 @@ paragraph would intentionally block publication. After the non-strict artifact i
 run can be used as the expected negative control. Required review should compare title/author/abstract,
 the 24 placeholder-bearing requests, table/formula/reference passthrough, new overflow buckets, and
 the unchanged degraded pages.
+
+### Strict negative-control authorization
+
+Invalid placeholder responses are intentionally not cached. Let `N` be the number of paragraphs
+that still have a placeholder violation after their one semantic retry in the accepted non-strict
+run. A strict replay may therefore have at most `N` translation-cache misses; every other paragraph
+must be a cache hit. The authorization prompt must state this allowance explicitly instead of
+claiming a zero-call replay.
+
+One cache miss is not necessarily one Responses HTTP request: the placeholder policy retries the
+first invalid response once. If all `N` paragraphs remain invalid, the strict replay can make up to
+`2N` HTTP requests. The authorization must cap both quantities (`cache misses <= N`, Responses
+requests `<= 2N`) and the run must stop if either cap is exceeded. A strict failure must still list
+only the reviewed degradation set and must not create or overwrite an output file.

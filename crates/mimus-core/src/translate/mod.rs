@@ -195,6 +195,7 @@ pub(crate) enum PreparedPart {
 pub(crate) struct PreparedTranslation {
     request_text: String,
     tokens: Vec<ProtocolToken>,
+    echo_retry_eligible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,15 +246,18 @@ impl PreparedTranslation {
     pub(crate) fn new(parts: impl IntoIterator<Item = PreparedPart>) -> Self {
         let mut request_text = String::new();
         let mut tokens = Vec::new();
+        let mut source_text = String::new();
         let mut formula_index = 0;
         let mut bold_index = 0;
         let mut literal_index = 0;
         for part in parts {
             match part {
                 PreparedPart::Text { text, bold: false } => {
+                    source_text.push_str(&text);
                     push_encoded_text(&mut request_text, &mut tokens, &mut literal_index, &text);
                 }
                 PreparedPart::Text { text, bold: true } => {
+                    source_text.push_str(&text);
                     bold_index += 1;
                     let open = format!("<b{bold_index}>");
                     let close = format!("</b{bold_index}>");
@@ -283,11 +287,16 @@ impl PreparedTranslation {
         Self {
             request_text,
             tokens,
+            echo_retry_eligible: echo_retry_eligible(&source_text),
         }
     }
 
     pub(crate) fn request_text(&self) -> &str {
         &self.request_text
+    }
+
+    pub(crate) const fn echo_retry_eligible(&self) -> bool {
+        self.echo_retry_eligible
     }
 
     pub(crate) fn classify(&self, output: &str) -> TranslationOutcome {
@@ -407,6 +416,32 @@ impl PreparedTranslation {
         }
         Ok(RestoredTranslation { segments })
     }
+}
+
+fn echo_retry_eligible(source: &str) -> bool {
+    let trimmed = source.trim();
+    if trimmed.is_empty() || looks_like_email(trimmed) {
+        return false;
+    }
+    trimmed.chars().any(char::is_alphabetic)
+}
+
+fn looks_like_email(source: &str) -> bool {
+    if source.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let mut parts = source.split('@');
+    let Some(local) = parts.next() else {
+        return false;
+    };
+    let Some(domain) = parts.next() else {
+        return false;
+    };
+    !local.is_empty()
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && parts.next().is_none()
 }
 
 fn push_encoded_text(

@@ -30,6 +30,13 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
             repo_root,
             b"BT\n/F1 12 Tf\n1 0 0 1 72 140 Tm\n(MIMUS) Tj\n1 0 0 1 72 100 Tm\n(MIMUS) Tj\nET\n",
         ),
+        "unit-translation-01-section-title-number" => basic_text_with_page_size(
+            fixture_id,
+            repo_root,
+            300,
+            220,
+            b"BT\n/F1 12 Tf\n1 0 0 1 125 195 Tm\n(MIMUS) Tj\n1 0 0 1 108 195 Tm\n(I) Tj\nET\n",
+        ),
         "unit-base-03-structured" => structured(repo_root),
         "unit-parse-01-ascii85" => filtered_text(fixture_id, repo_root, FilterRecipe::Ascii85),
         "unit-parse-02-cascade" => filtered_text(fixture_id, repo_root, FilterRecipe::Ascii85Flate),
@@ -457,6 +464,34 @@ fn basic_text(fixture_id: &str, repo_root: &Path, content: &[u8]) -> Result<Vec<
         "9 0 R",
         &[(String::new(), content.to_vec())],
     )
+}
+
+fn basic_text_with_page_size(
+    fixture_id: &str,
+    repo_root: &Path,
+    width: u32,
+    height: u32,
+    content: &[u8],
+) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new(fixture_id);
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Resources 4 0 R /Contents 9 0 R >>"
+        )
+        .as_bytes(),
+    )?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(
+        b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>",
+    )?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.stream(b"", content)?;
+    pdf.finish(1)
 }
 
 fn basic_pdf(

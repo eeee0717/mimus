@@ -11,7 +11,7 @@ use crate::error::{
 };
 use crate::event::{
     Diagnostic, Diagnostics, Event, EventKind, PageDegradeReason, PreservedParagraph, RecoveryKind,
-    Stage,
+    Stage, SuspiciousEchoParagraph,
 };
 use crate::geometry::{PageFrame, PageGeometryResolveError};
 use crate::il::{
@@ -199,6 +199,14 @@ fn push_degradation_summary(document: &mut Document) {
         .map(|page| page.index)
         .collect::<Vec<_>>();
     let placeholder_violations = &document.placeholder_violations;
+    let suspicious_echoes = document
+        .suspicious_echoes
+        .iter()
+        .map(|&(page_index, paragraph_index)| SuspiciousEchoParagraph {
+            page_index,
+            paragraph_index,
+        })
+        .collect::<Vec<_>>();
     let preserved_paragraphs = document
         .il
         .pages
@@ -219,14 +227,20 @@ fn push_degradation_summary(document: &mut Document) {
                 })
         })
         .collect::<Vec<_>>();
-    if degraded_page_indices.is_empty() && preserved_paragraphs.is_empty() {
+    if degraded_page_indices.is_empty()
+        && preserved_paragraphs.is_empty()
+        && suspicious_echoes.is_empty()
+    {
         return;
     }
+    let suspicious_echo_count = suspicious_echoes.len();
     document.diagnostics.push(Diagnostic::DegradationSummary {
         degraded_pages: degraded_page_indices.len(),
         degraded_page_indices,
         preserved_paragraph_count: preserved_paragraphs.len(),
         preserved_paragraphs,
+        suspicious_echoes,
+        suspicious_echo_count,
         total_pages: document.extracted_pages.len(),
     });
 }
@@ -783,9 +797,16 @@ fn apply_policy_overrides(
         let trimmed = text.trim();
         let top_ratio = region.bounds.top / geometry.height;
         let bottom_ratio = region.bounds.bottom / geometry.height;
-        if region.source == LayoutSource::Model && top_ratio >= 0.88 {
+        let positional_apparatus = is_positional_apparatus(region.label, trimmed);
+        if region.source == LayoutSource::Model && looks_like_numbered_caption(trimmed) {
+            region.label = LayoutLabel::FigureTitle;
+        } else if region.source == LayoutSource::Model && positional_apparatus && top_ratio >= 0.88
+        {
             region.label = LayoutLabel::Header;
-        } else if region.source == LayoutSource::Model && bottom_ratio <= 0.12 {
+        } else if region.source == LayoutSource::Model
+            && positional_apparatus
+            && bottom_ratio <= 0.12
+        {
             region.label = LayoutLabel::Footer;
         } else if looks_like_reference_entry(trimmed) {
             region.label = LayoutLabel::ReferenceContent;
@@ -793,6 +814,22 @@ fn apply_policy_overrides(
             region.label = LayoutLabel::Seal;
         }
     }
+}
+
+fn is_positional_apparatus(label: LayoutLabel, text: &str) -> bool {
+    label == LayoutLabel::Text && text.chars().count() <= 100
+}
+
+fn looks_like_numbered_caption(text: &str) -> bool {
+    let Some(rest) = text
+        .strip_prefix("Table")
+        .or_else(|| text.strip_prefix("Figure"))
+    else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && rest.as_bytes().get(digits) == Some(&b':')
 }
 
 fn looks_like_reference_entry(text: &str) -> bool {
@@ -1114,6 +1151,9 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
         model_groups.sort_by_key(|group| group.assignment.reading_order);
         let mut drafts = Vec::new();
         for mut group in model_groups {
+            if group.assignment.label == LayoutLabel::ParagraphTitle {
+                mark_leading_section_number(&mut group.chars);
+            }
             if group.assignment.label == LayoutLabel::AsideText
                 && chars_are_narrow_number(&group.chars)
             {
@@ -1192,6 +1232,95 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
         pages,
     };
     Ok(())
+}
+
+fn mark_leading_section_number(chars: &mut [PositionedChar]) {
+    let mut visual_order = (0..chars.len()).collect::<Vec<_>>();
+    visual_order.sort_by(|&left, &right| {
+        chars[left]
+            .character
+            .r#box
+            .left
+            .total_cmp(&chars[right].character.r#box.left)
+            .then(left.cmp(&right))
+    });
+    let Some(marker_kind) = visual_order.iter().find_map(|&index| {
+        chars[index]
+            .character
+            .unicode
+            .filter(|value| !value.is_whitespace())
+            .map(|value| value.is_ascii_digit())
+    }) else {
+        return;
+    };
+    let candidates = visual_order
+        .iter()
+        .copied()
+        .take_while(|&index| {
+            chars[index].character.unicode.is_some_and(|value| {
+                (if marker_kind {
+                    value.is_ascii_digit()
+                } else {
+                    matches!(value, 'I' | 'V' | 'X')
+                }) || value == '.'
+                    || value.is_whitespace()
+            })
+        })
+        .collect::<Vec<_>>();
+    if !candidates.iter().any(|&index| {
+        chars[index]
+            .character
+            .unicode
+            .is_some_and(|value| value.is_ascii_digit() || matches!(value, 'I' | 'V' | 'X'))
+    }) {
+        return;
+    }
+    let Some(title) = visual_order
+        .iter()
+        .copied()
+        .skip(candidates.len())
+        .find(|&index| {
+            chars[index]
+                .character
+                .unicode
+                .is_some_and(char::is_alphabetic)
+        })
+    else {
+        return;
+    };
+    let title_left = chars[title].character.r#box.left;
+    let candidate_right = candidates
+        .iter()
+        .map(|&index| chars[index].character.r#box.right)
+        .max_by(f64::total_cmp)
+        .unwrap_or(title_left);
+    let max_font_size = candidates
+        .iter()
+        .map(|&index| chars[index].character.font_size)
+        .fold(chars[title].character.font_size, f64::max);
+    let horizontal_gap = title_left - candidate_right;
+    let baseline_aligned = candidates.iter().all(|&index| {
+        let candidate = &chars[index];
+        (chars[title].character.baseline_origin.y - candidate.character.baseline_origin.y).abs()
+            <= chars[title]
+                .character
+                .font_size
+                .max(candidate.character.font_size)
+                * 0.35
+    });
+    if !baseline_aligned
+        || horizontal_gap < max_font_size * 0.25
+        || horizontal_gap > max_font_size * 2.0
+    {
+        return;
+    }
+    for index in candidates {
+        if let Some(layout) = &mut chars[index].character.layout {
+            layout.label = LayoutLabel::Number;
+            layout.policy = TranslationPolicy::Passthrough;
+        }
+    }
+    chars[title].force_no_space_before = true;
 }
 
 fn merge_nested_inline_formula_groups(groups: &mut Vec<ModelGroup>) {
@@ -1799,6 +1928,7 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
         prepare_translations(document)?;
     }
     document.placeholder_violations.clear();
+    document.suspicious_echoes.clear();
     let model_id = context.translator.model_id();
     if model_id == "none" {
         return translate_none(document, context);
@@ -1907,6 +2037,14 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                 reason: retry.reason,
             });
         }
+        for retry in execution.placeholder_retries {
+            document.diagnostics.push(Diagnostic::PlaceholderRetry {
+                page_index: job.page_index,
+                paragraph_index: job.paragraph_index,
+                attempt: retry.attempt,
+                violation: retry.violation,
+            });
+        }
         let paragraph = document
             .il
             .pages
@@ -1925,7 +2063,7 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                     .restored_translations
                     .insert((job.page_index, paragraph.reading_order), restored);
             }
-            Ok(crate::translate::executor::TranslationOutcome::Identity) => {
+            Ok(crate::translate::executor::TranslationOutcome::Identity { suspicious }) => {
                 paragraph.translated_text = Some(paragraph.source_text());
                 prose_identity_count += usize::from(job.prose_shaped);
                 document.diagnostics.push(Diagnostic::TranslationIdentity {
@@ -1933,6 +2071,16 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                     paragraph_index: job.paragraph_index,
                     request_characters: job.prepared.request_text().chars().count(),
                 });
+                if suspicious {
+                    document
+                        .suspicious_echoes
+                        .insert((job.page_index, job.paragraph_index));
+                    document.diagnostics.push(Diagnostic::SuspiciousEcho {
+                        page_index: job.page_index,
+                        paragraph_index: job.paragraph_index,
+                        request_characters: job.prepared.request_text().chars().count(),
+                    });
+                }
             }
             Ok(crate::translate::executor::TranslationOutcome::PlaceholderViolation {
                 violation,
@@ -2419,6 +2567,21 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 )
             })
             .collect::<BTreeMap<_, _>>();
+        let mut text_show_states = BTreeMap::new();
+        for character in &extracted.walked_characters {
+            text_show_states
+                .entry((
+                    character.content_object,
+                    character.byte_start,
+                    character.byte_end,
+                ))
+                .or_insert(TextShowState {
+                    line_matrix: character.text_line_matrix,
+                    matrix_after_show: character.text_matrix_after_show,
+                    font_size: character.font_size,
+                    horizontal_scale: character.horizontal_scale,
+                });
+        }
         let mut replacements = BTreeMap::<(lopdf::ObjectId, usize, usize), Vec<u8>>::new();
         let mut reused_fonts = BTreeSet::new();
         let mut planned_paragraphs = Vec::<(usize, Vec<TypesetPlan>)>::new();
@@ -2682,6 +2845,7 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 &output_fonts,
                 &streams,
                 &content_transforms,
+                &text_show_states,
                 &mut replacements,
             )?;
             typeset_characters.extend(planned_characters(plan, &output_fonts));
@@ -2786,6 +2950,14 @@ pub fn font_embed(document: &mut Document, _context: &PassContext<'_>) -> Result
 }
 
 type SpanKey = (lopdf::ObjectId, usize, usize);
+
+#[derive(Debug, Clone, Copy)]
+struct TextShowState {
+    line_matrix: [f64; 6],
+    matrix_after_show: [f64; 6],
+    font_size: f64,
+    horizontal_scale: f64,
+}
 
 #[derive(Debug)]
 struct TypesetPlan {
@@ -3567,6 +3739,7 @@ fn install_typeset_replacements(
     fonts: &BTreeMap<bool, BuiltOutputFont>,
     streams: &BTreeMap<lopdf::ObjectId, &[u8]>,
     content_transforms: &BTreeMap<SpanKey, [f64; 6]>,
+    text_show_states: &BTreeMap<SpanKey, TextShowState>,
     replacements: &mut BTreeMap<SpanKey, Vec<u8>>,
 ) -> Result<()> {
     let empty_operand = |span: SpanKey| -> Result<Vec<u8>> {
@@ -3582,8 +3755,13 @@ fn install_typeset_replacements(
     };
     if plan.lines.is_empty() {
         for span in &plan.spans {
-            let empty = empty_operand(*span)?;
-            replacements.entry(*span).or_insert(empty);
+            if let std::collections::btree_map::Entry::Vacant(entry) = replacements.entry(*span) {
+                entry.insert(state_preserving_empty_replacement(
+                    *span,
+                    streams,
+                    text_show_states,
+                )?);
+            }
         }
         return Ok(());
     }
@@ -3661,28 +3839,130 @@ fn install_typeset_replacements(
     } else {
         b" Tj\n".as_slice()
     };
+    let state_tail = text_show_state_tail(first, streams, text_show_states)?;
+    let mut graphics_tail = b"Q\n".to_vec();
+    graphics_tail.extend_from_slice(&state_tail);
     let replacement = replacements.entry(first).or_default();
     if replacement.is_empty() || replacement.as_slice() == terminal.as_slice() {
         replacement.clear();
         replacement.extend_from_slice(&terminal);
         replacement.extend_from_slice(original_operator);
-    } else if replacement.ends_with(&terminal) {
-        replacement.truncate(replacement.len() - terminal.len());
+        replacement.extend_from_slice(b"q\n");
+    } else if replacement.ends_with(&graphics_tail) {
+        replacement.truncate(replacement.len() - graphics_tail.len());
     } else {
         return Err(MimusError::internal(
             InternalReason::InvariantViolation,
             "typeset span has an incompatible existing replacement",
         ));
     }
-    replacement.extend_from_slice(b"q\n");
     replacement.extend_from_slice(command.as_bytes());
-    replacement.extend_from_slice(b" Tj\nQ\n");
-    replacement.extend_from_slice(&terminal);
+    replacement.extend_from_slice(b" Tj\n");
+    replacement.extend_from_slice(&graphics_tail);
     for span in &plan.spans[1..] {
-        let empty = empty_operand(*span)?;
-        replacements.entry(*span).or_insert(empty);
+        if let std::collections::btree_map::Entry::Vacant(entry) = replacements.entry(*span) {
+            entry.insert(state_preserving_empty_replacement(
+                *span,
+                streams,
+                text_show_states,
+            )?);
+        }
     }
     Ok(())
+}
+
+fn state_preserving_empty_replacement(
+    span: SpanKey,
+    streams: &BTreeMap<lopdf::ObjectId, &[u8]>,
+    text_show_states: &BTreeMap<SpanKey, TextShowState>,
+) -> Result<Vec<u8>> {
+    let source = streams
+        .get(&span.0)
+        .and_then(|stream| stream.get(span.1..span.2))
+        .ok_or_else(|| span_out_of_bounds(span.0, span.1, span.2, 0))?;
+    let empty = if source.starts_with(b"[") && source.ends_with(b"]") {
+        b"[]".as_slice()
+    } else {
+        b"()".as_slice()
+    };
+    let operator = if source.starts_with(b"[") && source.ends_with(b"]") {
+        b" TJ\n".as_slice()
+    } else {
+        b" Tj\n".as_slice()
+    };
+    let mut replacement = empty.to_vec();
+    replacement.extend_from_slice(operator);
+    replacement.extend_from_slice(&text_show_state_tail(span, streams, text_show_states)?);
+    Ok(replacement)
+}
+
+fn text_show_state_tail(
+    span: SpanKey,
+    streams: &BTreeMap<lopdf::ObjectId, &[u8]>,
+    text_show_states: &BTreeMap<SpanKey, TextShowState>,
+) -> Result<Vec<u8>> {
+    let source = streams
+        .get(&span.0)
+        .and_then(|stream| stream.get(span.1..span.2))
+        .ok_or_else(|| span_out_of_bounds(span.0, span.1, span.2, 0))?;
+    let terminal = if source.starts_with(b"[") && source.ends_with(b"]") {
+        b"[]".as_slice()
+    } else {
+        b"()".as_slice()
+    };
+    let state = text_show_states.get(&span).ok_or_else(|| {
+        MimusError::internal(
+            InternalReason::InvariantViolation,
+            "typeset span has no source text-show state",
+        )
+    })?;
+    let [a, b, c, d, e, f] = state.line_matrix;
+    let [after_a, after_b, after_c, after_d, after_e, after_f] = state.matrix_after_show;
+    let coefficient_error = (a - after_a)
+        .abs()
+        .max((b - after_b).abs())
+        .max((c - after_c).abs())
+        .max((d - after_d).abs());
+    let denominator = a.mul_add(a, b * b);
+    if coefficient_error > 1e-7 || denominator <= 1e-12 {
+        return Err(MimusError::internal(
+            InternalReason::InvariantViolation,
+            "source text-show matrices cannot be restored",
+        ));
+    }
+    let advance = ((after_e - e) * a + (after_f - f) * b) / denominator;
+    let residual_x = after_e - a.mul_add(advance, e);
+    let residual_y = after_f - b.mul_add(advance, f);
+    if residual_x.abs().max(residual_y.abs()) > 1e-7 {
+        return Err(MimusError::internal(
+            InternalReason::InvariantViolation,
+            "source text-show advance is not horizontal",
+        ));
+    }
+    let scale = state.font_size * state.horizontal_scale;
+    if advance.abs() > 1e-12 && scale.abs() <= 1e-12 {
+        return Err(MimusError::internal(
+            InternalReason::InvariantViolation,
+            "source text-show advance has a zero text scale",
+        ));
+    }
+
+    let mut tail = format!(
+        "{} {} {} {} {} {} Tm\n",
+        pdf_number(a),
+        pdf_number(b),
+        pdf_number(c),
+        pdf_number(d),
+        pdf_number(e),
+        pdf_number(f)
+    )
+    .into_bytes();
+    if advance.abs() > 1e-12 {
+        let adjustment = -advance * 1000.0 / scale;
+        tail.extend_from_slice(format!("[{}] TJ\n", pdf_number(adjustment)).as_bytes());
+    }
+    tail.extend_from_slice(terminal);
+    Ok(tail)
 }
 
 fn content_relative_text_matrix(content: [f64; 6], x: f64, y: f64) -> Option<[f64; 6]> {
@@ -5658,6 +5938,139 @@ mod tests {
     }
 
     #[test]
+    fn positional_policy_keeps_page_top_titles_translatable() {
+        let mut regions = [crate::engine::LayoutRegion {
+            bounds: Rect {
+                left: 20.0,
+                bottom: 180.0,
+                right: 180.0,
+                top: 195.0,
+            },
+            reading_order: 0,
+            label: LayoutLabel::ParagraphTitle,
+            source: LayoutSource::Model,
+            confidence: 0.9,
+        }];
+
+        apply_policy_overrides(
+            PageGeometry {
+                width: 200.0,
+                height: 200.0,
+                rotate_degrees: 0,
+            },
+            &mut regions,
+            &[],
+        );
+
+        assert_eq!(regions[0].label, LayoutLabel::ParagraphTitle);
+        assert_eq!(
+            regions[0].label.translation_policy(),
+            TranslationPolicy::Translate
+        );
+    }
+
+    #[test]
+    fn positional_policy_only_relabels_short_generic_text_apparatus() {
+        assert!(is_positional_apparatus(LayoutLabel::Text, "Short header"));
+        assert!(!is_positional_apparatus(
+            LayoutLabel::Text,
+            &"long running prose ".repeat(8)
+        ));
+        for label in [
+            LayoutLabel::Abstract,
+            LayoutLabel::DocTitle,
+            LayoutLabel::FigureTitle,
+            LayoutLabel::Footnote,
+            LayoutLabel::ParagraphTitle,
+        ] {
+            assert!(!is_positional_apparatus(label, "Short semantic region"));
+        }
+    }
+
+    #[test]
+    fn numbered_caption_shape_requires_a_prefix_number_and_colon() {
+        assert!(looks_like_numbered_caption("Table1: Results"));
+        assert!(looks_like_numbered_caption("Table 4: Results"));
+        assert!(looks_like_numbered_caption("Figure 2: Architecture"));
+        assert!(!looks_like_numbered_caption("Table 3 row (E)"));
+        assert!(!looks_like_numbered_caption("To evaluate Table 3"));
+    }
+
+    #[test]
+    fn arabic_section_number_does_not_consume_a_title_leading_roman_letter() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let source = document.il.pages[0].paragraphs[0].chars();
+        let assignment = LayoutAssignment {
+            label: LayoutLabel::ParagraphTitle,
+            reading_order: 0,
+            bounds: Rect {
+                left: 70.0,
+                bottom: 110.0,
+                right: 110.0,
+                top: 135.0,
+            },
+            source: LayoutSource::Model,
+            policy: TranslationPolicy::Translate,
+        };
+        let mut positioned = source[..3]
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(walked_index, mut character)| {
+                character.layout = Some(assignment);
+                PositionedChar {
+                    walked_index,
+                    locatable: true,
+                    character,
+                    force_no_space_before: false,
+                }
+            })
+            .collect::<Vec<_>>();
+        positioned[0].character.unicode = Some('1');
+        positioned[0].character.r#box.left = 72.0;
+        positioned[0].character.r#box.right = 78.0;
+        positioned[0].character.baseline_origin.x = 72.0;
+        positioned[1].character.unicode = Some('I');
+        positioned[1].character.r#box.left = 90.0;
+        positioned[1].character.r#box.right = 94.0;
+        positioned[1].character.baseline_origin.x = 90.0;
+        positioned[2].character.unicode = Some('n');
+        positioned[2].character.r#box.left = 94.0;
+        positioned[2].character.r#box.right = 100.0;
+        positioned[2].character.baseline_origin.x = 94.0;
+
+        mark_leading_section_number(&mut positioned);
+
+        assert_eq!(
+            positioned[0].character.layout.unwrap().label,
+            LayoutLabel::Number
+        );
+        assert_eq!(
+            positioned[0].character.layout.unwrap().policy,
+            TranslationPolicy::Passthrough
+        );
+        assert!(positioned[1..].iter().all(|positioned| {
+            positioned.character.layout.is_some_and(|layout| {
+                layout.label == LayoutLabel::ParagraphTitle
+                    && layout.policy == TranslationPolicy::Translate
+            })
+        }));
+        assert!(positioned[1].force_no_space_before);
+    }
+
+    #[test]
     fn model_ownership_requires_matching_fallback_line_semantics() {
         let bounds = Rect {
             left: 8.0,
@@ -6531,6 +6944,15 @@ mod tests {
         let source = b"[<0041>]";
         let streams = BTreeMap::from([((1, 0), source.as_slice())]);
         let transforms = BTreeMap::from([(span, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0])]);
+        let text_show_states = BTreeMap::from([(
+            span,
+            TextShowState {
+                line_matrix: [1.0, 0.0, 0.0, 1.0, 10.0, 20.0],
+                matrix_after_show: [1.0, 0.0, 0.0, 1.0, 18.0, 20.0],
+                font_size: 8.0,
+                horizontal_scale: 1.0,
+            },
+        )]);
         let output_fonts = test_output_fonts();
         let (font, cids) =
             build_embedded_font(&BTreeSet::from(['中']), &output_fonts.regular, false).unwrap();
@@ -6548,8 +6970,15 @@ mod tests {
         };
         let mut replacements = BTreeMap::new();
 
-        install_typeset_replacements(&plan, &fonts, &streams, &transforms, &mut replacements)
-            .unwrap();
+        install_typeset_replacements(
+            &plan,
+            &fonts,
+            &streams,
+            &transforms,
+            &text_show_states,
+            &mut replacements,
+        )
+        .unwrap();
         install_typeset_replacements(
             &TypesetPlan {
                 baselines: vec![(75.0, 100.0)],
@@ -6558,6 +6987,7 @@ mod tests {
             &fonts,
             &streams,
             &transforms,
+            &text_show_states,
             &mut replacements,
         )
         .unwrap();
@@ -6566,6 +6996,12 @@ mod tests {
         assert!(replacement.starts_with("[] TJ\n"), "{replacement}");
         assert!(replacement.contains(" Tm "), "{replacement}");
         assert_eq!(replacement.matches("/MimusR").count(), 2, "{replacement}");
+        assert_eq!(replacement.matches("q\n").count(), 1, "{replacement}");
+        assert_eq!(replacement.matches("Q\n").count(), 1, "{replacement}");
+        assert!(
+            replacement.ends_with("Q\n1 0 0 1 10 20 Tm\n[-1000] TJ\n[]"),
+            "{replacement}"
+        );
     }
 
     #[test]
@@ -7982,7 +8418,7 @@ mod tests {
             assert!(paragraph.translated_text.is_none(), "output {output}");
             assert_eq!(
                 translator.calls.load(Ordering::SeqCst),
-                1,
+                2,
                 "output {output}"
             );
             let diagnostic = document
@@ -8050,7 +8486,7 @@ mod tests {
     }
 
     #[test]
-    fn backend_echo_is_identity_output_without_degradation_or_warning() {
+    fn repeated_backend_echo_is_visible_without_becoming_hard_degradation() {
         let mut document = Document::for_inspection(fixture());
         let engine = FakeEngine::default();
         let translator = StaticTranslator {
@@ -8074,15 +8510,31 @@ mod tests {
         let paragraph = &document.il.pages[0].paragraphs[0];
         assert_eq!(paragraph.translated_text.as_deref(), Some("MIMUS"));
         assert_eq!(paragraph.preserved, None);
-        assert_eq!(document.diagnostics.warning_count(), 0);
-        assert!(matches!(
-            document.diagnostics.entries(),
-            [Diagnostic::TranslationIdentity {
-                page_index: 0,
-                paragraph_index: 0,
-                request_characters: 5,
-            }]
-        ));
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 2);
+        let diagnostics = document
+            .diagnostics
+            .events()
+            .into_iter()
+            .map(|event| serde_json::to_value(event).unwrap())
+            .collect::<Vec<_>>();
+        assert!(diagnostics.iter().any(|event| {
+            event["id"] == "suspicious_echo"
+                && event["page_index"] == 0
+                && event["paragraph_index"] == 0
+        }));
+
+        push_degradation_summary(&mut document);
+        let summary = document
+            .diagnostics
+            .events()
+            .into_iter()
+            .map(|event| serde_json::to_value(event).unwrap())
+            .find(|event| event["id"] == "degradation_summary")
+            .unwrap();
+        assert_eq!(summary["preserved_paragraph_count"], 0);
+        assert_eq!(summary["suspicious_echo_count"], 1);
+        assert_eq!(summary["suspicious_echoes"][0]["page_index"], 0);
+        assert_eq!(summary["suspicious_echoes"][0]["paragraph_index"], 0);
     }
 
     #[test]
@@ -8115,7 +8567,14 @@ mod tests {
 
         translate(&mut document, &context).unwrap();
 
-        assert_eq!(document.diagnostics.warning_count(), 1);
+        assert_eq!(document.diagnostics.warning_count(), 2);
+        assert!(
+            document
+                .diagnostics
+                .entries()
+                .iter()
+                .any(|diagnostic| matches!(diagnostic, Diagnostic::SuspiciousEcho { .. }))
+        );
         assert!(
             document
                 .diagnostics
@@ -8312,12 +8771,19 @@ mod tests {
             let paragraph = &document.il.pages[0].paragraphs[0];
             assert_eq!(paragraph.preserved, None);
             assert_eq!(paragraph.translated_text.as_deref(), Some("MIMUS"));
-            assert_eq!(document.diagnostics.warning_count(), 0);
+            assert_eq!(document.diagnostics.warning_count(), 1);
             assert!(document.diagnostics.entries().iter().any(|diagnostic| {
                 matches!(diagnostic, Diagnostic::TranslationIdentity { .. })
             }));
+            assert!(
+                document
+                    .diagnostics
+                    .entries()
+                    .iter()
+                    .any(|diagnostic| matches!(diagnostic, Diagnostic::SuspiciousEcho { .. }))
+            );
         }
-        assert_eq!(identity.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(identity.calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -8543,9 +9009,10 @@ mod tests {
 
         let result = run(&mut document, &context).unwrap();
 
-        assert_eq!(translator.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(result.warnings, 0);
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(result.warnings, 2);
         assert_eq!(document.il.pages[0].paragraphs[0].preserved, None);
+        assert_eq!(document.suspicious_echoes, BTreeSet::from([(0, 0)]));
         assert!(output.is_file());
     }
 
@@ -8899,6 +9366,7 @@ mod tests {
                 total_pages: 1,
                 preserved_paragraphs,
                 preserved_paragraph_count: 0,
+                ..
             } if degraded_page_indices == &[0] && preserved_paragraphs.is_empty()
         )));
     }

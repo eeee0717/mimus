@@ -21,16 +21,25 @@ pub(crate) struct RetryAttempt {
 #[derive(Debug)]
 pub(crate) enum TranslationOutcome {
     Translated(RestoredTranslation),
-    Identity,
+    Identity {
+        suspicious: bool,
+    },
     PlaceholderViolation {
         violation: PlaceholderViolation,
         profile: RedactedTranslationProfile,
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlaceholderRetryAttempt {
+    pub attempt: usize,
+    pub violation: PlaceholderViolation,
+}
+
 pub(crate) struct TranslationExecution {
     pub cache_status: Option<CacheStatus>,
     pub retries: Vec<RetryAttempt>,
+    pub placeholder_retries: Vec<PlaceholderRetryAttempt>,
     pub outcome: Result<TranslationOutcome>,
 }
 
@@ -53,7 +62,10 @@ pub(crate) fn execute(
                 return TranslationExecution {
                     cache_status: Some(CacheStatus::Hit),
                     retries: Vec::new(),
-                    outcome: Ok(TranslationOutcome::Identity),
+                    placeholder_retries: Vec::new(),
+                    outcome: Ok(TranslationOutcome::Identity {
+                        suspicious: request.prepared.echo_retry_eligible(),
+                    }),
                 };
             }
             Ok(Some(CachedTranslation::Translated(validated))) => {
@@ -61,6 +73,7 @@ pub(crate) fn execute(
                     return TranslationExecution {
                         cache_status: Some(CacheStatus::Hit),
                         retries: Vec::new(),
+                        placeholder_retries: Vec::new(),
                         outcome: Ok(TranslationOutcome::Translated(restored)),
                     };
                 }
@@ -71,6 +84,7 @@ pub(crate) fn execute(
                 return TranslationExecution {
                     cache_status: None,
                     retries: Vec::new(),
+                    placeholder_retries: Vec::new(),
                     outcome: Err(error),
                 };
             }
@@ -79,47 +93,95 @@ pub(crate) fn execute(
         None
     };
 
-    let (output, retries) = translate_with_retry(
-        translator,
-        sleeper,
-        &TranslationRequest {
-            text: request.prepared.request_text(),
-            target_language: request.target_language,
-            glossary: request.glossary,
-        },
-    );
-    let outcome = output.and_then(|output| match request.prepared.classify(&output) {
-        super::TranslationOutcome::Identity => {
-            if let Some(cache) = cache {
-                cache.insert_identity(request.cache_key)?;
+    let provider_request = TranslationRequest {
+        text: request.prepared.request_text(),
+        target_language: request.target_language,
+        glossary: request.glossary,
+    };
+    let mut retries = Vec::new();
+    let mut placeholder_retries = Vec::new();
+    let mut echo_retried = false;
+    let mut placeholder_retried = false;
+    let mut response_attempt = 0;
+    let outcome = loop {
+        let (output, attempt_retries) =
+            translate_with_retry(translator, sleeper, &provider_request);
+        retries.extend(attempt_retries);
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => break Err(error),
+        };
+        response_attempt += 1;
+        match classify_and_restore(request.prepared, &output) {
+            ClassifiedOutcome::Identity
+                if request.prepared.echo_retry_eligible() && !echo_retried =>
+            {
+                echo_retried = true;
             }
-            Ok(TranslationOutcome::Identity)
-        }
-        super::TranslationOutcome::Translated(validated) => {
-            match request.prepared.restore(&validated) {
-                Ok(restored) => {
-                    if let Some(cache) = cache {
-                        cache.insert(request.cache_key, &validated)?;
-                    }
-                    Ok(TranslationOutcome::Translated(restored))
-                }
-                Err(violation) => Ok(TranslationOutcome::PlaceholderViolation {
+            ClassifiedOutcome::Identity => {
+                let result = cache
+                    .map(|cache| cache.insert_identity(request.cache_key))
+                    .transpose()
+                    .map(|_| TranslationOutcome::Identity {
+                        suspicious: request.prepared.echo_retry_eligible(),
+                    });
+                break result;
+            }
+            ClassifiedOutcome::Translated {
+                validated,
+                restored,
+            } => {
+                let result = cache
+                    .map(|cache| cache.insert(request.cache_key, &validated))
+                    .transpose()
+                    .map(|_| TranslationOutcome::Translated(restored));
+                break result;
+            }
+            ClassifiedOutcome::PlaceholderViolation(violation) if !placeholder_retried => {
+                placeholder_retried = true;
+                placeholder_retries.push(PlaceholderRetryAttempt {
+                    attempt: response_attempt,
+                    violation,
+                });
+            }
+            ClassifiedOutcome::PlaceholderViolation(violation) => {
+                break Ok(TranslationOutcome::PlaceholderViolation {
                     violation,
                     profile: super::redacted_translation_profile(&output),
-                }),
+                });
             }
         }
-        super::TranslationOutcome::PlaceholderViolation(violation) => {
-            Ok(TranslationOutcome::PlaceholderViolation {
-                violation,
-                profile: super::redacted_translation_profile(&output),
-            })
-        }
-    });
+    };
     TranslationExecution {
         cache_status,
         retries,
+        placeholder_retries,
         outcome,
+    }
+}
+
+enum ClassifiedOutcome {
+    Translated {
+        validated: super::ValidatedTranslation,
+        restored: RestoredTranslation,
+    },
+    Identity,
+    PlaceholderViolation(PlaceholderViolation),
+}
+
+fn classify_and_restore(prepared: &PreparedTranslation, output: &str) -> ClassifiedOutcome {
+    match prepared.classify(output) {
+        super::TranslationOutcome::Identity => ClassifiedOutcome::Identity,
+        super::TranslationOutcome::Translated(validated) => match prepared.restore(&validated) {
+            Ok(restored) => ClassifiedOutcome::Translated {
+                validated,
+                restored,
+            },
+            Err(violation) => ClassifiedOutcome::PlaceholderViolation(violation),
+        },
+        super::TranslationOutcome::PlaceholderViolation(violation) => {
+            ClassifiedOutcome::PlaceholderViolation(violation)
+        }
     }
 }
 
@@ -160,6 +222,7 @@ fn translate_with_retry(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -181,6 +244,33 @@ mod tests {
         failures: usize,
         retry_reason: Option<RetryReason>,
         calls: AtomicUsize,
+    }
+
+    struct ScriptedTranslator {
+        outputs: Mutex<VecDeque<&'static str>>,
+        calls: AtomicUsize,
+    }
+
+    impl ScriptedTranslator {
+        fn new(outputs: impl IntoIterator<Item = &'static str>) -> Self {
+            Self {
+                outputs: Mutex::new(outputs.into_iter().collect()),
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Translator for ScriptedTranslator {
+        fn translate(&self, _request: &TranslationRequest<'_>) -> Result<String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self
+                .outputs
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("scripted translation response")
+                .to_owned())
+        }
     }
 
     impl Translator for FlakyTranslator {
@@ -219,17 +309,29 @@ mod tests {
         sleeper: &dyn Sleeper,
     ) -> TranslationExecution {
         let prepared = prepared();
+        execute_prepared_without_cache(&prepared, translator, sleeper)
+    }
+
+    fn execute_prepared_without_cache(
+        prepared: &PreparedTranslation,
+        translator: &dyn Translator,
+        sleeper: &dyn Sleeper,
+    ) -> TranslationExecution {
         let glossary = Glossary::default();
         execute(
             translator,
             None,
             sleeper,
             ExecutionRequest {
-                prepared: &prepared,
+                prepared,
                 target_language: "zh-CN",
                 glossary: &glossary,
                 cache_key: &TranslationCacheKey::new(
-                    "source", "model", "zh-CN", "prompt", "glossary",
+                    prepared.request_text(),
+                    "model",
+                    "zh-CN",
+                    "prompt",
+                    "glossary",
                 ),
             },
         )
@@ -331,5 +433,147 @@ mod tests {
     #[test]
     fn thread_sleeper_is_a_production_sleeper() {
         let _: &dyn Sleeper = &ThreadSleeper;
+    }
+
+    #[test]
+    fn translatable_echo_is_retried_once_before_accepting_a_translation() {
+        let translator = ScriptedTranslator::new(["source", "translated"]);
+
+        let execution = execute_without_cache(&translator, &RecordingSleeper::default());
+
+        assert!(matches!(
+            execution.outcome,
+            Ok(TranslationOutcome::Translated(_))
+        ));
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_second_translatable_echo_is_accepted_after_exactly_one_retry() {
+        let translator = ScriptedTranslator::new(["source", "source"]);
+
+        let execution = execute_without_cache(&translator, &RecordingSleeper::default());
+
+        assert!(matches!(
+            execution.outcome,
+            Ok(TranslationOutcome::Identity { suspicious: true })
+        ));
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn every_placeholder_violation_subtype_gets_one_semantic_retry() {
+        let prepared = PreparedTranslation::new([
+            PreparedPart::Text {
+                text: "Alpha ".to_owned(),
+                bold: false,
+            },
+            PreparedPart::Formula,
+            PreparedPart::Text {
+                text: " bold ".to_owned(),
+                bold: true,
+            },
+            PreparedPart::Formula,
+        ]);
+        const VALID: &str = "Translated {v1}<b1> strong </b1>{v2}";
+        for (invalid, violation) in [
+            (
+                "Translated <b1> strong </b1>{v2}",
+                PlaceholderViolation::Missing,
+            ),
+            (
+                "Translated {v1}{v1}<b1> strong </b1>{v2}",
+                PlaceholderViolation::Duplicate,
+            ),
+            (
+                "Translated {v1}<b1> strong </b1>{v2}{v3}",
+                PlaceholderViolation::Unknown,
+            ),
+            (
+                "Translated {v1}</b1> strong <b1>{v2}",
+                PlaceholderViolation::TagNesting,
+            ),
+            (
+                "Translated {v2}<b1> strong </b1>{v1}",
+                PlaceholderViolation::FormulaOrder,
+            ),
+            (
+                "Translated {v1}<b1> strong </b1>{v2",
+                PlaceholderViolation::PartialToken,
+            ),
+        ] {
+            let translator = ScriptedTranslator::new([invalid, VALID]);
+
+            let execution = execute_prepared_without_cache(
+                &prepared,
+                &translator,
+                &RecordingSleeper::default(),
+            );
+
+            assert!(matches!(
+                execution.outcome,
+                Ok(TranslationOutcome::Translated(_))
+            ));
+            assert_eq!(translator.calls.load(Ordering::SeqCst), 2, "{invalid}");
+            assert_eq!(
+                execution.placeholder_retries,
+                [PlaceholderRetryAttempt {
+                    attempt: 1,
+                    violation,
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn immutable_shapes_keep_identity_without_a_semantic_retry() {
+        for source in ["12345", "person@example.com", "[] +-= 42"] {
+            let prepared = PreparedTranslation::new([PreparedPart::Text {
+                text: source.to_owned(),
+                bold: false,
+            }]);
+            let translator = ScriptedTranslator::new([source]);
+
+            let execution = execute_prepared_without_cache(
+                &prepared,
+                &translator,
+                &RecordingSleeper::default(),
+            );
+
+            assert!(matches!(
+                execution.outcome,
+                Ok(TranslationOutcome::Identity { suspicious: false })
+            ));
+            assert_eq!(translator.calls.load(Ordering::SeqCst), 1, "{source}");
+        }
+    }
+
+    #[test]
+    fn echo_and_placeholder_retries_have_independent_one_shot_budgets() {
+        let prepared = PreparedTranslation::new([
+            PreparedPart::Text {
+                text: "Alpha ".to_owned(),
+                bold: false,
+            },
+            PreparedPart::Formula,
+        ]);
+        let translator =
+            ScriptedTranslator::new(["Alpha {v1}", "Translated {v999}", "Translated {v1}"]);
+
+        let execution =
+            execute_prepared_without_cache(&prepared, &translator, &RecordingSleeper::default());
+
+        assert!(matches!(
+            execution.outcome,
+            Ok(TranslationOutcome::Translated(_))
+        ));
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            execution.placeholder_retries,
+            [PlaceholderRetryAttempt {
+                attempt: 2,
+                violation: PlaceholderViolation::Unknown,
+            }]
+        );
     }
 }
