@@ -648,9 +648,11 @@ pub fn layout(document: &mut Document, context: &PassContext<'_>) -> Result<()> 
     let total_pages = document.extracted_pages.len();
     for page in &mut document.extracted_pages {
         if page.is_translatable() {
-            let raster = context
-                .engine
-                .rasterize_page(&document.original_bytes, page.index)?;
+            let raster = context.engine.rasterize_page_at_scale(
+                &document.original_bytes,
+                page.index,
+                context.layout_detector.raster_pixels_per_point(),
+            )?;
             raster.validate()?;
             let synthetic_characters =
                 if !page.recoveries.is_empty() || page.engine_characters.is_empty() {
@@ -1108,6 +1110,7 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
             }
         }
 
+        merge_nested_inline_formula_groups(&mut model_groups);
         model_groups.sort_by_key(|group| group.assignment.reading_order);
         let mut drafts = Vec::new();
         for mut group in model_groups {
@@ -1189,6 +1192,53 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
         pages,
     };
     Ok(())
+}
+
+fn merge_nested_inline_formula_groups(groups: &mut Vec<ModelGroup>) {
+    let owners = groups
+        .iter()
+        .enumerate()
+        .map(|(formula_index, formula)| {
+            if formula.assignment.label != LayoutLabel::InlineFormula {
+                return None;
+            }
+            let formula_bounds = formula.assignment.bounds;
+            let formula_center = crate::il::Point {
+                x: (formula_bounds.left + formula_bounds.right) / 2.0,
+                y: (formula_bounds.bottom + formula_bounds.top) / 2.0,
+            };
+            let formula_area = rect_area(formula_bounds);
+            groups
+                .iter()
+                .enumerate()
+                .filter(|(owner_index, owner)| {
+                    *owner_index != formula_index
+                        && owner.assignment.source == LayoutSource::Model
+                        && owner.assignment.policy == TranslationPolicy::Translate
+                        && rect_area(owner.assignment.bounds) > formula_area
+                        && point_in_rect(formula_center, owner.assignment.bounds)
+                })
+                .min_by(|(_, left), (_, right)| {
+                    rect_area(left.assignment.bounds)
+                        .total_cmp(&rect_area(right.assignment.bounds))
+                        .then_with(|| {
+                            left.assignment
+                                .reading_order
+                                .cmp(&right.assignment.reading_order)
+                        })
+                })
+                .map(|(owner_index, _)| owner_index)
+        })
+        .collect::<Vec<_>>();
+
+    for (formula_index, owner_index) in owners.into_iter().enumerate() {
+        let Some(owner_index) = owner_index else {
+            continue;
+        };
+        let chars = std::mem::take(&mut groups[formula_index].chars);
+        groups[owner_index].chars.extend(chars);
+    }
+    groups.retain(|group| !group.chars.is_empty());
 }
 
 fn build_text_lines(mut chars: Vec<PositionedChar>) -> Vec<TextLine> {
@@ -2103,6 +2153,10 @@ fn mark_math_passthrough_units(
             start = end;
             continue;
         };
+        if layout.source != LayoutSource::FallbackLine {
+            start = end;
+            continue;
+        }
         let source = request_text(&chars[start..end]);
         if math_shape_is_passthrough(&source)
             && chars[start..end]
@@ -3563,7 +3617,11 @@ fn validate_output_roundtrip(
         }
         let raster = context
             .engine
-            .rasterize_page(candidate, expected.index)
+            .rasterize_page_at_scale(
+                candidate,
+                expected.index,
+                context.layout_detector.raster_pixels_per_point(),
+            )
             .map_err(|error| {
                 output_mismatch(format!(
                     "inspection engine rejected output page {} raster: {error}",
@@ -7063,6 +7121,123 @@ mod tests {
         ] {
             assert!(!math_shape_is_passthrough(prose), "matched {prose:?}");
         }
+    }
+
+    #[test]
+    fn math_shape_heuristic_only_applies_to_fallback_layout() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars.truncate(3);
+        for (character, unicode) in chars.iter_mut().zip(['x', '=', 'y']) {
+            character.unicode = Some(unicode);
+            let layout = character.layout.as_mut().unwrap();
+            layout.label = LayoutLabel::Text;
+            layout.source = LayoutSource::Model;
+            layout.policy = TranslationPolicy::Translate;
+        }
+        let content_objects = BTreeSet::from([chars[0].passthrough.content_object]);
+        let mut diagnostics = Vec::new();
+
+        mark_math_passthrough_units(paragraph, &content_objects, 0, 0, &mut diagnostics);
+
+        assert!(diagnostics.is_empty());
+        assert!(
+            paragraph.chars().iter().all(|character| {
+                character.layout.unwrap().policy == TranslationPolicy::Translate
+            })
+        );
+    }
+
+    #[test]
+    fn nested_inline_formula_group_joins_its_translatable_model_owner() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let source = document.il.pages[0].paragraphs[0].chars();
+        let text_assignment = LayoutAssignment {
+            label: LayoutLabel::Text,
+            reading_order: 10,
+            bounds: Rect {
+                left: 60.0,
+                bottom: 100.0,
+                right: 140.0,
+                top: 140.0,
+            },
+            source: LayoutSource::Model,
+            policy: TranslationPolicy::Translate,
+        };
+        let formula_assignment = LayoutAssignment {
+            label: LayoutLabel::InlineFormula,
+            reading_order: 11,
+            bounds: Rect {
+                left: 82.0,
+                bottom: 115.0,
+                right: 94.0,
+                top: 132.0,
+            },
+            source: LayoutSource::Model,
+            policy: TranslationPolicy::Passthrough,
+        };
+        let positioned = |index: usize, assignment| {
+            let mut character = source[index].clone();
+            character.layout = Some(assignment);
+            PositionedChar {
+                walked_index: index,
+                locatable: true,
+                character,
+                force_no_space_before: false,
+            }
+        };
+        let mut groups = vec![
+            ModelGroup {
+                assignment: text_assignment,
+                chars: [0, 1, 3, 4]
+                    .into_iter()
+                    .map(|index| positioned(index, text_assignment))
+                    .collect(),
+            },
+            ModelGroup {
+                assignment: formula_assignment,
+                chars: vec![positioned(2, formula_assignment)],
+            },
+        ];
+
+        merge_nested_inline_formula_groups(&mut groups);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].chars.len(), 5);
+        assert_eq!(
+            groups[0]
+                .chars
+                .iter()
+                .filter(|positioned| positioned.character.layout.unwrap().label
+                    == LayoutLabel::InlineFormula)
+                .count(),
+            1
+        );
     }
 
     #[test]

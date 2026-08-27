@@ -3,6 +3,7 @@
 mod config;
 mod debug;
 mod font_assets;
+mod layout_assets;
 mod protocol;
 
 use std::ffi::{OsStr, OsString};
@@ -12,12 +13,14 @@ use std::process::ExitCode;
 
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser, Subcommand};
-use config::{Backend, ConfigOverrides, ResolvedConfig};
+use config::{Backend, ConfigOverrides, ResolvedConfig, ResolvedLayoutConfig};
 use debug::DebugArtifacts;
 use mimus_core::engine::pdfium::PdfiumEngine;
-use mimus_core::engine::{LayoutDetector, RecordedLayoutDetector, SingleLineLayoutDetector};
+use mimus_core::engine::{
+    LayoutDetector, OnnxLayoutDetector, RecordedLayoutDetector, SingleLineLayoutDetector,
+};
 use mimus_core::error::{ErrorReason, InternalReason, IoReason, MimusError, Result, UsageReason};
-use mimus_core::event::{Event, EventKind, EventSink, ResultPayload};
+use mimus_core::event::{ConfigurationResolved, Event, EventKind, EventSink, ResultPayload};
 use mimus_core::pass;
 use mimus_core::translate::NoneTranslator;
 use mimus_core::{Document, PassContext, PassSnapshotSink, PipelineConfig};
@@ -70,7 +73,13 @@ struct TranslateArgs {
     /// Bold output font file.
     #[arg(long, value_name = "TTF_OR_OTF")]
     font_bold: Option<PathBuf>,
-    /// Base URL used to mirror output-font assets.
+    /// PP-DocLayoutV3 ONNX model file.
+    #[arg(long, value_name = "ONNX")]
+    layout_model: Option<PathBuf>,
+    /// Layout detector implementation.
+    #[arg(long, value_enum, default_value_t = LayoutMode::Onnx)]
+    layout: LayoutMode,
+    /// Base URL used to mirror model and output-font assets.
     #[arg(long, value_name = "URL")]
     asset_mirror: Option<String>,
     /// User glossary TOML file. User entries override automatically extracted terms.
@@ -115,6 +124,37 @@ struct InspectArgs {
     /// Deterministic detector recording used by Corpus and explicit local validation.
     #[arg(long, value_name = "JSON", hide = true)]
     layout_replay: Option<PathBuf>,
+    /// PP-DocLayoutV3 ONNX model file.
+    #[arg(long, value_name = "ONNX")]
+    layout_model: Option<PathBuf>,
+    /// Layout detector implementation.
+    #[arg(long, value_enum, default_value_t = LayoutMode::Onnx)]
+    layout: LayoutMode,
+    /// Base URL used to mirror layout-model assets.
+    #[arg(long, value_name = "URL")]
+    asset_mirror: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum LayoutMode {
+    Onnx,
+    SingleLine,
+}
+
+impl LayoutMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Onnx => "onnx",
+            Self::SingleLine => "single_line",
+        }
+    }
+}
+
+struct CreatedLayoutDetector {
+    detector: Box<dyn LayoutDetector>,
+    mode: &'static str,
+    model_source: Option<String>,
+    model_sha256: Option<String>,
 }
 
 #[derive(Debug)]
@@ -180,6 +220,7 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         target_language: args.target_language,
         font_regular: args.font,
         font_bold: args.font_bold,
+        layout_model: args.layout_model,
         asset_mirror: args.asset_mirror,
         glossary: args.glossary,
         dump_glossary: args.dump_glossary,
@@ -213,6 +254,16 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
     let font_regular_sha256 = output_fonts.regular.sha256.clone();
     let font_bold_source = output_fonts.bold.source.clone();
     let font_bold_sha256 = output_fonts.bold.sha256.clone();
+    let layout_detector = match create_layout_detector(
+        args.layout,
+        args.layout_replay.as_deref(),
+        resolved.layout_model.as_ref(),
+        &resolved.layout_model_cache_dir,
+        resolved.asset_mirror.as_deref(),
+    ) {
+        Ok(value) => value,
+        Err(error) => return session.finish_error(error),
+    };
     let glossary_fingerprint = resolved.user_glossary.fingerprint();
     let cache_path = resolved.cache_path.clone();
     let cache_enabled = cache_path.is_some();
@@ -227,21 +278,26 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         Err(error) => return session.finish_error(error),
     };
     if let Err(error) = session.emit(Event::new(EventKind::ConfigurationResolved {
-        backend,
-        endpoint: Some(endpoint),
-        model: Some(model),
-        target_language: target_language.clone(),
-        font_regular_source: Some(font_regular_source),
-        font_regular_sha256: Some(font_regular_sha256),
-        font_bold_source: Some(font_bold_source),
-        font_bold_sha256: Some(font_bold_sha256),
-        auto_terms,
-        glossary_fingerprint,
-        cache_enabled,
-        cache_path: cache_path_display,
-        concurrency: max_concurrency,
-        strict,
-        translate_table,
+        configuration: Box::new(ConfigurationResolved {
+            backend,
+            endpoint: Some(endpoint),
+            model: Some(model),
+            target_language: target_language.clone(),
+            font_regular_source: Some(font_regular_source),
+            font_regular_sha256: Some(font_regular_sha256),
+            font_bold_source: Some(font_bold_source),
+            font_bold_sha256: Some(font_bold_sha256),
+            layout_mode: layout_detector.mode.to_owned(),
+            layout_model_source: layout_detector.model_source.clone(),
+            layout_model_sha256: layout_detector.model_sha256.clone(),
+            auto_terms,
+            glossary_fingerprint,
+            cache_enabled,
+            cache_path: cache_path_display,
+            concurrency: max_concurrency,
+            strict,
+            translate_table,
+        }),
     })) {
         return session.finish_error(error);
     }
@@ -253,13 +309,9 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         Ok(value) => value,
         Err(error) => return session.finish_error(error),
     };
-    let layout_detector = match create_layout_detector(args.layout_replay.as_deref()) {
-        Ok(value) => value,
-        Err(error) => return session.finish_error(error),
-    };
     let context = PassContext {
         engine: &engine,
-        layout_detector: layout_detector.as_ref(),
+        layout_detector: layout_detector.detector.as_ref(),
         translator: translator.as_ref(),
         events: session,
         snapshots: debug.as_ref().map(|value| value as &dyn PassSnapshotSink),
@@ -289,6 +341,30 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
 }
 
 fn run_inspect(args: InspectArgs, session: &ProtocolSession) -> ExitCode {
+    let layout_config = if args.layout_replay.is_some() || args.layout == LayoutMode::SingleLine {
+        None
+    } else {
+        match ResolvedLayoutConfig::load(args.layout_model, args.asset_mirror) {
+            Ok(value) => Some(value),
+            Err(error) => return session.finish_error(error),
+        }
+    };
+    let layout_detector = match create_layout_detector(
+        args.layout,
+        args.layout_replay.as_deref(),
+        layout_config
+            .as_ref()
+            .and_then(|config| config.layout_model.as_ref()),
+        layout_config
+            .as_ref()
+            .map_or_else(|| Path::new(""), |config| &config.layout_model_cache_dir),
+        layout_config
+            .as_ref()
+            .and_then(|config| config.asset_mirror.as_deref()),
+    ) {
+        Ok(value) => value,
+        Err(error) => return session.finish_error(error),
+    };
     let engine = match PdfiumEngine::from_environment() {
         Ok(value) => value,
         Err(error) => return session.finish_error(error),
@@ -298,13 +374,9 @@ fn run_inspect(args: InspectArgs, session: &ProtocolSession) -> ExitCode {
         Err(error) => return session.finish_error(error),
     };
     let translator = NoneTranslator;
-    let layout_detector = match create_layout_detector(args.layout_replay.as_deref()) {
-        Ok(value) => value,
-        Err(error) => return session.finish_error(error),
-    };
     let context = PassContext {
         engine: &engine,
-        layout_detector: layout_detector.as_ref(),
+        layout_detector: layout_detector.detector.as_ref(),
         translator: &translator,
         events: session,
         snapshots: debug.as_ref().map(|value| value as &dyn PassSnapshotSink),
@@ -351,20 +423,45 @@ fn create_debug(path: Option<PathBuf>) -> Result<Option<DebugArtifacts>> {
     path.map(DebugArtifacts::create).transpose()
 }
 
-fn create_layout_detector(path: Option<&Path>) -> Result<Box<dyn LayoutDetector>> {
-    let Some(path) = path else {
-        return Ok(Box::new(SingleLineLayoutDetector));
-    };
-    let bytes = std::fs::read(path).map_err(|error| {
-        MimusError::io(
-            IoReason::InputRead,
-            format!(
-                "could not read layout recording {}: {error}",
-                path.display()
-            ),
-        )
-    })?;
-    Ok(Box::new(RecordedLayoutDetector::from_bytes(&bytes)?))
+fn create_layout_detector(
+    mode: LayoutMode,
+    replay: Option<&Path>,
+    explicit_model: Option<&config::LayoutModelPathSelection>,
+    model_cache_dir: &Path,
+    asset_mirror: Option<&str>,
+) -> Result<CreatedLayoutDetector> {
+    if let Some(path) = replay {
+        let bytes = std::fs::read(path).map_err(|error| {
+            MimusError::io(
+                IoReason::InputRead,
+                format!(
+                    "could not read layout recording {}: {error}",
+                    path.display()
+                ),
+            )
+        })?;
+        return Ok(CreatedLayoutDetector {
+            detector: Box::new(RecordedLayoutDetector::from_bytes(&bytes)?),
+            mode: "replay",
+            model_source: None,
+            model_sha256: None,
+        });
+    }
+    if mode == LayoutMode::SingleLine {
+        return Ok(CreatedLayoutDetector {
+            detector: Box::new(SingleLineLayoutDetector),
+            mode: mode.as_str(),
+            model_source: None,
+            model_sha256: None,
+        });
+    }
+    let model = layout_assets::resolve_layout_model(explicit_model, model_cache_dir, asset_mirror)?;
+    Ok(CreatedLayoutDetector {
+        detector: Box::new(OnnxLayoutDetector::from_file(&model.path)?),
+        mode: mode.as_str(),
+        model_source: Some(model.source),
+        model_sha256: Some(model.sha256),
+    })
 }
 
 fn is_protocol_failure(error: &MimusError) -> bool {

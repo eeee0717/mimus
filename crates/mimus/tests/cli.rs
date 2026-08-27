@@ -431,7 +431,7 @@ fn run_none_with_output_flag(
     if json {
         command.arg("--json");
     }
-    command.args(["translate", "--backend", "none"]);
+    command.args(["translate", "--backend", "none", "--layout", "single-line"]);
     if let Some(output) = output {
         command.arg(output_flag).arg(output);
     }
@@ -445,7 +445,7 @@ fn run_inspect(input: &Path, json: bool, debug: Option<&Path>) -> Output {
     if json {
         command.arg("--json");
     }
-    command.arg("inspect");
+    command.args(["inspect", "--layout", "single-line"]);
     if let Some(debug) = debug {
         command.arg("--debug").arg(debug);
     }
@@ -453,12 +453,16 @@ fn run_inspect(input: &Path, json: bool, debug: Option<&Path>) -> Output {
 }
 
 fn run_inspect_with_layout(id: &str) -> Output {
+    run_inspect_with_recording(id, id)
+}
+
+fn run_inspect_with_recording(fixture_id: &str, recording_id: &str) -> Output {
     let mut command = Command::new(BIN);
     command.env(PDFIUM_ENV, pdfium_library());
     command
         .args(["--json", "inspect", "--layout-replay"])
-        .arg(layout_recording_path(id))
-        .arg(fixture_path(id))
+        .arg(layout_recording_path(recording_id))
+        .arg(fixture_path(fixture_id))
         .output()
         .unwrap()
 }
@@ -471,7 +475,14 @@ fn run_none_with_debug(input: &Path, output: &Path, debug: &Path, json: bool) ->
         command.arg("--json");
     }
     command
-        .args(["translate", "--backend", "none", "--output"])
+        .args([
+            "translate",
+            "--backend",
+            "none",
+            "--layout",
+            "single-line",
+            "--output",
+        ])
         .arg(output)
         .arg("--debug")
         .arg(debug)
@@ -718,6 +729,40 @@ fn default_openai_backend_requires_a_key_without_exposing_a_key_flag() {
 }
 
 #[test]
+fn missing_explicit_layout_model_fails_before_pdfium_as_asset_exit_three() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = Command::new(BIN)
+        .current_dir(directory.path())
+        .env_remove(PDFIUM_ENV)
+        .env("MIMUS_CONFIG_FILE", directory.path().join("missing.toml"))
+        .args(["--json", "inspect", "--layout-model"])
+        .arg(directory.path().join("missing.onnx"))
+        .arg(fixture())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(3));
+    let events = parse_events(&output.stdout);
+    assert_one_terminal_last(&events, "error");
+    assert_eq!(events.last().unwrap()["category"], "asset");
+    assert_eq!(events.last().unwrap()["reason"], "layout_model_unavailable");
+}
+
+#[test]
+fn single_line_layout_is_an_explicit_offline_degradation_mode() {
+    let output = Command::new(BIN)
+        .env(PDFIUM_ENV, pdfium_library())
+        .args(["--json", "inspect", "--layout", "single-line"])
+        .arg(fixture())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let events = parse_events(&output.stdout);
+    assert_one_terminal_last(&events, "result");
+}
+
+#[test]
 fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join("config.toml");
@@ -753,6 +798,8 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
             "flag-cache.redb",
             "--concurrency",
             "5",
+            "--layout",
+            "single-line",
         ])
         .arg("--font")
         .arg(test_font_path("Regular"))
@@ -800,6 +847,9 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
     assert_eq!(resolved["cache_enabled"], true);
     assert_eq!(resolved["cache_path"], "flag-cache.redb");
     assert_eq!(resolved["concurrency"], 5);
+    assert_eq!(resolved["layout_mode"], "single_line");
+    assert!(resolved.get("layout_model_source").is_none());
+    assert!(resolved.get("layout_model_sha256").is_none());
     assert!(events.iter().all(|event| event.get("api_key").is_none()));
 }
 
@@ -847,7 +897,7 @@ fn empty_secret_alias_falls_through_to_the_next_nonempty_alias() {
         .env("MODEL_ID", "test-model")
         .env("MIMUS_FONT_REGULAR", test_font_path("Regular"))
         .env("MIMUS_FONT_BOLD", test_font_path("Bold"))
-        .args(["--json", "translate"])
+        .args(["--json", "translate", "--layout", "single-line"])
         .arg(fixture())
         .output()
         .unwrap();
@@ -902,6 +952,8 @@ fn no_cache_resolves_as_a_complete_read_write_bypass() {
             "--backend",
             "none",
             "--no-cache",
+            "--layout",
+            "single-line",
             "--output",
         ])
         .arg(&output_path)
@@ -978,6 +1030,8 @@ fn user_glossary_dumps_as_a_stable_round_trip_when_auto_terms_are_disabled() {
             "--backend",
             "none",
             "--no-auto-terms",
+            "--layout",
+            "single-line",
             "--glossary",
         ])
         .arg(&glossary)
@@ -1769,8 +1823,17 @@ fn multi_region_none_roundtrip_remains_bounded_before_paragraph_reconstruction()
 
 #[test]
 fn recorded_layout_policy_drives_production_il_candidates_and_passthrough() {
-    let expected = BTreeMap::from([
+    let expected = [
         (
+            "unit-order-01-natural",
+            "pp-doclayoutv3-unit-order-01-natural",
+            (
+                expected_page_text(&fixture_manifest("unit-order-01-natural"), 0),
+                String::new(),
+            ),
+        ),
+        (
+            "unit-layout-01-nested-boxes",
             "unit-layout-01-nested-boxes",
             (
                 "Body text ends here, two points shy of the frame.".to_owned(),
@@ -1778,6 +1841,7 @@ fn recorded_layout_policy_drives_production_il_candidates_and_passthrough() {
             ),
         ),
         (
+            "unit-layout-07-policy-zones",
             "unit-layout-07-policy-zones",
             (
                 concat!(
@@ -1798,6 +1862,7 @@ fn recorded_layout_policy_drives_production_il_candidates_and_passthrough() {
         ),
         (
             "unit-layout-02-table-only",
+            "unit-layout-02-table-only",
             (
                 String::new(),
                 "RunThroughputLatencyfirst1204 ops8.1 mssecond1198 ops8.3 ms".to_owned(),
@@ -1805,15 +1870,16 @@ fn recorded_layout_policy_drives_production_il_candidates_and_passthrough() {
         ),
         (
             "unit-layout-08-narrow-gutter",
+            "unit-layout-08-narrow-gutter",
             (
                 String::new(),
                 expected_page_text(&fixture_manifest("unit-layout-08-narrow-gutter"), 0),
             ),
         ),
-    ]);
+    ];
 
-    for (id, (expected_translate, expected_passthrough)) in expected {
-        let output = run_inspect_with_layout(id);
+    for (id, recording_id, (expected_translate, expected_passthrough)) in expected {
+        let output = run_inspect_with_recording(id, recording_id);
         assert!(
             output.status.success(),
             "fixture {id}: {}",
@@ -3048,6 +3114,8 @@ fn strict_mode_turns_page_degradation_into_translation_exit_without_publishing()
             "--backend",
             "none",
             "--strict",
+            "--layout",
+            "single-line",
             "--output",
         ])
         .arg(&output_path)
@@ -3083,7 +3151,15 @@ fn strict_mode_turns_page_degradation_into_translation_exit_without_publishing()
     std::fs::write(&human_path, b"human destination").unwrap();
     let human = Command::new(BIN)
         .env(PDFIUM_ENV, pdfium_library())
-        .args(["translate", "--backend", "none", "--strict", "--output"])
+        .args([
+            "translate",
+            "--backend",
+            "none",
+            "--strict",
+            "--layout",
+            "single-line",
+            "--output",
+        ])
         .arg(&human_path)
         .arg(input)
         .output()
@@ -3193,7 +3269,14 @@ fn missing_pdfium_uses_asset_exit_code_three() {
         .env(PDFIUM_ENV, directory.path().join("missing-libpdfium.dylib"))
         .env("MIMUS_FONT_REGULAR", test_font_path("Regular"))
         .env("MIMUS_FONT_BOLD", test_font_path("Bold"))
-        .args(["translate", "--backend", "none", "--output"])
+        .args([
+            "translate",
+            "--backend",
+            "none",
+            "--layout",
+            "single-line",
+            "--output",
+        ])
         .arg(&translated)
         .arg(fixture())
         .output()
@@ -3211,7 +3294,15 @@ fn a_closed_stdout_pipe_does_not_turn_success_into_a_panic() {
         .env(PDFIUM_ENV, pdfium_library())
         .env("MIMUS_FONT_REGULAR", test_font_path("Regular"))
         .env("MIMUS_FONT_BOLD", test_font_path("Bold"))
-        .args(["--json", "translate", "--backend", "none", "--output"])
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "none",
+            "--layout",
+            "single-line",
+            "--output",
+        ])
         .arg(&translated)
         .arg(fixture())
         .stdout(Stdio::piped())
