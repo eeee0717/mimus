@@ -93,17 +93,19 @@ pub(crate) fn execute(
         None
     };
 
-    let provider_request = TranslationRequest {
-        text: request.prepared.request_text(),
-        target_language: request.target_language,
-        glossary: request.glossary,
-    };
     let mut retries = Vec::new();
     let mut placeholder_retries = Vec::new();
     let mut echo_retried = false;
     let mut placeholder_retried = false;
+    let mut placeholder_correction = None;
     let mut response_attempt = 0;
     let outcome = loop {
+        let provider_request = TranslationRequest {
+            text: request.prepared.request_text(),
+            target_language: request.target_language,
+            glossary: request.glossary,
+            placeholder_correction: placeholder_correction.as_deref(),
+        };
         let (output, attempt_retries) =
             translate_with_retry(translator, sleeper, &provider_request);
         retries.extend(attempt_retries);
@@ -139,6 +141,11 @@ pub(crate) fn execute(
             }
             ClassifiedOutcome::PlaceholderViolation(violation) if !placeholder_retried => {
                 placeholder_retried = true;
+                placeholder_correction = Some(
+                    request
+                        .prepared
+                        .placeholder_retry_correction(violation, &output),
+                );
                 placeholder_retries.push(PlaceholderRetryAttempt {
                     attempt: response_attempt,
                     violation,
@@ -248,6 +255,7 @@ mod tests {
 
     struct ScriptedTranslator {
         outputs: Mutex<VecDeque<&'static str>>,
+        placeholder_corrections: Mutex<Vec<Option<String>>>,
         calls: AtomicUsize,
     }
 
@@ -255,14 +263,23 @@ mod tests {
         fn new(outputs: impl IntoIterator<Item = &'static str>) -> Self {
             Self {
                 outputs: Mutex::new(outputs.into_iter().collect()),
+                placeholder_corrections: Mutex::new(Vec::new()),
                 calls: AtomicUsize::new(0),
             }
+        }
+
+        fn placeholder_corrections(&self) -> Vec<Option<String>> {
+            self.placeholder_corrections.lock().unwrap().clone()
         }
     }
 
     impl Translator for ScriptedTranslator {
-        fn translate(&self, _request: &TranslationRequest<'_>) -> Result<String> {
+        fn translate(&self, request: &TranslationRequest<'_>) -> Result<String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.placeholder_corrections
+                .lock()
+                .unwrap()
+                .push(request.placeholder_correction.map(str::to_owned));
             Ok(self
                 .outputs
                 .lock()
@@ -476,30 +493,36 @@ mod tests {
             PreparedPart::Formula,
         ]);
         const VALID: &str = "Translated {v1}<b1> strong </b1>{v2}";
-        for (invalid, violation) in [
+        for (invalid, violation, correction) in [
             (
                 "Translated <b1> strong </b1>{v2}",
                 PlaceholderViolation::Missing,
+                "the previous response omitted required placeholders: {v1}. include each missing placeholder exactly once.",
             ),
             (
                 "Translated {v1}{v1}<b1> strong </b1>{v2}",
                 PlaceholderViolation::Duplicate,
+                "the previous response duplicated placeholders: {v1}. include every required placeholder exactly once.",
             ),
             (
                 "Translated {v1}<b1> strong </b1>{v2}{v3}",
                 PlaceholderViolation::Unknown,
+                "the previous response introduced unknown placeholders: {v3}. use only this required placeholder sequence: {v1}, <b1>, </b1>, {v2}.",
             ),
             (
                 "Translated {v1}</b1> strong <b1>{v2}",
                 PlaceholderViolation::TagNesting,
+                "the previous response mis-nested bold placeholders. use this exact bold-tag order: <b1>, </b1>.",
             ),
             (
                 "Translated {v2}<b1> strong </b1>{v1}",
                 PlaceholderViolation::FormulaOrder,
+                "the previous response changed formula placeholder order. use this exact formula order: {v1}, {v2}. include each exactly once.",
             ),
             (
                 "Translated {v1}<b1> strong </b1>{v2",
                 PlaceholderViolation::PartialToken,
+                "the previous response contained a partial placeholder. emit only complete placeholders and use this required sequence: {v1}, <b1>, </b1>, {v2}.",
             ),
         ] {
             let translator = ScriptedTranslator::new([invalid, VALID]);
@@ -516,6 +539,11 @@ mod tests {
             ));
             assert_eq!(translator.calls.load(Ordering::SeqCst), 2, "{invalid}");
             assert_eq!(
+                translator.placeholder_corrections(),
+                [None, Some(correction.to_owned())],
+                "{invalid}"
+            );
+            assert_eq!(
                 execution.placeholder_retries,
                 [PlaceholderRetryAttempt {
                     attempt: 1,
@@ -523,6 +551,54 @@ mod tests {
                 }]
             );
         }
+    }
+
+    #[test]
+    fn a_second_placeholder_violation_degrades_after_one_corrected_retry() {
+        let prepared = PreparedTranslation::new([
+            PreparedPart::Text {
+                text: "Alpha ".to_owned(),
+                bold: false,
+            },
+            PreparedPart::Formula,
+            PreparedPart::Text {
+                text: " omega".to_owned(),
+                bold: false,
+            },
+        ]);
+        let translator = ScriptedTranslator::new([
+            "Translated without the formula",
+            "Still translated without the formula",
+        ]);
+
+        let execution =
+            execute_prepared_without_cache(&prepared, &translator, &RecordingSleeper::default());
+
+        assert!(matches!(
+            execution.outcome,
+            Ok(TranslationOutcome::PlaceholderViolation {
+                violation: PlaceholderViolation::Missing,
+                ..
+            })
+        ));
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            translator.placeholder_corrections(),
+            [
+                None,
+                Some(
+                    "the previous response omitted required placeholders: {v1}. include each missing placeholder exactly once."
+                        .to_owned()
+                ),
+            ]
+        );
+        assert_eq!(
+            execution.placeholder_retries,
+            [PlaceholderRetryAttempt {
+                attempt: 1,
+                violation: PlaceholderViolation::Missing,
+            }]
+        );
     }
 
     #[test]

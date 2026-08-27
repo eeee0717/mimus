@@ -2165,6 +2165,7 @@ fn translate_none(document: &mut Document, context: &PassContext<'_>) -> Result<
                             text: &source,
                             target_language: &context.config.target_language,
                             glossary: &document.glossary,
+                            placeholder_correction: None,
                         },
                     )?);
                 } else {

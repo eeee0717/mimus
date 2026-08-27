@@ -39,6 +39,7 @@ struct RecordedRequest {
     path: String,
     model: String,
     input: String,
+    instructions: String,
     kind: RequestKind,
 }
 
@@ -228,6 +229,7 @@ fn handle_request(
         path,
         model,
         input: input.clone(),
+        instructions: instructions.to_owned(),
         kind,
     });
 
@@ -2330,6 +2332,22 @@ fn semantic_retries_recover_once_and_never_cache_invalid_placeholder_responses()
             .all(|event| event["id"] != "placeholder_violation")
     );
     assert_eq!(recovered_server.request_count(), 2);
+    let recovered_requests = recovered_server.requests();
+    assert!(
+        !recovered_requests[0]
+            .instructions
+            .contains("previous response")
+    );
+    assert!(
+        recovered_requests[1]
+            .instructions
+            .contains("previous response introduced unknown placeholders")
+    );
+    assert!(
+        recovered_requests[1]
+            .instructions
+            .contains("do not emit placeholders because the input has none")
+    );
     recovered_server.assert_clean();
 
     let cache = directory.path().join("invalid.redb");
@@ -2372,6 +2390,15 @@ fn semantic_retries_recover_once_and_never_cache_invalid_placeholder_responses()
         4,
         "an invalid response entered the translation cache"
     );
+    let invalid_requests = invalid_server.requests();
+    for requests in invalid_requests.chunks_exact(2) {
+        assert!(!requests[0].instructions.contains("previous response"));
+        assert!(
+            requests[1]
+                .instructions
+                .contains("previous response introduced unknown placeholders")
+        );
+    }
     invalid_server.assert_clean();
     assert_tree_has_no_secret(directory.path());
 }

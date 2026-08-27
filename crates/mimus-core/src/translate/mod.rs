@@ -299,6 +299,109 @@ impl PreparedTranslation {
         self.echo_retry_eligible
     }
 
+    pub(crate) fn placeholder_retry_correction(
+        &self,
+        violation: PlaceholderViolation,
+        output: &str,
+    ) -> String {
+        let expected = scan_tokens(&self.request_text).unwrap_or_default();
+        let observed = scan_tokens(output).unwrap_or_default();
+        let required = expected
+            .iter()
+            .map(|token| token.literal.clone())
+            .collect::<Vec<_>>();
+        let observed_counts = observed.iter().fold(BTreeMap::new(), |mut counts, token| {
+            *counts.entry(token.literal.clone()).or_insert(0_usize) += 1;
+            counts
+        });
+        match violation {
+            PlaceholderViolation::Missing => {
+                let missing = required
+                    .iter()
+                    .filter(|token| !observed_counts.contains_key(token.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                format!(
+                    "the previous response omitted required placeholders: {}. include each missing placeholder exactly once.",
+                    placeholder_list(&missing)
+                )
+            }
+            PlaceholderViolation::Duplicate => {
+                let duplicated = required
+                    .iter()
+                    .filter(|token| observed_counts.get(token.as_str()).copied().unwrap_or(0) > 1)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                format!(
+                    "the previous response duplicated placeholders: {}. include every required placeholder exactly once.",
+                    placeholder_list(&duplicated)
+                )
+            }
+            PlaceholderViolation::Unknown => {
+                let mut unknown = Vec::new();
+                for token in observed
+                    .iter()
+                    .filter(|token| !required.contains(&token.literal))
+                    .map(|token| token.literal.clone())
+                {
+                    if !unknown.contains(&token) {
+                        unknown.push(token);
+                    }
+                    if unknown.len() == 8 {
+                        break;
+                    }
+                }
+                if required.is_empty() {
+                    format!(
+                        "the previous response introduced unknown placeholders: {}. do not emit placeholders because the input has none.",
+                        placeholder_list(&unknown)
+                    )
+                } else {
+                    format!(
+                        "the previous response introduced unknown placeholders: {}. use only this required placeholder sequence: {}.",
+                        placeholder_list(&unknown),
+                        placeholder_list(&required)
+                    )
+                }
+            }
+            PlaceholderViolation::TagNesting => {
+                let bold_tags = expected
+                    .iter()
+                    .filter(|token| {
+                        matches!(
+                            token.kind,
+                            ScannedTokenKind::BoldOpen(_) | ScannedTokenKind::BoldClose(_)
+                        )
+                    })
+                    .map(|token| token.literal.clone())
+                    .collect::<Vec<_>>();
+                format!(
+                    "the previous response mis-nested bold placeholders. use this exact bold-tag order: {}.",
+                    placeholder_list(&bold_tags)
+                )
+            }
+            PlaceholderViolation::FormulaOrder => {
+                let formulas = expected
+                    .iter()
+                    .filter(|token| matches!(token.kind, ScannedTokenKind::Formula(_)))
+                    .map(|token| token.literal.clone())
+                    .collect::<Vec<_>>();
+                format!(
+                    "the previous response changed formula placeholder order. use this exact formula order: {}. include each exactly once.",
+                    placeholder_list(&formulas)
+                )
+            }
+            PlaceholderViolation::PartialToken => format!(
+                "the previous response contained a partial placeholder. emit only complete placeholders and use this required sequence: {}.",
+                placeholder_list(&required)
+            ),
+            PlaceholderViolation::BackendEcho => {
+                "the previous response echoed the input. return a translation while preserving every placeholder exactly."
+                    .to_owned()
+            }
+        }
+    }
+
     pub(crate) fn classify(&self, output: &str) -> TranslationOutcome {
         if output == self.request_text {
             return TranslationOutcome::Identity;
@@ -595,10 +698,19 @@ fn scan_tokens(text: &str) -> std::result::Result<Vec<ScannedToken>, Placeholder
     Ok(output)
 }
 
+fn placeholder_list(tokens: &[String]) -> String {
+    if tokens.is_empty() {
+        "none".to_owned()
+    } else {
+        tokens.join(", ")
+    }
+}
+
 pub struct TranslationRequest<'a> {
     pub text: &'a str,
     pub target_language: &'a str,
     pub glossary: &'a Glossary,
+    pub placeholder_correction: Option<&'a str>,
 }
 
 pub struct TermExtractionRequest<'a> {
@@ -699,13 +811,15 @@ pub fn validate_openai_base_url(base_url: &str) -> Result<()> {
 impl Translator for OpenAiTranslator {
     fn translate(&self, request: &TranslationRequest<'_>) -> Result<String> {
         let glossary = request.glossary.prompt_json();
-        self.response_text(
-            format!(
-                "Translate the input into {}. Return only the translated text. Preserve every placeholder exactly. Apply this source-to-target glossary JSON exactly: {glossary}",
-                request.target_language
-            ),
-            request.text,
-        )
+        let mut instructions = format!(
+            "Translate the input into {}. Return only the translated text. Preserve every placeholder exactly. Apply this source-to-target glossary JSON exactly: {glossary}",
+            request.target_language
+        );
+        if let Some(correction) = request.placeholder_correction {
+            write!(instructions, " Placeholder correction: {correction}")
+                .expect("writing to a String cannot fail");
+        }
+        self.response_text(instructions, request.text)
     }
 
     fn model_id(&self) -> &str {
@@ -991,6 +1105,7 @@ mod tests {
             text: "Hello",
             target_language: "zh-CN",
             glossary: &EMPTY_GLOSSARY,
+            placeholder_correction: None,
         }
     }
 

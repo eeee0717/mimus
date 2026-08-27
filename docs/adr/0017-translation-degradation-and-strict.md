@@ -29,10 +29,12 @@ existing destination.
    Typeset creates no replacement for that paragraph.
 2. Every placeholder violation subtype gets one semantic retry after validation. This budget is
    independent of transport retries and of the echo retry below. A second invalid response follows
-   the existing paragraph degradation path. Invalid responses remain absent from the cache; the
-   retry emits paragraph-scoped `placeholder_retry` with the subtype and semantic response attempt.
-   Alternating echo and placeholder failures can therefore produce at most three semantic
-   responses for one paragraph.
+   the existing paragraph degradation path. The retry request adds a correction scoped to the
+   observed subtype: it names missing, duplicated, or unknown tokens, gives the required formula or
+   bold-tag order, or requires complete tokens. It does not change the source request, cache key, or
+   validator. Invalid responses remain absent from the cache; the retry emits paragraph-scoped
+   `placeholder_retry` with the subtype and semantic response attempt. Alternating echo and
+   placeholder failures can therefore produce at most three semantic responses for one paragraph.
 3. A response byte-for-byte equal to the prepared request is `TranslationOutcome::Identity`, not a
    placeholder violation. A translation-worthy shape (any alphabetic content except an email
    address) gets one semantic retry. If the second response is also an echo, the paragraph keeps
