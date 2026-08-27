@@ -7,13 +7,15 @@ version = "0.0.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/eeee0717/mimus"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.dependencies]
 mimus-core = { path = "crates/mimus-core" }
 clap = { version = "4", features = ["derive"] }
 insta = "1"
+image = { version = "0.25", default-features = false }
 lopdf = { version = "0.44", default-features = false }
+ort = "=2.0.0-rc.13"
 pdfium-render = { version = "=0.9.1", default-features = false, features = ["pdfium_7763", "thread_safe"] }
 quick-xml = "0.41"
 rayon = "1"

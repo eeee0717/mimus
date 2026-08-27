@@ -914,7 +914,7 @@ fn parse_encoding_cmap(bytes: &[u8]) -> FontResult<CodeMap> {
     let mut map = CodeMap::default();
     parse_sections(&tokens, |kind, entries| match kind {
         Section::CodeSpace => {
-            for entry in entries.chunks_exact(2) {
+            for entry in entries.as_chunks::<2>().0 {
                 let (CMapToken::Bytes(low), CMapToken::Bytes(high)) = (&entry[0], &entry[1]) else {
                     return Err(FontFailure);
                 };
@@ -927,7 +927,7 @@ fn parse_encoding_cmap(bytes: &[u8]) -> FontResult<CodeMap> {
             Ok(())
         }
         Section::CidChar => {
-            for entry in entries.chunks_exact(2) {
+            for entry in entries.as_chunks::<2>().0 {
                 let (CMapToken::Bytes(code), CMapToken::Number(cid)) = (&entry[0], &entry[1])
                 else {
                     return Err(FontFailure);
@@ -938,7 +938,7 @@ fn parse_encoding_cmap(bytes: &[u8]) -> FontResult<CodeMap> {
             Ok(())
         }
         Section::CidRange => {
-            for entry in entries.chunks_exact(3) {
+            for entry in entries.as_chunks::<3>().0 {
                 let (CMapToken::Bytes(low), CMapToken::Bytes(high), CMapToken::Number(first)) =
                     (&entry[0], &entry[1], &entry[2])
                 else {
@@ -966,7 +966,7 @@ fn parse_unicode_cmap(bytes: &[u8]) -> FontResult<UnicodeMap> {
     let mut map = UnicodeMap::default();
     parse_sections(&tokens, |kind, entries| match kind {
         Section::CodeSpace => {
-            for entry in entries.chunks_exact(2) {
+            for entry in entries.as_chunks::<2>().0 {
                 let (CMapToken::Bytes(low), CMapToken::Bytes(high)) = (&entry[0], &entry[1]) else {
                     return Err(FontFailure);
                 };
@@ -979,7 +979,7 @@ fn parse_unicode_cmap(bytes: &[u8]) -> FontResult<UnicodeMap> {
             Ok(())
         }
         Section::BfChar => {
-            for entry in entries.chunks_exact(2) {
+            for entry in entries.as_chunks::<2>().0 {
                 let (CMapToken::Bytes(code), CMapToken::Bytes(unicode)) = (&entry[0], &entry[1])
                 else {
                     return Err(FontFailure);
@@ -1054,7 +1054,9 @@ fn cmap_tokens(bytes: &[u8]) -> FontResult<Vec<CMapToken>> {
                 }
                 tokens.push(CMapToken::Bytes(
                     nibbles
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|pair| pair[0] << 4 | pair[1])
                         .collect(),
                 ));
@@ -1275,11 +1277,13 @@ fn segment_codes(bytes: &[u8], spaces: &[CodeSpace]) -> Vec<Vec<u8>> {
 }
 
 fn decode_utf16be(bytes: &[u8]) -> FontResult<Vec<char>> {
-    if bytes.is_empty() || bytes.len() % 2 != 0 {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(2) {
         return Err(FontFailure);
     }
     let words = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
         .collect::<Vec<_>>();
     let mut chars = char::decode_utf16(words)

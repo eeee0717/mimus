@@ -388,7 +388,7 @@ fn validate_object_streams(pdf: &LopdfDocument) -> Result<()> {
                     let body_len = decoded.len() - first;
                     let mut object_numbers = BTreeSet::new();
                     let mut previous_offset = None;
-                    integers.chunks_exact(2).all(|pair| {
+                    integers.as_chunks::<2>().0.iter().all(|pair| {
                         let object_number = pair[0];
                         let offset = pair[1];
                         let ordered = previous_offset.is_none_or(|previous| offset >= previous);

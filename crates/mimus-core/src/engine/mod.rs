@@ -5,7 +5,10 @@ use serde::Deserialize;
 
 use crate::il::{LayoutLabel, LayoutSource, PageGeometry, Point, Rect};
 
+pub mod onnx_layout;
 pub mod pdfium;
+
+pub use onnx_layout::OnnxLayoutDetector;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageCharSnapshot {
@@ -91,6 +94,21 @@ pub trait PdfInspector: Send + Sync {
 
 pub trait Rasterizer: Send + Sync {
     fn rasterize_page(&self, pdf: &[u8], page_index: usize) -> Result<RgbaImage>;
+
+    fn rasterize_page_at_scale(
+        &self,
+        pdf: &[u8],
+        page_index: usize,
+        pixels_per_point: f32,
+    ) -> Result<RgbaImage> {
+        if (pixels_per_point - 1.0).abs() > f32::EPSILON {
+            return Err(MimusError::input(
+                InputReason::EngineMismatch,
+                "the rasterizer does not support the detector's requested resolution",
+            ));
+        }
+        self.rasterize_page(pdf, page_index)
+    }
 }
 
 pub trait PdfEngine: PdfInspector + Rasterizer {}
@@ -108,6 +126,10 @@ pub struct LayoutRegion {
 }
 
 pub trait LayoutDetector: Send + Sync {
+    fn raster_pixels_per_point(&self) -> f32 {
+        1.0
+    }
+
     fn detect(
         &self,
         page_index: usize,
