@@ -1458,6 +1458,18 @@ BabelDOC 的输出**不得作为唯一正确性 oracle**。它是参考实现而
 - 预期：译文均为 2 汉字宽缩进且三段一致
 - oracle：几何断言（首行首字符 x − 段落 box.x）· **M3** · 合法
 
+#### TYPE-13 · 可翻文字与 inline formula 共享 show operand
+- 触发：一个 `Tj` 字符串或 `TJ` 数组字符串同时包含普通文字与 inline formula 字符；
+  版面模型只把其中连续子区间标为公式
+- V1：**相关**——ADR-0020 的整 operand 重发要求会把同 operand 内的源文字一起画回，
+  因而当前只能 typed `typeset_protocol` fail closed
+- 构造：一个三行混排段，前两行使用 `(MIMUS) Tj` 与 `[(MIMUS)] TJ`，各有一个公式
+  glyph 与两侧文字共享 operand；第三行使用 `(MIMUS) Tj`，前四个公式 glyph 只与
+  末尾一个可翻文字 owner 共享 operand
+- 预期：仅公式 glyph 的源编码字节、源字体身份与相对几何被重发；普通文字只出现译文，
+  原 show advance 保持；无法逐 glyph 证明身份或矩阵时仍 typed fail closed
+- oracle：生产 CLI typed diagnostic + 双提取器文字 + decoded incremental content + 几何断言 · **M3** · 合法
+
 ### 3.8 扫描件判定（SCAN）
 
 #### SCAN-01 · 单页判据：删除文字层后 SSIM > 0.95

@@ -3020,10 +3020,20 @@ struct TypesetPlan {
 #[derive(Debug)]
 struct FormulaRelocation {
     spans: Vec<SpanKey>,
+    split_glyphs: BTreeMap<SpanKey, Vec<FormulaGlyphReplay>>,
     delta_x_pt: f64,
     delta_y_pt: f64,
     characters: Vec<TypesetCharacter>,
     source_fonts: Vec<il::FontRef>,
+}
+
+#[derive(Debug, Clone)]
+struct FormulaGlyphReplay {
+    encoded: Vec<u8>,
+    text_matrix: [f64; 6],
+    validation_baseline: il::Point,
+    font_resource_name: String,
+    font_size: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3263,6 +3273,11 @@ fn plan_paragraph<'a>(
         ));
     }
     let mixed_with_formula = source_segments.len() > 1;
+    let shared_formula_operand = paragraph_has_shared_formula_operand(
+        paragraph,
+        geometry.content_objects,
+        &content_object_numbers,
+    );
     let fixed_plans = source_segments
         .iter()
         .zip(&translated_segments)
@@ -3280,6 +3295,7 @@ fn plan_paragraph<'a>(
             )
         })
         .collect::<std::result::Result<Vec<_>, _>>();
+    let mut fixed_slot_overflow = false;
     match fixed_plans {
         Ok(plans) => {
             let paragraph_ink = plans
@@ -3287,10 +3303,31 @@ fn plan_paragraph<'a>(
                 .flat_map(|plan| plan.ink_bounds.iter().copied())
                 .collect::<Vec<_>>();
             if !rects_intersect_each_other(&paragraph_ink) {
-                return Ok(plans);
+                if !shared_formula_operand {
+                    return Ok(plans);
+                }
+                let plans = prepare_shared_formula_fixed_plans(
+                    paragraph,
+                    plans,
+                    geometry.extracted,
+                    geometry.content_objects,
+                    &content_object_numbers,
+                )
+                .ok_or(TypesetPlanError::Preserved(
+                    il::PreservedReason::TypesetProtocol,
+                ))?;
+                let paragraph_ink = plans
+                    .iter()
+                    .flat_map(|plan| plan.ink_bounds.iter().copied())
+                    .collect::<Vec<_>>();
+                if !rects_intersect_each_other(&paragraph_ink) {
+                    return Ok(plans);
+                }
             }
         }
-        Err(TypesetPlanError::Preserved(il::PreservedReason::TypesetOverflow)) => {}
+        Err(TypesetPlanError::Preserved(il::PreservedReason::TypesetOverflow)) => {
+            fixed_slot_overflow = true;
+        }
         Err(error) => return Err(error),
     }
     if mixed_with_formula && restored.is_some() && paragraph_source_line_count(paragraph) >= 2 {
@@ -3307,8 +3344,184 @@ fn plan_paragraph<'a>(
         .map(|plan| vec![plan]);
     }
     Err(TypesetPlanError::Preserved(
-        il::PreservedReason::TypesetOverflow,
+        if shared_formula_operand && !fixed_slot_overflow {
+            il::PreservedReason::TypesetProtocol
+        } else {
+            il::PreservedReason::TypesetOverflow
+        },
     ))
+}
+
+fn prepare_shared_formula_fixed_plans(
+    paragraph: &Paragraph,
+    mut plans: Vec<TypesetPlan>,
+    extracted: &ExtractedPage,
+    content_objects: &BTreeSet<lopdf::ObjectId>,
+    content_object_numbers: &BTreeSet<u32>,
+) -> Option<Vec<TypesetPlan>> {
+    let formula_units = source_formula_units(
+        paragraph,
+        extracted,
+        content_objects,
+        content_object_numbers,
+    )?;
+    let shared_spans = formula_units
+        .iter()
+        .flat_map(|unit| unit.split_glyphs.keys().copied())
+        .collect::<BTreeSet<_>>();
+    let owners = shared_spans
+        .iter()
+        .map(|span| {
+            let indices = plans
+                .iter()
+                .enumerate()
+                .filter_map(|(index, plan)| plan.spans.contains(span).then_some(index))
+                .collect::<Vec<_>>();
+            (*span, indices)
+        })
+        .collect::<BTreeMap<_, _>>();
+    if owners.values().all(|indices| indices.len() == 1) {
+        for unit in formula_units {
+            for (span, glyphs) in unit.split_glyphs {
+                let owner = owners.get(&span)?.first().copied()?;
+                let matching = unit
+                    .chars
+                    .iter()
+                    .zip(&unit.validation_baselines)
+                    .filter(|(character, _)| {
+                        unique_page_content(character, content_objects)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|object_id| span_key(character, object_id) == span)
+                    })
+                    .collect::<Vec<_>>();
+                let characters = matching
+                    .iter()
+                    .map(|(character, baseline)| {
+                        Some(TypesetCharacter {
+                            unicode: character.unicode?,
+                            baseline_origin: **baseline,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                let ink_bounds = matching
+                    .iter()
+                    .map(|(character, _)| character.visual_bbox)
+                    .reduce(Rect::union)?;
+                let source_fonts = matching
+                    .iter()
+                    .map(|(character, _)| character.font.clone())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                plans[owner].formula_relocations.push(FormulaRelocation {
+                    spans: vec![span],
+                    split_glyphs: BTreeMap::from([(span, glyphs)]),
+                    delta_x_pt: 0.0,
+                    delta_y_pt: 0.0,
+                    characters,
+                    source_fonts,
+                });
+                plans[owner].ink_bounds.push(ink_bounds);
+            }
+        }
+        return Some(plans);
+    }
+
+    let font_size = plans.first()?.font_size;
+    if plans.iter().any(|plan| {
+        (plan.font_size - font_size).abs() > 0.001
+            || plan.single_line_expansion.is_some()
+            || plan.multi_line_expansion.is_some()
+            || !plan.formula_relocations.is_empty()
+    }) {
+        return None;
+    }
+    let mut spans = plans
+        .iter()
+        .flat_map(|plan| plan.spans.iter().copied())
+        .collect::<Vec<_>>();
+    spans.sort_unstable();
+    spans.dedup();
+    if formula_units.iter().any(|unit| {
+        unit.split_glyphs
+            .keys()
+            .any(|span| spans.binary_search(span).is_err())
+    }) {
+        return None;
+    }
+    let mut lines = Vec::new();
+    let mut baselines = Vec::new();
+    let mut ink_bounds = Vec::new();
+    for plan in plans {
+        lines.extend(plan.lines);
+        baselines.extend(plan.baselines);
+        ink_bounds.extend(plan.ink_bounds);
+    }
+    let formula_relocations = formula_units
+        .into_iter()
+        .map(|unit| {
+            let characters = unit
+                .chars
+                .iter()
+                .zip(&unit.validation_baselines)
+                .map(|(character, baseline)| {
+                    Some(TypesetCharacter {
+                        unicode: character.unicode?,
+                        baseline_origin: *baseline,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?;
+            ink_bounds.push(unit.ink_bounds);
+            Some(FormulaRelocation {
+                spans: unit.spans,
+                split_glyphs: unit.split_glyphs,
+                delta_x_pt: 0.0,
+                delta_y_pt: 0.0,
+                characters,
+                source_fonts: unit.source_fonts,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(vec![TypesetPlan {
+        spans,
+        lines,
+        baselines,
+        formula_relocations,
+        ink_bounds,
+        font_size,
+        single_line_expansion: None,
+        multi_line_expansion: None,
+    }])
+}
+
+fn paragraph_has_shared_formula_operand(
+    paragraph: &Paragraph,
+    content_objects: &BTreeSet<lopdf::ObjectId>,
+    content_object_numbers: &BTreeSet<u32>,
+) -> bool {
+    let mut span_classes = BTreeMap::<SpanKey, (bool, bool)>::new();
+    for character in paragraph.chars() {
+        let Some(object_id) = unique_page_content(character, content_objects)
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        let classes = span_classes
+            .entry(span_key(character, object_id))
+            .or_default();
+        if prepared_character_class(character, content_object_numbers)
+            == PreparedCharacterClass::Formula
+        {
+            classes.0 = true;
+        } else {
+            classes.1 = true;
+        }
+    }
+    span_classes
+        .into_values()
+        .any(|(has_formula, has_other)| has_formula && has_other)
 }
 
 fn paragraph_source_line_count(paragraph: &Paragraph) -> usize {
@@ -3458,6 +3671,7 @@ struct SourceFormulaUnit<'a> {
     chars: Vec<&'a Char>,
     validation_baselines: Vec<il::Point>,
     spans: Vec<SpanKey>,
+    split_glyphs: BTreeMap<SpanKey, Vec<FormulaGlyphReplay>>,
     bounds: Rect,
     ink_bounds: Rect,
     source_fonts: Vec<il::FontRef>,
@@ -3659,7 +3873,7 @@ fn source_formula_units<'a>(
     content_objects: &BTreeSet<lopdf::ObjectId>,
     content_object_numbers: &BTreeSet<u32>,
 ) -> Option<Vec<SourceFormulaUnit<'a>>> {
-    let mut span_classes = BTreeMap::<SpanKey, (bool, bool)>::new();
+    let mut span_classes = BTreeMap::<SpanKey, (bool, bool, bool)>::new();
     for character in paragraph.chars() {
         let object_id = unique_page_content(character, content_objects)
             .ok()
@@ -3667,12 +3881,10 @@ fn source_formula_units<'a>(
         let entry = span_classes
             .entry(span_key(character, object_id))
             .or_default();
-        if prepared_character_class(character, content_object_numbers)
-            == PreparedCharacterClass::Formula
-        {
-            entry.0 = true;
-        } else {
-            entry.1 = true;
+        match prepared_character_class(character, content_object_numbers) {
+            PreparedCharacterClass::Formula => entry.0 = true,
+            PreparedCharacterClass::Text { .. } => entry.1 = true,
+            PreparedCharacterClass::Passthrough => entry.2 = true,
         }
     }
     let mut grouped = Vec::<Vec<&Char>>::new();
@@ -3714,14 +3926,35 @@ fn source_formula_units<'a>(
                 .collect::<Vec<_>>();
             spans.sort_unstable();
             spans.dedup();
-            if spans.is_empty()
-                || spans.iter().any(|span| {
-                    span_classes
-                        .get(span)
-                        .is_none_or(|class| !class.0 || class.1)
-                })
-            {
+            if spans.is_empty() {
                 return None;
+            }
+            let mut split_glyphs = BTreeMap::new();
+            for span in &spans {
+                let &(has_formula, has_text, has_passthrough) = span_classes.get(span)?;
+                if !has_formula
+                    || has_passthrough
+                    || !paragraph_owns_walked_span(paragraph, extracted, *span, content_objects)
+                {
+                    return None;
+                }
+                if !has_text {
+                    continue;
+                }
+                let glyphs = chars
+                    .iter()
+                    .filter(|character| {
+                        unique_page_content(character, content_objects)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|object_id| span_key(character, object_id) == *span)
+                    })
+                    .map(|character| formula_glyph_replay(extracted, character))
+                    .collect::<Option<Vec<_>>>()?;
+                if glyphs.is_empty() {
+                    return None;
+                }
+                split_glyphs.insert(*span, glyphs);
             }
             let metric_bounds = chars
                 .iter()
@@ -3744,20 +3977,85 @@ fn source_formula_units<'a>(
             let validation_baselines = chars
                 .iter()
                 .map(|character| {
-                    formula_validation_baseline(extracted, character)
-                        .unwrap_or(character.baseline_origin)
+                    let object_id = unique_page_content(character, content_objects)
+                        .ok()
+                        .flatten()?;
+                    if split_glyphs.contains_key(&span_key(character, object_id)) {
+                        formula_glyph_replay(extracted, character)
+                            .map(|glyph| glyph.validation_baseline)
+                    } else {
+                        Some(
+                            formula_validation_baseline(extracted, character)
+                                .unwrap_or(character.baseline_origin),
+                        )
+                    }
                 })
-                .collect();
+                .collect::<Option<Vec<_>>>()?;
             Some(SourceFormulaUnit {
                 chars,
                 validation_baselines,
                 spans,
+                split_glyphs,
                 bounds,
                 ink_bounds: visual_bounds,
                 source_fonts,
             })
         })
         .collect()
+}
+
+fn paragraph_owns_walked_span(
+    paragraph: &Paragraph,
+    extracted: &ExtractedPage,
+    span: SpanKey,
+    content_objects: &BTreeSet<lopdf::ObjectId>,
+) -> bool {
+    let paragraph_count = paragraph
+        .chars()
+        .iter()
+        .filter(|character| {
+            unique_page_content(character, content_objects)
+                .ok()
+                .flatten()
+                .is_some_and(|object_id| span_key(character, object_id) == span)
+        })
+        .count();
+    let walked_count = extracted
+        .walked_characters
+        .iter()
+        .filter(|character| {
+            character.content_object == span.0
+                && character.byte_start == span.1
+                && character.byte_end == span.2
+        })
+        .count();
+    paragraph_count > 0 && paragraph_count == walked_count
+}
+
+fn formula_glyph_replay(extracted: &ExtractedPage, character: &Char) -> Option<FormulaGlyphReplay> {
+    let mut matching = extracted.walked_characters.iter().filter(|walked| {
+        walked.content_object.0 == character.passthrough.content_object
+            && walked.byte_start == character.passthrough.byte_start
+            && walked.byte_end == character.passthrough.byte_end
+            && walked.code == character.code
+            && walked.encoded == character.passthrough.encoded
+            && walked.font == character.font
+            && point_close(walked.baseline_origin, character.baseline_origin, 1e-7)
+    });
+    let walked = matching.next()?;
+    if matching.next().is_some()
+        || walked.encoded.is_empty()
+        || walked.source_glyph_scalar_count != 1
+    {
+        return None;
+    }
+    Some(FormulaGlyphReplay {
+        encoded: walked.encoded.clone(),
+        text_matrix: walked.text_matrix_before_glyph,
+        validation_baseline: walked.baseline_origin,
+        font_resource_name: walked.font.resource_name.clone(),
+        font_size: walked.font_size,
+    })
 }
 
 fn place_formula_flow(
@@ -3825,6 +4123,7 @@ fn place_formula_flow(
                 formula_ink.push(translated_rect(unit.ink_bounds, delta_x_pt, delta_y_pt));
                 formula_relocations.push(FormulaRelocation {
                     spans: unit.spans.clone(),
+                    split_glyphs: unit.split_glyphs.clone(),
                     delta_x_pt,
                     delta_y_pt,
                     characters,
@@ -4694,6 +4993,19 @@ fn install_formula_relocation(
     replacements: &mut BTreeMap<SpanKey, Vec<u8>>,
 ) -> Result<()> {
     for span in &relocation.spans {
+        if let Some(glyphs) = relocation.split_glyphs.get(span) {
+            install_split_formula_relocation(
+                *span,
+                glyphs,
+                relocation.delta_x_pt,
+                relocation.delta_y_pt,
+                streams,
+                content_transforms,
+                text_show_states,
+                replacements,
+            )?;
+            continue;
+        }
         let source = streams
             .get(&span.0)
             .and_then(|stream| stream.get(span.1..span.2))
@@ -4741,6 +5053,83 @@ fn install_formula_relocation(
             ));
         }
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn install_split_formula_relocation(
+    span: SpanKey,
+    glyphs: &[FormulaGlyphReplay],
+    delta_x_pt: f64,
+    delta_y_pt: f64,
+    streams: &BTreeMap<lopdf::ObjectId, &[u8]>,
+    content_transforms: &BTreeMap<SpanKey, [f64; 6]>,
+    text_show_states: &BTreeMap<SpanKey, TextShowState>,
+    replacements: &mut BTreeMap<SpanKey, Vec<u8>>,
+) -> Result<()> {
+    let content_transform = content_transforms.get(&span).ok_or_else(|| {
+        MimusError::internal(
+            InternalReason::InvariantViolation,
+            "split formula span has no active content transform",
+        )
+    })?;
+    let (delta_x, delta_y) = content_relative_delta(*content_transform, delta_x_pt, delta_y_pt)
+        .ok_or_else(|| {
+            MimusError::internal(
+                InternalReason::InvariantViolation,
+                "split formula span has a singular content transform",
+            )
+        })?;
+    let state_tail = text_show_state_tail(span, streams, text_show_states)?;
+    let graphics_tail = [b"Q\n".as_slice(), state_tail.as_slice()].concat();
+    let replacement = replacements.get_mut(&span).ok_or_else(|| {
+        MimusError::internal(
+            InternalReason::InvariantViolation,
+            "split formula span was not neutralized by its translated owner",
+        )
+    })?;
+    if replacement.ends_with(&graphics_tail) {
+        replacement.truncate(replacement.len() - graphics_tail.len());
+    } else if replacement.ends_with(&state_tail) {
+        replacement.truncate(replacement.len() - state_tail.len());
+        replacement.extend_from_slice(b"q\n");
+    } else {
+        return Err(MimusError::internal(
+            InternalReason::InvariantViolation,
+            "split formula span has an incompatible translated replacement",
+        ));
+    }
+    replacement.extend_from_slice(
+        format!(
+            "q\n1 0 0 1 {} {} cm\n",
+            pdf_number(delta_x),
+            pdf_number(delta_y)
+        )
+        .as_bytes(),
+    );
+    for glyph in glyphs {
+        let [a, b, c, d, e, f] = glyph.text_matrix;
+        replacement.extend_from_slice(
+            format!(
+                "/{} {} Tf\n{} {} {} {} {} {} Tm <",
+                glyph.font_resource_name,
+                pdf_number(glyph.font_size),
+                pdf_number(a),
+                pdf_number(b),
+                pdf_number(c),
+                pdf_number(d),
+                pdf_number(e),
+                pdf_number(f)
+            )
+            .as_bytes(),
+        );
+        for byte in &glyph.encoded {
+            replacement.extend_from_slice(format!("{byte:02X}").as_bytes());
+        }
+        replacement.extend_from_slice(b"> Tj\n");
+    }
+    replacement.extend_from_slice(b"Q\n");
+    replacement.extend_from_slice(&graphics_tail);
     Ok(())
 }
 
@@ -8034,6 +8423,140 @@ mod tests {
             .map(|character| character.unicode)
             .collect::<String>();
         assert_eq!(values, "M中文");
+    }
+
+    #[test]
+    fn formula_relocation_rejects_a_show_operand_not_fully_owned_by_its_paragraph() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let mut formula = paragraph.chars()[1].clone();
+        let layout = formula.layout.as_mut().unwrap();
+        layout.label = LayoutLabel::InlineFormula;
+        layout.policy = TranslationPolicy::Passthrough;
+        paragraph.text = TextCarrier::Chars {
+            chars: vec![formula],
+        };
+        let extracted = &document.extracted_pages[0];
+        let content_objects = extracted
+            .content_streams
+            .iter()
+            .map(|stream| stream.object_id)
+            .collect::<BTreeSet<_>>();
+        let content_object_numbers = content_objects
+            .iter()
+            .map(|object_id| object_id.0)
+            .collect::<BTreeSet<_>>();
+
+        assert!(
+            source_formula_units(
+                paragraph,
+                extracted,
+                &content_objects,
+                &content_object_numbers,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn formula_relocation_rejects_other_passthrough_text_in_a_shared_operand() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        let formula_layout = chars[1].layout.as_mut().unwrap();
+        formula_layout.label = LayoutLabel::InlineFormula;
+        formula_layout.policy = TranslationPolicy::Passthrough;
+        let passthrough_layout = chars[2].layout.as_mut().unwrap();
+        passthrough_layout.label = LayoutLabel::Number;
+        passthrough_layout.policy = TranslationPolicy::Passthrough;
+        let extracted = &document.extracted_pages[0];
+        let content_objects = extracted
+            .content_streams
+            .iter()
+            .map(|stream| stream.object_id)
+            .collect::<BTreeSet<_>>();
+        let content_object_numbers = content_objects
+            .iter()
+            .map(|object_id| object_id.0)
+            .collect::<BTreeSet<_>>();
+
+        assert!(
+            source_formula_units(
+                paragraph,
+                extracted,
+                &content_objects,
+                &content_object_numbers,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn formula_relocation_rejects_a_multi_scalar_source_glyph() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        let formula = &mut chars[1];
+        let layout = formula.layout.as_mut().unwrap();
+        layout.label = LayoutLabel::InlineFormula;
+        layout.policy = TranslationPolicy::Passthrough;
+        document.extracted_pages[0].walked_characters[1].source_glyph_scalar_count = 2;
+        let extracted = &document.extracted_pages[0];
+        let content_objects = extracted
+            .content_streams
+            .iter()
+            .map(|stream| stream.object_id)
+            .collect::<BTreeSet<_>>();
+        let content_object_numbers = content_objects
+            .iter()
+            .map(|object_id| object_id.0)
+            .collect::<BTreeSet<_>>();
+
+        assert!(
+            source_formula_units(
+                paragraph,
+                extracted,
+                &content_objects,
+                &content_object_numbers,
+            )
+            .is_none()
+        );
     }
 
     #[test]
