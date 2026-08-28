@@ -251,6 +251,7 @@ pub enum DiagnosticId {
     UnsupportedOutputGlyph,
     SingleLineBoundsExpanded,
     MultiLineBoundsExpanded,
+    TypesetOverflowDetail,
     DroppedDiagnostics,
 }
 
@@ -309,6 +310,10 @@ pub enum RecoveryKind {
     /// Form BBox 端点倒序；两轴按 min/max 规范化后继续执行。
     #[serde(rename = "normalized_form_bbox")]
     NormalizedFormBBox,
+    /// Form 内的字符整体落在累积 `/BBox` 裁剪框之外（PDF 32000-1:2008 §8.10.2），
+    /// 与渲染器一致地判为不可见：不进障碍集、不进 fallback 聚类、不进翻译集。
+    #[serde(rename = "clipped_form_content")]
+    ClippedFormContent,
     /// Form 退出时仍有未闭合的 `q`，仅丢弃子作用域的栈。
     ScopedGraphicsStateUnclosed,
     /// Form 退出时仍有操作数，仅丢弃子作用域的尾部。
@@ -489,6 +494,17 @@ pub enum Diagnostic {
         overflow_top_pt: f64,
         overflow_bottom_pt: f64,
     },
+    /// 段落因每个候选字号的墨迹都撞上障碍或页面边界而 `typeset_overflow` 保留时，
+    /// 逐段公开容器盒、按重叠面积排序的有界障碍样本与实际尝试过的字号序列。
+    TypesetOverflowDetail {
+        page_index: usize,
+        paragraph_index: usize,
+        container: [f64; 4],
+        attempted_font_sizes_pt: Vec<f64>,
+        obstacle_count: usize,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        obstacles: Vec<[f64; 4]>,
+    },
 }
 
 impl Diagnostic {
@@ -515,6 +531,7 @@ impl Diagnostic {
             Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
             Self::SingleLineBoundsExpanded { .. } => DiagnosticId::SingleLineBoundsExpanded,
             Self::MultiLineBoundsExpanded { .. } => DiagnosticId::MultiLineBoundsExpanded,
+            Self::TypesetOverflowDetail { .. } => DiagnosticId::TypesetOverflowDetail,
         }
     }
 
@@ -674,6 +691,15 @@ pub enum DiagnosticEvent {
         overflow_top_pt: f64,
         overflow_bottom_pt: f64,
     },
+    TypesetOverflowDetail {
+        page_index: usize,
+        paragraph_index: usize,
+        container: [f64; 4],
+        attempted_font_sizes_pt: Vec<f64>,
+        obstacle_count: usize,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        obstacles: Vec<[f64; 4]>,
+    },
     DroppedDiagnostics {
         count: usize,
         counts_by_id: Vec<DroppedDiagnosticCount>,
@@ -704,6 +730,7 @@ impl DiagnosticEvent {
             Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
             Self::SingleLineBoundsExpanded { .. } => DiagnosticId::SingleLineBoundsExpanded,
             Self::MultiLineBoundsExpanded { .. } => DiagnosticId::MultiLineBoundsExpanded,
+            Self::TypesetOverflowDetail { .. } => DiagnosticId::TypesetOverflowDetail,
             Self::DroppedDiagnostics { .. } => DiagnosticId::DroppedDiagnostics,
         }
     }
@@ -938,6 +965,21 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 reading_order: *reading_order,
                 overflow_top_pt: *overflow_top_pt,
                 overflow_bottom_pt: *overflow_bottom_pt,
+            },
+            Diagnostic::TypesetOverflowDetail {
+                page_index,
+                paragraph_index,
+                container,
+                attempted_font_sizes_pt,
+                obstacle_count,
+                obstacles,
+            } => Self::TypesetOverflowDetail {
+                page_index: *page_index,
+                paragraph_index: *paragraph_index,
+                container: *container,
+                attempted_font_sizes_pt: attempted_font_sizes_pt.clone(),
+                obstacle_count: *obstacle_count,
+                obstacles: obstacles.clone(),
             },
         }
     }

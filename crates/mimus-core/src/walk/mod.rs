@@ -15,6 +15,9 @@ use tokenizer::{CompositeDelimiter, InlineImageLengthSource, Token, TokenKind, t
 
 pub(crate) const MAX_STREAM_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_FORM_DEPTH: usize = 64;
+/// Form `/BBox` 裁剪判定的边界容差。字符只有超出裁剪框这么多才算被裁掉，
+/// 让浮点噪声与刚好贴边的字形留在可见集里。
+const FORM_CLIP_TOLERANCE_PT: f64 = 0.01;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WalkedChar {
@@ -159,6 +162,9 @@ struct Walker<'a> {
     active_forms: Vec<ObjectId>,
     form_cycles: Vec<Vec<ObjectId>>,
     normalized_form_object_ids: BTreeSet<ObjectId>,
+    /// 累积的 Form `/BBox` 裁剪框（页面坐标，轴对齐）。`None` = 页面本体，无 form 裁剪。
+    form_clip: Option<Rect>,
+    clipped_form_object_ids: BTreeSet<ObjectId>,
     degradation: Option<PageDegradeReason>,
     visual_rotation: Matrix,
 }
@@ -171,6 +177,7 @@ struct ScopeSnapshot {
     compatibility_depth: usize,
     text_object_is_implicit: bool,
     content_object: ObjectId,
+    form_clip: Option<Rect>,
 }
 
 /// 一页走查的结果。`recoveries` 用集合而非计数：ADR-0013 §3 要求恢复决定
@@ -182,6 +189,7 @@ pub struct PageWalk {
     pub recoveries: BTreeSet<RecoveryKind>,
     pub form_cycles: Vec<Vec<ObjectId>>,
     pub normalized_form_object_ids: BTreeSet<ObjectId>,
+    pub clipped_form_object_ids: BTreeSet<ObjectId>,
     pub(crate) content_streams: Vec<WalkedContentStream>,
 }
 
@@ -247,6 +255,8 @@ pub(crate) fn walk_page_detailed_with_rotation(
         active_forms: Vec::new(),
         form_cycles: Vec::new(),
         normalized_form_object_ids: BTreeSet::new(),
+        form_clip: None,
+        clipped_form_object_ids: BTreeSet::new(),
         degradation: None,
         visual_rotation: Matrix::page_rotation(rotate_degrees),
     };
@@ -289,6 +299,7 @@ pub(crate) fn walk_page_detailed_with_rotation(
         recoveries: walker.recoveries,
         form_cycles: walker.form_cycles,
         normalized_form_object_ids: walker.normalized_form_object_ids,
+        clipped_form_object_ids: walker.clipped_form_object_ids,
         content_streams,
     })
 }
@@ -545,7 +556,7 @@ impl Walker<'_> {
             .ok()
             .flatten()
             .and_then(|values| normalize_form_bbox(&values));
-        let Some((_bbox, reordered)) = normalized_bbox else {
+        let Some((bbox, reordered)) = normalized_bbox else {
             return Err(self.degrade_error(
                 PageDegradeReason::BadFormBBox,
                 format!(
@@ -609,8 +620,28 @@ impl Walker<'_> {
             }
         };
 
+        // PDF 32000-1:2008 §8.10.2 Table 95：`/BBox` 在 form 坐标系下表述，并且在
+        // `/Matrix` 与 CTM 连接之后作为裁剪路径生效。旋转 / 斜切的 form 会把矩形
+        // 映射成平行四边形，这里取其轴对齐外接框——**故意取超集**，宁可少裁也不
+        // 误裁真实墨迹。
+        let clip = transformed_box(
+            self.state.ctm.then(matrix),
+            bbox[0],
+            bbox[1],
+            bbox[2],
+            bbox[3],
+        );
+        let form_clip = if rect_is_finite(clip) {
+            Some(match self.form_clip {
+                Some(inherited) => intersect_rect(inherited, clip),
+                None => clip,
+            })
+        } else {
+            self.form_clip
+        };
+
         self.active_forms.push(object_id);
-        let snapshot = self.enter_scope(resources, matrix, object_id);
+        let snapshot = self.enter_scope(resources, matrix, object_id, form_clip);
         let result = match tokenize(&decoded) {
             Ok(tokens) => self.walk(tokens).map(|()| self.finish_scoped()),
             Err(failure) => {
@@ -629,6 +660,7 @@ impl Walker<'_> {
         resources: Dictionary,
         matrix: Matrix,
         content_object: ObjectId,
+        form_clip: Option<Rect>,
     ) -> ScopeSnapshot {
         let mut child_state = self.state.clone();
         child_state.ctm = child_state.ctm.then(matrix);
@@ -643,6 +675,7 @@ impl Walker<'_> {
             compatibility_depth: std::mem::replace(&mut self.compatibility_depth, 0),
             text_object_is_implicit: std::mem::replace(&mut self.text_object_is_implicit, false),
             content_object: std::mem::replace(&mut self.content_object, content_object),
+            form_clip: std::mem::replace(&mut self.form_clip, form_clip),
         }
     }
 
@@ -654,6 +687,22 @@ impl Walker<'_> {
         self.compatibility_depth = snapshot.compatibility_depth;
         self.text_object_is_implicit = snapshot.text_object_is_implicit;
         self.content_object = snapshot.content_object;
+        self.form_clip = snapshot.form_clip;
+    }
+
+    /// 字符是否整体落在累积 Form 裁剪框之外。只有**完全**在某一侧才判为裁掉，
+    /// 部分相交一律保留（ADR-0013 §3：有界、可报告、不扩散）。
+    fn clipped_by_form_bbox(&self, metric_box: Rect) -> bool {
+        let Some(clip) = self.form_clip else {
+            return false;
+        };
+        if !rect_is_finite(metric_box) {
+            return false;
+        }
+        metric_box.right < clip.left - FORM_CLIP_TOLERANCE_PT
+            || metric_box.left > clip.right + FORM_CLIP_TOLERANCE_PT
+            || metric_box.top < clip.bottom - FORM_CLIP_TOLERANCE_PT
+            || metric_box.bottom > clip.top + FORM_CLIP_TOLERANCE_PT
     }
 
     fn finish_scoped(&mut self) {
@@ -864,11 +913,18 @@ impl Walker<'_> {
                     part_width * self.state.horizontal_scale,
                     font.ascent_em * self.state.font_size + self.state.rise,
                 );
+                let clipped_out = self.clipped_by_form_bbox(metric_box);
+                if clipped_out {
+                    self.recoveries.insert(RecoveryKind::ClippedFormContent);
+                    if let Some(&form) = self.active_forms.last() {
+                        self.clipped_form_object_ids.insert(form);
+                    }
+                }
                 self.characters.push(WalkedChar {
                     unicode,
                     unicode_provenance: glyph.unicode_provenance,
                     code: glyph.code,
-                    visible: !matches!(self.state.rendering_mode, 3 | 7),
+                    visible: !matches!(self.state.rendering_mode, 3 | 7) && !clipped_out,
                     locatable,
                     encoded: glyph.encoded.clone(),
                     font: font.reference.clone(),
@@ -1114,6 +1170,21 @@ fn object_number(object: &Object) -> Option<f64> {
         Object::Integer(value) => Some(*value as f64),
         Object::Real(value) => Some(f64::from(*value)),
         _ => None,
+    }
+}
+
+fn rect_is_finite(rect: Rect) -> bool {
+    [rect.left, rect.bottom, rect.right, rect.top]
+        .iter()
+        .all(|value| value.is_finite())
+}
+
+fn intersect_rect(left: Rect, right: Rect) -> Rect {
+    Rect {
+        left: left.left.max(right.left),
+        bottom: left.bottom.max(right.bottom),
+        right: left.right.min(right.right),
+        top: left.top.min(right.top),
     }
 }
 
@@ -2047,6 +2118,122 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// 页面调用 `/Outer`（BBox 上沿 `outer_top`），`/Outer` 再调用 `/Inner`
+    /// （BBox 上沿 200），`/Inner` 在 `baseline_y` 处画 MIMUS。用来验证裁剪框
+    /// 沿嵌套链求交，而不是只看最内层。
+    fn walk_nested_form_clip(outer_top: i32, baseline_y: i32) -> PageWalk {
+        let mut document = Document::load(fixture()).unwrap();
+        let mut inner_resources = Dictionary::new();
+        inner_resources.set("Font", lopdf::dictionary! { "F1" => (5, 0) });
+        let inner = document.add_object(lopdf::Stream::new(
+            lopdf::dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 300.into(), 200.into()],
+                "Resources" => inner_resources,
+            },
+            format!("BT /F1 12 Tf 1 0 0 1 72 {baseline_y} Tm (MIMUS) Tj ET\n").into_bytes(),
+        ));
+        let outer = document.add_object(lopdf::Stream::new(
+            lopdf::dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 300.into(), outer_top.into()],
+                "Resources" => lopdf::dictionary! {
+                    "XObject" => lopdf::dictionary! { "Inner" => inner },
+                },
+            },
+            b"/Inner Do\n".to_vec(),
+        ));
+        document
+            .get_object_mut((4, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("XObject", lopdf::dictionary! { "Outer" => outer });
+        document
+            .get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(b"/Outer Do\n".to_vec());
+        let page_id = document.get_pages()[&1];
+        walk_page(&document, page_id).unwrap()
+    }
+
+    #[test]
+    fn production_walk_marks_form_text_outside_the_bbox_invisible_without_losing_it() {
+        let document = Document::load(fixture_path("unit-xobj-12-form-bbox-clip")).unwrap();
+        let pages = document.get_pages();
+
+        let inside = walk_page(&document, pages[&1]).unwrap();
+        assert_eq!(text_of(&inside), "MIMUSMIMUS");
+        assert!(inside.characters.iter().all(|character| character.visible));
+        assert!(inside.recoveries.is_empty());
+        assert!(inside.clipped_form_object_ids.is_empty());
+
+        let clipped = walk_page(&document, pages[&2]).unwrap();
+        // 被裁掉的字符仍然留在走查结果里——提取视图（poppler / PDFium text page）
+        // 也看得到它们，抽掉会凭空制造 engine-only 残差（ADR-0015）。
+        assert_eq!(text_of(&clipped), "MIMUSMIMUS");
+        assert_eq!(
+            clipped
+                .characters
+                .iter()
+                .filter(|character| !character.visible)
+                .map(|character| (character.unicode, character.baseline_origin.y))
+                .collect::<Vec<_>>(),
+            [
+                (Some('M'), 125.0),
+                (Some('I'), 125.0),
+                (Some('M'), 125.0),
+                (Some('U'), 125.0),
+                (Some('S'), 125.0),
+            ]
+        );
+        assert_eq!(
+            clipped.recoveries,
+            BTreeSet::from([RecoveryKind::ClippedFormContent])
+        );
+        assert_eq!(
+            clipped.clipped_form_object_ids,
+            BTreeSet::from([(11, 0)]),
+            "the innermost Form owning the clipped ink is reported"
+        );
+    }
+
+    #[test]
+    fn form_bbox_clipping_intersects_across_nesting_and_keeps_straddling_glyphs() {
+        // 内层 BBox 上沿 200 容得下 y=125 的文字，外层上沿 100 容不下：裁剪框必须求交。
+        let clipped = walk_nested_form_clip(100, 125);
+        assert_eq!(text_of(&clipped), "MIMUS");
+        assert!(
+            clipped
+                .characters
+                .iter()
+                .all(|character| !character.visible)
+        );
+        assert_eq!(
+            clipped.recoveries,
+            BTreeSet::from([RecoveryKind::ClippedFormContent])
+        );
+
+        // 外层放宽到 200 后同一段文字照常可见——变量只有外层 BBox 上沿。
+        let inside = walk_nested_form_clip(200, 125);
+        assert!(inside.characters.iter().all(|character| character.visible));
+        assert!(inside.recoveries.is_empty());
+
+        // 跨越裁剪边界的字形保守保留：度量盒 [95.168, 109.136] 与上沿 100 相交。
+        let straddling = walk_nested_form_clip(100, 98);
+        assert!(
+            straddling
+                .characters
+                .iter()
+                .all(|character| character.visible)
+        );
+        assert!(straddling.clipped_form_object_ids.is_empty());
     }
 
     #[test]

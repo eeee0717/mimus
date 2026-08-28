@@ -627,21 +627,20 @@ pub fn scan_detect(document: &mut Document, context: &PassContext<'_>) -> Result
                         })
                         .map(|path| path.iter().map(|object_id| object_id.0).collect())
                         .collect();
-                    let form_object_count = if recovery == RecoveryKind::NormalizedFormBBox {
-                        walked.normalized_form_object_ids.len()
-                    } else {
-                        0
+                    let located_forms = match recovery {
+                        RecoveryKind::NormalizedFormBBox => {
+                            Some(&walked.normalized_form_object_ids)
+                        }
+                        RecoveryKind::ClippedFormContent => Some(&walked.clipped_form_object_ids),
+                        _ => None,
                     };
-                    let form_object_ids = if recovery == RecoveryKind::NormalizedFormBBox {
-                        walked
-                            .normalized_form_object_ids
-                            .iter()
-                            .take(MAX_REPORTED_FORM_OBJECT_IDS)
-                            .map(|object_id| object_id.0)
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
+                    let form_object_count = located_forms.map_or(0, BTreeSet::len);
+                    let form_object_ids = located_forms
+                        .into_iter()
+                        .flatten()
+                        .take(MAX_REPORTED_FORM_OBJECT_IDS)
+                        .map(|object_id| object_id.0)
+                        .collect();
                     document.diagnostics.push(Diagnostic::ContentRecovered {
                         page_index: page.index,
                         recovery,
@@ -2915,6 +2914,11 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                     planned_paragraphs.push((paragraph.reading_order, paragraph_plans));
                 }
                 Err(TypesetPlanError::Preserved(reason)) => {
+                    if reason == il::PreservedReason::TypesetOverflow {
+                        document
+                            .diagnostics
+                            .push(typeset_overflow_detail(page.index, paragraph, &obstacles));
+                    }
                     preserved.push((page.index, paragraph.reading_order, reason));
                 }
                 Err(TypesetPlanError::MissingGlyphs {
@@ -3208,6 +3212,68 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
     Ok(())
 }
 
+/// 逐段 `typeset_overflow` 明细。之前 NDJSON 里只有 `degradation_summary` 一行汇总，
+/// 无法回答「哪个障碍挡住了哪个字号」；这里公开容器盒、按与容器重叠面积排序的有界
+/// 障碍样本，以及 `plan_text_segment` 实际走过的字号序列（`preferred` 起每次 −0.5，
+/// 下探到 `MIN_FONT_SIZE_PT`）。
+fn typeset_overflow_detail(
+    page_index: usize,
+    paragraph: &Paragraph,
+    obstacles: &[Rect],
+) -> Diagnostic {
+    let chars = paragraph.chars();
+    let container = chars
+        .iter()
+        .filter_map(|character| character.layout.map(|layout| layout.bounds))
+        .reduce(Rect::union)
+        .unwrap_or(Rect {
+            left: 0.0,
+            bottom: 0.0,
+            right: 0.0,
+            top: 0.0,
+        });
+    let mut attempted_font_sizes_pt = Vec::new();
+    if !chars.is_empty() {
+        let preferred = chars
+            .iter()
+            .map(|character| character.font_size)
+            .sum::<f64>()
+            / chars.len() as f64;
+        let mut size = preferred.max(MIN_FONT_SIZE_PT);
+        loop {
+            attempted_font_sizes_pt.push(size);
+            if size <= MIN_FONT_SIZE_PT + 0.001 {
+                break;
+            }
+            size = (size - 0.5).max(MIN_FONT_SIZE_PT);
+        }
+        attempted_font_sizes_pt.truncate(MAX_REPORTED_TYPESET_FONT_SIZES);
+    }
+    let mut overlapping = obstacles
+        .iter()
+        .map(|obstacle| (intersection_area(container, *obstacle), *obstacle))
+        .filter(|(area, _)| *area > 0.0)
+        .collect::<Vec<_>>();
+    overlapping.sort_by(|left, right| right.0.total_cmp(&left.0));
+    Diagnostic::TypesetOverflowDetail {
+        page_index,
+        paragraph_index: paragraph.reading_order,
+        container: [
+            container.left,
+            container.bottom,
+            container.right,
+            container.top,
+        ],
+        attempted_font_sizes_pt,
+        obstacle_count: overlapping.len(),
+        obstacles: overlapping
+            .iter()
+            .take(MAX_REPORTED_TYPESET_OBSTACLES)
+            .map(|(_, obstacle)| [obstacle.left, obstacle.bottom, obstacle.right, obstacle.top])
+            .collect(),
+    }
+}
+
 fn paragraph_typeset_obstacles(
     page: &il::Page,
     extracted: &ExtractedPage,
@@ -3446,6 +3512,9 @@ impl<'a> OutputFontFaces<'a> {
 }
 
 const MIN_FONT_SIZE_PT: f64 = 8.0;
+/// `typeset_overflow_detail` 的样本上限——诊断要够定位，但不能随页面内容线性膨胀。
+const MAX_REPORTED_TYPESET_OBSTACLES: usize = 4;
+const MAX_REPORTED_TYPESET_FONT_SIZES: usize = 16;
 const LINE_ADVANCE_EM: f64 = 1.5;
 const SINGLE_LINE_MAX_VERTICAL_OVERFLOW_EM: f64 = 0.25;
 const SINGLE_LINE_MAX_VERTICAL_OVERFLOW_PT: f64 = 3.0;
@@ -8359,6 +8428,209 @@ mod tests {
                 &[],
             )
             .is_none()
+        );
+    }
+
+    /// 真实论文 `1706.03762v7.pdf` 页 12（0 基）段 69 `Attention Visualizations` 的
+    /// 几何：容器与原文足迹取自 L5-4 的 typeset IL，障碍取自被外层 Form `/BBox`
+    /// 裁掉的 `Input-Input Layer5` 的 `visual_bbox`（#110）。
+    #[test]
+    fn form_clipped_phantom_ink_is_the_only_thing_blocking_the_heading_it_covers() {
+        let output_fonts = test_output_fonts();
+        let container = Rect {
+            left: 108.0,
+            bottom: 707.5383632,
+            right: 230.767_948_8,
+            top: 718.286_088,
+        };
+        let page_bounds = Rect {
+            left: 0.0,
+            bottom: 0.0,
+            right: 612.0,
+            top: 792.0,
+        };
+        // `Input-Input Layer5` 的 18 个 glyph 里与容器相交的那 16 个的包络。
+        let phantom = Rect {
+            left: 109.110_816_955_566_4,
+            bottom: 711.335_205_078_125,
+            right: 234.453_857_421_875,
+            top: 726.445_617_675_781_2,
+        };
+        let source = "Attention Visualizations"
+            .chars()
+            .enumerate()
+            .map(|(index, unicode)| Char {
+                unicode: Some(unicode),
+                code: unicode as u32,
+                visible: true,
+                font: crate::il::FontRef {
+                    resource_name: "F87".to_owned(),
+                    object_number: 105,
+                    generation: 0,
+                },
+                font_size: 11.9552,
+                baseline_origin: crate::il::Point {
+                    x: 108.0 + index as f64 * 5.0,
+                    y: 710.037,
+                },
+                r#box: container,
+                visual_bbox: container,
+                text_transform: TextTransform::Upright,
+                implicit_space_before: false,
+                layout: Some(LayoutAssignment {
+                    label: LayoutLabel::FallbackLine,
+                    reading_order: 288,
+                    bounds: container,
+                    source: LayoutSource::FallbackLine,
+                    policy: TranslationPolicy::Translate,
+                }),
+                passthrough: PassthroughRef {
+                    content_object: 356,
+                    byte_start: 50,
+                    byte_end: 87,
+                    encoded: vec![unicode as u8],
+                },
+            })
+            .collect::<Vec<_>>();
+        let chars = source.iter().collect::<Vec<_>>();
+        let translated = "中文"
+            .chars()
+            .map(|value| crate::translate::StyledCharacter { value, bold: true })
+            .collect::<Vec<_>>();
+        let content_objects = BTreeSet::from([(356, 0)]);
+
+        let blocked = plan_text_segment(
+            &chars,
+            &translated,
+            &content_objects,
+            &output_fonts,
+            page_bounds,
+            &[phantom],
+            None,
+        );
+        assert!(
+            matches!(
+                blocked,
+                Err(TypesetPlanError::Preserved(
+                    il::PreservedReason::TypesetOverflow
+                ))
+            ),
+            "a visible obstacle covering the heading's own footprint must still degrade"
+        );
+
+        // 幽灵被判为不可见后它不再进入障碍集，同一段落照常排下译文。
+        let planned = plan_text_segment(
+            &chars,
+            &translated,
+            &content_objects,
+            &output_fonts,
+            page_bounds,
+            &[],
+            None,
+        )
+        .unwrap_or_else(|_| panic!("the heading fits its own footprint once the phantom is gone"));
+        assert_eq!(planned.lines.len(), 1);
+        assert!(planned.font_size >= MIN_FONT_SIZE_PT);
+        assert!(
+            !ink_bounds_are_safe(&planned.ink_bounds, page_bounds, &[phantom]),
+            "the planned ink really does sit under the phantom"
+        );
+        assert!(ink_bounds_are_safe(&planned.ink_bounds, page_bounds, &[]));
+    }
+
+    #[test]
+    fn typeset_overflow_detail_reports_the_container_obstacles_and_font_sizes() {
+        let container = Rect {
+            left: 108.0,
+            bottom: 707.5383632,
+            right: 230.767_948_8,
+            top: 718.286_088,
+        };
+        let phantom = Rect {
+            left: 109.110_816_955_566_4,
+            bottom: 711.335_205_078_125,
+            right: 234.453_857_421_875,
+            top: 726.445_617_675_781_2,
+        };
+        let far_away = Rect {
+            left: 0.0,
+            bottom: 0.0,
+            right: 10.0,
+            top: 10.0,
+        };
+        let paragraph = Paragraph {
+            reading_order: 69,
+            bounds: container,
+            text: TextCarrier::Chars {
+                chars: vec![Char {
+                    unicode: Some('A'),
+                    code: 65,
+                    visible: true,
+                    font: crate::il::FontRef {
+                        resource_name: "F87".to_owned(),
+                        object_number: 105,
+                        generation: 0,
+                    },
+                    font_size: 11.9552,
+                    baseline_origin: crate::il::Point {
+                        x: 108.0,
+                        y: 710.037,
+                    },
+                    r#box: container,
+                    visual_bbox: container,
+                    text_transform: TextTransform::Upright,
+                    implicit_space_before: false,
+                    layout: Some(LayoutAssignment {
+                        label: LayoutLabel::FallbackLine,
+                        reading_order: 288,
+                        bounds: container,
+                        source: LayoutSource::FallbackLine,
+                        policy: TranslationPolicy::Translate,
+                    }),
+                    passthrough: PassthroughRef {
+                        content_object: 356,
+                        byte_start: 50,
+                        byte_end: 87,
+                        encoded: vec![65],
+                    },
+                }],
+            },
+            translated_text: None,
+            preserved: None,
+        };
+
+        let Diagnostic::TypesetOverflowDetail {
+            page_index,
+            paragraph_index,
+            container: reported_container,
+            attempted_font_sizes_pt,
+            obstacle_count,
+            obstacles,
+        } = typeset_overflow_detail(12, &paragraph, &[far_away, phantom])
+        else {
+            panic!("typeset_overflow_detail must produce its own diagnostic");
+        };
+        assert_eq!(page_index, 12);
+        assert_eq!(paragraph_index, 69);
+        assert_eq!(
+            reported_container,
+            [
+                container.left,
+                container.bottom,
+                container.right,
+                container.top
+            ]
+        );
+        assert_eq!(
+            attempted_font_sizes_pt,
+            vec![
+                11.9552, 11.4552, 10.9552, 10.4552, 9.9552, 9.4552, 8.9552, 8.4552, 8.0
+            ]
+        );
+        assert_eq!(obstacle_count, 1, "only container-overlapping obstacles");
+        assert_eq!(
+            obstacles,
+            vec![[phantom.left, phantom.bottom, phantom.right, phantom.top]]
         );
     }
 
