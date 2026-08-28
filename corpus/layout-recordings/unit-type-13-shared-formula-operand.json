@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "pages": [
+    {
+      "page_index": 0,
+      "geometry": { "width": 300.0, "height": 200.0, "rotate_degrees": 0 },
+      "regions": [
+        {
+          "bounds": { "left": 72.0, "bottom": 109.168, "right": 260.0, "top": 151.136 },
+          "reading_order": 0,
+          "label": "text",
+          "source": "model",
+          "confidence": 1.0
+        },
+        {
+          "bounds": { "left": 82.356, "bottom": 137.168, "right": 85.896, "top": 151.136 },
+          "reading_order": 1,
+          "label": "inline_formula",
+          "source": "model",
+          "confidence": 1.0
+        },
+        {
+          "bounds": { "left": 96.252, "bottom": 123.168, "right": 105.036, "top": 137.136 },
+          "reading_order": 2,
+          "label": "inline_formula",
+          "source": "model",
+          "confidence": 1.0
+        },
+        {
+          "bounds": { "left": 72.0, "bottom": 109.168, "right": 105.036, "top": 123.136 },
+          "reading_order": 3,
+          "label": "inline_formula",
+          "source": "model",
+          "confidence": 1.0
+        }
+      ]
+    }
+  ]
+}

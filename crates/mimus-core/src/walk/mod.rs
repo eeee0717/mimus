@@ -33,6 +33,8 @@ pub struct WalkedChar {
     pub metric_box: Rect,
     pub text_transform: TextTransform,
     pub content_transform: [f64; 6],
+    pub text_matrix_before_glyph: [f64; 6],
+    pub source_glyph_scalar_count: usize,
     pub text_line_matrix: [f64; 6],
     pub text_matrix_after_show: [f64; 6],
     pub horizontal_scale: f64,
@@ -844,10 +846,12 @@ impl Walker<'_> {
             } else {
                 glyph.unicode.into_iter().map(Some).collect::<Vec<_>>()
             };
+            let source_glyph_scalar_count = unicode.len();
             let parts = unicode.len() as f64;
             let part_width = glyph_width / parts;
             let part_advance = total_advance / parts;
             for unicode in unicode {
+                let text_matrix_before_glyph = self.state.text_matrix.0;
                 let transform = self.state.ctm.then(self.state.text_matrix);
                 let locatable = !transform.is_singular();
                 let baseline = transform.point(0.0, self.state.rise);
@@ -874,6 +878,8 @@ impl Walker<'_> {
                     metric_box,
                     text_transform: classify_transform(self.visual_rotation.then(transform)),
                     content_transform: self.state.ctm.0,
+                    text_matrix_before_glyph,
+                    source_glyph_scalar_count,
                     text_line_matrix: self.state.line_matrix.0,
                     text_matrix_after_show: self.state.text_matrix.0,
                     horizontal_scale: self.state.horizontal_scale,

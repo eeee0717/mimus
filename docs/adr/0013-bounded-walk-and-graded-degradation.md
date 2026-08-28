@@ -32,10 +32,12 @@ Typeset 不再从 IL 重建整个 content stream。页面输出 = **原解码流
 Typeset 的恒等守卫从「全段单一 upright 字体 run」收窄为「**替换字节必须等于原字节**」。真正的非恒等重排（改字节宽度、嵌入新字体、重新断行）仍推迟到 #22 及以后，本 ADR 不为其预留结构。
 
 > 2026-08-27 修订：[ADR-0020](0020-inline-formula-flow-relocation.md) 进一步收窄了公式
-> span 不进入替换集的边界。`display_formula`、段外公式、未翻译段公式和不满足独占
-> operand 条件的公式仍逐字节透传；只有已翻译多行段内、独占 text-show operand span 的
-> `inline_formula` 可进入替换集，且只能在保留源 operand 字节、字体身份与内部相对几何
-> 的前提下整体平移重发。该修订不允许用译文字体或重编码字节替换公式。
+> span 不进入替换集的边界。`display_formula`、段外公式和未翻译段公式仍逐字节透传；
+> 已翻译多行段内的 `inline_formula` 可在独占 operand 中整体平移重发，也可在当前段完整
+> 拥有且不含其它 passthrough 类字符的共享 operand 中逐 glyph 分割重发。两条路径都必须
+> 保留公式 glyph 的源编码字节、字体身份与内部相对几何；独占路径另保留整个 operand 的
+> lexical bytes。该修订不允许用译文字体或重编码字节替换公式，无法唯一溯源时仍段级
+> fail closed。
 
 ### 2. 降级粒度：页级与段级，各有确定的保留语义
 
