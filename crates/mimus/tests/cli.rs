@@ -1279,8 +1279,8 @@ fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 149, "M1 closure fixture inventory changed");
-    assert_eq!(cases.len(), 87, "M1 closure case inventory changed");
+    assert_eq!(ids.len(), 150, "M1 closure fixture inventory changed");
+    assert_eq!(cases.len(), 88, "M1 closure case inventory changed");
 
     for id in ids {
         let input = fixture_path(&id);
@@ -1982,6 +1982,122 @@ fn recorded_layout_policy_drives_production_il_candidates_and_passthrough() {
     assert!(labels.contains("reference_content"));
     assert!(labels.contains("seal"));
     assert!(labels.contains("number"));
+}
+
+#[test]
+fn one_model_region_with_two_author_columns_preserves_column_ownership() {
+    let output = run_inspect_with_layout("unit-para-17-author-columns");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = parse_events(&output.stdout);
+    assert_one_terminal_last(&events, "result");
+    let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap();
+    assert_eq!(paragraphs.len(), 2, "{paragraphs:#?}");
+
+    let summaries = paragraphs
+        .iter()
+        .map(|paragraph| {
+            let chars = paragraph["text"]["chars"].as_array().unwrap();
+            let text = chars
+                .iter()
+                .filter_map(|character| character["unicode"].as_str())
+                .collect::<String>();
+            let left = chars
+                .iter()
+                .map(|character| character["box"]["left"].as_f64().unwrap())
+                .min_by(f64::total_cmp)
+                .unwrap();
+            let right = chars
+                .iter()
+                .map(|character| character["box"]["right"].as_f64().unwrap())
+                .max_by(f64::total_cmp)
+                .unwrap();
+            let layout_left = chars
+                .iter()
+                .map(|character| character["layout"]["bounds"]["left"].as_f64().unwrap())
+                .min_by(f64::total_cmp)
+                .unwrap();
+            let layout_right = chars
+                .iter()
+                .map(|character| character["layout"]["bounds"]["right"].as_f64().unwrap())
+                .max_by(f64::total_cmp)
+                .unwrap();
+            (text, left, right, layout_left, layout_right)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(summaries[0].0, "MMM");
+    assert_eq!(summaries[1].0, "MMM");
+    assert!(
+        summaries[0].2 < summaries[1].1,
+        "author columns overlap or interleave: {summaries:?}"
+    );
+    assert!(
+        summaries[0].4 <= summaries[1].3,
+        "author column typeset containers overlap: {summaries:?}"
+    );
+}
+
+#[test]
+fn prose_mislabeled_as_footer_below_a_title_is_recovered_without_touching_the_folio() {
+    let output = run_inspect_with_recording(
+        "unit-layout-07-policy-zones",
+        "unit-layout-07-false-footer-body",
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = parse_events(&output.stdout);
+    assert_one_terminal_last(&events, "result");
+    let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap();
+    let body = paragraphs
+        .iter()
+        .find(|paragraph| {
+            paragraph["text"]["chars"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|character| character["unicode"].as_str())
+                .collect::<String>()
+                .starts_with("The second body paragraph")
+        })
+        .unwrap();
+    assert!(
+        body["text"]["chars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|character| character["layout"]["label"] == "text"
+                && character["layout"]["policy"] == "translate")
+    );
+    let folio = paragraphs
+        .iter()
+        .find(|paragraph| {
+            paragraph["text"]["chars"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|character| character["unicode"].as_str())
+                .collect::<String>()
+                == "17"
+        })
+        .unwrap();
+    assert!(
+        folio["text"]["chars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|character| character["layout"]["label"] == "number"
+                && character["layout"]["policy"] == "passthrough")
+    );
 }
 
 #[test]

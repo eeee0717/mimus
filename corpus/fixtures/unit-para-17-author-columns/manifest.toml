@@ -1,0 +1,210 @@
+# unit-para-17-author-columns -- expected manifest
+#
+# This specification predates the exact writer recipe. Geometry is derived
+# from MimusExact.ttf's pinned 2048-unit TrueType tables at 12pt.
+
+schema_version = 1
+
+[identity]
+id = "unit-para-17-author-columns"
+name = "Two author columns inside one model text region"
+class = "unit"
+legality = "legal"
+cases = ["PARA-17"]
+priority = "M3"
+variable = "Two aligned three-line author columns share one model region and have a narrow final-row gutter"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-para-17-author-columns.pdf"
+pdf_sha256 = "fdd76bfc084c1eb0668041481e4881a97bcbfae2ed976cf69357062246bc16ac"
+font_provenance = "vendored"
+fonts = [
+    { file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" },
+]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d706172612d31372d617574"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 6
+columns = 2
+bookmarks = 0
+bookmark_depth = 0
+annotations = 0
+form_fields = 0
+optional_content_groups = 0
+named_destinations = 0
+uri_actions = 0
+
+[[expected.block]]
+key = "LEFT_NAME"
+page = 0
+column = "left"
+draw_order = 1
+reading_order = 1
+text = "M"
+baseline_origin = [145.0, 140.0]
+metric_box = [145.0, 137.168, 155.356, 151.136]
+visual_bbox = [146.177734, 140.0, 154.181641, 148.748047]
+
+[[expected.block]]
+key = "RIGHT_NAME"
+page = 0
+column = "right"
+draw_order = 2
+reading_order = 2
+text = "M"
+baseline_origin = [180.0, 140.0]
+metric_box = [180.0, 137.168, 190.356, 151.136]
+visual_bbox = [181.177734, 140.0, 189.181641, 148.748047]
+
+[[expected.block]]
+key = "LEFT_AFFILIATION"
+page = 0
+column = "left"
+draw_order = 3
+reading_order = 3
+text = "M"
+baseline_origin = [140.0, 120.0]
+metric_box = [140.0, 117.168, 150.356, 131.136]
+visual_bbox = [141.177734, 120.0, 149.181641, 128.748047]
+
+[[expected.block]]
+key = "RIGHT_AFFILIATION"
+page = 0
+column = "right"
+draw_order = 4
+reading_order = 4
+text = "M"
+baseline_origin = [180.0, 120.0]
+metric_box = [180.0, 117.168, 190.356, 131.136]
+visual_bbox = [181.177734, 120.0, 189.181641, 128.748047]
+
+[[expected.block]]
+key = "LEFT_EMAIL"
+page = 0
+column = "left"
+draw_order = 5
+reading_order = 5
+text = "M"
+baseline_origin = [157.0, 100.0]
+metric_box = [157.0, 97.168, 167.356, 111.136]
+visual_bbox = [158.177734, 100.0, 166.181641, 108.748047]
+
+[[expected.block]]
+key = "RIGHT_EMAIL"
+page = 0
+column = "right"
+draw_order = 6
+reading_order = 6
+text = "M"
+baseline_origin = [180.0, 100.0]
+metric_box = [180.0, 97.168, 190.356, 111.136]
+visual_bbox = [181.177734, 100.0, 189.181641, 108.748047]
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 145 140 Tm
+(M) Tj
+1 0 0 1 180 140 Tm
+(M) Tj
+1 0 0 1 140 120 Tm
+(M) Tj
+1 0 0 1 180 120 Tm
+(M) Tj
+1 0 0 1 157 100 Tm
+(M) Tj
+1 0 0 1 180 100 Tm
+(M) Tj
+ET
+"""
+
+[[expected.reference]]
+from_object = 1
+path = ["/Pages"]
+to_object = 2
+
+[[expected.reference]]
+from_object = 2
+path = ["/Kids", "0"]
+to_object = 3
+
+[[expected.reference]]
+from_object = 3
+path = ["/Parent"]
+to_object = 2
+
+[[expected.reference]]
+from_object = 3
+path = ["/Resources"]
+to_object = 4
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 9
+
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 5
+
+[[expected.reference]]
+from_object = 5
+path = ["/FontDescriptor"]
+to_object = 6
+
+[[expected.reference]]
+from_object = 5
+path = ["/ToUnicode"]
+to_object = 8
+
+[[expected.reference]]
+from_object = 6
+path = ["/FontFile2"]
+to_object = 7
+
+[[expected.behaviour]]
+id = "PARA-17-column-ownership"
+assertion = "A single model text region with two consistently aligned author columns becomes exactly two visual-column paragraphs even when its final row has a sub-threshold gutter"
+observable_via = "recorded layout and paragraph-find IL"
+
+[oracle]
+checks = [
+    "determinism",
+    "legality",
+    "page-geometry",
+    "glyphs",
+    "transformed-text-geometry",
+    "pdf-bytes",
+    "pdf-structure",
+    "render",
+]
+
+[[adjudication]]
+date = "2026-08-28"
+issue = "The intentionally aligned two-column rows are a grid shape that independent text parsers may aggregate by row instead of by visual author column."
+resolution = "Keep six hand-derived exact text blocks and assert their glyph geometry independently. The recorded model region and production ParagraphFind test own the visual-column paragraph boundary."

@@ -45,6 +45,11 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
             repo_root,
             b"BT\n/F1 12 Tf\n1 0 0 1 72 140 Tm\n(MIMUS) Tj\n1 0 0 1 72 126 Tm\n[(MIMUS)] TJ\n1 0 0 1 72 112 Tm\n(MIMUS) Tj\nET\n",
         ),
+        "unit-para-17-author-columns" => basic_text(
+            fixture_id,
+            repo_root,
+            b"BT\n/F1 12 Tf\n1 0 0 1 145 140 Tm\n(M) Tj\n1 0 0 1 180 140 Tm\n(M) Tj\n1 0 0 1 140 120 Tm\n(M) Tj\n1 0 0 1 180 120 Tm\n(M) Tj\n1 0 0 1 157 100 Tm\n(M) Tj\n1 0 0 1 180 100 Tm\n(M) Tj\nET\n",
+        ),
         "unit-translation-01-section-title-number" => basic_text_with_page_size(
             fixture_id,
             repo_root,

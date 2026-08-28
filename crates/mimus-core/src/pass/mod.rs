@@ -815,6 +815,100 @@ fn apply_policy_overrides(
             region.label = LayoutLabel::Seal;
         }
     }
+    recover_false_footer_body(regions, walked);
+}
+
+fn recover_false_footer_body(
+    regions: &mut [crate::engine::LayoutRegion],
+    walked: &[crate::walk::WalkedChar],
+) {
+    let recovered = regions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, footer)| {
+            if footer.source != LayoutSource::Model || footer.label != LayoutLabel::Footer {
+                return None;
+            }
+            let text = walked
+                .iter()
+                .filter(|character| {
+                    character.visible
+                        && character.locatable
+                        && point_in_rect(character.baseline_origin, footer.bounds)
+                })
+                .filter_map(|character| character.unicode)
+                .collect::<String>();
+            if !looks_like_body_continuation(&text) {
+                return None;
+            }
+            let previous = regions
+                .iter()
+                .filter(|candidate| {
+                    candidate.source == LayoutSource::Model
+                        && candidate.reading_order < footer.reading_order
+                })
+                .max_by_key(|candidate| candidate.reading_order)?;
+            if previous.label != LayoutLabel::ParagraphTitle {
+                return None;
+            }
+            let previous_height = previous.bounds.top - previous.bounds.bottom;
+            let footer_height = footer.bounds.top - footer.bounds.bottom;
+            let max_height = previous_height.max(footer_height);
+            let vertical_gap = previous.bounds.bottom - footer.bounds.top;
+            if !(0.0..=max_height * 1.55).contains(&vertical_gap)
+                || (previous.bounds.left - footer.bounds.left).abs() > max_height
+                || footer.bounds.right - footer.bounds.left <= footer_height * 4.0
+            {
+                return None;
+            }
+            regions
+                .iter()
+                .any(|candidate| {
+                    candidate.source == LayoutSource::Model
+                        && candidate.label == LayoutLabel::Number
+                        && candidate.reading_order > footer.reading_order
+                        && candidate.bounds.top < footer.bounds.bottom
+                })
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let recovered_bounds = recovered
+        .iter()
+        .map(|&index| regions[index].bounds)
+        .collect::<Vec<_>>();
+    for index in recovered {
+        regions[index].label = LayoutLabel::Text;
+    }
+    for fallback in regions.iter_mut().filter(|region| {
+        region.source == LayoutSource::FallbackLine && region.label == LayoutLabel::Footer
+    }) {
+        let center = crate::il::Point {
+            x: (fallback.bounds.left + fallback.bounds.right) / 2.0,
+            y: (fallback.bounds.bottom + fallback.bounds.top) / 2.0,
+        };
+        if recovered_bounds
+            .iter()
+            .any(|bounds| point_in_rect(center, *bounds))
+        {
+            fallback.label = LayoutLabel::Text;
+        }
+    }
+}
+
+fn looks_like_body_continuation(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .count()
+        >= 20
+        && trimmed.chars().any(char::is_lowercase)
+        && trimmed
+            .chars()
+            .next_back()
+            .is_some_and(|character| matches!(character, '.' | ':' | ';' | '?' | '!'))
+        && !looks_like_numbered_caption(trimmed)
+        && !looks_like_reference_entry(trimmed)
 }
 
 fn is_positional_apparatus(label: LayoutLabel, text: &str) -> bool {
@@ -1162,15 +1256,22 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
             }
             let mut lines = build_text_lines(group.chars);
             merge_toc_page_numbers(&mut lines);
-            for paragraph_lines in split_natural_paragraphs(lines, group.assignment.label) {
-                let bounds = lines_bounds(&paragraph_lines);
-                drafts.push(ParagraphDraft {
-                    model_order: Some(group.assignment.reading_order),
-                    apparatus: paragraph_lines.iter().all(line_is_number),
-                    column_left: bounds.left,
-                    top: bounds.top,
-                    lines: paragraph_lines,
-                });
+            let columns = if group.assignment.label == LayoutLabel::Text {
+                split_parallel_model_columns(lines)
+            } else {
+                vec![lines]
+            };
+            for column in columns {
+                for paragraph_lines in split_natural_paragraphs(column, group.assignment.label) {
+                    let bounds = lines_bounds(&paragraph_lines);
+                    drafts.push(ParagraphDraft {
+                        model_order: Some(group.assignment.reading_order),
+                        apparatus: paragraph_lines.iter().all(line_is_number),
+                        column_left: bounds.left,
+                        top: bounds.top,
+                        lines: paragraph_lines,
+                    });
+                }
             }
         }
 
@@ -1424,7 +1525,20 @@ fn build_text_lines(mut chars: Vec<PositionedChar>) -> Vec<TextLine> {
                             .unicode
                             .is_some_and(|unicode| unicode.is_ascii_digit())
                     });
-                gap > font_size * 1.8 || (leading_number && gap > font_size * 0.8)
+                let retained_section_number = leading_number
+                    && segment.iter().all(|value| {
+                        value.character.layout.is_some_and(|number| {
+                            character.character.layout.is_some_and(|title| {
+                                number.label == LayoutLabel::Number
+                                    && title.label == LayoutLabel::ParagraphTitle
+                                    && number.reading_order == title.reading_order
+                                    && number.bounds == title.bounds
+                                    && number.source == title.source
+                            })
+                        })
+                    });
+                gap > font_size * 1.8
+                    || (leading_number && !retained_section_number && gap > font_size * 0.8)
             });
             if split {
                 lines.push(text_line(std::mem::take(&mut segment)));
@@ -1606,6 +1720,152 @@ fn group_lines_into_columns(mut lines: Vec<TextLine>) -> Vec<Vec<TextLine>> {
         });
     }
     columns
+}
+
+fn split_parallel_model_columns(lines: Vec<TextLine>) -> Vec<Vec<TextLine>> {
+    let Some(separator) = parallel_model_column_separator(&lines) else {
+        return vec![lines];
+    };
+    if lines.iter().any(|line| {
+        line.chars.iter().any(|character| {
+            let bounds = character.character.r#box;
+            bounds.left < separator && bounds.right > separator
+        })
+    }) {
+        return vec![lines];
+    }
+    let left_line_count = lines
+        .iter()
+        .filter(|line| {
+            line.chars
+                .iter()
+                .any(|character| character.character.r#box.right <= separator)
+        })
+        .count();
+    let right_line_count = lines
+        .iter()
+        .filter(|line| {
+            line.chars
+                .iter()
+                .any(|character| character.character.r#box.left >= separator)
+        })
+        .count();
+    let left_right = lines
+        .iter()
+        .flat_map(|line| &line.chars)
+        .filter(|character| character.character.r#box.right <= separator)
+        .map(|character| character.character.r#box.right)
+        .max_by(f64::total_cmp);
+    let right_left = lines
+        .iter()
+        .flat_map(|line| &line.chars)
+        .filter(|character| character.character.r#box.left >= separator)
+        .map(|character| character.character.r#box.left)
+        .min_by(f64::total_cmp);
+    if left_line_count < 2
+        || right_line_count < 2
+        || left_right
+            .zip(right_left)
+            .is_none_or(|(left, right)| left >= right)
+    {
+        return vec![lines];
+    }
+
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for line in lines {
+        let mut left_chars = Vec::new();
+        let mut right_chars = Vec::new();
+        for character in line.chars {
+            let bounds = character.character.r#box;
+            if bounds.right <= separator {
+                left_chars.push(character);
+            } else {
+                right_chars.push(character);
+            }
+        }
+        if !left_chars.is_empty() {
+            left.push(text_line(left_chars));
+        }
+        if !right_chars.is_empty() {
+            right.push(text_line(right_chars));
+        }
+    }
+    bound_model_column(&mut left, |bounds| {
+        bounds.right = bounds.right.min(separator);
+    });
+    bound_model_column(&mut right, |bounds| {
+        bounds.left = bounds.left.max(separator);
+    });
+    vec![left, right]
+}
+
+fn bound_model_column(lines: &mut [TextLine], update: impl Fn(&mut Rect)) {
+    for character in lines.iter_mut().flat_map(|line| &mut line.chars) {
+        if let Some(layout) = &mut character.character.layout {
+            update(&mut layout.bounds);
+        }
+    }
+}
+
+fn parallel_model_column_separator(lines: &[TextLine]) -> Option<f64> {
+    let mut rows = Vec::<Vec<&TextLine>>::new();
+    let mut ordered = lines.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        right
+            .baseline
+            .total_cmp(&left.baseline)
+            .then_with(|| left.bounds.left.total_cmp(&right.bounds.left))
+    });
+    for line in ordered {
+        let belongs = rows.last().is_some_and(|row| {
+            let anchor = row[0];
+            (anchor.baseline - line.baseline).abs() <= anchor.font_size.max(line.font_size) * 0.35
+        });
+        if belongs {
+            rows.last_mut()?.push(line);
+        } else {
+            rows.push(vec![line]);
+        }
+    }
+
+    let mut gutters = Vec::new();
+    for row in rows {
+        let mut substantial = row
+            .into_iter()
+            .filter(|line| {
+                line.bounds.right - line.bounds.left >= line.font_size * 0.75
+                    && line.chars.iter().all(|character| {
+                        character
+                            .character
+                            .layout
+                            .is_some_and(|layout| layout.label == LayoutLabel::Text)
+                    })
+            })
+            .collect::<Vec<_>>();
+        if substantial.len() != 2 {
+            continue;
+        }
+        substantial.sort_by(|left, right| left.bounds.left.total_cmp(&right.bounds.left));
+        let left = substantial[0];
+        let right = substantial[1];
+        let gap = right.bounds.left - left.bounds.right;
+        if gap > left.font_size.max(right.font_size) * 1.8 {
+            gutters.push((left.bounds.right, right.bounds.left));
+        }
+    }
+    if gutters.len() < 2 {
+        return None;
+    }
+    let common_left = gutters
+        .iter()
+        .map(|(left, _)| *left)
+        .max_by(f64::total_cmp)?;
+    let common_right = gutters
+        .iter()
+        .map(|(_, right)| *right)
+        .min_by(f64::total_cmp)?;
+    (common_left < common_right).then_some((common_left + common_right) / 2.0)
 }
 
 fn split_natural_paragraphs(mut lines: Vec<TextLine>, label: LayoutLabel) -> Vec<Vec<TextLine>> {
@@ -3248,8 +3508,8 @@ fn plan_paragraph<'a>(
         .iter()
         .map(|id| id.0)
         .collect::<BTreeSet<_>>();
-    let source_segments = source_text_segments(all_chars, &content_object_numbers);
-    let translated_segments = if let Some(restored) = restored {
+    let mut source_segments = source_text_segments(all_chars, &content_object_numbers);
+    let mut translated_segments = if let Some(restored) = restored {
         restored.segments().to_vec()
     } else {
         let bold = all_chars.iter().any(|character| {
@@ -3272,6 +3532,13 @@ fn plan_paragraph<'a>(
             il::PreservedReason::TypesetProtocol,
         ));
     }
+    retain_shared_section_number_prefix(
+        all_chars,
+        &mut source_segments,
+        &mut translated_segments,
+        &content_object_numbers,
+    )
+    .map_err(TypesetPlanError::Preserved)?;
     let mixed_with_formula = source_segments.len() > 1;
     let shared_formula_operand = paragraph_has_shared_formula_operand(
         paragraph,
@@ -3664,6 +3931,138 @@ fn source_text_segments<'a>(
         start = end;
     }
     segments
+}
+
+fn retain_shared_section_number_prefix<'a>(
+    all_chars: &'a [Char],
+    source_segments: &mut [Vec<&'a Char>],
+    translated_segments: &mut [Vec<crate::translate::StyledCharacter>],
+    content_objects: &BTreeSet<u32>,
+) -> std::result::Result<(), il::PreservedReason> {
+    let span = |character: &Char| {
+        (
+            character.passthrough.content_object,
+            character.passthrough.byte_start,
+            character.passthrough.byte_end,
+        )
+    };
+    let translated_spans = source_segments
+        .iter()
+        .flatten()
+        .map(|character| span(character))
+        .collect::<BTreeSet<_>>();
+    let shared_passthrough_indices = all_chars
+        .iter()
+        .enumerate()
+        .filter(|(_, character)| {
+            prepared_character_class(character, content_objects)
+                == PreparedCharacterClass::Passthrough
+                && translated_spans.contains(&span(character))
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if shared_passthrough_indices.is_empty() {
+        return Ok(());
+    }
+
+    let prefix_len = all_chars
+        .iter()
+        .take_while(|character| {
+            character.visible
+                && character.text_transform == TextTransform::Upright
+                && character.layout.is_some_and(|layout| {
+                    layout.label == LayoutLabel::Number
+                        && layout.policy == TranslationPolicy::Passthrough
+                })
+        })
+        .count();
+    let prefix = &all_chars[..prefix_len];
+    if prefix.is_empty()
+        || shared_passthrough_indices != (0..prefix_len).collect::<Vec<_>>()
+        || !section_number_prefix_is_supported(prefix)
+        || prefix
+            .iter()
+            .any(|character| !translated_spans.contains(&span(character)))
+    {
+        return Err(il::PreservedReason::TypesetProtocol);
+    }
+
+    let prefix_spans = prefix.iter().map(&span).collect::<BTreeSet<_>>();
+    let matching_segments = source_segments
+        .iter()
+        .enumerate()
+        .filter(|(_, segment)| {
+            segment
+                .iter()
+                .any(|character| prefix_spans.contains(&span(character)))
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if matching_segments != [0]
+        || all_chars.iter().skip(prefix_len).any(|character| {
+            prefix_spans.contains(&span(character))
+                && !source_segments[0]
+                    .iter()
+                    .any(|source| std::ptr::eq(*source, character))
+        })
+    {
+        return Err(il::PreservedReason::TypesetProtocol);
+    }
+
+    let bold = translated_segments[0]
+        .first()
+        .map(|character| character.bold)
+        .unwrap_or_else(|| {
+            source_segments[0].first().is_some_and(|character| {
+                matches!(
+                    prepared_character_class(character, content_objects),
+                    PreparedCharacterClass::Text { bold: true }
+                )
+            })
+        });
+    let mut retained = prefix
+        .iter()
+        .map(|character| crate::translate::StyledCharacter {
+            value: character
+                .unicode
+                .expect("validated section number character"),
+            bold,
+        })
+        .collect::<Vec<_>>();
+    retained.append(&mut translated_segments[0]);
+    translated_segments[0] = retained;
+    let mut source = prefix.iter().collect::<Vec<_>>();
+    source.append(&mut source_segments[0]);
+    source_segments[0] = source;
+    Ok(())
+}
+
+fn section_number_prefix_is_supported(chars: &[Char]) -> bool {
+    let values = chars
+        .iter()
+        .filter_map(|character| character.unicode)
+        .collect::<Vec<_>>();
+    if values.len() != chars.len() {
+        return false;
+    }
+    let Some(marker_kind) = values
+        .iter()
+        .copied()
+        .find(|character| !character.is_whitespace())
+        .map(|character| character.is_ascii_digit())
+    else {
+        return false;
+    };
+    values.iter().all(|character| {
+        (if marker_kind {
+            character.is_ascii_digit()
+        } else {
+            matches!(character, 'I' | 'V' | 'X')
+        }) || *character == '.'
+            || character.is_whitespace()
+    }) && values
+        .iter()
+        .any(|character| character.is_ascii_digit() || matches!(character, 'I' | 'V' | 'X'))
 }
 
 #[derive(Debug)]
@@ -7406,6 +7805,12 @@ mod tests {
             })
         }));
         assert!(positioned[1].force_no_space_before);
+        let lines = build_text_lines(positioned);
+        assert_eq!(
+            lines.len(),
+            1,
+            "a retained section number and its title must remain one visual heading line"
+        );
     }
 
     #[test]
@@ -8631,6 +9036,130 @@ mod tests {
             .map(|character| character.unicode)
             .collect::<String>();
         assert_eq!(values, "M中文");
+    }
+
+    #[test]
+    fn typeset_retains_numeric_passthrough_prefix_inside_one_translated_paragraph() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("shared-section-title.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        pdf.get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(
+                b"BT /F1 12 Tf\n1 0 0 1 72 120 Tm\n[(M) -100 (IMUS)] TJ\nET\n".to_vec(),
+            );
+        pdf.save(&input).unwrap();
+        let mut document = Document::for_inspection(&input);
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let paragraph = document.il.pages[0].paragraphs.pop().unwrap();
+        let TextCarrier::Chars { mut chars } = paragraph.text;
+        let shared_span = (
+            chars[0].passthrough.content_object,
+            chars[0].passthrough.byte_start,
+            chars[0].passthrough.byte_end,
+        );
+        assert!(chars.iter().all(|character| {
+            (
+                character.passthrough.content_object,
+                character.passthrough.byte_start,
+                character.passthrough.byte_end,
+            ) == shared_span
+        }));
+        let layout_bounds = Rect {
+            left: 72.0,
+            bottom: 119.0,
+            right: 172.0,
+            top: 129.0,
+        };
+        for character in &mut chars {
+            let layout = character.layout.as_mut().unwrap();
+            layout.bounds = layout_bounds;
+            layout.label = LayoutLabel::ParagraphTitle;
+            layout.policy = TranslationPolicy::Translate;
+        }
+        chars[0].unicode = Some('1');
+        chars[0].layout.as_mut().unwrap().label = LayoutLabel::Number;
+        chars[0].layout.as_mut().unwrap().policy = TranslationPolicy::Passthrough;
+        document.extracted_pages[0].layout_regions[0].bounds = layout_bounds;
+        document.il.pages[0].paragraphs = vec![Paragraph {
+            reading_order: 0,
+            bounds: layout_bounds,
+            text: TextCarrier::Chars { chars },
+            translated_text: Some("中文".to_owned()),
+            preserved: None,
+        }];
+
+        typeset(&mut document, &context).unwrap();
+
+        assert!(document.il.pages[0].paragraphs[0].preserved.is_none());
+        let values = document.rewrites[0]
+            .typeset_characters
+            .iter()
+            .map(|character| character.unicode)
+            .collect::<String>();
+        assert_eq!(values, "1中文");
+    }
+
+    #[test]
+    fn unsupported_passthrough_prefix_inside_a_translated_operand_fails_closed() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let paragraph = document.il.pages[0].paragraphs.pop().unwrap();
+        let TextCarrier::Chars { mut chars } = paragraph.text;
+        let layout_bounds = Rect {
+            left: 72.0,
+            bottom: 119.0,
+            right: 172.0,
+            top: 129.0,
+        };
+        for character in &mut chars {
+            let layout = character.layout.as_mut().unwrap();
+            layout.bounds = layout_bounds;
+            layout.label = LayoutLabel::ParagraphTitle;
+            layout.policy = TranslationPolicy::Translate;
+        }
+        chars[0].layout.as_mut().unwrap().label = LayoutLabel::Number;
+        chars[0].layout.as_mut().unwrap().policy = TranslationPolicy::Passthrough;
+        document.extracted_pages[0].layout_regions[0].bounds = layout_bounds;
+        document.il.pages[0].paragraphs = vec![Paragraph {
+            reading_order: 0,
+            bounds: layout_bounds,
+            text: TextCarrier::Chars { chars },
+            translated_text: Some("中文".to_owned()),
+            preserved: None,
+        }];
+
+        typeset(&mut document, &context).unwrap();
+
+        assert_eq!(
+            document.il.pages[0].paragraphs[0].preserved,
+            Some(il::PreservedReason::TypesetProtocol)
+        );
+        assert!(document.rewrites.is_empty());
     }
 
     #[test]
