@@ -98,5 +98,10 @@ id = "LAYOUT-07-seal-preserved"
 assertion = "印章区文字原样保留，且其圆环矢量图形不被改动"
 observable_via = "输出 PDF 与输入在印章区的栅格差为 0"
 
+[[expected.behaviour]]
+id = "LAYOUT-07-false-footer-recovery"
+assertion = "A prose region mislabeled footer immediately below a paragraph title is recovered as text when a distinct lower folio remains"
+observable_via = "alternative recorded layout and paragraph-find IL"
+
 [oracle]
 checks = ["determinism", "legality", "page-geometry", "structure", "reading-order", "dual-parser-geometry", "render"]

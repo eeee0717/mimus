@@ -1974,11 +1974,16 @@ fn page_top_section_title_translates_without_sending_its_leading_number() {
     let paragraph_find: serde_json::Value =
         serde_json::from_slice(&std::fs::read(debug.join("03-paragraph_find.il.json")).unwrap())
             .unwrap();
-    let characters = paragraph_find["pages"][0]["paragraphs"]
+    let paragraphs = paragraph_find["pages"][0]["paragraphs"].as_array().unwrap();
+    assert_eq!(
+        paragraphs.len(),
+        1,
+        "the retained section number and translated title must share one paragraph"
+    );
+    let characters = paragraphs.first().unwrap()["text"]["chars"]
         .as_array()
         .unwrap()
         .iter()
-        .flat_map(|paragraph| paragraph["text"]["chars"].as_array().unwrap())
         .collect::<Vec<_>>();
     let section_number = characters
         .iter()
@@ -2063,9 +2068,9 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
         "unit-scan-01-image-only".to_owned(),
         "unit-scan-02-invisible-ocr".to_owned(),
     ]);
-    assert_eq!(ids.len(), 149, "Corpus fixture inventory changed");
-    assert_eq!(unique_cases.len(), 87, "Corpus case inventory changed");
-    assert_eq!(legal.len(), 109, "legal fixture inventory changed");
+    assert_eq!(ids.len(), 150, "Corpus fixture inventory changed");
+    assert_eq!(unique_cases.len(), 88, "Corpus case inventory changed");
+    assert_eq!(legal.len(), 110, "legal fixture inventory changed");
     assert!(rejected.is_subset(&legal));
 
     let directory = tempfile::tempdir().unwrap();
@@ -2144,10 +2149,10 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
             output_count += 1;
         }
     }
-    assert_eq!(output_count, 102);
+    assert_eq!(output_count, 103);
     assert_eq!(
         server.request_count(),
-        135,
+        137,
         "eligible corpus request inventory changed"
     );
     assert!(server.requests().iter().all(|request| {

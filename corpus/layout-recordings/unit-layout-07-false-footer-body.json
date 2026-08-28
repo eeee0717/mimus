@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "pages": [
+    {
+      "page_index": 0,
+      "geometry": { "width": 380.0, "height": 260.0, "rotate_degrees": 0 },
+      "regions": [
+        {
+          "bounds": { "left": 24.0, "bottom": 227.0, "right": 131.0, "top": 238.0 },
+          "reading_order": 0,
+          "label": "header",
+          "source": "model",
+          "confidence": 0.750
+        },
+        {
+          "bounds": { "left": 24.0, "bottom": 192.0, "right": 356.0, "top": 214.0 },
+          "reading_order": 1,
+          "label": "paragraph_title",
+          "source": "model",
+          "confidence": 0.900
+        },
+        {
+          "bounds": { "left": 24.0, "bottom": 138.0, "right": 356.0, "top": 160.0 },
+          "reading_order": 2,
+          "label": "footer",
+          "source": "model",
+          "confidence": 0.900
+        },
+        {
+          "bounds": { "left": 24.0, "bottom": 95.0, "right": 212.0, "top": 106.0 },
+          "reading_order": 3,
+          "label": "reference_content",
+          "source": "model",
+          "confidence": 0.786
+        },
+        {
+          "bounds": { "left": 185.0, "bottom": 32.0, "right": 195.0, "top": 43.0 },
+          "reading_order": 4,
+          "label": "number",
+          "source": "model",
+          "confidence": 0.751
+        }
+      ]
+    }
+  ]
+}
