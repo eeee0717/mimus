@@ -10,6 +10,7 @@ use crate::il;
 pub const SCHEMA_VERSION: u32 = 2;
 pub const MAX_DIAGNOSTICS: usize = 500;
 pub const MAX_DIAGNOSTICS_PER_ID: usize = 25;
+pub const MAX_REPORTED_FORM_OBJECT_IDS: usize = 16;
 pub const MINIMAL_SERIALIZATION_ERROR_LINE: &[u8] = b"{\"schema_version\":2,\"event\":\"error\",\"category\":\"internal\",\"reason\":\"event_serialization\",\"message\":\"could not serialize protocol event\",\"hint\":null}\n";
 
 fn usize_is_zero(value: &usize) -> bool {
@@ -305,6 +306,9 @@ pub enum RecoveryKind {
     MutuallyRecursiveForm,
     /// Form 调用链超过 64 层，当前 `Do` 被原子跳过。
     FormDepthExceeded,
+    /// Form BBox 端点倒序；两轴按 min/max 规范化后继续执行。
+    #[serde(rename = "normalized_form_bbox")]
+    NormalizedFormBBox,
     /// Form 退出时仍有未闭合的 `q`，仅丢弃子作用域的栈。
     ScopedGraphicsStateUnclosed,
     /// Form 退出时仍有操作数，仅丢弃子作用域的尾部。
@@ -404,6 +408,10 @@ pub enum Diagnostic {
         recovery: RecoveryKind,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         form_cycle_paths: Vec<Vec<u32>>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        form_object_ids: Vec<u32>,
+        #[serde(skip_serializing_if = "usize_is_zero")]
+        form_object_count: usize,
     },
     TranslationRetry {
         page_index: usize,
@@ -585,6 +593,10 @@ pub enum DiagnosticEvent {
         recovery: RecoveryKind,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         form_cycle_paths: Vec<Vec<u32>>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        form_object_ids: Vec<u32>,
+        #[serde(skip_serializing_if = "usize_is_zero")]
+        form_object_count: usize,
     },
     TranslationRetry {
         page_index: usize,
@@ -778,10 +790,14 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 page_index,
                 recovery,
                 form_cycle_paths,
+                form_object_ids,
+                form_object_count,
             } => Self::ContentRecovered {
                 page_index: *page_index,
                 recovery: *recovery,
                 form_cycle_paths: form_cycle_paths.clone(),
+                form_object_ids: form_object_ids.clone(),
+                form_object_count: *form_object_count,
             },
             Diagnostic::TranslationRetry {
                 page_index,
@@ -1102,6 +1118,8 @@ mod tests {
             page_index: 1,
             recovery: RecoveryKind::UnknownOperator,
             form_cycle_paths: Vec::new(),
+            form_object_ids: Vec::new(),
+            form_object_count: 0,
         });
         diagnostics.push(Diagnostic::PageDegraded {
             page_index: 2,
@@ -1144,6 +1162,8 @@ mod tests {
                 page_index: 1,
                 recovery: RecoveryKind::UnknownOperator,
                 form_cycle_paths: Vec::new(),
+                form_object_ids: Vec::new(),
+                form_object_count: 0,
             });
         }
 
@@ -1325,6 +1345,8 @@ mod tests {
             page_index: 0,
             recovery: RecoveryKind::MutuallyRecursiveForm,
             form_cycle_paths: vec![vec![12, 13, 12]],
+            form_object_ids: Vec::new(),
+            form_object_count: 0,
         });
         let line =
             serialize_line(&Event::new(EventKind::Diagnostic { diagnostic: event })).unwrap();
@@ -1338,10 +1360,31 @@ mod tests {
             page_index: 0,
             recovery: RecoveryKind::UnknownOperator,
             form_cycle_paths: Vec::new(),
+            form_object_ids: Vec::new(),
+            form_object_count: 0,
         });
         let value =
             serde_json::to_value(Event::new(EventKind::Diagnostic { diagnostic: event })).unwrap();
         assert!(value.get("form_cycle_paths").is_none());
+        assert!(value.get("form_object_ids").is_none());
+        assert!(value.get("form_object_count").is_none());
+    }
+
+    #[test]
+    fn normalized_form_bbox_recovery_exposes_bounded_object_locations() {
+        let event = DiagnosticEvent::from(&Diagnostic::ContentRecovered {
+            page_index: 11,
+            recovery: RecoveryKind::NormalizedFormBBox,
+            form_cycle_paths: Vec::new(),
+            form_object_ids: vec![344, 346],
+            form_object_count: 615,
+        });
+        let value =
+            serde_json::to_value(Event::new(EventKind::Diagnostic { diagnostic: event })).unwrap();
+
+        assert_eq!(value["recovery"], "normalized_form_bbox");
+        assert_eq!(value["form_object_ids"], serde_json::json!([344, 346]));
+        assert_eq!(value["form_object_count"], 615);
     }
 
     #[test]

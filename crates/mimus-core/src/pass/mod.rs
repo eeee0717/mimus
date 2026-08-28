@@ -10,8 +10,8 @@ use crate::error::{
     TranslationReason, UsageReason,
 };
 use crate::event::{
-    Diagnostic, Diagnostics, Event, EventKind, PageDegradeReason, PreservedParagraph, RecoveryKind,
-    Stage, SuspiciousEchoParagraph,
+    Diagnostic, Diagnostics, Event, EventKind, MAX_REPORTED_FORM_OBJECT_IDS, PageDegradeReason,
+    PreservedParagraph, RecoveryKind, Stage, SuspiciousEchoParagraph,
 };
 use crate::geometry::{PageFrame, PageGeometryResolveError};
 use crate::il::{
@@ -627,10 +627,27 @@ pub fn scan_detect(document: &mut Document, context: &PassContext<'_>) -> Result
                         })
                         .map(|path| path.iter().map(|object_id| object_id.0).collect())
                         .collect();
+                    let form_object_count = if recovery == RecoveryKind::NormalizedFormBBox {
+                        walked.normalized_form_object_ids.len()
+                    } else {
+                        0
+                    };
+                    let form_object_ids = if recovery == RecoveryKind::NormalizedFormBBox {
+                        walked
+                            .normalized_form_object_ids
+                            .iter()
+                            .take(MAX_REPORTED_FORM_OBJECT_IDS)
+                            .map(|object_id| object_id.0)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     document.diagnostics.push(Diagnostic::ContentRecovered {
                         page_index: page.index,
                         recovery,
                         form_cycle_paths,
+                        form_object_ids,
+                        form_object_count,
                     });
                 }
                 page.walked_characters = walked.characters;

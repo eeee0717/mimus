@@ -134,6 +134,7 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
         "unit-xobj-00-recursion-parent" => xobject_recursion_parent(repo_root),
         "unit-xobj-04-inherited-resources" => inherited_form_resources(repo_root),
         "unit-xobj-05-scope-parent" => xobject_scope_parent(repo_root),
+        "unit-xobj-11-bbox-order-parent" => xobject_bbox_order_parent(repo_root),
         "unit-xobj-depth-overflow" => xobject_depth_overflow(repo_root),
         "unit-xobj-m1-switchboard" => xobject_m1_switchboard(repo_root),
         "unit-write-01-bookmarks-rich" => {
@@ -1239,6 +1240,34 @@ fn xobject_m1_switchboard(repo_root: &Path) -> Result<Vec<u8>> {
     )?;
     pdf.object(b"<< /Type /XObject /Subtype /Form /BBox [0 0 300 200] >>")?;
     pdf.stream(b"", b"q /X0 Do Q\n")?;
+    pdf.finish(1)
+}
+
+fn xobject_bbox_order_parent(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-xobj-11-bbox-order-parent");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 5 0 R /Contents 11 0 R >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 5 0 R /Contents 12 0 R >>")?;
+    pdf.object(b"<< /Font << /F1 6 0 R >> /XObject << /Outside 10 0 R /Inside 13 0 R >> >>")?;
+    pdf.object(font_dictionary_with_descriptor(9, 7).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 8 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.stream(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 200 180]",
+        b"q 0 0 20 20 re f Q\n",
+    )?;
+    pdf.stream(
+        b"",
+        b"/Outside Do\nBT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n",
+    )?;
+    pdf.stream(b"", b"/Inside Do\n")?;
+    pdf.stream(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 200 180] /Resources << /Font << /F1 6 0 R >> >>",
+        b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n",
+    )?;
     pdf.finish(1)
 }
 

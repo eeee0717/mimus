@@ -158,6 +158,7 @@ struct Walker<'a> {
     text_object_is_implicit: bool,
     active_forms: Vec<ObjectId>,
     form_cycles: Vec<Vec<ObjectId>>,
+    normalized_form_object_ids: BTreeSet<ObjectId>,
     degradation: Option<PageDegradeReason>,
     visual_rotation: Matrix,
 }
@@ -180,6 +181,7 @@ pub struct PageWalk {
     pub characters: Vec<WalkedChar>,
     pub recoveries: BTreeSet<RecoveryKind>,
     pub form_cycles: Vec<Vec<ObjectId>>,
+    pub normalized_form_object_ids: BTreeSet<ObjectId>,
     pub(crate) content_streams: Vec<WalkedContentStream>,
 }
 
@@ -244,6 +246,7 @@ pub(crate) fn walk_page_detailed_with_rotation(
         text_object_is_implicit: false,
         active_forms: Vec::new(),
         form_cycles: Vec::new(),
+        normalized_form_object_ids: BTreeSet::new(),
         degradation: None,
         visual_rotation: Matrix::page_rotation(rotate_degrees),
     };
@@ -285,6 +288,7 @@ pub(crate) fn walk_page_detailed_with_rotation(
         characters: walker.characters,
         recoveries: walker.recoveries,
         form_cycles: walker.form_cycles,
+        normalized_form_object_ids: walker.normalized_form_object_ids,
         content_streams,
     })
 }
@@ -537,26 +541,24 @@ impl Walker<'_> {
             return Ok(());
         }
 
-        let bbox = match numeric_array(self.document, &stream.dict, b"BBox", 4) {
-            Ok(Some(values))
-                if values[2] > values[0]
-                    && values[3] > values[1]
-                    && values.iter().all(|value| value.is_finite()) =>
-            {
-                values
-            }
-            Ok(_) | Err(_) => {
-                return Err(self.degrade_error(
-                    PageDegradeReason::BadFormBBox,
-                    format!(
-                        "Form XObject /{} object {} has no usable BBox",
-                        display_pdf_name(name),
-                        object_id.0
-                    ),
-                ));
-            }
+        let normalized_bbox = numeric_array(self.document, &stream.dict, b"BBox", 4)
+            .ok()
+            .flatten()
+            .and_then(|values| normalize_form_bbox(&values));
+        let Some((_bbox, reordered)) = normalized_bbox else {
+            return Err(self.degrade_error(
+                PageDegradeReason::BadFormBBox,
+                format!(
+                    "Form XObject /{} object {} has no usable BBox",
+                    display_pdf_name(name),
+                    object_id.0
+                ),
+            ));
         };
-        debug_assert_eq!(bbox.len(), 4);
+        if reordered {
+            self.recoveries.insert(RecoveryKind::NormalizedFormBBox);
+            self.normalized_form_object_ids.insert(object_id);
+        }
         let matrix = match numeric_array(self.document, &stream.dict, b"Matrix", 6) {
             Ok(Some(values)) if values.iter().all(|value| value.is_finite()) => {
                 Matrix::from_values(&values)
@@ -1113,6 +1115,17 @@ fn object_number(object: &Object) -> Option<f64> {
         Object::Real(value) => Some(f64::from(*value)),
         _ => None,
     }
+}
+
+fn normalize_form_bbox(values: &[f64]) -> Option<([f64; 4], bool)> {
+    let [x0, y0, x1, y1]: [f64; 4] = values.try_into().ok()?;
+    if !values.iter().all(|value| value.is_finite()) || x0 == x1 || y0 == y1 {
+        return None;
+    }
+    Some((
+        [x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)],
+        x0 > x1 || y0 > y1,
+    ))
 }
 
 fn numeric_array(
@@ -2034,6 +2047,63 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn production_walk_accepts_reversed_form_bbox_with_text_outside_or_inside_the_form() {
+        for (fixture, recovered_page, unaffected_page, form_object) in [
+            ("mal-xobj-11-reversed-bbox-page-text", 1, 2, (10, 0)),
+            ("mal-xobj-11-reversed-bbox-form-text", 2, 1, (13, 0)),
+        ] {
+            let document = Document::load(fixture_path(fixture)).unwrap();
+            let pages = document.get_pages();
+            let walked = walk_page_detailed(&document, pages[&recovered_page])
+                .unwrap_or_else(|error| panic!("fixture {fixture}: {error:?}"));
+            assert_eq!(text_of(&walked), "MIMUS", "fixture {fixture}");
+            assert_eq!(
+                walked.recoveries,
+                BTreeSet::from([RecoveryKind::NormalizedFormBBox]),
+                "fixture {fixture}"
+            );
+            assert_eq!(
+                walked.normalized_form_object_ids,
+                BTreeSet::from([form_object]),
+                "fixture {fixture}"
+            );
+
+            let unaffected = walk_page_detailed(&document, pages[&unaffected_page])
+                .unwrap_or_else(|error| panic!("fixture {fixture} sibling: {error:?}"));
+            assert_eq!(text_of(&unaffected), "MIMUS", "fixture {fixture} sibling");
+            assert!(
+                unaffected.recoveries.is_empty(),
+                "fixture {fixture} sibling"
+            );
+            assert!(
+                unaffected.normalized_form_object_ids.is_empty(),
+                "fixture {fixture} sibling"
+            );
+        }
+    }
+
+    #[test]
+    fn form_bbox_normalization_rejects_nonfinite_wrong_arity_and_degenerate_values() {
+        assert_eq!(
+            normalize_form_bbox(&[20.0, 180.0, 0.0, 0.0]),
+            Some(([0.0, 0.0, 20.0, 180.0], true))
+        );
+        assert_eq!(
+            normalize_form_bbox(&[0.0, 0.0, 20.0, 180.0]),
+            Some(([0.0, 0.0, 20.0, 180.0], false))
+        );
+        for invalid in [
+            &[0.0, 0.0, 20.0][..],
+            &[0.0, 0.0, f64::INFINITY, 180.0],
+            &[0.0, f64::NAN, 20.0, 180.0],
+            &[0.0, 0.0, 0.0, 180.0],
+            &[0.0, 180.0, 20.0, 180.0],
+        ] {
+            assert_eq!(normalize_form_bbox(invalid), None, "values {invalid:?}");
+        }
     }
 
     #[test]

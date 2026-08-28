@@ -320,15 +320,24 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
             page_index,
             recovery,
             form_cycle_paths,
+            form_object_ids,
+            form_object_count,
         } => {
             let paths = if form_cycle_paths.is_empty() {
                 String::new()
             } else {
                 format!("; object paths: {form_cycle_paths:?}")
             };
+            let form_objects = if form_object_ids.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; form objects: {form_object_ids:?}; form object count: {form_object_count}"
+                )
+            };
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "warning[content_recovered]: page {} translated after recovering from malformed content ({}{paths})",
+                "warning[content_recovered]: page {} translated after recovering from malformed content ({}{paths}{form_objects})",
                 page_index + 1,
                 human_recovery_kind(recovery)
             );
@@ -573,6 +582,7 @@ const fn human_recovery_kind(recovery: RecoveryKind) -> &'static str {
         RecoveryKind::SelfRecursiveForm => "a self-recursive Form XObject",
         RecoveryKind::MutuallyRecursiveForm => "mutually recursive Form XObjects",
         RecoveryKind::FormDepthExceeded => "a Form XObject nesting chain deeper than 64",
+        RecoveryKind::NormalizedFormBBox => "reversed Form XObject BBox endpoints",
         RecoveryKind::ScopedGraphicsStateUnclosed => {
             "an unclosed q graphics-state scope inside a Form XObject"
         }
