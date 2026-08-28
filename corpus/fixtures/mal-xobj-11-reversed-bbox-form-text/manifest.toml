@@ -1,0 +1,77 @@
+schema_version = 1
+
+[identity]
+id = "mal-xobj-11-reversed-bbox-form-text"
+name = "Reversed Form BBox with Form-owned text"
+class = "mal"
+legality = "malformed"
+cases = ["XOBJ-11"]
+priority = "M3"
+variable = "Only the text-bearing Form BBox y endpoints are reversed while MIMUS remains inside"
+
+[source]
+method = "byte-mutation"
+pdf = "mal-xobj-11-reversed-bbox-form-text.pdf"
+pdf_sha256 = "ec29b55db4ad63e4c6e1530ff2de116f06a8785e9f4dd0caef54c38ca5690c38"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+
+[lineage]
+parent = "unit-xobj-11-bbox-order-parent"
+
+[[lineage.mutations]]
+byte_offset = 3808
+original_bytes = [48, 32, 48, 32, 50, 48, 48, 32, 49, 56, 48]
+replacement_bytes = [48, 32, 49, 56, 48, 32, 50, 48, 48, 32, 48]
+description = "reverse only the text Form BBox y endpoints from [0 0 200 180] to [0 180 200 0]"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[[page]]
+index = 1
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+declared_failure = "content-semantics:XOBJ-11"
+
+[expected.structure]
+pages = 2
+blocks = 2
+columns = 1
+
+[[expected.block]]
+key = "PAGE_TEXT"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.168, 112.656, 131.136]
+visual_bbox = [73.177734, 119.830078, 111.985219, 128.90625]
+
+[[expected.block]]
+key = "FORM_TEXT"
+page = 1
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "MIMUS"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.168, 112.656, 131.136]
+visual_bbox = [73.177734, 119.830078, 111.985219, 128.90625]
+
+[[expected.behaviour]]
+id = "XOBJ-11-form-text"
+assertion = "The reversed text Form BBox is normalized and Form-owned MIMUS remains locatable without page degradation"
+observable_via = "single-range byte lineage, typed recovery with object location, production IL, and independent renderers"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "render"]

@@ -844,6 +844,18 @@ BabelDOC 的输出**不得作为唯一正确性 oracle**。它是参考实现而
 - 预期：能正确"解析 ObjStm 内 Resources → 修改 Form → 保持普通 stream 可寻址"；断言该 XObject 文本已翻译且 ObjStm 中其余对象未受影响。若无法处理则文档级 fail-fast，**不产出半译文档**
 - oracle：独立解析器展开后逐对象比对 + 输出文本断言 · **M0**（增量写回风险探测）· 合法
 
+**XOBJ-11 · Form `/BBox` 的轴端点倒序被误判为不可用**
+- 触发：四元、全数值、有限且非退化的 Form `/BBox` 使用倒序 y 端点，例如
+  `[0 180 200 0]`；独立解析器与渲染器将其规范化后正常显示
+- V1：**高度相关**——真实论文 1706.03762v7 的页 12–14 共 2,555 个 child Form 使用
+  该形状，严格要求 `y1 > y0` 会让三个页面全部 `bad_form_b_box`
+- 构造：同一合法两页父本的两个单变量子本；一份反转图形 Form 的 y 端点而页面文字
+  位于 Form 外，另一份反转含 `MIMUS` 文字 Form 的 y 端点
+- 预期：仅对四元、全数值、有限且两轴非退化的 BBox 用 `min/max` 规范化，并发
+  `normalized_form_bbox` typed recovery；缺失、非数值或退化仍 `bad_form_b_box` 页级降级
+- oracle：byte-mutation 谱系 + production walk/CLI 诊断 + 双提取器文字/几何 + 双渲染器
+  栅格 · **M3** · 故意畸形
+
 #### GEOM — MediaBox / CropBox / Rotate / 坐标系
 
 **GEOM-01 · MediaBox 用字符串切分解析**

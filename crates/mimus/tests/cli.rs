@@ -1279,8 +1279,8 @@ fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 150, "M1 closure fixture inventory changed");
-    assert_eq!(cases.len(), 88, "M1 closure case inventory changed");
+    assert_eq!(ids.len(), 153, "M1 closure fixture inventory changed");
+    assert_eq!(cases.len(), 89, "M1 closure case inventory changed");
 
     for id in ids {
         let input = fixture_path(&id);
@@ -2771,6 +2771,14 @@ fn parse_stream_and_xobject_fixture_matrix_stays_bounded_and_preserves_streams()
             (0, OutputExpectation::Rewritten, Some("content_recovered")),
         ),
         (
+            "mal-xobj-11-reversed-bbox-form-text",
+            (0, OutputExpectation::Rewritten, Some("content_recovered")),
+        ),
+        (
+            "mal-xobj-11-reversed-bbox-page-text",
+            (0, OutputExpectation::Rewritten, Some("content_recovered")),
+        ),
+        (
             "mal-xobj-bad-matrix",
             (0, OutputExpectation::Exact, Some("degradation_summary")),
         ),
@@ -2887,6 +2895,10 @@ fn parse_stream_and_xobject_fixture_matrix_stays_bounded_and_preserves_streams()
             (0, OutputExpectation::Rewritten, None),
         ),
         (
+            "unit-xobj-11-bbox-order-parent",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
             "unit-xobj-05-singular-ctm",
             (0, OutputExpectation::Exact, Some("degradation_summary")),
         ),
@@ -2986,6 +2998,39 @@ fn parse_stream_and_xobject_fixture_matrix_stays_bounded_and_preserves_streams()
                 );
             }
         }
+    }
+}
+
+#[test]
+fn reversed_form_bbox_is_recovered_with_typed_object_location_without_page_degradation() {
+    for (id, page_index, form_object) in [
+        ("mal-xobj-11-reversed-bbox-page-text", 0, 10),
+        ("mal-xobj-11-reversed-bbox-form-text", 1, 13),
+    ] {
+        let output = run_inspect(&fixture_path(id), true, None);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let events = parse_events(&output.stdout);
+        assert_one_terminal_last(&events, "result");
+        assert!(events.iter().all(|event| event["id"] != "page_degraded"));
+
+        let recoveries = events
+            .iter()
+            .filter(|event| {
+                event["id"] == "content_recovered" && event["recovery"] == "normalized_form_bbox"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(recoveries.len(), 1, "fixture {id}: {events:?}");
+        assert_eq!(recoveries[0]["page_index"], page_index);
+        assert_eq!(
+            recoveries[0]["form_object_ids"],
+            serde_json::json!([form_object])
+        );
+        assert_eq!(recoveries[0]["form_object_count"], 1);
     }
 }
 

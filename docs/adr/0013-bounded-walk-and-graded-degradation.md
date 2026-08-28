@@ -2,6 +2,7 @@
 
 - 状态：已接受（2026-08-24）
 - 决策层级：混合——边界数值与恢复语义可逆（复议时更新本 ADR 与对应 fixture 预期即可）；§5 的降级报告形状一经发布即属公开合同，受 ADR-0011 §6 演进规则约束，难逆；§3 的写回模型是难逆（三个 Issue 的保真上限建立其上）
+- 2026-08-28 修订（#98）：允许有界规范化有限、非退化但轴端点倒序的 Form `/BBox`，并为恢复诊断增加有界对象定位。
 
 ## 背景
 
@@ -70,7 +71,7 @@ Typeset 的恒等守卫从「全段单一 upright 字体 run」收窄为「**替
 | `Tr` 渲染模式 | 走查追踪 `Tr`，`Tr 3`/`Tr 7` 的字符照常产出并标记不可见；不可见字符不翻译（区间不替换），与非直立同一机制 |
 | 内联图像 | 长度按 `/L` 声明 > `W·H·BPC` 可计算（溢出检查）> 受限 `EI` 扫描 + 续接合理性检查 三级优先，记录所选路径；扫描窗耗尽 → 页级降级 |
 
-**Form XObject 与 Type3 CharProc**：主防线是**对象 ID active-path 去环**（自环与互环产出不同诊断，路径入 detail），深度上限是第二道边界。`/BBox` 必须是 4 元全数值、`/Matrix` 必须是 6 元数值，否则该 `Do` 原子跳过并页级降级——**不得回落单位矩阵执行**（XOBJ-04 的验收明文禁止；M0 PoC 对坏 `/Matrix` 回落 IDENTITY 的行为不采纳）。Form 自带 `/Resources` 优先，缺失时整体继承调用方作用域（不 merge）。进入隔离作用域时按值保存 `{图形状态, q/Q 栈, 操作数, 兼容深度}`，退出时全量恢复，残留只产诊断不污染页面。Type3 CharProc 补齐与 Form 同源的递归保护——M0 实验 2 §范围限制已自陈这是留给生产实现的洞。
+**Form XObject 与 Type3 CharProc**：主防线是**对象 ID active-path 去环**（自环与互环产出不同诊断，路径入 detail），深度上限是第二道边界。`/BBox` 必须是 4 元全数值且有限，两轴均不得退化；轴端点倒序时按 `min/max` 规范化并发出 `normalized_form_bbox` 恢复诊断，缺失、错长、非数值、非有限或退化仍页级 `bad_form_b_box`。`/Matrix` 必须是 6 元有限数值，否则该 `Do` 原子跳过并页级降级——**不得回落单位矩阵执行**（XOBJ-04 的验收明文禁止；M0 PoC 对坏 `/Matrix` 回落 IDENTITY 的行为不采纳）。Form 自带 `/Resources` 优先，缺失时整体继承调用方作用域（不 merge）。进入隔离作用域时按值保存 `{图形状态, q/Q 栈, 操作数, 兼容深度}`，退出时全量恢复，残留只产诊断不污染页面。Type3 CharProc 补齐与 Form 同源的递归保护——M0 实验 2 §范围限制已自陈这是留给生产实现的洞。
 
 图形状态结构上，**文本矩阵不进 `q`/`Q` 的保存集**（PDF 规范语义）。M0 PoC 把两者混存是已识别的偏差，生产实现不沿用。
 
@@ -94,7 +95,7 @@ M0 实验 2 的参数不自动成为生产政策（其 §范围限制明确不�
 
 - **`PageDegraded { page_index, reason }`**：逐页一条，吃 100 条上限，超限由既有 `dropped_diagnostics` 汇总兜底。
 - **`DegradationSummary { degraded_page_indices, preserved_paragraphs, … }`**：单条汇总，仿 `ScanSummary` 的特权——无条件入库、不吃 100 条上限，终结事件之前发出。这满足 #18「终结报告列出受影响页」而**不触碰 `result` 的形状**（ADR-0011 §2 明文规定 result 不重复诊断内容、只保留 `warnings` 总数）。
-- **`ContentRecovered { page_index, recovery }`**：§3 每一条「+ warning」的出线口。它与 `PageDegraded` 是同一枚硬币的两面——降级说「这一页没翻」，恢复说「这一页翻了，但走查偏离了输入的字面结构」。**每页每类恢复只报一条**，不是每次恢复一条：§3 要求恢复决定页级一致，逐次计数会随内容长度漂移，做不成稳定断言。
+- **`ContentRecovered { page_index, recovery, … }`**：§3 每一条「+ warning」的出线口。它与 `PageDegraded` 是同一枚硬币的两面——降级说「这一页没翻」，恢复说「这一页翻了，但走查偏离了输入的字面结构」。**每页每类恢复只报一条**，不是每次恢复一条：§3 要求恢复决定页级一致，逐次计数会随内容长度漂移，做不成稳定断言。`normalized_form_bbox` 额外携带按对象号排序且最多 16 项的 `form_object_ids`，以及未截断的 `form_object_count`；其他恢复省略这两个 additive v2 字段。
 - **不新增 ExitCategory、不新增 reason**：页级与段级降级不是错误，退出码仍为 0。
 - 人类模式：逐条 stderr `warning[page_degraded]: …`，外加一行汇总。
 - `--debug` 的 `diagnostics.ndjson` 与 stdout 共用同一 serializer，自动获得新诊断，不引入第三个 schema。
