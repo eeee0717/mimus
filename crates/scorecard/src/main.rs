@@ -1388,18 +1388,49 @@ fn expected_formula_neighbors(
 }
 
 fn continuity_bound(paragraph: &Paragraph) -> f64 {
-    let mut word_gaps = Vec::new();
-    for pair in paragraph.text.chars.windows(2) {
-        if (pair[0].baseline_origin.y - pair[1].baseline_origin.y).abs() > pair[0].font_size * 0.2 {
-            continue;
+    let translates = |character: &Char| {
+        character
+            .layout
+            .as_ref()
+            .is_some_and(|layout| layout.policy == "translate")
+    };
+    let mut word_gaps = paragraph
+        .text
+        .chars
+        .iter()
+        .filter(|character| {
+            character
+                .unicode
+                .as_deref()
+                .is_some_and(|value| !value.is_empty() && value.chars().all(char::is_whitespace))
+        })
+        .map(|character| character.box_.right - character.box_.left)
+        .filter(|gap| gap.is_finite() && *gap > 0.0)
+        .collect::<Vec<_>>();
+    word_gaps.extend(paragraph.text.chars.windows(2).filter_map(|pair| {
+        let [left, right] = pair else {
+            return None;
+        };
+        if !right.implicit_space_before
+            || !translates(left)
+            || !translates(right)
+            || (left.baseline_origin.y - right.baseline_origin.y).abs()
+                > left.font_size.max(right.font_size) * 0.35
+        {
+            return None;
         }
-        let gap = pair[1].box_.left - pair[0].box_.right;
-        if gap > pair[0].font_size * 0.1 {
-            word_gaps.push(gap);
-        }
-    }
+        let gap = right.box_.left - left.box_.right;
+        (gap.is_finite() && gap > 0.0).then_some(gap)
+    }));
     let word_spacing = median(&mut word_gaps);
-    (2.0 * word_spacing).max(1.5 * median_font(paragraph))
+    let mut font_sizes = paragraph
+        .text
+        .chars
+        .iter()
+        .map(|character| character.font_size)
+        .filter(|size| size.is_finite() && *size > 0.0)
+        .collect::<Vec<_>>();
+    (2.0 * word_spacing).max(1.5 * median(&mut font_sizes))
 }
 
 fn compact(text: &str) -> String {
@@ -2374,6 +2405,24 @@ mod tests {
         assert_eq!(result.unbalanced_delimiter_paragraphs, 1);
         assert_eq!(result.adjacent_fragment_count, 1);
         assert_eq!(result.evidence[1].text, "ls]");
+    }
+
+    #[test]
+    fn continuity_bound_excludes_formula_adjacent_source_gaps() {
+        let document: Il = serde_json::from_value(serde_json::json!({
+            "pages": [{"index": 0, "paragraphs": [{
+                "reading_order": 2,
+                "bounds": {"left": 0.0, "bottom": 0.0, "right": 202.0, "top": 1.0},
+                "text": {"chars": [
+                    {"unicode":"A", "font_size":10.0, "baseline_origin":{"x":0.0,"y":0.0}, "box":{"left":0.0,"bottom":0.0,"right":1.0,"top":1.0}, "layout":{"label":"text","policy":"translate"}},
+                    {"unicode":"B", "implicit_space_before":true, "font_size":10.0, "baseline_origin":{"x":3.0,"y":0.0}, "box":{"left":3.0,"bottom":0.0,"right":4.0,"top":1.0}, "layout":{"label":"text","policy":"translate"}},
+                    {"unicode":"x", "font_size":10.0, "baseline_origin":{"x":100.0,"y":0.0}, "box":{"left":100.0,"bottom":0.0,"right":101.0,"top":1.0}, "layout":{"label":"inline_formula","policy":"passthrough"}},
+                    {"unicode":"C", "implicit_space_before":true, "font_size":10.0, "baseline_origin":{"x":201.0,"y":0.0}, "box":{"left":201.0,"bottom":0.0,"right":202.0,"top":1.0}, "layout":{"label":"text","policy":"translate"}}
+                ]}
+            }]}]
+        }))
+        .unwrap();
+        assert_eq!(continuity_bound(&document.pages[0].paragraphs[0]), 15.0);
     }
 
     #[test]

@@ -1290,8 +1290,8 @@ fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 156, "M1 closure fixture inventory changed");
-    assert_eq!(cases.len(), 91, "M1 closure case inventory changed");
+    assert_eq!(ids.len(), 157, "M1 closure fixture inventory changed");
+    assert_eq!(cases.len(), 92, "M1 closure case inventory changed");
 
     for id in ids {
         let input = fixture_path(&id);

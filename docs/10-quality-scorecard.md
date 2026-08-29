@@ -112,9 +112,10 @@ bilingual review or a separately governed semantic evaluator.
 LAY-05 is reserved because current debug IL does not expose final output line boxes. The comparator
 ledger may compute it from pinned extractor XML; the harness must not invent it from string length.
 
-FOR-02 derives its bound per source paragraph. Source word gaps are positive same-baseline character
-box gaps above `0.1em`; the median is doubled and compared with `1.5` times the paragraph median font
-size. A neighbor is required only where the source formula unit immediately touched a translatable
+FOR-02 derives its bound per source paragraph. Source word-spacing samples are positive finite source
+whitespace-character widths plus same-baseline `implicit_space_before` gaps whose characters on both
+sides are `text/translate`; formula-adjacent gaps are excluded. The median is doubled and compared
+with `1.5` times the paragraph median font size. A neighbor is required only where the source formula unit immediately touched a translatable
 character on the same baseline. The output formula is matched by compact exact text and expected
 vertical position before its nearest left/right extracted lines are measured. Unmatched formula
 units remain visible in `formula_units` versus `matched_units`; v2 does not invent geometry for them.

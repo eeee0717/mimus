@@ -55,6 +55,7 @@
 | 46 | Form XObject 的 `/BBox` 按 §8.10.2 Table 95 当裁剪框生效：取 `Matrix ∘ CTM` 变换后的轴对齐外接框（旋转/斜切时**故意取超集**，宁可少裁不误裁），沿嵌套链求交；只有 metric box **整体**落在框外的字符才 `visible=false`，且仍留在走查结果里以保住跨引擎对齐的字符序列；被裁内容按页记一次 `content_recovered` / `clipped_form_content` 并附所属 form 对象号。裁掉的墨迹不再充当排版障碍——L5-4 唯一阻塞 `(12,69)` 即由此虚假障碍造成 | [ADR-0013](docs/adr/0013-bounded-walk-and-graded-degradation.md) |
 | 47 | M3 质量以六个封顶维度度量：覆盖缺口、过度翻译、误译风险代理、版面漂移、排版 lint、结构保真；严重度加权错误按每千输出字符归一化，六维等权汇总。schema v2 增加内容守恒、公式完整性/连续性/空洞、title/author 守恒与过程指标；reference-free QE 是独立 sidecar，不混入六维总分。旧 fake 的内容守恒明确 N/A；人工确认的 critical 永远覆盖自动结论。离线 `scorecard` 只消费公开 NDJSON/IL/PDF，不依赖生产 crate；阈值是待用户裁定的提案，不进 CI。真实输入出现 `Internal/6` 永远是 bug，合法终态只有发布成功或 ADR-0013 分级 typed 降级 | [docs/10-quality-scorecard.md](docs/10-quality-scorecard.md)、[docs/11-quality-scorecard-v2-baseline.md](docs/11-quality-scorecard-v2-baseline.md) |
 | 48 | model `inline_formula` 仍是公式存在性的唯一权威；StylesAndFormulas 只可在同段、同行、紧邻且有脚本基线、定界符配平、经 Mathematical Alphanumeric Symbols 锚证明的同数学字体连续 run 或紧连数学后缀证据时扩展既有公式边界，不得凭启发式新建或收缩 model 公式。每类扩展发 `formula_boundary_expanded` typed info，扩入字符继续受 ADR-0020 的源字节、字体和相对几何合同保护 | [ADR-0020](docs/adr/0020-inline-formula-flow-relocation.md) |
+| 49 | inline formula 的 fixed-slot 与 relocation 成功路径共用一个阅读连续性 oracle：同行邻接与跨行前导空洞上界为 `max(2×源 text→text 词间距中位数, 1.5×源字号中位数)`，公式间距不得污染样本；公式邻接标点不拆行、单元阅读序不逆转。fixed 不连续先尝试既有边界内的 relocation，仍失败则 `typeset_overflow` typed 段级保留；不得靠缩字号或扩大碰撞容差满足 oracle | [ADR-0020](docs/adr/0020-inline-formula-flow-relocation.md) §6 |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 

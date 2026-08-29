@@ -2,7 +2,7 @@
 
 - 状态：已接受（2026-08-27）
 - 决策层级：难逆（公式保真边界、写回字节合同和几何验收建立其上）
-- 修订：2026-08-29 补充 StylesAndFormulas 的公式单元边界合同
+- 修订：2026-08-29 补充 StylesAndFormulas 的公式单元边界合同与 Typeset 阅读连续性
 
 ## 背景
 
@@ -99,6 +99,37 @@ model reading order 和扩入字符数。事件受现有逐 ID 有界诊断预�
 `dropped_diagnostics` 按 ID 记账。扩展后的完整连续字符区间才对应一个 `{vN}`，并整体
 适用本 ADR 的字节、字体和单元内部相对几何合同。
 
+### 6. fixed-slot 与 relocation 共用阅读连续性 oracle
+
+几何不相交只是成功计划的必要条件。任何含 inline formula 的 fixed-slot 或 relocation
+计划还必须通过同一个阅读连续性 oracle；两条路径不得拥有各自阈值。
+
+连续性上界从源段事实推导：
+
+```text
+max(2 * median(source inline word spacing), 1.5 * median(source font size))
+```
+
+`source inline word spacing` 只取两类正有限样本：源空白字符的度量宽度，以及两个
+`text/translate` 字符间由 `implicit_space_before` 标出的同行水平间距。model formula
+任一端的间距不得进入样本，否则待检测的远端固定槽会反向抬高自己的合法上界。没有
+词间距样本时，仍由源字号中位数给出 `1.5em` 下界；中位数避免单个合法宽空格或度量
+离群值支配阈值。
+
+oracle 按 `RestoredTranslation` 的 text/formula segment 顺序检查：
+
+- 同行公式与前后语义邻居的间距不得超过推导上界；
+- 语义邻居换行时，新行首项到所属行槽左边界的距离不得超过同一上界，防止 fixed
+  formula 独自留在源行中部；
+- 相邻项的阅读序与公式单元顺序不得逆转；
+- 与公式邻接的标点不得拆行。relocation 放置器在装箱前把公式与相邻标点视为不可拆
+  组合，oracle 再作最终验证。
+
+门禁顺序固定为：fixed-slot 几何成功但连续性失败 → 在 ADR 本节之前已允许的范围内尝试
+relocation → relocation 仍失败或不具备重定位资格 → `typeset_overflow` typed 段级保留。
+oracle 拒绝后不得通过继续缩字号、扩大碰撞容差、删除公式字符或重绘公式来换取成功；
+既有字号搜索只服务于进入 oracle 之前的几何装箱。
+
 ## 后果
 
 - L5-2 离线回放实际恢复 11 个多行混排溢出中的 9 个，使双提取器 Han 保留率从
@@ -114,3 +145,6 @@ model reading order 和扩入字符数。事件受现有逐 ID 有界诊断预�
 - 1706 离线回放中，边界合同在 17 个段扩入 65 个字符；`(1,11)`、`(4,19)`、
   `(4,21)`、`(7,50)` 分别恢复完整序列、`d_model` 与 `epsilon_ls` 单元。受影响段的
   prepared request 和 cache key 随之改变，这是内容修复的必要结果。
+- `unit-type-14-formula-continuity` 钉死短译文造成的 fixed-slot 超界空洞：固定计划虽无
+  碰撞仍必须失败，随后以相同字号重定位源公式 operand；标点拆行和多公式逆序由共享
+  oracle 单测覆盖。
