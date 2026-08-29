@@ -856,6 +856,20 @@ BabelDOC 的输出**不得作为唯一正确性 oracle**。它是参考实现而
 - oracle：byte-mutation 谱系 + production walk/CLI 诊断 + 双提取器文字/几何 + 双渲染器
   栅格 · **M3** · 故意畸形
 
+**XOBJ-12 · Form `/BBox` 未作为裁剪框，被裁掉的内容成为虚假障碍**
+- 触发：外层 Form 的 `/BBox` 比内层内容小（pdfTeX `\includegraphics` 包装 form 裁掉
+  Illustrator 原图的顶部标题），被裁的文字在页面坐标下压在一段可翻译标题的原始足迹上
+- V1：**高度相关**——真实论文 1706.03762v7 的页 12–14 各有 1–2 个这样的 form；页 12 的
+  `Input-Input Layer5` 让 `Attention Visualizations` 在 9 个候选字号上全部
+  `ink_bounds_are_safe` 失败，段级 `typeset_overflow` 保留英文
+- 构造：一份合法两页 fixture，只有外层 Form `/BBox` 上沿不同（200 容得下 / 100 容不下），
+  两页画同一段标签
+- 预期：按 §8.10.2 Table 95 把 `/BBox` 经 `Matrix ∘ CTM` 变换后的轴对齐外接框沿嵌套链求交
+  作为裁剪框；度量盒整体在框外的字符 `visible = false` 并发 `clipped_form_content`，部分
+  相交保留；被裁字符仍留在走查结果里以保住跨引擎字符序
+- oracle：手写对象图 + content bytes + poppler 双页文本盒（提取视图不裁剪）+ mutool 单页
+  文本与栅格（渲染视图裁剪）+ production IL 可见性 · **M3** · 合法
+
 #### GEOM — MediaBox / CropBox / Rotate / 坐标系
 
 **GEOM-01 · MediaBox 用字符串切分解析**
@@ -1679,6 +1693,7 @@ D2（跨栏合并）由 `unit-order-01`–`05` 覆盖，D11（公式字体正则
 | `mal-xobj-01-self-recursive` / `-02-mutual-recursive` | XOBJ-02 | 自环 / 互环（2 份） |
 | `mal-xobj-03-form-no-bbox` | XOBJ-04 | Form 缺 `/BBox` 且带非单位 `/Matrix` |
 | `unit-xobj-04-inherited-resources` | XOBJ-07 | XObject 与页面同名字体指向不同字体 |
+| `unit-xobj-12-form-bbox-clip` | XOBJ-12 | 只有外层 Form `/BBox` 上沿不同（容得下 / 裁掉同一段标签） |
 
 #### 实验 3 · 增量写回（对应 ADR-0003 §2）
 

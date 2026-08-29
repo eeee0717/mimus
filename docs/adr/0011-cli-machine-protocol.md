@@ -72,6 +72,7 @@ CLI 机器协议版本升为 2；IL 的 `schema_version` 独立保持 1。每行
 - ADR-0015（#67/#68/#70 前置决策）：`engine_character_alignment` 逐页聚合分类交叉校验的等价差异、解释边、Unicode 冲突及 D/E/F 残差；`explained_count` 是 v2 的 additive 字段，不升 schema；既有 `engine_character_mismatch` 保留为分类器不可用时的兜底。
 - 2026-08-26 真实论文恢复：诊断预算改为总量 500 + 每 ID 25，`dropped_diagnostics.counts_by_id` 为 additive 字段；baseline 残差计数与最大偏移并入逐页 `engine_character_alignment`，逐字符明细降为 debug-only。公开协议仍为 v2。
 - 2026-08-28 #98：`content_recovered` 新增可选 `form_object_ids` 与 `form_object_count`，用于 `normalized_form_bbox` 的有界对象定位；公开协议仍为 v2。
+- 2026-08-28 #110：`content_recovered` 新增 `recovery` 取值 `clipped_form_content`（沿用同一对可选字段）；新增诊断 `typeset_overflow_detail { page_index, paragraph_index, container, attempted_font_sizes_pt, obstacle_count, obstacles }`——每个 `typeset_overflow` 保留段一条，`container` 与 `obstacles` 均为 `[left, bottom, right, top]`，`obstacles` 按与容器的重叠面积降序且最多 4 项、为空时省略，`attempted_font_sizes_pt` 最多 16 项。两者都是 additive，公开协议仍为 v2。
 - ADR-0018：`configuration_resolved` 增加 Regular/Bold 输出字体的 source 与 SHA-256；
   `unsupported_output_glyph` 增加缺字符样本与字体身份。两者均为 additive v2 扩展。
 

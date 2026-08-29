@@ -527,6 +527,20 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 page_index + 1
             );
         }
+        DiagnosticEvent::TypesetOverflowDetail {
+            page_index,
+            paragraph_index,
+            container,
+            attempted_font_sizes_pt,
+            obstacle_count,
+            obstacles,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[typeset_overflow_detail]: page {} paragraph {paragraph_index} container={container:?} font_sizes={attempted_font_sizes_pt:?} obstacles={obstacle_count} sample={obstacles:?}",
+                page_index + 1
+            );
+        }
         DiagnosticEvent::DroppedDiagnostics {
             count,
             counts_by_id,
@@ -583,6 +597,7 @@ const fn human_recovery_kind(recovery: RecoveryKind) -> &'static str {
         RecoveryKind::MutuallyRecursiveForm => "mutually recursive Form XObjects",
         RecoveryKind::FormDepthExceeded => "a Form XObject nesting chain deeper than 64",
         RecoveryKind::NormalizedFormBBox => "reversed Form XObject BBox endpoints",
+        RecoveryKind::ClippedFormContent => "text clipped away by a Form XObject BBox",
         RecoveryKind::ScopedGraphicsStateUnclosed => {
             "an unclosed q graphics-state scope inside a Form XObject"
         }

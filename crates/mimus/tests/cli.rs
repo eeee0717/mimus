@@ -1279,8 +1279,8 @@ fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 153, "M1 closure fixture inventory changed");
-    assert_eq!(cases.len(), 89, "M1 closure case inventory changed");
+    assert_eq!(ids.len(), 154, "M1 closure fixture inventory changed");
+    assert_eq!(cases.len(), 90, "M1 closure case inventory changed");
 
     for id in ids {
         let input = fixture_path(&id);
@@ -2899,6 +2899,10 @@ fn parse_stream_and_xobject_fixture_matrix_stays_bounded_and_preserves_streams()
             (0, OutputExpectation::Rewritten, None),
         ),
         (
+            "unit-xobj-12-form-bbox-clip",
+            (0, OutputExpectation::Rewritten, Some("content_recovered")),
+        ),
+        (
             "unit-xobj-05-singular-ctm",
             (0, OutputExpectation::Exact, Some("degradation_summary")),
         ),
@@ -2999,6 +3003,32 @@ fn parse_stream_and_xobject_fixture_matrix_stays_bounded_and_preserves_streams()
             }
         }
     }
+}
+
+#[test]
+fn form_bbox_clipped_text_is_reported_and_never_becomes_visible_ink() {
+    let id = "unit-xobj-12-form-bbox-clip";
+    let output = run_inspect(&fixture_path(id), true, None);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = parse_events(&output.stdout);
+    assert_one_terminal_last(&events, "result");
+    assert!(events.iter().all(|event| event["id"] != "page_degraded"));
+
+    let clipped = events
+        .iter()
+        .filter(|event| {
+            event["id"] == "content_recovered" && event["recovery"] == "clipped_form_content"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(clipped.len(), 1, "{events:?}");
+    assert_eq!(clipped[0]["page_index"], 1);
+    assert_eq!(clipped[0]["form_object_ids"], serde_json::json!([11]));
+    assert_eq!(clipped[0]["form_object_count"], 1);
 }
 
 #[test]

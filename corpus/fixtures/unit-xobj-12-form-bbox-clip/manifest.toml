@@ -1,0 +1,164 @@
+schema_version = 1
+
+[identity]
+id = "unit-xobj-12-form-bbox-clip"
+name = "Form BBox clips the text it encloses"
+class = "unit"
+legality = "legal"
+cases = ["XOBJ-12"]
+priority = "M3"
+variable = "Only the enclosing Form BBox top edge differs between the two pages"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-xobj-12-form-bbox-clip.pdf"
+pdf_sha256 = "2e5a064cc4f592585537ee75ee993e73495e87021dbb24687048f1ee4eded7ad"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 6, descriptor_object = 7, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[[page]]
+index = 1
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d786f626a2d31322d666f72"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 2
+blocks = 4
+columns = 1
+
+[[expected.block]]
+key = "PAGE_TEXT_INSIDE"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 2
+text = "MIMUS"
+baseline_origin = [72.0, 40.0]
+metric_box = [72.0, 37.168, 112.656, 51.136]
+visual_bbox = [73.177734, 39.830078, 111.985219, 48.90625]
+
+[[expected.block]]
+key = "FORM_LABEL_INSIDE"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 1
+text = "MIMUS"
+baseline_origin = [72.0, 125.0]
+metric_box = [72.0, 122.168, 112.656, 136.136]
+visual_bbox = [73.177734, 124.830078, 111.985219, 133.90625]
+
+[[expected.block]]
+key = "PAGE_TEXT_CLIPPED"
+page = 1
+column = "full"
+draw_order = 3
+reading_order = 4
+text = "MIMUS"
+baseline_origin = [72.0, 40.0]
+metric_box = [72.0, 37.168, 112.656, 51.136]
+visual_bbox = [73.177734, 39.830078, 111.985219, 48.90625]
+
+[[expected.block]]
+key = "FORM_LABEL_CLIPPED"
+page = 1
+column = "full"
+draw_order = 4
+reading_order = 3
+text = "MIMUS"
+visible = false
+mutool_extractable = false
+baseline_origin = [72.0, 125.0]
+metric_box = [72.0, 122.168, 112.656, 136.136]
+visual_bbox = [73.177734, 124.830078, 111.985219, 133.90625]
+
+[[expected.content_stream]]
+object = 10
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 125 Tm
+(MIMUS) Tj
+ET
+"""
+
+[[expected.content_stream]]
+object = 11
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 125 Tm
+(MIMUS) Tj
+ET
+"""
+
+[[expected.content_stream]]
+object = 12
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 40 Tm
+(MIMUS) Tj
+ET
+/Inside Do
+"""
+
+[[expected.content_stream]]
+object = 13
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 40 Tm
+(MIMUS) Tj
+ET
+/Clipped Do
+"""
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 12
+
+[[expected.reference]]
+from_object = 4
+path = ["/Contents"]
+to_object = 13
+
+[[expected.reference]]
+from_object = 5
+path = ["/XObject", "/Inside"]
+to_object = 10
+
+[[expected.reference]]
+from_object = 5
+path = ["/XObject", "/Clipped"]
+to_object = 11
+
+[[expected.behaviour]]
+id = "XOBJ-12-form-bbox-clip"
+assertion = "The label drawn at baseline y=125 renders inside the /BBox [0 0 300 200] form on page 0 and is clipped away by the /BBox [0 0 300 100] form on page 1; only the enclosing BBox top edge differs"
+observable_via = "exact object graph, content streams, poppler text boxes on both pages, absent mutool text and raster ink on page 1"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]

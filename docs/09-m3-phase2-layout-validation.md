@@ -134,3 +134,110 @@ first invalid response once. If all `N` paragraphs remain invalid, the strict re
 `2N` HTTP requests. The authorization must cap both quantities (`cache misses <= N`, Responses
 requests `<= 2N`) and the run must stop if either cap is exceeded. A strict failure must still list
 only the reviewed degradation set and must not create or overwrite an output file.
+
+## L5-4R real-paper re-acceptance
+
+- Date: 2026-08-28 (Asia/Shanghai)
+- Issue: #110, under #34
+- Base: `origin/master` at `250ddd3c8a2c6b0cba3a52e920f72271a7b3c1ab` plus the #110 walk fix
+- Input SHA-256: `bdfaa68d8984f0dc02beaca527b76f207d99b666d31d1da728ee0728182df697`
+- Layout model SHA-256: `45bf71750b00739a41fc209f132eb104a4d6b5bb29483c9078164d8b87cf28ba`
+- Primary/bold font SHA-256: `d68bafcb48a2707749396aa12bbbd833cb70401f3a9a689fd2902c7e0d295964`
+- Fallback regular/bold SHA-256:
+  `3fdf69cabf06049ea70a00b5919340e2ce1e6d02b0cc3c4b44fb6801bd1e0d22` /
+  `b184b89e3c1075f22f6b71575b6fc20d4972b3cfd3b23322ca6fd596dcaef167`
+- Glossary: 96 entries, fingerprint
+  `abc661f7ab8a80209e05adccf3cbf56418cf710a9fb0eddebe8945c9c001705a`
+- Cache: byte copy of the archived L5-4 cache
+  `592c911df60254659b29458c1e6870ad29173ac996ddce76a37ccbbdc8fefac9`; the archive itself was never
+  opened for writing
+- Output SHA-256: `5d9f97582b58a1ce415ed68aec1ddc9685c05cc53ed56bc91a22e2d6013ff70e`
+- Result: **PASS**
+- Evidence: `.context/real-pdf-test-2026-08-28-l5-4r/`
+
+### API boundary
+
+Fully offline. 146 translation jobs, 146 translation-cache hits, zero misses. Both the primary and
+strict runs pointed at a loopback counting proxy with `--limit 0` whose upstream was a closed port;
+both `/count` endpoints ended at `{"forwarded":0,"limit":0,"rejected":0}`. The process key was the
+literal placeholder `sk-l5-4r-offline-fake-key`. **Real Responses calls: 0.**
+
+### Root cause closed this round
+
+The single L5-4 blocker `(12,69)` `Attention Visualizations` was not a genuine fit failure. The walk
+parsed and validated a Form XObject `/BBox` and then discarded it, so it never applied the clip that
+PDF 32000-1:2008 §8.10.2 Table 95 makes mandatory. Page 13 nests an Illustrator artwork form
+(`/BBox [0 0 382.326 230.321]`) inside a `\includegraphics` wrapper (`/BBox [0 0 382.325 194.32]`);
+the artwork draws `(Input-Input Layer5) Tj` at form-space `y = 217.04`, above the wrapper's clip
+edge. No conforming renderer paints it, but the walk admitted its 18 glyphs as visible ink. Their
+`visual_bbox` values and the `fallback_line` pseudo-region they clustered into sat directly on the
+heading's own source footprint, so all nine font sizes from 11.9552 pt down to `MIN_FONT_SIZE_PT`
+were rejected by `ink_bounds_are_safe`.
+
+The fix intersects the transformed `/BBox` across form nesting and marks fully-outside glyphs
+invisible while keeping them in the IL, so cross-engine alignment still sees the same character
+sequence. Rotated or skewed forms take the axis-aligned superset of the transformed rectangle —
+deliberately under-clipping rather than risking the removal of real ink. Clipped content is reported
+once per page as `content_recovered` / `clipped_form_content` with the owning form object id.
+
+### Five-round comparison
+
+| Metric | L5 | L5-2 | L5-3 | L5-4 | L5-4R |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Date (2026-08) | 27 | 27 | 28 | 28 | 28 |
+| Result | FAIL | FAIL | PASS | FAIL | **PASS** |
+| Real Responses calls | 101 | 120 | 5 | 13 | **0** |
+| Translate Han | 5,786 | 6,498 | 6,501 | 6,936 | 6,936 |
+| Typeset Han | 5,506 | 5,209 | 6,294 | 6,930 | **6,936** |
+| Poppler / MuPDF Han | 5,506 | 5,209 | 6,294 | 6,930 | **6,936** |
+| Retention | 95.16% | 80.16% | 96.82% | 99.91% | **100.00%** |
+| Han loss | 280 | 1,289 | 207 | 6 | **0** |
+| Dominant typed loss | `unsupported_font` | `typeset_overflow` | `typeset_protocol` | `typeset_overflow` | none |
+| Unexplained loss | 0 | 0 | 0 | 0 | 0 |
+| Preserved paragraphs | 9 | 17 | 4 | 2 | **1** |
+| Degraded pages | `[12,13,14]` | `[12,13,14]` | `[12,13,14]` | `[]` | **`[]`** |
+| Suspicious echoes | not tracked | 1 | 1 | 1 | 1 |
+
+The only remaining preserved paragraph is `(3,12)` `unreliable_unicode`; the only suspicious echo is
+`(0,10)`, the author/email block. Both are reviewed, accepted residues carried unchanged since L5-3.
+
+### Acceptance matrix
+
+| Check | Evidence | Result |
+| --- | --- | --- |
+| Container | `qpdf --check` clean; 15 pages in and out; output starts with the exact input bytes | pass |
+| Non-text structure | `/Form` 2,565, `/Image` 6, `/Link` 113, `/TrueType` 10, `/Type1` 24 all unchanged; only `/Type0` + `/CIDFontType2` subsets added; 22 page-outline mappings and 7 bookmarks unchanged | pass |
+| Graphics identity | Canonical Form JSON SHA-256 `9fa117404f67aa2a1954c1259e6ba545308a1138e264634a41eb519b9971f2f1` identical in and out, same value as L5-4; XObject listings byte-identical | pass |
+| Graphics render | Pages 1/13/14/15 at 150 DPI: every colored (non-greyscale) pixel is identical between input and output; no source-English overprint under the translations | pass |
+| Chinese | Translate / Typeset / Poppler / MuPDF all 6,936 Han; retention 100.00%; Han loss 0 | pass |
+| `(12,69)` | Both extractors contain 注意力可视化; the heading typesets with `single_line_bounds_expanded` `overflow_top_pt` 1.7455 | pass |
+| Formula relocation | 52 exclusive spans, 4 shared spans, 79 characters, 30 units, 13 recovered mixed paragraphs, 0 residual — identical to L5-4 | pass |
+| Policy passthrough | 7,978 selected characters over 153 table / 40 reference-content / 2 reference / 36 number / 1 header / 1 footer / 8 display-formula regions; one hash `4bc5cd6e3da4838395c094aacec610944f170590c8ead088153b95d969865074` from ParagraphFind through Write | pass |
+| Placeholders | Zero `{vN}` / `{lN}` / `<bN>` residue in Poppler, MuPDF, and the Write IL | pass |
+| Diagnostics | Only 5 `translation_identity` items dropped, inside that id's budget; no degradation, expansion, echo, or recovery item dropped | pass |
+| Degradation | 0 degraded pages; 1 preserved paragraph `(3,12)`; 1 suspicious echo `(0,10)` | pass |
+| Strict | Exit code 4, `strict_degradation`, lists exactly `(3,12)` and `(0,10)`, 0 calls, sentinel PDF hash unchanged, and no file created at an unused output path | pass |
+| Security | No `sk-`-shaped token anywhere in the run directory, including the cache copy and the output PDF | pass |
+
+### Comparison against the BabelDOC baseline
+
+Page 13 was rendered at 150 DPI and compared with the BabelDOC translation of the same paper. The
+baseline PDF is a visual reference only and is not stored in this repository. Heading ink bounding
+boxes converted back to PDF points:
+
+| Render | left | right | bottom | top |
+| --- | ---: | ---: | ---: | ---: |
+| English source | 108.00 | 230.40 | 709.92 | 718.56 |
+| BabelDOC | 108.48 | 179.04 | 709.44 | 720.96 |
+| mimus L5-4R | 108.48 | 179.04 | 709.44 | 720.48 |
+
+Left, right, and bottom edges match the baseline exactly; the top differs by 0.48 pt, one 150 DPI
+pixel of antialiasing. The attention-visualization figure, its rotated token labels, and the
+translated caption are all intact.
+
+### Disposition
+
+Under the accepted baseline of BabelDOC parity, the real-paper translation is **达标**: zero Han
+loss, zero degraded pages, zero overflow, an intact graphics layer, and heading placement that
+matches the baseline. The remaining open work is tracked in #105-#108 and #38 and is not a blocker
+for this judgement.

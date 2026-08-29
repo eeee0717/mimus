@@ -1320,6 +1320,21 @@ fn cjk_translation_overflow_preserves_the_original_paragraph() {
     );
 
     assert_single_preserved_paragraph(&output, "typeset_overflow");
+    let events = parse_events(&output.stdout);
+    let detail = events
+        .iter()
+        .find(|event| event["id"] == "typeset_overflow_detail")
+        .unwrap_or_else(|| panic!("每个 typeset_overflow 都要有逐段明细: {events:?}"));
+    assert_eq!(detail["page_index"], 0);
+    assert_eq!(detail["paragraph_index"], 0);
+    assert_eq!(detail["container"].as_array().unwrap().len(), 4);
+    // 字号序列从段落平均字号起每次 −0.5 下探到 8.0，最后一档必须正好是最小字号。
+    let sizes = detail["attempted_font_sizes_pt"].as_array().unwrap();
+    assert!(sizes.len() > 1, "{detail}");
+    assert_eq!(sizes.last().unwrap().as_f64().unwrap(), 8.0);
+    // 这一段是真的装不下——障碍集为空，撑爆的是容器与页面，而不是别的墨迹。
+    assert_eq!(detail["obstacle_count"], 0);
+    assert!(detail.get("obstacles").is_none(), "{detail}");
     assert_eq!(
         translated_han_strings(&debug.join("06-translate.il.json")),
         [LONG_HAN]
@@ -2068,9 +2083,9 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
         "unit-scan-01-image-only".to_owned(),
         "unit-scan-02-invisible-ocr".to_owned(),
     ]);
-    assert_eq!(ids.len(), 153, "Corpus fixture inventory changed");
-    assert_eq!(unique_cases.len(), 89, "Corpus case inventory changed");
-    assert_eq!(legal.len(), 111, "legal fixture inventory changed");
+    assert_eq!(ids.len(), 154, "Corpus fixture inventory changed");
+    assert_eq!(unique_cases.len(), 90, "Corpus case inventory changed");
+    assert_eq!(legal.len(), 112, "legal fixture inventory changed");
     assert!(rejected.is_subset(&legal));
 
     let directory = tempfile::tempdir().unwrap();
@@ -2149,7 +2164,7 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
             output_count += 1;
         }
     }
-    assert_eq!(output_count, 104);
+    assert_eq!(output_count, 105);
     assert_eq!(
         server.request_count(),
         138,
