@@ -1,0 +1,88 @@
+schema_version = 1
+
+[identity]
+id = "unit-parse-12-contents-array-tj-operand"
+name = "Text-show operand and operator in separate Contents streams"
+class = "unit"
+legality = "legal"
+cases = ["PARSE-04"]
+priority = "M3"
+variable = "A complete TJ array operand ends one Contents stream and its TJ operator starts the next"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-parse-12-contents-array-tj-operand.pdf"
+pdf_sha256 = "78f21f896357d549548a71e56ba3b7d76ec2d6a75ebdd8cc0208163778e1f5bb"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d70617273652d31322d636f"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "L1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.168, 112.656, 131.136]
+visual_bbox = [73.177734, 119.830078, 111.985219, 128.90625]
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = "BT /F1 12 Tf 1 0 0 1 72 120 Tm [(MIMUS)]"
+
+[[expected.content_stream]]
+object = 10
+compressed = false
+bytes = """TJ ET
+"""
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents", "0"]
+to_object = 9
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents", "1"]
+to_object = 10
+
+[[expected.behaviour]]
+id = "PARSE-04-text-show-operand-boundary"
+assertion = "All five walked characters and their replacement span are owned by object 9; object 10 only executes TJ"
+observable_via = "raw stream bytes, production walk source spans, mutool baseline, poppler bbox, and renderers"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]
+
+[[adjudication]]
+date = "2026-08-29"
+issue = "Word producers legally separate a complete text-show operand from its operator across Contents streams"
+resolution = "The operand span remains local to object 9 while PDF Contents concatenation carries the operand stack into object 10"

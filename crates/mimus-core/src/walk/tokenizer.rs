@@ -1,5 +1,7 @@
 use std::ops::Range;
 
+use lopdf::ObjectId;
+
 use crate::error::{InputReason, MimusError};
 use crate::event::PageDegradeReason;
 
@@ -24,6 +26,7 @@ const MAX_INLINE_IMAGE_SCAN: usize = 16 * 1024 * 1024;
 pub(super) struct Token {
     pub kind: TokenKind,
     pub span: Range<usize>,
+    pub content_object: ObjectId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +137,7 @@ impl Tokenizer<'_> {
             tokens.push(Token {
                 kind,
                 span: start..self.cursor,
+                content_object: (0, 0),
             });
         }
         if let Some(kind) = self.composites.last() {

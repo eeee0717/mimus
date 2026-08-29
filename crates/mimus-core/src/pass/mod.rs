@@ -3,7 +3,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use lopdf::{Document as LopdfDocument, Object, ObjectId};
 use rayon::prelude::*;
 
-use crate::context::{CharacterAlignment, Document, ExtractedPage, OutputFont, PassContext};
+use crate::context::{
+    CharacterAlignment, Document, ExtractedPage, OutputFont, OutputFonts, PassContext,
+};
 use crate::engine::{PageCharSnapshot, RgbaImage};
 use crate::error::{
     AssetReason, ErrorReason, InputReason, InternalReason, IoReason, MimusError, Result,
@@ -2953,6 +2955,17 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
             .collect::<BTreeSet<_>>();
         let mut blocked_spans = BTreeSet::new();
         for paragraph in &page.paragraphs {
+            if paragraph.preserved.is_none() {
+                continue;
+            }
+            for character in paragraph.chars() {
+                let Some(content_object) = unique_page_content(character, &content_objects)? else {
+                    continue;
+                };
+                blocked_spans.insert(span_key(character, content_object));
+            }
+        }
+        for paragraph in &page.paragraphs {
             if paragraph.preserved.is_some() {
                 continue;
             }
@@ -3106,6 +3119,54 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
             }
         }
         planned_paragraphs.sort_by_key(|(reading_order, _)| *reading_order);
+        let configured_fonts = context.config.output_fonts.as_ref();
+        if !planned_paragraphs.is_empty() {
+            let configured_fonts = configured_fonts.ok_or_else(|| {
+                MimusError::internal(
+                    InternalReason::InvariantViolation,
+                    "translated text has no resolved output fonts",
+                )
+            })?;
+            let probe_fonts = build_typeset_fonts(
+                planned_paragraphs
+                    .iter()
+                    .flat_map(|(_, plans)| plans.iter()),
+                configured_fonts,
+            )?;
+            let incompatible = incompatible_plan_component_indices(
+                &planned_paragraphs,
+                &probe_fonts,
+                &streams,
+                &content_transforms,
+                &text_show_states,
+                &replacements,
+            )?;
+            planned_paragraphs = planned_paragraphs
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, planned)| {
+                    if !incompatible.contains(&index) {
+                        return Some(planned);
+                    }
+                    let (reading_order, _) = &planned;
+                    let paragraph = page
+                        .paragraphs
+                        .iter()
+                        .find(|paragraph| paragraph.reading_order == *reading_order)
+                        .expect("planned paragraph belongs to its page");
+                    if paragraph.translated_text.as_deref()
+                        != Some(paragraph.source_text().as_str())
+                    {
+                        preserved.push((
+                            page.index,
+                            *reading_order,
+                            il::PreservedReason::TypesetProtocol,
+                        ));
+                    }
+                    None
+                })
+                .collect();
+        }
         let plans = planned_paragraphs
             .into_iter()
             .flat_map(|(_, plans)| plans)
@@ -3114,42 +3175,13 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
         let mut output_fonts = BTreeMap::new();
         let mut typeset_characters = Vec::new();
         if !plans.is_empty() {
-            let configured_fonts = context.config.output_fonts.as_ref().ok_or_else(|| {
+            let configured_fonts = configured_fonts.ok_or_else(|| {
                 MimusError::internal(
                     InternalReason::InvariantViolation,
                     "translated text has no resolved output fonts",
                 )
             })?;
-            let faces = OutputFontFaces::parse(configured_fonts).map_err(|_| {
-                MimusError::internal(
-                    InternalReason::InvariantViolation,
-                    "validated output font could not be parsed for translated text",
-                )
-            })?;
-            for key in OutputFontKey::ALL {
-                let used = plans
-                    .iter()
-                    .flat_map(|plan| plan.lines.iter().flatten())
-                    .filter(|character| faces.key_for(character.value, character.bold) == Some(key))
-                    .map(|character| character.value)
-                    .collect::<BTreeSet<_>>();
-                if used.is_empty() {
-                    continue;
-                }
-                let source_font = match key {
-                    OutputFontKey::PrimaryRegular => &configured_fonts.regular,
-                    OutputFontKey::PrimaryBold => &configured_fonts.bold,
-                    OutputFontKey::FallbackRegular => &configured_fonts.fallback_regular,
-                    OutputFontKey::FallbackBold => &configured_fonts.fallback_bold,
-                };
-                let (font, cids) = build_embedded_font(&used, source_font, key).map_err(|_| {
-                    MimusError::internal(
-                        InternalReason::InvariantViolation,
-                        "validated output font could not be subset for translated text",
-                    )
-                })?;
-                output_fonts.insert(key, BuiltOutputFont { font, cids });
-            }
+            output_fonts = build_typeset_fonts(plans.iter(), configured_fonts)?;
         }
         for plan in &plans {
             reused_fonts.extend(
@@ -3740,7 +3772,7 @@ fn prepare_shared_formula_fixed_plans(
                 let matching = unit
                     .chars
                     .iter()
-                    .zip(&unit.validation_baselines)
+                    .zip(&unit.validation_characters)
                     .filter(|(character, _)| {
                         unique_page_content(character, content_objects)
                             .ok()
@@ -3750,13 +3782,8 @@ fn prepare_shared_formula_fixed_plans(
                     .collect::<Vec<_>>();
                 let characters = matching
                     .iter()
-                    .map(|(character, baseline)| {
-                        Some(TypesetCharacter {
-                            unicode: character.unicode?,
-                            baseline_origin: **baseline,
-                        })
-                    })
-                    .collect::<Option<Vec<_>>>()?;
+                    .map(|(_, expected)| (*expected).clone())
+                    .collect::<Vec<_>>();
                 let ink_bounds = matching
                     .iter()
                     .map(|(character, _)| character.visual_bbox)
@@ -3814,17 +3841,7 @@ fn prepare_shared_formula_fixed_plans(
     let formula_relocations = formula_units
         .into_iter()
         .map(|unit| {
-            let characters = unit
-                .chars
-                .iter()
-                .zip(&unit.validation_baselines)
-                .map(|(character, baseline)| {
-                    Some(TypesetCharacter {
-                        unicode: character.unicode?,
-                        baseline_origin: *baseline,
-                    })
-                })
-                .collect::<Option<Vec<_>>>()?;
+            let characters = unit.validation_characters.clone();
             ink_bounds.push(unit.ink_bounds);
             Some(FormulaRelocation {
                 spans: unit.spans,
@@ -4154,7 +4171,7 @@ fn section_number_prefix_is_supported(chars: &[Char]) -> bool {
 #[derive(Debug)]
 struct SourceFormulaUnit<'a> {
     chars: Vec<&'a Char>,
-    validation_baselines: Vec<il::Point>,
+    validation_characters: Vec<TypesetCharacter>,
     spans: Vec<SpanKey>,
     split_glyphs: BTreeMap<SpanKey, Vec<FormulaGlyphReplay>>,
     bounds: Rect,
@@ -4459,26 +4476,23 @@ fn source_formula_units<'a>(
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
-            let validation_baselines = chars
+            let validation_characters = chars
                 .iter()
                 .map(|character| {
                     let object_id = unique_page_content(character, content_objects)
                         .ok()
                         .flatten()?;
+                    let mut expected = formula_validation_character(extracted, character)?;
                     if split_glyphs.contains_key(&span_key(character, object_id)) {
-                        formula_glyph_replay(extracted, character)
-                            .map(|glyph| glyph.validation_baseline)
-                    } else {
-                        Some(
-                            formula_validation_baseline(extracted, character)
-                                .unwrap_or(character.baseline_origin),
-                        )
+                        expected.baseline_origin =
+                            formula_glyph_replay(extracted, character)?.validation_baseline;
                     }
+                    Some(expected)
                 })
                 .collect::<Option<Vec<_>>>()?;
             Some(SourceFormulaUnit {
                 chars,
-                validation_baselines,
+                validation_characters,
                 spans,
                 split_glyphs,
                 bounds,
@@ -4592,15 +4606,14 @@ fn place_formula_flow(
                 let source_center_y = (unit.bounds.bottom + unit.bounds.top) / 2.0;
                 let delta_y_pt = target_center_y - source_center_y;
                 let characters = unit
-                    .chars
+                    .validation_characters
                     .iter()
-                    .zip(&unit.validation_baselines)
-                    .map(|(character, validation_baseline)| {
+                    .map(|expected| {
                         Some(TypesetCharacter {
-                            unicode: character.unicode?,
+                            unicode: expected.unicode,
                             baseline_origin: il::Point {
-                                x: validation_baseline.x + delta_x_pt,
-                                y: validation_baseline.y + delta_y_pt,
+                                x: expected.baseline_origin.x + delta_x_pt,
+                                y: expected.baseline_origin.y + delta_y_pt,
                             },
                         })
                     })
@@ -4629,7 +4642,10 @@ fn place_formula_flow(
     })
 }
 
-fn formula_validation_baseline(extracted: &ExtractedPage, character: &Char) -> Option<il::Point> {
+fn formula_validation_character(
+    extracted: &ExtractedPage,
+    character: &Char,
+) -> Option<TypesetCharacter> {
     let walk_index = extracted
         .walked_characters
         .iter()
@@ -4666,10 +4682,27 @@ fn formula_validation_baseline(extracted: &ExtractedPage, character: &Char) -> O
                 &vec![false; extracted.engine_characters.len()],
                 0.25,
             )
+            .and_then(|indices| indices.into_iter().next())
         });
-    engine_index
-        .and_then(|engine_index| extracted.engine_characters.get(engine_index))
-        .map(|engine| engine.baseline_origin)
+    if let Some(engine) =
+        engine_index.and_then(|engine_index| extracted.engine_characters.get(engine_index))
+    {
+        return Some(TypesetCharacter {
+            unicode: engine.unicode.or(character.unicode)?,
+            baseline_origin: engine.baseline_origin,
+        });
+    }
+    if extracted
+        .engine_characters
+        .iter()
+        .any(|engine| point_close(character.baseline_origin, engine.baseline_origin, 0.25))
+    {
+        return None;
+    }
+    Some(TypesetCharacter {
+        unicode: character.unicode?,
+        baseline_origin: character.baseline_origin,
+    })
 }
 
 fn styled_token_width(
@@ -5284,6 +5317,126 @@ fn build_embedded_font(
     ))
 }
 
+fn build_typeset_fonts<'a>(
+    plans: impl IntoIterator<Item = &'a TypesetPlan>,
+    configured_fonts: &OutputFonts,
+) -> Result<BTreeMap<OutputFontKey, BuiltOutputFont>> {
+    let plans = plans.into_iter().collect::<Vec<_>>();
+    let faces = OutputFontFaces::parse(configured_fonts).map_err(|_| {
+        MimusError::internal(
+            InternalReason::InvariantViolation,
+            "validated output font could not be parsed for translated text",
+        )
+    })?;
+    let mut output_fonts = BTreeMap::new();
+    for key in OutputFontKey::ALL {
+        let used = plans
+            .iter()
+            .flat_map(|plan| plan.lines.iter().flatten())
+            .filter(|character| faces.key_for(character.value, character.bold) == Some(key))
+            .map(|character| character.value)
+            .collect::<BTreeSet<_>>();
+        if used.is_empty() {
+            continue;
+        }
+        let source_font = match key {
+            OutputFontKey::PrimaryRegular => &configured_fonts.regular,
+            OutputFontKey::PrimaryBold => &configured_fonts.bold,
+            OutputFontKey::FallbackRegular => &configured_fonts.fallback_regular,
+            OutputFontKey::FallbackBold => &configured_fonts.fallback_bold,
+        };
+        let (font, cids) = build_embedded_font(&used, source_font, key).map_err(|_| {
+            MimusError::internal(
+                InternalReason::InvariantViolation,
+                "validated output font could not be subset for translated text",
+            )
+        })?;
+        output_fonts.insert(key, BuiltOutputFont { font, cids });
+    }
+    Ok(output_fonts)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn incompatible_plan_component_indices(
+    planned_paragraphs: &[(usize, Vec<TypesetPlan>)],
+    fonts: &BTreeMap<OutputFontKey, BuiltOutputFont>,
+    streams: &BTreeMap<lopdf::ObjectId, &[u8]>,
+    content_transforms: &BTreeMap<SpanKey, [f64; 6]>,
+    text_show_states: &BTreeMap<SpanKey, TextShowState>,
+    existing_replacements: &BTreeMap<SpanKey, Vec<u8>>,
+) -> Result<BTreeSet<usize>> {
+    let paragraph_spans = planned_paragraphs
+        .iter()
+        .map(|(_, plans)| {
+            plans
+                .iter()
+                .flat_map(plan_modified_spans)
+                .collect::<BTreeSet<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut remaining = (0..planned_paragraphs.len()).collect::<BTreeSet<_>>();
+    let mut incompatible = BTreeSet::new();
+    while let Some(seed) = remaining.iter().next().copied() {
+        remaining.remove(&seed);
+        let mut component = vec![seed];
+        let mut component_spans = paragraph_spans[seed].clone();
+        loop {
+            let joined = remaining
+                .iter()
+                .copied()
+                .filter(|index| !paragraph_spans[*index].is_disjoint(&component_spans))
+                .collect::<Vec<_>>();
+            if joined.is_empty() {
+                break;
+            }
+            for index in joined {
+                remaining.remove(&index);
+                component_spans.extend(paragraph_spans[index].iter().copied());
+                component.push(index);
+            }
+        }
+
+        let mut probe = existing_replacements.clone();
+        'install: for index in &component {
+            for plan in &planned_paragraphs[*index].1 {
+                if let Err(error) = install_typeset_replacements(
+                    plan,
+                    fonts,
+                    streams,
+                    content_transforms,
+                    text_show_states,
+                    &mut probe,
+                ) {
+                    if is_typeset_replacement_collision(&error) {
+                        incompatible.extend(component.iter().copied());
+                        break 'install;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+    Ok(incompatible)
+}
+
+fn is_typeset_replacement_collision(error: &MimusError) -> bool {
+    let MimusError::Internal {
+        reason: InternalReason::InvariantViolation,
+        message,
+        ..
+    } = error
+    else {
+        return false;
+    };
+    matches!(
+        message.as_str(),
+        "typeset span has an incompatible existing replacement"
+            | "formula relocation overlaps another typeset replacement"
+            | "split formula span was not neutralized by its translated owner"
+            | "split formula span has an incompatible translated replacement"
+    )
+}
+
 fn subset_tag(used: &BTreeSet<char>, key: OutputFontKey) -> String {
     let mut hash = match key {
         OutputFontKey::PrimaryRegular => 0x811c9dc5u32,
@@ -5365,7 +5518,10 @@ fn install_text_replacements(
             "typeset span has no active content transform",
         )
     })?;
-    let mut command = String::new();
+    // The replacement is emitted inside q/Q but inherits the source text state. Typeset geometry
+    // assumes neutral spacing, horizontal scale, rise, and rendering mode, so make that state
+    // explicit before placing any output glyphs.
+    let mut command = String::from("0 Tc 0 Tw 100 Tz 0 Ts 0 Tr\n");
     let mut emitted_run = false;
     for (index, line) in plan.lines.iter().enumerate() {
         let (x, y) = plan.baselines[index];
@@ -5441,8 +5597,12 @@ fn install_text_replacements(
     let state_tail = text_show_state_tail(first, streams, text_show_states)?;
     let mut graphics_tail = b"Q\n".to_vec();
     graphics_tail.extend_from_slice(&state_tail);
+    let neutralized = state_preserving_empty_replacement(first, streams, text_show_states)?;
     let replacement = replacements.entry(first).or_default();
-    if replacement.is_empty() || replacement.as_slice() == terminal.as_slice() {
+    if replacement.is_empty()
+        || replacement.as_slice() == terminal.as_slice()
+        || replacement.as_slice() == neutralized.as_slice()
+    {
         replacement.clear();
         replacement.extend_from_slice(&terminal);
         replacement.extend_from_slice(original_operator);
@@ -6032,6 +6192,12 @@ fn retained_input_characters(
         &page.engine_characters,
         &mut engine_owners,
     );
+    inherit_unique_explanation_owners(
+        &page.walked_characters,
+        &page.engine_characters,
+        &mut engine_owners,
+        baseline_tolerance_pt,
+    );
     let owner_states = engine_owners
         .iter()
         .map(|owner| owner.map(|walk_index| modified_walk[walk_index]))
@@ -6234,6 +6400,36 @@ fn inherit_pdfium_utf16_surrogate_owners(
     }
 }
 
+fn inherit_unique_explanation_owners(
+    walked: &[crate::walk::WalkedChar],
+    engine: &[PageCharSnapshot],
+    owners: &mut [Option<usize>],
+    tolerance: f64,
+) {
+    if owners.len() != engine.len() {
+        return;
+    }
+    let mut walk_matched = vec![false; walked.len()];
+    let engine_matched = owners
+        .iter()
+        .map(|owner| {
+            if let Some(walk_index) = owner {
+                if let Some(matched) = walk_matched.get_mut(*walk_index) {
+                    *matched = true;
+                }
+                true
+            } else {
+                false
+            }
+        })
+        .collect::<Vec<_>>();
+    let (pairs, _, _) =
+        match_unique_explanation_edges(walked, engine, tolerance, &walk_matched, &engine_matched);
+    for pair in pairs {
+        owners[pair.engine_index] = Some(pair.walk_index);
+    }
+}
+
 fn validate_mixed_output_characters(
     page_index: usize,
     retained: &[ExpectedOutputCharacter],
@@ -6243,21 +6439,29 @@ fn validate_mixed_output_characters(
 ) -> Result<()> {
     let mut matched = vec![false; actual.len()];
     for expected_character in retained {
-        let owner = match_output_character(expected_character, actual, &matched, tolerance)
+        if expected_character
+            .unicode
+            .is_some_and(|unicode| PDFIUM_C0_EXTRACTION_MARKERS.contains(&u32::from(unicode)))
+        {
+            continue;
+        }
+        let owners = match_output_character(expected_character, actual, &matched, tolerance)
             .ok_or_else(|| {
                 output_mismatch(format!(
                     "output page {} is missing a preserved character",
                     page_index + 1
                 ))
             })?;
-        matched[owner] = true;
+        for owner in owners {
+            matched[owner] = true;
+        }
     }
     for character in typeset {
         let expected_character = ExpectedOutputCharacter {
             unicode: Some(character.unicode),
             baseline_origin: character.baseline_origin,
         };
-        let Some(owner) = match_output_character(&expected_character, actual, &matched, tolerance)
+        let Some(owners) = match_output_character(&expected_character, actual, &matched, tolerance)
         else {
             // PDFium's extraction view may omit whitespace that is present in the content stream.
             if character.unicode.is_whitespace() {
@@ -6288,9 +6492,15 @@ fn validate_mixed_output_characters(
                 observed,
             )));
         };
-        matched[owner] = true;
+        for owner in owners {
+            matched[owner] = true;
+        }
     }
-    if matched.iter().any(|matched| !matched) {
+    if actual
+        .iter()
+        .zip(&matched)
+        .any(|(character, matched)| !matched && !is_pdfium_c0_extraction_marker(character))
+    {
         return Err(output_mismatch(format!(
             "output page {} has an unexpected extracted character",
             page_index + 1
@@ -6304,8 +6514,8 @@ fn match_output_character(
     actual: &[PageCharSnapshot],
     matched: &[bool],
     tolerance: f64,
-) -> Option<usize> {
-    actual
+) -> Option<Vec<usize>> {
+    let scalar_match = actual
         .iter()
         .enumerate()
         .filter(|(index, actual_character)| {
@@ -6322,7 +6532,34 @@ fn match_output_character(
                 &point_distance_squared(expected.baseline_origin, right.baseline_origin),
             )
         })
-        .map(|(index, _)| index)
+        .map(|(index, _)| vec![index]);
+    if scalar_match.is_some() {
+        return scalar_match;
+    }
+
+    let unicode = expected.unicode?;
+    let mut units = [0u16; 2];
+    let encoded = unicode.encode_utf16(&mut units);
+    if encoded.len() != 2 {
+        return None;
+    }
+    actual
+        .windows(2)
+        .enumerate()
+        .filter(|(index, pair)| {
+            !matched[*index]
+                && !matched[*index + 1]
+                && pair[0].unicode_value == u32::from(encoded[0])
+                && pair[1].unicode_value == u32::from(encoded[1])
+                && point_close(expected.baseline_origin, pair[0].baseline_origin, tolerance)
+                && point_close(expected.baseline_origin, pair[1].baseline_origin, tolerance)
+        })
+        .min_by(|(_, left), (_, right)| {
+            point_distance_squared(expected.baseline_origin, left[0].baseline_origin).total_cmp(
+                &point_distance_squared(expected.baseline_origin, right[0].baseline_origin),
+            )
+        })
+        .map(|(index, _)| vec![index, index + 1])
 }
 
 fn output_unicode_matches(expected: Option<char>, actual: &PageCharSnapshot) -> bool {
@@ -8894,6 +9131,46 @@ mod tests {
     }
 
     #[test]
+    fn mixed_output_validation_consumes_both_pdfium_utf16_surrogates() {
+        let expected = TypesetCharacter {
+            unicode: '\u{1D44E}',
+            baseline_origin: Point { x: 10.0, y: 20.0 },
+        };
+        let template = FakeEngine::default().page_characters(&[], 0).unwrap()[0].clone();
+        let mut units = [0u16; 2];
+        let encoded = expected.unicode.encode_utf16(&mut units);
+        assert_eq!(encoded.len(), 2);
+        let actual = encoded
+            .iter()
+            .enumerate()
+            .map(|(index, unit)| PageCharSnapshot {
+                index: index as u32,
+                unicode: None,
+                unicode_value: u32::from(*unit),
+                baseline_origin: expected.baseline_origin,
+                ..template.clone()
+            })
+            .collect::<Vec<_>>();
+
+        validate_mixed_output_characters(0, &[], &[expected], &actual, 0.001).unwrap();
+    }
+
+    #[test]
+    fn mixed_output_validation_ignores_pdfium_c0_extraction_markers() {
+        let marker = ExpectedOutputCharacter {
+            unicode: Some('\u{2}'),
+            baseline_origin: Point { x: 10.0, y: 20.0 },
+        };
+        let mut actual_marker = FakeEngine::default().page_characters(&[], 0).unwrap()[0].clone();
+        actual_marker.unicode = Some('\u{2}');
+        actual_marker.unicode_value = 2;
+        actual_marker.baseline_origin = marker.baseline_origin;
+
+        validate_mixed_output_characters(0, &[marker], &[], &[], 0.001).unwrap();
+        validate_mixed_output_characters(0, &[], &[], &[actual_marker], 0.001).unwrap();
+    }
+
+    #[test]
     fn exact_unicode_sequences_can_attribute_rewrites_without_baseline_links() {
         let pdf = LopdfDocument::load(fixture()).unwrap();
         let page_id = pdf.get_pages()[&1];
@@ -8955,6 +9232,21 @@ mod tests {
         inherit_pdfium_utf16_surrogate_owners(&walked, &engine, &mut owners);
 
         assert_eq!(owners, [Some(0), Some(0)]);
+    }
+
+    #[test]
+    fn retained_character_owners_absorb_unique_unresolved_explanations() {
+        let pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        let mut walked = walk_page(&pdf, page_id).unwrap().characters[..3].to_vec();
+        walked[1].unicode = None;
+        walked[1].unicode_provenance = UnicodeProvenance::Unresolved;
+        let engine = FakeEngine::default().page_characters(&[], 0).unwrap()[..3].to_vec();
+        let mut owners = vec![Some(0), None, Some(2)];
+
+        inherit_unique_explanation_owners(&walked, &engine, &mut owners, 0.001);
+
+        assert_eq!(owners, [Some(0), Some(1), Some(2)]);
     }
 
     #[test]
@@ -9038,6 +9330,10 @@ mod tests {
 
         let replacement = std::str::from_utf8(&replacements[&span]).unwrap();
         assert!(replacement.starts_with("[] TJ\n"), "{replacement}");
+        assert!(
+            replacement.contains("0 Tc 0 Tw 100 Tz 0 Ts 0 Tr\n"),
+            "{replacement}"
+        );
         assert!(replacement.contains(" Tm "), "{replacement}");
         assert_eq!(replacement.matches("/MimusR").count(), 2, "{replacement}");
         assert_eq!(replacement.matches("q\n").count(), 1, "{replacement}");
@@ -9046,6 +9342,148 @@ mod tests {
             replacement.ends_with("Q\n1 0 0 1 10 20 Tm\n[-1000] TJ\n[]"),
             "{replacement}"
         );
+    }
+
+    #[test]
+    fn typeset_replacement_claims_a_neutralized_secondary_span() {
+        let first = ((1, 0), 0, 8);
+        let second = ((1, 0), 9, 17);
+        let source = b"[<0041>] [<0042>]";
+        let streams = BTreeMap::from([((1, 0), source.as_slice())]);
+        let transforms = BTreeMap::from([
+            (first, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+            (second, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+        ]);
+        let state = TextShowState {
+            line_matrix: [1.0, 0.0, 0.0, 1.0, 10.0, 20.0],
+            matrix_after_show: [1.0, 0.0, 0.0, 1.0, 18.0, 20.0],
+            font_size: 8.0,
+            horizontal_scale: 1.0,
+        };
+        let text_show_states = BTreeMap::from([(first, state), (second, state)]);
+        let output_fonts = test_output_fonts();
+        let (font, cids) = build_embedded_font(
+            &BTreeSet::from(['中', '文']),
+            &output_fonts.regular,
+            OutputFontKey::PrimaryRegular,
+        )
+        .unwrap();
+        let fonts = BTreeMap::from([(
+            OutputFontKey::PrimaryRegular,
+            BuiltOutputFont { font, cids },
+        )]);
+        let plan = |spans, value, x| TypesetPlan {
+            spans,
+            lines: vec![vec![crate::translate::StyledCharacter {
+                value,
+                bold: false,
+            }]],
+            baselines: vec![(x, 100.0)],
+            formula_relocations: Vec::new(),
+            ink_bounds: Vec::new(),
+            font_size: 8.0,
+            single_line_expansion: None,
+            multi_line_expansion: None,
+        };
+        let mut replacements = BTreeMap::new();
+
+        install_typeset_replacements(
+            &plan(vec![first, second], '中', 25.0),
+            &fonts,
+            &streams,
+            &transforms,
+            &text_show_states,
+            &mut replacements,
+        )
+        .unwrap();
+        install_typeset_replacements(
+            &plan(vec![second], '文', 75.0),
+            &fonts,
+            &streams,
+            &transforms,
+            &text_show_states,
+            &mut replacements,
+        )
+        .unwrap();
+
+        assert!(
+            replacements[&first]
+                .windows(4)
+                .any(|bytes| bytes == b"0001")
+        );
+        assert!(
+            replacements[&second]
+                .windows(4)
+                .any(|bytes| bytes == b"0002")
+        );
+    }
+
+    #[test]
+    fn incompatible_formula_and_text_replacements_preserve_the_connected_component() {
+        let first = ((1, 0), 0, 8);
+        let second = ((1, 0), 9, 17);
+        let source = b"[<0041>] [<0042>]";
+        let streams = BTreeMap::from([((1, 0), source.as_slice())]);
+        let transforms = BTreeMap::from([
+            (first, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+            (second, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+        ]);
+        let state = TextShowState {
+            line_matrix: [1.0, 0.0, 0.0, 1.0, 10.0, 20.0],
+            matrix_after_show: [1.0, 0.0, 0.0, 1.0, 18.0, 20.0],
+            font_size: 8.0,
+            horizontal_scale: 1.0,
+        };
+        let text_show_states = BTreeMap::from([(first, state), (second, state)]);
+        let output_fonts = test_output_fonts();
+        let (font, cids) = build_embedded_font(
+            &BTreeSet::from(['中', '文']),
+            &output_fonts.regular,
+            OutputFontKey::PrimaryRegular,
+        )
+        .unwrap();
+        let fonts = BTreeMap::from([(
+            OutputFontKey::PrimaryRegular,
+            BuiltOutputFont { font, cids },
+        )]);
+        let text_plan = |span, value, x| TypesetPlan {
+            spans: vec![span],
+            lines: vec![vec![crate::translate::StyledCharacter {
+                value,
+                bold: false,
+            }]],
+            baselines: vec![(x, 100.0)],
+            formula_relocations: Vec::new(),
+            ink_bounds: Vec::new(),
+            font_size: 8.0,
+            single_line_expansion: None,
+            multi_line_expansion: None,
+        };
+        let first_paragraph = text_plan(first, '中', 25.0);
+        let mut second_paragraph = text_plan(second, '文', 75.0);
+        second_paragraph
+            .formula_relocations
+            .push(FormulaRelocation {
+                spans: vec![first],
+                split_glyphs: BTreeMap::new(),
+                delta_x_pt: 1.0,
+                delta_y_pt: 0.0,
+                characters: Vec::new(),
+                source_fonts: Vec::new(),
+            });
+        let planned = vec![(0, vec![first_paragraph]), (1, vec![second_paragraph])];
+
+        let incompatible = incompatible_plan_component_indices(
+            &planned,
+            &fonts,
+            &streams,
+            &transforms,
+            &text_show_states,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(incompatible, BTreeSet::from([0, 1]));
     }
 
     #[test]
@@ -9251,6 +9689,60 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn formula_replay_validation_uses_the_input_engine_extraction_view() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let mut character = document.il.pages[0].paragraphs[0].chars()[0].clone();
+        character.unicode = Some(';');
+        let extracted = &mut document.extracted_pages[0];
+        extracted.engine_characters[0].unicode = Some(',');
+        extracted.engine_characters[0].unicode_value = u32::from(',');
+
+        let expected = formula_validation_character(extracted, &character).unwrap();
+
+        assert_eq!(expected.unicode, ',');
+        assert_eq!(
+            expected.baseline_origin,
+            extracted.engine_characters[0].baseline_origin
+        );
+    }
+
+    #[test]
+    fn formula_replay_without_an_alignment_rejects_a_nearby_unicode_conflict() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let mut character = document.il.pages[0].paragraphs[0].chars()[0].clone();
+        character.unicode = Some(';');
+        let extracted = &mut document.extracted_pages[0];
+        extracted.character_alignment.engine_indices_by_walk[0] = None;
+        extracted.engine_characters[0].unicode = Some(',');
+        extracted.engine_characters[0].unicode_value = u32::from(',');
+        extracted.engine_characters[0].baseline_origin.x += 0.002;
+
+        assert!(formula_validation_character(extracted, &character).is_none());
     }
 
     #[test]
@@ -9534,6 +10026,104 @@ mod tests {
 
         typeset(&mut document, &context).unwrap();
 
+        assert_eq!(
+            document.il.pages[0].paragraphs[1].preserved,
+            Some(il::PreservedReason::TypesetProtocol)
+        );
+        assert_eq!(document.il.pages[0].paragraphs[2].preserved, None);
+        let values = document.rewrites[0]
+            .typeset_characters
+            .iter()
+            .map(|character| character.unicode)
+            .collect::<String>();
+        assert_eq!(values, "测试");
+    }
+
+    #[test]
+    fn preserved_shared_operand_preserves_only_its_span_component() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("preserved-shared-span.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        pdf.get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(
+                b"BT /F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\n0 -20 Td (MIMUS) Tj\nET\n".to_vec(),
+            );
+        pdf.save(&input).unwrap();
+        let mut document = Document::for_inspection(&input);
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let mut chars = document.il.pages[0]
+            .paragraphs
+            .iter()
+            .flat_map(|paragraph| paragraph.chars().iter().cloned())
+            .collect::<Vec<_>>();
+        chars.sort_by(|left, right| {
+            right
+                .baseline_origin
+                .y
+                .total_cmp(&left.baseline_origin.y)
+                .then_with(|| left.baseline_origin.x.total_cmp(&right.baseline_origin.x))
+        });
+        let bounds = Rect {
+            left: 70.0,
+            bottom: 90.0,
+            right: 170.0,
+            top: 135.0,
+        };
+        for character in &mut chars {
+            character.layout.as_mut().unwrap().bounds = bounds;
+        }
+        document.extracted_pages[0].layout_regions.clear();
+        assert_eq!(span_key(&chars[0], (9, 0)), span_key(&chars[4], (9, 0)));
+        assert_ne!(span_key(&chars[0], (9, 0)), span_key(&chars[5], (9, 0)));
+        document.il.pages[0].paragraphs = vec![
+            Paragraph {
+                reading_order: 0,
+                bounds,
+                text: TextCarrier::Chars {
+                    chars: chars[..1].to_vec(),
+                },
+                translated_text: None,
+                preserved: Some(il::PreservedReason::UnreliableUnicode),
+            },
+            Paragraph {
+                reading_order: 1,
+                bounds,
+                text: TextCarrier::Chars {
+                    chars: chars[1..5].to_vec(),
+                },
+                translated_text: Some("中文".to_owned()),
+                preserved: None,
+            },
+            Paragraph {
+                reading_order: 2,
+                bounds,
+                text: TextCarrier::Chars {
+                    chars: chars[5..].to_vec(),
+                },
+                translated_text: Some("测试".to_owned()),
+                preserved: None,
+            },
+        ];
+
+        typeset(&mut document, &context).unwrap();
+
+        assert_eq!(
+            document.il.pages[0].paragraphs[0].preserved,
+            Some(il::PreservedReason::UnreliableUnicode)
+        );
         assert_eq!(
             document.il.pages[0].paragraphs[1].preserved,
             Some(il::PreservedReason::TypesetProtocol)

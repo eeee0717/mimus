@@ -306,7 +306,8 @@ pub(crate) fn walk_page_detailed_with_rotation(
 
 impl Walker<'_> {
     fn walk(&mut self, tokens: Vec<Token>) -> Result<()> {
-        for token in tokens {
+        for mut token in tokens {
+            token.content_object = self.content_object;
             match &token.kind {
                 TokenKind::InlineImage { length_source, .. } => {
                     if !self.operands.is_empty() {
@@ -319,13 +320,25 @@ impl Walker<'_> {
                 }
                 TokenKind::Operator(operator) => {
                     if let Some((first, second)) = split_double_decimal(operator) {
-                        self.operands.push(number_token(first, token.span.clone()));
-                        self.operands.push(number_token(second, token.span.clone()));
+                        self.operands.push(number_token(
+                            first,
+                            token.span.clone(),
+                            token.content_object,
+                        ));
+                        self.operands.push(number_token(
+                            second,
+                            token.span.clone(),
+                            token.content_object,
+                        ));
                         self.recoveries.insert(RecoveryKind::DoubleDecimal);
                         continue;
                     }
                     if let Some((number, recovered_operator)) = split_glued_operator(operator) {
-                        self.operands.push(number_token(number, token.span.clone()));
+                        self.operands.push(number_token(
+                            number,
+                            token.span.clone(),
+                            token.content_object,
+                        ));
                         let operands = std::mem::take(&mut self.operands);
                         self.apply_operator(recovered_operator, &operands)?;
                         self.recoveries.insert(RecoveryKind::GluedToken);
@@ -414,7 +427,12 @@ impl Walker<'_> {
                     if let TokenKind::Bytes(bytes) = &tail[0].kind {
                         let first_character = self.characters.len();
                         let line_matrix = self.state.line_matrix;
-                        self.show_text(bytes, tail[0].span.start, tail[0].span.end)?;
+                        self.show_text(
+                            bytes,
+                            tail[0].content_object,
+                            tail[0].span.start,
+                            tail[0].span.end,
+                        )?;
                         self.finish_text_show(first_character, line_matrix);
                     } else {
                         self.recoveries.insert(RecoveryKind::InvalidOperands);
@@ -838,7 +856,12 @@ impl Walker<'_> {
         self.state.word_spacing = *word;
         self.state.character_spacing = *character;
         self.apply_operator(b"T*", &[])?;
-        self.show_text(bytes, tail[2].span.start, tail[2].span.end)
+        self.show_text(
+            bytes,
+            tail[2].content_object,
+            tail[2].span.start,
+            tail[2].span.end,
+        )
     }
 
     fn operand_tail<'a>(&mut self, operands: &'a [Token], count: usize) -> Option<&'a [Token]> {
@@ -867,7 +890,13 @@ impl Walker<'_> {
         values
     }
 
-    fn show_text(&mut self, bytes: &[u8], byte_start: usize, byte_end: usize) -> Result<()> {
+    fn show_text(
+        &mut self,
+        bytes: &[u8],
+        content_object: ObjectId,
+        byte_start: usize,
+        byte_end: usize,
+    ) -> Result<()> {
         if self.state.font_name.is_empty() {
             return Err(walk_error("Tj appeared before Tf"));
         }
@@ -941,7 +970,7 @@ impl Walker<'_> {
                     text_line_matrix: self.state.line_matrix.0,
                     text_matrix_after_show: self.state.text_matrix.0,
                     horizontal_scale: self.state.horizontal_scale,
-                    content_object: self.content_object,
+                    content_object,
                     byte_start,
                     byte_end,
                 });
@@ -1010,6 +1039,7 @@ impl Walker<'_> {
         }
         let array_start = operands[start].span.start;
         let array_end = last.span.end;
+        let content_object = operands[start].content_object;
         let elements = &operands[start + 1..operands.len() - 1];
         if elements.iter().any(|element| {
             matches!(
@@ -1024,7 +1054,7 @@ impl Walker<'_> {
         for element in elements {
             match &element.kind {
                 TokenKind::Bytes(bytes) => {
-                    self.show_text(bytes, array_start, array_end)?;
+                    self.show_text(bytes, content_object, array_start, array_end)?;
                 }
                 TokenKind::Number(adjustment) => {
                     let shift =
@@ -1070,10 +1100,11 @@ fn inherited_page_resources(document: &Document, page_id: ObjectId) -> Result<Di
     Err(walk_error("page resource inheritance exceeds 128 levels"))
 }
 
-fn number_token(value: f64, span: std::ops::Range<usize>) -> Token {
+fn number_token(value: f64, span: std::ops::Range<usize>, content_object: ObjectId) -> Token {
     Token {
         kind: TokenKind::Number(value),
         span,
+        content_object,
     }
 }
 
@@ -1561,6 +1592,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(9, 0), (10, 0)]
         );
+        assert!(walked.recoveries.is_empty());
+    }
+
+    #[test]
+    fn production_walk_keeps_a_cross_stream_text_operand_owned_by_its_source_stream() {
+        let document =
+            Document::load(fixture_path("unit-parse-12-contents-array-tj-operand")).unwrap();
+        let page_id = document.get_pages()[&1];
+
+        let walked = walk_page(&document, page_id).unwrap();
+
+        assert_eq!(text_of(&walked), "MIMUS");
+        assert!(walked.characters.iter().all(|character| {
+            character.content_object == (9, 0)
+                && character.byte_end <= walked.content_streams[0].decoded.len()
+        }));
         assert!(walked.recoveries.is_empty());
     }
 
