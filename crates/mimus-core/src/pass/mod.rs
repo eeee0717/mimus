@@ -5365,7 +5365,10 @@ fn install_text_replacements(
             "typeset span has no active content transform",
         )
     })?;
-    let mut command = String::new();
+    // The replacement is emitted inside q/Q but inherits the source text state. Typeset geometry
+    // assumes neutral spacing, horizontal scale, rise, and rendering mode, so make that state
+    // explicit before placing any output glyphs.
+    let mut command = String::from("0 Tc 0 Tw 100 Tz 0 Ts 0 Tr\n");
     let mut emitted_run = false;
     for (index, line) in plan.lines.iter().enumerate() {
         let (x, y) = plan.baselines[index];
@@ -9038,6 +9041,10 @@ mod tests {
 
         let replacement = std::str::from_utf8(&replacements[&span]).unwrap();
         assert!(replacement.starts_with("[] TJ\n"), "{replacement}");
+        assert!(
+            replacement.contains("0 Tc 0 Tw 100 Tz 0 Ts 0 Tr\n"),
+            "{replacement}"
+        );
         assert!(replacement.contains(" Tm "), "{replacement}");
         assert_eq!(replacement.matches("/MimusR").count(), 2, "{replacement}");
         assert_eq!(replacement.matches("q\n").count(), 1, "{replacement}");
