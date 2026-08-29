@@ -1,6 +1,7 @@
 /target
 **/target/
 .DS_Store
+__pycache__/
 /.context
 
 # TeX 引擎的副产物。不属于 §2 生成合同——门禁只读 .tex / .pdf / manifest.toml，
