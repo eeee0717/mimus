@@ -1329,7 +1329,7 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
                 })
                 .then_with(|| right.top.total_cmp(&left.top)),
         });
-        let paragraphs = drafts
+        let mut paragraphs = drafts
             .into_iter()
             .enumerate()
             .map(|(reading_order, draft)| {
@@ -1340,7 +1340,10 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
                     &extracted.character_alignment.weak_unicode_conflicts,
                 )
             })
-            .collect();
+            .collect::<Vec<_>>();
+        if extracted.index == 0 {
+            apply_title_author_passthrough(&mut paragraphs);
+        }
         pages.push(il::Page {
             index: extracted.index,
             geometry: extracted.geometry,
@@ -1352,6 +1355,55 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
         pages,
     };
     Ok(())
+}
+
+fn apply_title_author_passthrough(paragraphs: &mut [Paragraph]) {
+    let Some(title_index) = paragraphs
+        .iter()
+        .position(|paragraph| paragraph_has_only_label(paragraph, LayoutLabel::DocTitle))
+    else {
+        return;
+    };
+    let Some(lower_index) = paragraphs
+        .iter()
+        .enumerate()
+        .skip(title_index + 1)
+        .find_map(|(index, paragraph)| {
+            paragraph_has_only_label(paragraph, LayoutLabel::Abstract)
+                .then_some(index)
+                .or_else(|| {
+                    paragraph_has_only_label(paragraph, LayoutLabel::ParagraphTitle)
+                        .then_some(index)
+                })
+        })
+    else {
+        return;
+    };
+
+    for paragraph in &mut paragraphs[title_index + 1..lower_index] {
+        if !paragraph_has_only_label(paragraph, LayoutLabel::Text) {
+            continue;
+        }
+        for character in paragraph_chars_mut(paragraph) {
+            if let Some(layout) = &mut character.layout {
+                layout.policy = TranslationPolicy::Passthrough;
+            }
+        }
+    }
+}
+
+fn paragraph_has_only_label(paragraph: &Paragraph, label: LayoutLabel) -> bool {
+    !paragraph.chars().is_empty()
+        && paragraph
+            .chars()
+            .iter()
+            .all(|character| character.layout.is_some_and(|layout| layout.label == label))
+}
+
+fn paragraph_chars_mut(paragraph: &mut Paragraph) -> &mut [Char] {
+    match &mut paragraph.text {
+        TextCarrier::Chars { chars } => chars,
+    }
 }
 
 fn mark_leading_section_number(chars: &mut [PositionedChar]) {

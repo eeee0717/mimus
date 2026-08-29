@@ -125,18 +125,18 @@ to_object = 7
 
 [[expected.behaviour]]
 id = "TYPE-01-tight-height"
-assertion = "The title layout bounds equal the Latin outline ink height while leaving enough horizontal room for the deterministic short CJK translation"
-observable_via = "hand-written visual bbox, layout recording, translation-stage IL, and typeset-stage geometry"
+assertion = "The title layout bounds equal the Latin outline ink height and remain source geometry under doc_title passthrough"
+observable_via = "hand-written visual bbox, layout recording, and write-stage IL"
 
 [[expected.behaviour]]
 id = "TYPE-01-bounded-single-line"
-assertion = "A one-line CJK title remains anchored to the source baseline and may exceed the tight Latin ink box only by the bounded output-glyph ink difference"
-observable_via = "output character baselines and glyph ink boxes; page and non-owner layout regions remain disjoint"
+assertion = "A doc_title never enters the translation or typeset request set and preserves its source operand bytes and geometry"
+observable_via = "captured translation requests, source/write IL, and output PDF bytes"
 
 [[expected.behaviour]]
 id = "TYPE-01-bold-title"
-assertion = "The doc_title recording selects the bold output font without changing the bounded fit contract"
-observable_via = "layout recording label and embedded MimusB font resource"
+assertion = "The doc_title recording preserves the source title font instead of embedding an output-font replacement"
+observable_via = "layout recording label, source/write font references, and output PDF resources"
 
 [oracle]
 checks = [

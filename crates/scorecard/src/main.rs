@@ -64,7 +64,7 @@ enum EvaluationProfile {
     LegacyFake,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct Rect {
     left: f64,
     bottom: f64,
@@ -121,6 +121,8 @@ struct Char {
     #[serde(rename = "box")]
     box_: Rect,
     #[serde(default)]
+    visual_bbox: Option<Rect>,
+    #[serde(default)]
     font: Option<Value>,
     #[serde(default)]
     passthrough: Option<Value>,
@@ -135,7 +137,7 @@ struct TextTransform {
     kind: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct Point {
     #[serde(default)]
     x: f64,
@@ -1413,6 +1415,8 @@ struct TitleAuthorConservation {
     author_policy_passthrough: bool,
     title_write_identity: bool,
     author_write_identity: bool,
+    source_hash_sha256: String,
+    write_hash_sha256: Option<String>,
     failures: usize,
 }
 
@@ -1449,6 +1453,13 @@ fn title_author_conservation(before: &Il, write: &Il) -> Option<TitleAuthorConse
             find_paragraph(write, 0, source.reading_order)
                 .is_some_and(|after| paragraph_identity(source, after))
         });
+    let selected = std::iter::once(title)
+        .chain(authors.iter().copied())
+        .collect::<Vec<_>>();
+    let write_selected = selected
+        .iter()
+        .map(|paragraph| find_paragraph(write, 0, paragraph.reading_order))
+        .collect::<Option<Vec<_>>>();
     let failures = [title_policy, author_policy, title_identity, author_identity]
         .iter()
         .filter(|value| !**value)
@@ -1461,8 +1472,45 @@ fn title_author_conservation(before: &Il, write: &Il) -> Option<TitleAuthorConse
         author_policy_passthrough: author_policy,
         title_write_identity: title_identity,
         author_write_identity: author_identity,
+        source_hash_sha256: title_author_hash(&selected),
+        write_hash_sha256: write_selected.as_deref().map(title_author_hash),
         failures,
     })
+}
+
+fn title_author_hash(paragraphs: &[&Paragraph]) -> String {
+    let canonical = paragraphs
+        .iter()
+        .map(|paragraph| {
+            let chars = paragraph
+                .text
+                .chars
+                .iter()
+                .map(|character| {
+                    serde_json::json!({
+                        "unicode": character.unicode,
+                        "code": character.code,
+                        "font": character.font,
+                        "font_size": character.font_size,
+                        "baseline_origin": character.baseline_origin,
+                        "box": character.box_,
+                        "visual_bbox": character.visual_bbox,
+                        "layout_label": character.layout.as_ref().map(|layout| layout.label.as_str()),
+                        "layout_policy": character.layout.as_ref().map(|layout| layout.policy.as_str()),
+                        "passthrough": character.passthrough,
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "page_index": 0,
+                "reading_order": paragraph.reading_order,
+                "bounds": paragraph.bounds,
+                "translated_text": paragraph.translated_text,
+                "chars": chars,
+            })
+        })
+        .collect::<Vec<_>>();
+    sha256(&serde_json::to_vec(&canonical).unwrap())
 }
 
 fn has_label(paragraph: &Paragraph, label: &str) -> bool {
@@ -1499,6 +1547,7 @@ fn paragraph_identity(before: &Paragraph, after: &Paragraph) -> bool {
                     && a.box_.bottom == b.box_.bottom
                     && a.box_.right == b.box_.right
                     && a.box_.top == b.box_.top
+                    && a.visual_bbox == b.visual_bbox
                     && a.font == b.font
                     && a.passthrough == b.passthrough
             })
@@ -2345,6 +2394,40 @@ mod tests {
     }
 
     #[test]
+    fn title_author_hash_and_identity_include_the_visual_box() {
+        let document = || {
+            serde_json::from_value::<Il>(serde_json::json!({
+                "pages": [{"index": 0, "paragraphs": [
+                    test_paragraph(2, "doc_title", "passthrough", "Title"),
+                    test_paragraph(3, "text", "passthrough", "Author Institution email@example.com"),
+                    test_paragraph(4, "abstract", "translate", "Abstract body")
+                ]}]
+            }))
+            .unwrap()
+        };
+        let source = document();
+        let unchanged = title_author_conservation(&source, &source).unwrap();
+        assert_eq!(
+            unchanged.write_hash_sha256.as_deref(),
+            Some(unchanged.source_hash_sha256.as_str())
+        );
+
+        let mut changed = document();
+        changed.pages[0].paragraphs[0].text.chars[0].visual_bbox = Some(Rect {
+            left: 100.0,
+            bottom: 100.0,
+            right: 101.0,
+            top: 101.0,
+        });
+        let changed = title_author_conservation(&source, &changed).unwrap();
+        assert!(!changed.title_write_identity);
+        assert_ne!(
+            changed.write_hash_sha256.as_deref(),
+            Some(changed.source_hash_sha256.as_str())
+        );
+    }
+
+    #[test]
     fn conservation_excludes_form_xobject_characters_not_in_page_contents() {
         let before: Il = serde_json::from_value(serde_json::json!({
             "pages": [{"index": 0, "paragraphs": [{
@@ -2404,6 +2487,7 @@ mod tests {
                 "font_size": 10.0,
                 "baseline_origin": {"x": index as f64, "y": 10.0},
                 "box": {"left": index as f64, "bottom": 9.0, "right": index as f64 + 1.0, "top": 11.0},
+                "visual_bbox": {"left": index as f64, "bottom": 9.0, "right": index as f64 + 1.0, "top": 11.0},
                 "layout": {"label": label, "policy": policy}
             }))
             .collect::<Vec<_>>();

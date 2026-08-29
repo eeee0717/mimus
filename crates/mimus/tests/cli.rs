@@ -2043,6 +2043,132 @@ fn one_model_region_with_two_author_columns_preserves_column_ownership() {
 }
 
 #[test]
+fn page_zero_title_and_bounded_author_block_are_policy_passthrough() {
+    let output = run_inspect_with_recording(
+        "unit-para-17-author-columns",
+        "unit-para-17-title-author-abstract",
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = parse_events(&output.stdout);
+    assert_one_terminal_last(&events, "result");
+    let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap();
+    assert_eq!(paragraphs.len(), 3, "{paragraphs:#?}");
+    for paragraph in &paragraphs[..2] {
+        assert!(
+            paragraph["text"]["chars"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|character| character["layout"]["policy"] == "passthrough"),
+            "{paragraph:#?}"
+        );
+    }
+    assert!(
+        paragraphs[2]["text"]["chars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|character| character["layout"]["policy"] == "translate"),
+        "{:#?}",
+        paragraphs[2]
+    );
+
+    let missing_anchor = run_inspect_with_recording(
+        "unit-para-17-author-columns",
+        "unit-para-17-title-without-lower-anchor",
+    );
+    assert!(
+        missing_anchor.status.success(),
+        "{}",
+        String::from_utf8_lossy(&missing_anchor.stderr)
+    );
+    let events = parse_events(&missing_anchor.stdout);
+    let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap();
+    assert!(
+        paragraphs[1..]
+            .iter()
+            .flat_map(|paragraph| paragraph["text"]["chars"].as_array().unwrap())
+            .all(|character| character["layout"]["policy"] == "translate"),
+        "{paragraphs:#?}"
+    );
+}
+
+#[test]
+fn title_and_author_passthrough_skip_translation_and_keep_source_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("title-author.pdf");
+    let debug = directory.path().join("debug");
+    let server = FakeResponsesServer::start();
+    let mut command = Command::new(BIN);
+    configure_test_fonts(&mut command);
+    let output = command
+        .env(PDFIUM_ENV, pdfium_library())
+        .env("API_KEY", "mimus-title-author-test-key")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "openai",
+            "--endpoint",
+            &server.endpoint,
+            "--model",
+            "title-author-test-model",
+            "--no-auto-terms",
+            "--no-cache",
+            "--layout-replay",
+        ])
+        .arg(layout_recording_path("unit-para-17-title-author-abstract"))
+        .arg("--debug")
+        .arg(&debug)
+        .arg("--output")
+        .arg(&output_path)
+        .arg(fixture_path("unit-para-17-author-columns"))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(server.requests(), vec!["M M"]);
+
+    let read_il = |stage: &str| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(debug.join(stage)).unwrap()).unwrap()
+    };
+    let before = read_il("03-paragraph_find.il.json");
+    let after = read_il("09-write.il.json");
+    for paragraph_index in 0..=1 {
+        let before_chars = before["pages"][0]["paragraphs"][paragraph_index]["text"]["chars"]
+            .as_array()
+            .unwrap();
+        let after_chars = after["pages"][0]["paragraphs"][paragraph_index]["text"]["chars"]
+            .as_array()
+            .unwrap();
+        assert_eq!(before_chars.len(), after_chars.len());
+        for (before, after) in before_chars.iter().zip(after_chars) {
+            assert_eq!(after["unicode"], before["unicode"]);
+            assert_eq!(after["passthrough"], before["passthrough"]);
+            assert_eq!(after["font"], before["font"]);
+            assert_eq!(after["font_size"], before["font_size"]);
+            assert_eq!(after["baseline_origin"], before["baseline_origin"]);
+            assert_eq!(after["box"], before["box"]);
+            assert_eq!(after["visual_bbox"], before["visual_bbox"]);
+        }
+    }
+}
+
+#[test]
 fn prose_mislabeled_as_footer_below_a_title_is_recovered_without_touching_the_folio() {
     let output = run_inspect_with_recording(
         "unit-layout-07-policy-zones",

@@ -21,7 +21,7 @@
 | 12 | 流水线：固定顺序 pass 链（`fn(&mut Document, &PassContext)`——`Document` 只装数据：原始字节/lopdf 文档/IL/诊断；`PassContext` 装引擎实例/配置/事件钩子；无 pass 框架）；pass 内按页 rayon 并行；`--debug` 逐 pass 落盘 IL | — |
 | 13 | 阶段草案：Parse → ScanDetect(拒绝) → Layout → ParagraphFind → StylesAndFormulas → ExtractTerms → Translate → Typeset → FontEmbed → Write | — |
 | 14 | 阅读顺序：以 V3 模型输出为准 + 几何排序兜底；实测 `[M,7]` 第 7 列是 RT-DETR query id，同时可作页内阅读顺序键；同 query 多类别先取最高分，排序键为 `(page_index, col7)` | [ADR-0002](docs/adr/0002-pp-doclayoutv3.md) |
-| 15 | 翻译政策表（见下）；表体默认不翻留 `--translate-table` 实验开关 | — |
+| 15 | 翻译政策表（见下）；`doc_title` 原样保留；页 0 在 `doc_title` 与 `abstract`/首个 `paragraph_title` 双锚之间的完整视觉作者块原样保留；表体默认不翻留 `--translate-table` 实验开关 | — |
 | 16 | 错误恢复：三层降级（段→页→文档，宁保原文不出坏译文）+ 结束汇总 + `--strict`；畸形 PDF fail-fast、修复函数语料驱动；退出码 0/1/2/3/4/5/6 分类（Usage/Input/Asset/Translation/Io/Internal） | [ADR-0011](docs/adr/0011-cli-machine-protocol.md)、[ADR-0017](docs/adr/0017-translation-degradation-and-strict.md) |
 | 17 | V1 单进程；PDFium 崩溃（abort）接受，子进程隔离推 V2 | — |
 | 18 | 输出字体按字符级走主字体 Noto Sans SC 2.004 → 回退字体 DejaVu Sans 2.35；两族各有 Regular/Bold 槽，均按 flag > env > config > SHA 缓存 > manifest 下载解析，经 `PassContext` 注入并按需子集化；主槽用 `--font`/`--font-bold`，回退槽用 `--font-fallback`/`--font-fallback-bold`。两族皆缺才整段 `unsupported_font`，诊断列出双方身份；italic 映射正常字重。Noto 主字体仍以同一份可变字体承载两个逻辑槽，静态双字重仍是 follow-up | [ADR-0018](docs/adr/0018-output-font-assets.md) |
@@ -59,8 +59,8 @@
 
 | 政策 | 类别 |
 |---|---|
-| 翻译 | text, paragraph_title, doc_title, abstract, content, figure_title, footnote, vision_footnote, aside_text |
-| 不翻·原样保留 | header, footer, header_image, footer_image, image, chart, seal, algorithm, display_formula, formula_number, number, vertical_text, reference, reference_content, table（表体，`--translate-table` 可开） |
+| 翻译 | text, paragraph_title, abstract, content, figure_title, footnote, vision_footnote, aside_text |
+| 不翻·原样保留 | doc_title, header, footer, header_image, footer_image, image, chart, seal, algorithm, display_formula, formula_number, number, vertical_text, reference, reference_content, table（表体，`--translate-table` 可开） |
 | 占位符处理 | inline_formula（在所属段落内以 `{v1}` 占位送翻，返回后还原） |
 
 公式漏检兜底政策（#35）：生产 layout 模型接入（#84）后，偏保守的数学形状启发式仅对
@@ -75,6 +75,12 @@ passthrough，不进入翻译请求，并按命中单元发出不计 degradation
 接入生产后，recording replay 仍只证明已提供标签下的确定性政策行为；真实模型资格测试与
 真实论文离线报告分别证明推理合同和语料分类表现。与类别正交的还有一条按**文本朝向**的划分：**非直立文本一律
 不翻译、原样 passthrough**，优先于类别政策（决策 #32）。
+
+作者块没有 PP-DocLayoutV3 独立类别，按结构锚确定：仅页 0，`doc_title` 为上锚，
+`abstract` 或首个 `paragraph_title` 为下锚；两锚齐备时，其间完整标为 `text` 的段落
+整体改为 typed passthrough，覆盖姓名、角标、机构与邮箱。任一锚缺失时不猜测作者块，
+保留原 `text` 翻译政策。该合同不依赖 LLM identity，受保护字符的源 operand 字节、字体
+引用与几何必须贯穿 Write 保持不变。
 
 ## 术语表
 
