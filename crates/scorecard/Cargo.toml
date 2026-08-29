@@ -1,0 +1,21 @@
+[package]
+name = "scorecard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Deterministic offline quality measurements for public mimus artifacts."
+
+[[bin]]
+name = "scorecard"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tempfile = "3"
