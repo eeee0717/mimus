@@ -12,8 +12,9 @@ use crate::error::{
     TranslationReason, UsageReason,
 };
 use crate::event::{
-    Diagnostic, Diagnostics, Event, EventKind, MAX_REPORTED_FORM_OBJECT_IDS, PageDegradeReason,
-    PreservedParagraph, RecoveryKind, Stage, SuspiciousEchoParagraph,
+    Diagnostic, Diagnostics, Event, EventKind, FormulaBoundaryEvidence,
+    MAX_REPORTED_FORM_OBJECT_IDS, PageDegradeReason, PreservedParagraph, RecoveryKind, Stage,
+    SuspiciousEchoParagraph,
 };
 use crate::geometry::{PageFrame, PageGeometryResolveError};
 use crate::il::{
@@ -2568,6 +2569,13 @@ fn prepare_translations(document: &mut Document) -> Result<()> {
             if paragraph.preserved.is_some() {
                 continue;
             }
+            complete_model_formula_boundaries(
+                paragraph,
+                content_objects,
+                page.index,
+                paragraph_index,
+                &mut math_diagnostics,
+            );
             mark_math_passthrough_units(
                 paragraph,
                 content_objects,
@@ -2611,6 +2619,358 @@ fn prepare_translations(document: &mut Document) -> Result<()> {
         document.diagnostics.push(diagnostic);
     }
     Ok(())
+}
+
+fn complete_model_formula_boundaries(
+    paragraph: &mut Paragraph,
+    content_objects: &BTreeSet<u32>,
+    page_index: usize,
+    paragraph_index: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let chars = paragraph_chars_mut(paragraph);
+    let anchors = chars
+        .iter()
+        .enumerate()
+        .filter(|(_, character)| model_formula_character(character, content_objects))
+        .map(|(index, character)| (index, character.layout.unwrap().reading_order))
+        .collect::<Vec<_>>();
+    if anchors.is_empty() {
+        return;
+    }
+
+    let mut expanded = BTreeMap::<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>::new();
+    expand_script_runs(chars, content_objects, &anchors, &mut expanded);
+    loop {
+        let before = expanded.values().map(BTreeSet::len).sum::<usize>();
+        expand_same_math_font_runs(chars, content_objects, &anchors, &mut expanded);
+        expand_tightly_attached_suffixes(chars, content_objects, &anchors, &mut expanded);
+        expand_balancing_delimiters(chars, content_objects, &anchors, &mut expanded);
+        let after = expanded.values().map(BTreeSet::len).sum::<usize>();
+        if after == before {
+            break;
+        }
+    }
+
+    for ((reading_order, evidence), indices) in expanded {
+        diagnostics.push(Diagnostic::FormulaBoundaryExpanded {
+            page_index,
+            paragraph_index,
+            reading_order,
+            expanded_character_count: indices.len(),
+            evidence,
+        });
+    }
+}
+
+fn model_formula_character(character: &Char, content_objects: &BTreeSet<u32>) -> bool {
+    character.visible
+        && character.text_transform == TextTransform::Upright
+        && character.layout.is_some_and(|layout| {
+            layout.source == LayoutSource::Model && layout.label == LayoutLabel::InlineFormula
+        })
+        && content_objects.contains(&character.passthrough.content_object)
+}
+
+fn formula_boundary_candidate(character: &Char, content_objects: &BTreeSet<u32>) -> bool {
+    character
+        .unicode
+        .is_some_and(|value| !value.is_whitespace())
+        && character_is_translatable(character, content_objects)
+        && character
+            .layout
+            .is_some_and(|layout| layout.source == LayoutSource::Model)
+}
+
+fn formula_character(character: &Char, content_objects: &BTreeSet<u32>) -> bool {
+    character.visible
+        && character.text_transform == TextTransform::Upright
+        && character
+            .layout
+            .is_some_and(|layout| layout.label == LayoutLabel::InlineFormula)
+        && content_objects.contains(&character.passthrough.content_object)
+}
+
+fn characters_are_attached(left: &Char, right: &Char) -> bool {
+    if right.implicit_space_before {
+        return false;
+    }
+    let em = left.font_size.max(right.font_size);
+    let gap = right.r#box.left - left.r#box.right;
+    gap >= -em * 0.25
+        && gap <= em * 0.25
+        && (left.baseline_origin.y - right.baseline_origin.y).abs() <= em * 0.35
+}
+
+fn mark_formula_extension(
+    chars: &mut [Char],
+    index: usize,
+    reading_order: usize,
+    evidence: FormulaBoundaryEvidence,
+    expanded: &mut BTreeMap<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>,
+) {
+    let layout = chars[index]
+        .layout
+        .as_mut()
+        .expect("formula boundary candidates have model layout");
+    layout.label = LayoutLabel::InlineFormula;
+    layout.policy = TranslationPolicy::Passthrough;
+    expanded
+        .entry((reading_order, evidence))
+        .or_default()
+        .insert(index);
+}
+
+fn expand_script_runs(
+    chars: &mut [Char],
+    content_objects: &BTreeSet<u32>,
+    anchors: &[(usize, usize)],
+    expanded: &mut BTreeMap<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>,
+) {
+    for &(anchor_index, reading_order) in anchors {
+        for direction in [-1_isize, 1] {
+            let anchor = chars[anchor_index].clone();
+            let mut previous = anchor_index;
+            let mut next = anchor_index as isize + direction;
+            while let Some(index) = usize::try_from(next)
+                .ok()
+                .filter(|index| *index < chars.len())
+            {
+                let candidate = &chars[index];
+                if !formula_boundary_candidate(candidate, content_objects)
+                    || candidate.font_size > anchor.font_size * 0.85
+                    || (candidate.baseline_origin.y - anchor.baseline_origin.y).abs()
+                        < anchor.font_size * 0.05
+                {
+                    break;
+                }
+                let attached = if direction < 0 {
+                    characters_are_attached(candidate, &chars[previous])
+                } else {
+                    characters_are_attached(&chars[previous], candidate)
+                };
+                if !attached {
+                    break;
+                }
+                mark_formula_extension(
+                    chars,
+                    index,
+                    reading_order,
+                    FormulaBoundaryEvidence::ScriptBaseline,
+                    expanded,
+                );
+                previous = index;
+                next += direction;
+            }
+        }
+    }
+}
+
+fn nearest_formula_reading_order(
+    chars: &[Char],
+    anchors: &[(usize, usize)],
+    index: usize,
+) -> Option<usize> {
+    anchors
+        .iter()
+        .filter(|(anchor_index, _)| {
+            let formula_path = match anchor_index.cmp(&index) {
+                std::cmp::Ordering::Less => &chars[*anchor_index..index],
+                std::cmp::Ordering::Greater => &chars[index + 1..=*anchor_index],
+                std::cmp::Ordering::Equal => return false,
+            };
+            formula_path.iter().all(|character| {
+                character
+                    .layout
+                    .is_some_and(|layout| layout.label == LayoutLabel::InlineFormula)
+            })
+        })
+        .min_by_key(|(anchor_index, _)| anchor_index.abs_diff(index))
+        .map(|(_, reading_order)| *reading_order)
+}
+
+fn unicode_proves_math_font(value: char) -> bool {
+    ('\u{1d400}'..='\u{1d7ff}').contains(&value)
+}
+
+fn expand_same_math_font_runs(
+    chars: &mut [Char],
+    content_objects: &BTreeSet<u32>,
+    anchors: &[(usize, usize)],
+    expanded: &mut BTreeMap<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>,
+) {
+    loop {
+        let mut additions = Vec::new();
+        for index in 0..chars.len() {
+            let candidate = &chars[index];
+            if !formula_boundary_candidate(candidate, content_objects)
+                || !candidate.unicode.is_some_and(char::is_alphanumeric)
+                || !anchors
+                    .iter()
+                    .filter(|(anchor, _)| {
+                        chars[*anchor].font == candidate.font
+                            && chars[*anchor].unicode.is_some_and(unicode_proves_math_font)
+                    })
+                    .any(|anchor| {
+                        nearest_formula_reading_order(chars, std::slice::from_ref(anchor), index)
+                            .is_some()
+                    })
+            {
+                continue;
+            }
+            let attached = index
+                .checked_sub(1)
+                .filter(|left| formula_character(&chars[*left], content_objects))
+                .is_some_and(|left| characters_are_attached(&chars[left], candidate))
+                || chars
+                    .get(index + 1)
+                    .filter(|right| formula_character(right, content_objects))
+                    .is_some_and(|right| characters_are_attached(candidate, right));
+            if attached
+                && let Some(reading_order) = nearest_formula_reading_order(chars, anchors, index)
+            {
+                additions.push((index, reading_order));
+            }
+        }
+        if additions.is_empty() {
+            break;
+        }
+        for (index, reading_order) in additions {
+            mark_formula_extension(
+                chars,
+                index,
+                reading_order,
+                FormulaBoundaryEvidence::SameMathFontRun,
+                expanded,
+            );
+        }
+    }
+}
+
+fn tightly_attached_math_suffix(value: char) -> bool {
+    matches!(value, '\'' | '′' | '″' | '‴' | '!' | '%' | '°') || ('⁰'..='₟').contains(&value)
+}
+
+fn expand_tightly_attached_suffixes(
+    chars: &mut [Char],
+    content_objects: &BTreeSet<u32>,
+    anchors: &[(usize, usize)],
+    expanded: &mut BTreeMap<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>,
+) {
+    for index in 1..chars.len() {
+        if !formula_boundary_candidate(&chars[index], content_objects)
+            || !chars[index]
+                .unicode
+                .is_some_and(tightly_attached_math_suffix)
+            || !formula_character(&chars[index - 1], content_objects)
+            || !characters_are_attached(&chars[index - 1], &chars[index])
+        {
+            continue;
+        }
+        let Some(reading_order) = nearest_formula_reading_order(chars, anchors, index) else {
+            continue;
+        };
+        mark_formula_extension(
+            chars,
+            index,
+            reading_order,
+            FormulaBoundaryEvidence::TightlyAttachedSuffix,
+            expanded,
+        );
+    }
+}
+
+fn matching_delimiter(value: char) -> Option<char> {
+    match value {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        '⟨' => Some('⟩'),
+        _ => None,
+    }
+}
+
+fn opening_delimiter(value: char) -> Option<char> {
+    match value {
+        ')' => Some('('),
+        ']' => Some('['),
+        '}' => Some('{'),
+        '⟩' => Some('⟨'),
+        _ => None,
+    }
+}
+
+fn expand_balancing_delimiters(
+    chars: &mut [Char],
+    content_objects: &BTreeSet<u32>,
+    anchors: &[(usize, usize)],
+    expanded: &mut BTreeMap<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>,
+) {
+    let mut start = 0;
+    while start < chars.len() {
+        if !formula_character(&chars[start], content_objects) {
+            start += 1;
+            continue;
+        }
+        let mut end = start + 1;
+        while end < chars.len() && formula_character(&chars[end], content_objects) {
+            end += 1;
+        }
+        let mut stack = Vec::new();
+        let mut unmatched_close = None;
+        for character in &chars[start..end] {
+            let Some(value) = character.unicode else {
+                continue;
+            };
+            if let Some(close) = matching_delimiter(value) {
+                stack.push((value, close));
+            } else if let Some(open) = opening_delimiter(value) {
+                if stack.last().is_some_and(|(expected, _)| *expected == open) {
+                    stack.pop();
+                } else {
+                    unmatched_close.get_or_insert(open);
+                }
+            }
+        }
+
+        if let Some((_, expected)) = stack.last().copied()
+            && end < chars.len()
+            && formula_boundary_candidate(&chars[end], content_objects)
+            && chars[end].unicode == Some(expected)
+            && characters_are_attached(&chars[end - 1], &chars[end])
+        {
+            let Some(reading_order) = nearest_formula_reading_order(chars, anchors, end) else {
+                start = end;
+                continue;
+            };
+            mark_formula_extension(
+                chars,
+                end,
+                reading_order,
+                FormulaBoundaryEvidence::DelimiterCompletion,
+                expanded,
+            );
+        } else if let Some(expected) = unmatched_close
+            && start > 0
+            && formula_boundary_candidate(&chars[start - 1], content_objects)
+            && chars[start - 1].unicode == Some(expected)
+            && characters_are_attached(&chars[start - 1], &chars[start])
+        {
+            let index = start - 1;
+            let Some(reading_order) = nearest_formula_reading_order(chars, anchors, index) else {
+                start = end;
+                continue;
+            };
+            mark_formula_extension(
+                chars,
+                index,
+                reading_order,
+                FormulaBoundaryEvidence::DelimiterCompletion,
+                expanded,
+            );
+        }
+        start = end;
+    }
 }
 
 fn mark_math_passthrough_units(
@@ -10885,6 +11245,65 @@ mod tests {
             paragraph.chars().iter().all(|character| {
                 character.layout.unwrap().policy == TranslationPolicy::Translate
             })
+        );
+    }
+
+    #[test]
+    fn formula_boundary_completion_requires_a_model_anchor_and_no_word_break() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        for character in chars.iter_mut() {
+            let layout = character.layout.as_mut().unwrap();
+            layout.label = LayoutLabel::Text;
+            layout.source = LayoutSource::Model;
+            layout.policy = TranslationPolicy::Translate;
+        }
+        let content_objects = BTreeSet::from([chars[0].passthrough.content_object]);
+        let mut diagnostics = Vec::new();
+
+        complete_model_formula_boundaries(paragraph, &content_objects, 0, 0, &mut diagnostics);
+        assert!(diagnostics.is_empty());
+        assert!(
+            paragraph
+                .chars()
+                .iter()
+                .all(|character| { character.layout.unwrap().label == LayoutLabel::Text })
+        );
+
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars[0].layout.as_mut().unwrap().label = LayoutLabel::InlineFormula;
+        chars[0].layout.as_mut().unwrap().policy = TranslationPolicy::Passthrough;
+        chars[1].implicit_space_before = true;
+        complete_model_formula_boundaries(paragraph, &content_objects, 0, 0, &mut diagnostics);
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            paragraph.chars()[1].layout.unwrap().label,
+            LayoutLabel::Text
+        );
+
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars[1].implicit_space_before = false;
+        complete_model_formula_boundaries(paragraph, &content_objects, 0, 0, &mut diagnostics);
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            paragraph.chars()[1].layout.unwrap().label,
+            LayoutLabel::Text,
+            "an ASCII formula anchor does not prove that a shared prose font is mathematical"
         );
     }
 

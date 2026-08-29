@@ -2,6 +2,7 @@
 
 - 状态：已接受（2026-08-27）
 - 决策层级：难逆（公式保真边界、写回字节合同和几何验收建立其上）
+- 修订：2026-08-29 补充 StylesAndFormulas 的公式单元边界合同
 
 ## 背景
 
@@ -76,6 +77,28 @@ ADR-0013 的“公式 span 不替换”收窄为：display formula、段外公�
 
 IL schema 保持 v1；CLI schema 保持 v2。本决策不增加配置开关。
 
+### 5. 公式单元边界
+
+PP-DocLayoutV3 的 `inline_formula` label 是公式**存在性**的唯一权威。fallback 数学形状
+启发式不得据此新建 model 公式；StylesAndFormulas 也不得收缩模型已经标出的字符。
+
+模型框可能漏掉同一数学单元的下标、上标或末尾定界符。已有 model 公式锚时，可以把
+相邻 `text/translate` 字符提升为 `inline_formula/passthrough`，但必须同时满足：
+
+- 与锚在同一段和同一视觉行，水平间距按相邻字号的 em 有界，且没有显式或推导出的
+  词间边界；
+- 至少有一项 typed 证据：相对锚发生有界脚本基线偏移、补全未配平定界符、与锚使用
+  同一数学字体的连续字母数字 run，或属于紧连的数学后缀。其中“数学字体”必须由该
+  字体内已有 model 锚的 Unicode Mathematical Alphanumeric Symbols 字符证明；普通
+  ASCII 公式锚与正文共用字体时，不得据此吞入相邻散文；
+- 只改变 layout label/policy；Unicode/code、源 operand 引用与编码字节、字体引用、
+  字号、baseline、metric box 和 visual box 均不改变。
+
+每个公式锚和证据类别发一条 informational `formula_boundary_expanded`，字段包含页、段、
+model reading order 和扩入字符数。事件受现有逐 ID 有界诊断预算约束，超额仍由
+`dropped_diagnostics` 按 ID 记账。扩展后的完整连续字符区间才对应一个 `{vN}`，并整体
+适用本 ADR 的字节、字体和单元内部相对几何合同。
+
 ## 后果
 
 - L5-2 离线回放实际恢复 11 个多行混排溢出中的 9 个，使双提取器 Han 保留率从
@@ -88,3 +111,6 @@ IL schema 保持 v1；CLI schema 保持 v2。本决策不增加配置开关。
   转入“带新 baseline 的预期字符”。
 - 含段外字符或其它 passthrough 类字符的共享 operand、跨行公式或奇异 content transform
   继续 fail closed；后续真实语料若证明这些形状重要，须另立 ADR 扩大边界。
+- 1706 离线回放中，边界合同在 17 个段扩入 65 个字符；`(1,11)`、`(4,19)`、
+  `(4,21)`、`(7,50)` 分别恢复完整序列、`d_model` 与 `epsilon_ls` 单元。受影响段的
+  prepared request 和 cache key 随之改变，这是内容修复的必要结果。
