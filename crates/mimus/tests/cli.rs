@@ -1279,7 +1279,7 @@ fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 154, "M1 closure fixture inventory changed");
+    assert_eq!(ids.len(), 155, "M1 closure fixture inventory changed");
     assert_eq!(cases.len(), 90, "M1 closure case inventory changed");
 
     for id in ids {
@@ -2820,6 +2820,10 @@ fn parse_stream_and_xobject_fixture_matrix_stays_bounded_and_preserves_streams()
         ),
         (
             "unit-parse-11-outline-siblings",
+            (0, OutputExpectation::Rewritten, None),
+        ),
+        (
+            "unit-parse-12-contents-array-tj-operand",
             (0, OutputExpectation::Rewritten, None),
         ),
         (

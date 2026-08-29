@@ -1677,6 +1677,7 @@ D2（跨栏合并）由 `unit-order-01`–`05` 覆盖，D11（公式字体正则
 |---|---|---|
 | `unit-parse-01-ascii85` / `-02-cascade` / `-03-lzw-earlychange` | PARSE-03 | 三种流编码（3 份） |
 | `unit-parse-04-contents-array-numeric-split` | PARSE-04 | 数字 token 跨流边界（合法） |
+| `unit-parse-12-contents-array-tj-operand` | PARSE-04 | 完整 `TJ` operand 与执行 operator 分处相邻 `/Contents` 流（合法） |
 | `mal-parse-05-contents-array-string-split` | PARSE-04 | 字符串跨流边界（畸形） |
 | `mal-parse-06-deep-nesting` | PARSE-08 | 512 层嵌套数组 |
 | `mal-parse-07-parent-cycle` | PARSE-10(c) | `/Parent` 自环 |

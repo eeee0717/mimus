@@ -149,6 +149,7 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
         "unit-write-04-xobj-in-objstm" => xobject_in_object_stream(repo_root),
         "unit-write-05-indirect-resources-objstm" => resources_in_object_stream(repo_root),
         "unit-parse-11-outline-siblings" => outline_siblings(repo_root),
+        "unit-parse-12-contents-array-tj-operand" => contents_array_tj_operand(repo_root),
         "unit-write-06-free-object-slot" => free_object_slot(repo_root),
         "unit-doc-04-rotated-90" => geometry_text_page(
             repo_root,
@@ -556,6 +557,21 @@ fn contents_array_numeric_split(repo_root: &Path) -> Result<Vec<u8>> {
                 String::new(),
                 b" 20 cm\nBT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET\nQ\n".to_vec(),
             ),
+        ],
+    )
+}
+
+fn contents_array_tj_operand(repo_root: &Path) -> Result<Vec<u8>> {
+    basic_pdf(
+        "unit-parse-12-contents-array-tj-operand",
+        repo_root,
+        "[9 0 R 10 0 R]",
+        &[
+            (
+                String::new(),
+                b"BT /F1 12 Tf 1 0 0 1 72 120 Tm [(MIMUS)]".to_vec(),
+            ),
+            (String::new(), b"TJ ET\n".to_vec()),
         ],
     )
 }
