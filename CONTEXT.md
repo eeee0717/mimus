@@ -53,6 +53,7 @@
 | 44 | 生产 layout detector 默认使用 PP-DocLayoutV3 官方 ONNX + ort CPU EP；模型资产按 flag > env > config > SHA 缓存 > 钉死 manifest 解析，缺失/损坏启动期 Asset/3，禁止静默回退。`--layout-replay` 最高优先保留为 CI 接缝，`--layout single-line` 仅作显式降级；模型栅格为 200 DPI，真实模型资格由 `MIMUS_LAYOUT_MODEL` 显式门禁 | [ADR-0019](docs/adr/0019-production-layout-detector.md) |
 | 45 | 已翻译多行段内、独占 text-show operand span 的 inline formula 可与译文共同进入行流：原 operand 字节、源字体对象/子集标签及单元内部相对几何不变，只允许整体平移；display formula、段外/未翻译段公式及共享 operand 继续透传或段级 fail closed。L5-2 离线回放恢复 9/11 个混排段，双提取器 Han 保留率 96.82% | [ADR-0020](docs/adr/0020-inline-formula-flow-relocation.md) |
 | 46 | Form XObject 的 `/BBox` 按 §8.10.2 Table 95 当裁剪框生效：取 `Matrix ∘ CTM` 变换后的轴对齐外接框（旋转/斜切时**故意取超集**，宁可少裁不误裁），沿嵌套链求交；只有 metric box **整体**落在框外的字符才 `visible=false`，且仍留在走查结果里以保住跨引擎对齐的字符序列；被裁内容按页记一次 `content_recovered` / `clipped_form_content` 并附所属 form 对象号。裁掉的墨迹不再充当排版障碍——L5-4 唯一阻塞 `(12,69)` 即由此虚假障碍造成 | [ADR-0013](docs/adr/0013-bounded-walk-and-graded-degradation.md) |
+| 47 | M3 质量以六个封顶维度度量：覆盖缺口、过度翻译、误译风险代理、版面漂移、排版 lint、结构保真；严重度加权错误按每千输出字符归一化，六维等权汇总。离线 `scorecard` 只消费公开 NDJSON/IL/PDF，不依赖生产 crate；阈值是待用户裁定的提案，不进 CI。真实输入出现 `Internal/6` 永远是 bug，合法终态只有发布成功或 ADR-0013 分级 typed 降级 | [docs/10-quality-scorecard.md](docs/10-quality-scorecard.md) |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
