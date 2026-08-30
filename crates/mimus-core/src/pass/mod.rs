@@ -12,8 +12,9 @@ use crate::error::{
     TranslationReason, UsageReason,
 };
 use crate::event::{
-    Diagnostic, Diagnostics, Event, EventKind, MAX_REPORTED_FORM_OBJECT_IDS, PageDegradeReason,
-    PreservedParagraph, RecoveryKind, Stage, SuspiciousEchoParagraph,
+    Diagnostic, Diagnostics, Event, EventKind, FormulaBoundaryEvidence,
+    MAX_REPORTED_FORM_OBJECT_IDS, PageDegradeReason, PreservedParagraph, RecoveryKind, Stage,
+    SuspiciousEchoParagraph,
 };
 use crate::geometry::{PageFrame, PageGeometryResolveError};
 use crate::il::{
@@ -1329,7 +1330,7 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
                 })
                 .then_with(|| right.top.total_cmp(&left.top)),
         });
-        let paragraphs = drafts
+        let mut paragraphs = drafts
             .into_iter()
             .enumerate()
             .map(|(reading_order, draft)| {
@@ -1340,7 +1341,10 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
                     &extracted.character_alignment.weak_unicode_conflicts,
                 )
             })
-            .collect();
+            .collect::<Vec<_>>();
+        if extracted.index == 0 {
+            apply_title_author_passthrough(&mut paragraphs);
+        }
         pages.push(il::Page {
             index: extracted.index,
             geometry: extracted.geometry,
@@ -1352,6 +1356,55 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
         pages,
     };
     Ok(())
+}
+
+fn apply_title_author_passthrough(paragraphs: &mut [Paragraph]) {
+    let Some(title_index) = paragraphs
+        .iter()
+        .position(|paragraph| paragraph_has_only_label(paragraph, LayoutLabel::DocTitle))
+    else {
+        return;
+    };
+    let Some(lower_index) = paragraphs
+        .iter()
+        .enumerate()
+        .skip(title_index + 1)
+        .find_map(|(index, paragraph)| {
+            paragraph_has_only_label(paragraph, LayoutLabel::Abstract)
+                .then_some(index)
+                .or_else(|| {
+                    paragraph_has_only_label(paragraph, LayoutLabel::ParagraphTitle)
+                        .then_some(index)
+                })
+        })
+    else {
+        return;
+    };
+
+    for paragraph in &mut paragraphs[title_index + 1..lower_index] {
+        if !paragraph_has_only_label(paragraph, LayoutLabel::Text) {
+            continue;
+        }
+        for character in paragraph_chars_mut(paragraph) {
+            if let Some(layout) = &mut character.layout {
+                layout.policy = TranslationPolicy::Passthrough;
+            }
+        }
+    }
+}
+
+fn paragraph_has_only_label(paragraph: &Paragraph, label: LayoutLabel) -> bool {
+    !paragraph.chars().is_empty()
+        && paragraph
+            .chars()
+            .iter()
+            .all(|character| character.layout.is_some_and(|layout| layout.label == label))
+}
+
+fn paragraph_chars_mut(paragraph: &mut Paragraph) -> &mut [Char] {
+    match &mut paragraph.text {
+        TextCarrier::Chars { chars } => chars,
+    }
 }
 
 fn mark_leading_section_number(chars: &mut [PositionedChar]) {
@@ -2516,6 +2569,13 @@ fn prepare_translations(document: &mut Document) -> Result<()> {
             if paragraph.preserved.is_some() {
                 continue;
             }
+            complete_model_formula_boundaries(
+                paragraph,
+                content_objects,
+                page.index,
+                paragraph_index,
+                &mut math_diagnostics,
+            );
             mark_math_passthrough_units(
                 paragraph,
                 content_objects,
@@ -2559,6 +2619,358 @@ fn prepare_translations(document: &mut Document) -> Result<()> {
         document.diagnostics.push(diagnostic);
     }
     Ok(())
+}
+
+fn complete_model_formula_boundaries(
+    paragraph: &mut Paragraph,
+    content_objects: &BTreeSet<u32>,
+    page_index: usize,
+    paragraph_index: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let chars = paragraph_chars_mut(paragraph);
+    let anchors = chars
+        .iter()
+        .enumerate()
+        .filter(|(_, character)| model_formula_character(character, content_objects))
+        .map(|(index, character)| (index, character.layout.unwrap().reading_order))
+        .collect::<Vec<_>>();
+    if anchors.is_empty() {
+        return;
+    }
+
+    let mut expanded = BTreeMap::<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>::new();
+    expand_script_runs(chars, content_objects, &anchors, &mut expanded);
+    loop {
+        let before = expanded.values().map(BTreeSet::len).sum::<usize>();
+        expand_same_math_font_runs(chars, content_objects, &anchors, &mut expanded);
+        expand_tightly_attached_suffixes(chars, content_objects, &anchors, &mut expanded);
+        expand_balancing_delimiters(chars, content_objects, &anchors, &mut expanded);
+        let after = expanded.values().map(BTreeSet::len).sum::<usize>();
+        if after == before {
+            break;
+        }
+    }
+
+    for ((reading_order, evidence), indices) in expanded {
+        diagnostics.push(Diagnostic::FormulaBoundaryExpanded {
+            page_index,
+            paragraph_index,
+            reading_order,
+            expanded_character_count: indices.len(),
+            evidence,
+        });
+    }
+}
+
+fn model_formula_character(character: &Char, content_objects: &BTreeSet<u32>) -> bool {
+    character.visible
+        && character.text_transform == TextTransform::Upright
+        && character.layout.is_some_and(|layout| {
+            layout.source == LayoutSource::Model && layout.label == LayoutLabel::InlineFormula
+        })
+        && content_objects.contains(&character.passthrough.content_object)
+}
+
+fn formula_boundary_candidate(character: &Char, content_objects: &BTreeSet<u32>) -> bool {
+    character
+        .unicode
+        .is_some_and(|value| !value.is_whitespace())
+        && character_is_translatable(character, content_objects)
+        && character
+            .layout
+            .is_some_and(|layout| layout.source == LayoutSource::Model)
+}
+
+fn formula_character(character: &Char, content_objects: &BTreeSet<u32>) -> bool {
+    character.visible
+        && character.text_transform == TextTransform::Upright
+        && character
+            .layout
+            .is_some_and(|layout| layout.label == LayoutLabel::InlineFormula)
+        && content_objects.contains(&character.passthrough.content_object)
+}
+
+fn characters_are_attached(left: &Char, right: &Char) -> bool {
+    if right.implicit_space_before {
+        return false;
+    }
+    let em = left.font_size.max(right.font_size);
+    let gap = right.r#box.left - left.r#box.right;
+    gap >= -em * 0.25
+        && gap <= em * 0.25
+        && (left.baseline_origin.y - right.baseline_origin.y).abs() <= em * 0.35
+}
+
+fn mark_formula_extension(
+    chars: &mut [Char],
+    index: usize,
+    reading_order: usize,
+    evidence: FormulaBoundaryEvidence,
+    expanded: &mut BTreeMap<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>,
+) {
+    let layout = chars[index]
+        .layout
+        .as_mut()
+        .expect("formula boundary candidates have model layout");
+    layout.label = LayoutLabel::InlineFormula;
+    layout.policy = TranslationPolicy::Passthrough;
+    expanded
+        .entry((reading_order, evidence))
+        .or_default()
+        .insert(index);
+}
+
+fn expand_script_runs(
+    chars: &mut [Char],
+    content_objects: &BTreeSet<u32>,
+    anchors: &[(usize, usize)],
+    expanded: &mut BTreeMap<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>,
+) {
+    for &(anchor_index, reading_order) in anchors {
+        for direction in [-1_isize, 1] {
+            let anchor = chars[anchor_index].clone();
+            let mut previous = anchor_index;
+            let mut next = anchor_index as isize + direction;
+            while let Some(index) = usize::try_from(next)
+                .ok()
+                .filter(|index| *index < chars.len())
+            {
+                let candidate = &chars[index];
+                if !formula_boundary_candidate(candidate, content_objects)
+                    || candidate.font_size > anchor.font_size * 0.85
+                    || (candidate.baseline_origin.y - anchor.baseline_origin.y).abs()
+                        < anchor.font_size * 0.05
+                {
+                    break;
+                }
+                let attached = if direction < 0 {
+                    characters_are_attached(candidate, &chars[previous])
+                } else {
+                    characters_are_attached(&chars[previous], candidate)
+                };
+                if !attached {
+                    break;
+                }
+                mark_formula_extension(
+                    chars,
+                    index,
+                    reading_order,
+                    FormulaBoundaryEvidence::ScriptBaseline,
+                    expanded,
+                );
+                previous = index;
+                next += direction;
+            }
+        }
+    }
+}
+
+fn nearest_formula_reading_order(
+    chars: &[Char],
+    anchors: &[(usize, usize)],
+    index: usize,
+) -> Option<usize> {
+    anchors
+        .iter()
+        .filter(|(anchor_index, _)| {
+            let formula_path = match anchor_index.cmp(&index) {
+                std::cmp::Ordering::Less => &chars[*anchor_index..index],
+                std::cmp::Ordering::Greater => &chars[index + 1..=*anchor_index],
+                std::cmp::Ordering::Equal => return false,
+            };
+            formula_path.iter().all(|character| {
+                character
+                    .layout
+                    .is_some_and(|layout| layout.label == LayoutLabel::InlineFormula)
+            })
+        })
+        .min_by_key(|(anchor_index, _)| anchor_index.abs_diff(index))
+        .map(|(_, reading_order)| *reading_order)
+}
+
+fn unicode_proves_math_font(value: char) -> bool {
+    ('\u{1d400}'..='\u{1d7ff}').contains(&value)
+}
+
+fn expand_same_math_font_runs(
+    chars: &mut [Char],
+    content_objects: &BTreeSet<u32>,
+    anchors: &[(usize, usize)],
+    expanded: &mut BTreeMap<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>,
+) {
+    loop {
+        let mut additions = Vec::new();
+        for index in 0..chars.len() {
+            let candidate = &chars[index];
+            if !formula_boundary_candidate(candidate, content_objects)
+                || !candidate.unicode.is_some_and(char::is_alphanumeric)
+                || !anchors
+                    .iter()
+                    .filter(|(anchor, _)| {
+                        chars[*anchor].font == candidate.font
+                            && chars[*anchor].unicode.is_some_and(unicode_proves_math_font)
+                    })
+                    .any(|anchor| {
+                        nearest_formula_reading_order(chars, std::slice::from_ref(anchor), index)
+                            .is_some()
+                    })
+            {
+                continue;
+            }
+            let attached = index
+                .checked_sub(1)
+                .filter(|left| formula_character(&chars[*left], content_objects))
+                .is_some_and(|left| characters_are_attached(&chars[left], candidate))
+                || chars
+                    .get(index + 1)
+                    .filter(|right| formula_character(right, content_objects))
+                    .is_some_and(|right| characters_are_attached(candidate, right));
+            if attached
+                && let Some(reading_order) = nearest_formula_reading_order(chars, anchors, index)
+            {
+                additions.push((index, reading_order));
+            }
+        }
+        if additions.is_empty() {
+            break;
+        }
+        for (index, reading_order) in additions {
+            mark_formula_extension(
+                chars,
+                index,
+                reading_order,
+                FormulaBoundaryEvidence::SameMathFontRun,
+                expanded,
+            );
+        }
+    }
+}
+
+fn tightly_attached_math_suffix(value: char) -> bool {
+    matches!(value, '\'' | '′' | '″' | '‴' | '!' | '%' | '°') || ('⁰'..='₟').contains(&value)
+}
+
+fn expand_tightly_attached_suffixes(
+    chars: &mut [Char],
+    content_objects: &BTreeSet<u32>,
+    anchors: &[(usize, usize)],
+    expanded: &mut BTreeMap<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>,
+) {
+    for index in 1..chars.len() {
+        if !formula_boundary_candidate(&chars[index], content_objects)
+            || !chars[index]
+                .unicode
+                .is_some_and(tightly_attached_math_suffix)
+            || !formula_character(&chars[index - 1], content_objects)
+            || !characters_are_attached(&chars[index - 1], &chars[index])
+        {
+            continue;
+        }
+        let Some(reading_order) = nearest_formula_reading_order(chars, anchors, index) else {
+            continue;
+        };
+        mark_formula_extension(
+            chars,
+            index,
+            reading_order,
+            FormulaBoundaryEvidence::TightlyAttachedSuffix,
+            expanded,
+        );
+    }
+}
+
+fn matching_delimiter(value: char) -> Option<char> {
+    match value {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        '⟨' => Some('⟩'),
+        _ => None,
+    }
+}
+
+fn opening_delimiter(value: char) -> Option<char> {
+    match value {
+        ')' => Some('('),
+        ']' => Some('['),
+        '}' => Some('{'),
+        '⟩' => Some('⟨'),
+        _ => None,
+    }
+}
+
+fn expand_balancing_delimiters(
+    chars: &mut [Char],
+    content_objects: &BTreeSet<u32>,
+    anchors: &[(usize, usize)],
+    expanded: &mut BTreeMap<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>,
+) {
+    let mut start = 0;
+    while start < chars.len() {
+        if !formula_character(&chars[start], content_objects) {
+            start += 1;
+            continue;
+        }
+        let mut end = start + 1;
+        while end < chars.len() && formula_character(&chars[end], content_objects) {
+            end += 1;
+        }
+        let mut stack = Vec::new();
+        let mut unmatched_close = None;
+        for character in &chars[start..end] {
+            let Some(value) = character.unicode else {
+                continue;
+            };
+            if let Some(close) = matching_delimiter(value) {
+                stack.push((value, close));
+            } else if let Some(open) = opening_delimiter(value) {
+                if stack.last().is_some_and(|(expected, _)| *expected == open) {
+                    stack.pop();
+                } else {
+                    unmatched_close.get_or_insert(open);
+                }
+            }
+        }
+
+        if let Some((_, expected)) = stack.last().copied()
+            && end < chars.len()
+            && formula_boundary_candidate(&chars[end], content_objects)
+            && chars[end].unicode == Some(expected)
+            && characters_are_attached(&chars[end - 1], &chars[end])
+        {
+            let Some(reading_order) = nearest_formula_reading_order(chars, anchors, end) else {
+                start = end;
+                continue;
+            };
+            mark_formula_extension(
+                chars,
+                end,
+                reading_order,
+                FormulaBoundaryEvidence::DelimiterCompletion,
+                expanded,
+            );
+        } else if let Some(expected) = unmatched_close
+            && start > 0
+            && formula_boundary_candidate(&chars[start - 1], content_objects)
+            && chars[start - 1].unicode == Some(expected)
+            && characters_are_attached(&chars[start - 1], &chars[start])
+        {
+            let index = start - 1;
+            let Some(reading_order) = nearest_formula_reading_order(chars, anchors, index) else {
+                start = end;
+                continue;
+            };
+            mark_formula_extension(
+                chars,
+                index,
+                reading_order,
+                FormulaBoundaryEvidence::DelimiterCompletion,
+                expanded,
+            );
+        }
+        start = end;
+    }
 }
 
 fn mark_math_passthrough_units(
@@ -3418,6 +3830,27 @@ struct TypesetLineSlot {
     baseline_y: f64,
 }
 
+#[derive(Debug, Clone)]
+struct FormulaContinuityText {
+    segment_index: usize,
+    lines: Vec<FormulaContinuityLine>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FormulaContinuityLine {
+    bounds: Rect,
+    line_left: f64,
+    starts_with_punctuation: bool,
+    ends_with_punctuation: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FormulaContinuityFormula {
+    formula_index: usize,
+    bounds: Rect,
+    line_left: f64,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct SingleLineBoundsExpansion {
     top_pt: f64,
@@ -3666,8 +4099,9 @@ fn plan_paragraph<'a>(
     let fixed_plans = source_segments
         .iter()
         .zip(&translated_segments)
-        .filter(|(source, translated)| !source.is_empty() || !translated.is_empty())
-        .map(|(source, translated)| {
+        .enumerate()
+        .filter(|(_, (source, translated))| !source.is_empty() || !translated.is_empty())
+        .map(|(segment_index, (source, translated))| {
             let line_slots = mixed_with_formula.then(|| source_text_line_slots(paragraph, source));
             plan_text_segment(
                 source,
@@ -3678,36 +4112,59 @@ fn plan_paragraph<'a>(
                 geometry.obstacles,
                 line_slots.as_deref(),
             )
+            .map(|plan| (segment_index, plan))
         })
         .collect::<std::result::Result<Vec<_>, _>>();
     let mut fixed_slot_overflow = false;
     match fixed_plans {
-        Ok(plans) => {
+        Ok(indexed_plans) => {
+            let continuity_text = planned_formula_continuity_text(&indexed_plans, output_fonts);
+            let plans = indexed_plans
+                .into_iter()
+                .map(|(_, plan)| plan)
+                .collect::<Vec<_>>();
             let paragraph_ink = plans
                 .iter()
                 .flat_map(|plan| plan.ink_bounds.iter().copied())
                 .collect::<Vec<_>>();
             if !rects_intersect_each_other(&paragraph_ink) {
-                if !shared_formula_operand {
+                if !mixed_with_formula {
                     return Ok(plans);
                 }
-                let plans = prepare_shared_formula_fixed_plans(
-                    paragraph,
-                    plans,
-                    geometry.extracted,
-                    geometry.content_objects,
-                    &content_object_numbers,
-                )
-                .ok_or(TypesetPlanError::Preserved(
-                    il::PreservedReason::TypesetProtocol,
-                ))?;
-                let paragraph_ink = plans
-                    .iter()
-                    .flat_map(|plan| plan.ink_bounds.iter().copied())
-                    .collect::<Vec<_>>();
-                if !rects_intersect_each_other(&paragraph_ink) {
-                    return Ok(plans);
+                let continuity_formulas =
+                    fixed_formula_continuity(paragraph, &content_object_numbers);
+                if let (Some(continuity_text), Some(continuity_formulas), Some(limit)) = (
+                    continuity_text,
+                    continuity_formulas,
+                    formula_continuity_limit(paragraph, &content_object_numbers),
+                ) && formula_continuity_is_valid(
+                    &translated_segments,
+                    &continuity_text,
+                    &continuity_formulas,
+                    limit,
+                ) {
+                    if !shared_formula_operand {
+                        return Ok(plans);
+                    }
+                    let plans = prepare_shared_formula_fixed_plans(
+                        paragraph,
+                        plans,
+                        geometry.extracted,
+                        geometry.content_objects,
+                        &content_object_numbers,
+                    )
+                    .ok_or(TypesetPlanError::Preserved(
+                        il::PreservedReason::TypesetProtocol,
+                    ))?;
+                    let paragraph_ink = plans
+                        .iter()
+                        .flat_map(|plan| plan.ink_bounds.iter().copied())
+                        .collect::<Vec<_>>();
+                    if !rects_intersect_each_other(&paragraph_ink) {
+                        return Ok(plans);
+                    }
                 }
+                fixed_slot_overflow = true;
             }
         }
         Err(TypesetPlanError::Preserved(il::PreservedReason::TypesetOverflow)) => {
@@ -4180,15 +4637,25 @@ struct SourceFormulaUnit<'a> {
 }
 
 enum FormulaFlowAtom {
-    Text(Vec<crate::translate::StyledCharacter>),
+    Text {
+        segment_index: usize,
+        characters: Vec<crate::translate::StyledCharacter>,
+    },
     Formula(usize),
 }
 
 struct FormulaFlowPlacement {
     lines: Vec<Vec<crate::translate::StyledCharacter>>,
     baselines: Vec<(f64, f64)>,
+    line_segment_indices: Vec<usize>,
     formula_relocations: Vec<FormulaRelocation>,
+    formula_line_lefts: Vec<f64>,
     ink_bounds: Vec<Rect>,
+}
+
+enum FormulaFlowAttempt {
+    Placed(FormulaFlowPlacement),
+    NoFit { continuity_blocked: bool },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4294,11 +4761,12 @@ fn plan_relocated_formula_flow<'a>(
     }
     let mut atoms = Vec::new();
     for (segment_index, segment) in translated_segments.iter().enumerate() {
-        atoms.extend(
-            styled_text_tokens(segment)
-                .into_iter()
-                .map(FormulaFlowAtom::Text),
-        );
+        atoms.extend(styled_text_tokens(segment).into_iter().map(|characters| {
+            FormulaFlowAtom::Text {
+                segment_index,
+                characters,
+            }
+        }));
         if segment_index < formula_units.len() {
             atoms.push(FormulaFlowAtom::Formula(segment_index));
         }
@@ -4327,9 +4795,63 @@ fn plan_relocated_formula_flow<'a>(
         if !may_expand {
             slots.retain(|slot| slot.baseline_y + descent >= container.bottom - 0.01);
         }
-        if let Some(placement) = place_formula_flow(&atoms, &formula_units, &faces, size, &slots)
-            && ink_bounds_are_safe(&placement.ink_bounds, page_bounds, obstacles)
-        {
+        let placement = match place_formula_flow(&atoms, &formula_units, &faces, size, &slots)
+            .ok_or(TypesetPlanError::Preserved(
+                il::PreservedReason::TypesetProtocol,
+            ))? {
+            FormulaFlowAttempt::Placed(placement) => placement,
+            FormulaFlowAttempt::NoFit {
+                continuity_blocked: true,
+            } => {
+                return Err(TypesetPlanError::Preserved(
+                    il::PreservedReason::TypesetOverflow,
+                ));
+            }
+            FormulaFlowAttempt::NoFit {
+                continuity_blocked: false,
+            } => {
+                if size <= MIN_FONT_SIZE_PT + 0.001 {
+                    break;
+                }
+                size = (size - 0.5).max(MIN_FONT_SIZE_PT);
+                continue;
+            }
+        };
+        if ink_bounds_are_safe(&placement.ink_bounds, page_bounds, obstacles) {
+            let continuity_text = formula_flow_continuity_text(&placement, &faces, size).ok_or(
+                TypesetPlanError::Preserved(il::PreservedReason::TypesetProtocol),
+            )?;
+            let continuity_formulas = formula_units
+                .iter()
+                .zip(&placement.formula_relocations)
+                .zip(&placement.formula_line_lefts)
+                .enumerate()
+                .map(
+                    |(formula_index, ((unit, relocation), line_left))| FormulaContinuityFormula {
+                        formula_index,
+                        bounds: translated_rect(
+                            unit.bounds,
+                            relocation.delta_x_pt,
+                            relocation.delta_y_pt,
+                        ),
+                        line_left: *line_left,
+                    },
+                )
+                .collect::<Vec<_>>();
+            let continuity_limit = formula_continuity_limit(paragraph, &content_object_numbers)
+                .ok_or(TypesetPlanError::Preserved(
+                    il::PreservedReason::TypesetProtocol,
+                ))?;
+            if !formula_continuity_is_valid(
+                &translated_segments,
+                &continuity_text,
+                &continuity_formulas,
+                continuity_limit,
+            ) {
+                return Err(TypesetPlanError::Preserved(
+                    il::PreservedReason::TypesetOverflow,
+                ));
+            }
             let overflow_top = placement
                 .ink_bounds
                 .iter()
@@ -4563,40 +5085,70 @@ fn place_formula_flow(
     faces: &OutputFontFaces<'_>,
     size: f64,
     slots: &[TypesetLineSlot],
-) -> Option<FormulaFlowPlacement> {
+) -> Option<FormulaFlowAttempt> {
     let mut lines = Vec::<Vec<crate::translate::StyledCharacter>>::new();
     let mut baselines = Vec::<(f64, f64)>::new();
+    let mut line_segment_indices = Vec::new();
     let mut formula_relocations = Vec::new();
+    let mut formula_line_lefts = Vec::new();
     let mut formula_ink = Vec::new();
     let mut slot_index = 0_usize;
-    let mut cursor = slots.first()?.left;
+    let Some(first_slot) = slots.first() else {
+        return Some(FormulaFlowAttempt::NoFit {
+            continuity_blocked: false,
+        });
+    };
+    let mut cursor = first_slot.left;
     let mut open_text_slot = None;
-    for atom in atoms {
+    let mut continuity_blocked = false;
+    for (atom_index, atom) in atoms.iter().enumerate() {
         let width = match atom {
-            FormulaFlowAtom::Text(token) => styled_token_width(token, faces, size)?,
+            FormulaFlowAtom::Text { characters, .. } => {
+                styled_token_width(characters, faces, size)?
+            }
             FormulaFlowAtom::Formula(index) => {
                 let unit = formula_units.get(*index)?;
                 unit.bounds.right - unit.bounds.left
             }
         };
+        let attached_width = match atoms
+            .get(atom_index + 1)
+            .filter(|next| formula_flow_atoms_must_stay_together(atom, next))
+        {
+            Some(next) => formula_flow_atom_width(next, formula_units, faces, size)?,
+            None => 0.0,
+        };
+        let unbreakable_width = width + attached_width;
         loop {
-            let slot = slots.get(slot_index)?;
-            if width <= slot.right - cursor + 0.01 {
+            let Some(slot) = slots.get(slot_index) else {
+                return Some(FormulaFlowAttempt::NoFit { continuity_blocked });
+            };
+            if unbreakable_width <= slot.right - cursor + 0.01 {
                 break;
             }
+            if attached_width > 0.0 && width <= slot.right - cursor + 0.01 {
+                continuity_blocked = true;
+            }
             slot_index += 1;
-            cursor = slots.get(slot_index)?.left;
+            let Some(next_slot) = slots.get(slot_index) else {
+                return Some(FormulaFlowAttempt::NoFit { continuity_blocked });
+            };
+            cursor = next_slot.left;
             open_text_slot = None;
         }
         let slot = slots[slot_index];
         match atom {
-            FormulaFlowAtom::Text(token) => {
+            FormulaFlowAtom::Text {
+                segment_index,
+                characters,
+            } => {
                 if open_text_slot != Some(slot_index) {
                     lines.push(Vec::new());
                     baselines.push((cursor, slot.baseline_y));
+                    line_segment_indices.push(*segment_index);
                     open_text_slot = Some(slot_index);
                 }
-                lines.last_mut()?.extend(token);
+                lines.last_mut()?.extend(characters);
             }
             FormulaFlowAtom::Formula(index) => {
                 let unit = &formula_units[*index];
@@ -4627,6 +5179,7 @@ fn place_formula_flow(
                     characters,
                     source_fonts: unit.source_fonts.clone(),
                 });
+                formula_line_lefts.push(slot.left);
                 open_text_slot = None;
             }
         }
@@ -4634,12 +5187,319 @@ fn place_formula_flow(
     }
     let mut ink_bounds = planned_line_ink_bounds(&lines, &baselines, faces, size)?;
     ink_bounds.extend(formula_ink);
-    Some(FormulaFlowPlacement {
+    Some(FormulaFlowAttempt::Placed(FormulaFlowPlacement {
         lines,
         baselines,
+        line_segment_indices,
         formula_relocations,
+        formula_line_lefts,
         ink_bounds,
+    }))
+}
+
+fn formula_flow_atom_width(
+    atom: &FormulaFlowAtom,
+    formula_units: &[SourceFormulaUnit<'_>],
+    faces: &OutputFontFaces<'_>,
+    size: f64,
+) -> Option<f64> {
+    match atom {
+        FormulaFlowAtom::Text { characters, .. } => styled_token_width(characters, faces, size),
+        FormulaFlowAtom::Formula(index) => {
+            let unit = formula_units.get(*index)?;
+            Some(unit.bounds.right - unit.bounds.left)
+        }
+    }
+}
+
+fn formula_flow_atoms_must_stay_together(left: &FormulaFlowAtom, right: &FormulaFlowAtom) -> bool {
+    match (left, right) {
+        (FormulaFlowAtom::Formula(_), FormulaFlowAtom::Text { characters, .. }) => characters
+            .iter()
+            .find(|character| !character.value.is_whitespace())
+            .is_some_and(|character| formula_adjacent_punctuation(character.value)),
+        (FormulaFlowAtom::Text { characters, .. }, FormulaFlowAtom::Formula(_)) => characters
+            .iter()
+            .rev()
+            .find(|character| !character.value.is_whitespace())
+            .is_some_and(|character| formula_adjacent_punctuation(character.value)),
+        _ => false,
+    }
+}
+
+fn planned_formula_continuity_text(
+    plans: &[(usize, TypesetPlan)],
+    output_fonts: &crate::context::OutputFonts,
+) -> Option<Vec<FormulaContinuityText>> {
+    let faces = OutputFontFaces::parse(output_fonts).ok()?;
+    plans
+        .iter()
+        .map(|(segment_index, plan)| {
+            Some(FormulaContinuityText {
+                segment_index: *segment_index,
+                lines: formula_continuity_lines(
+                    &plan.lines,
+                    &plan.baselines,
+                    &faces,
+                    plan.font_size,
+                )?,
+            })
+        })
+        .collect()
+}
+
+fn formula_flow_continuity_text(
+    placement: &FormulaFlowPlacement,
+    faces: &OutputFontFaces<'_>,
+    size: f64,
+) -> Option<Vec<FormulaContinuityText>> {
+    let lines = formula_continuity_lines(&placement.lines, &placement.baselines, faces, size)?;
+    if lines.len() != placement.line_segment_indices.len() {
+        return None;
+    }
+    let mut segments = BTreeMap::<usize, Vec<FormulaContinuityLine>>::new();
+    for (segment_index, line) in placement.line_segment_indices.iter().copied().zip(lines) {
+        segments.entry(segment_index).or_default().push(line);
+    }
+    Some(
+        segments
+            .into_iter()
+            .map(|(segment_index, lines)| FormulaContinuityText {
+                segment_index,
+                lines,
+            })
+            .collect(),
+    )
+}
+
+fn formula_continuity_lines(
+    lines: &[Vec<crate::translate::StyledCharacter>],
+    baselines: &[(f64, f64)],
+    faces: &OutputFontFaces<'_>,
+    size: f64,
+) -> Option<Vec<FormulaContinuityLine>> {
+    if lines.len() != baselines.len() {
+        return None;
+    }
+    lines
+        .iter()
+        .zip(baselines)
+        .map(|(line, &(x, y))| {
+            let width = styled_token_width(line, faces, size)?;
+            let first = line
+                .iter()
+                .find(|character| !character.value.is_whitespace());
+            let last = line
+                .iter()
+                .rev()
+                .find(|character| !character.value.is_whitespace());
+            Some(FormulaContinuityLine {
+                bounds: Rect {
+                    left: x,
+                    bottom: y + faces.descent_em() * size,
+                    right: x + width,
+                    top: y + faces.ascent_em() * size,
+                },
+                line_left: x,
+                starts_with_punctuation: first
+                    .is_some_and(|character| formula_adjacent_punctuation(character.value)),
+                ends_with_punctuation: last
+                    .is_some_and(|character| formula_adjacent_punctuation(character.value)),
+            })
+        })
+        .collect()
+}
+
+fn fixed_formula_continuity(
+    paragraph: &Paragraph,
+    content_objects: &BTreeSet<u32>,
+) -> Option<Vec<FormulaContinuityFormula>> {
+    let mut formulas = Vec::new();
+    let mut start = 0_usize;
+    let chars = paragraph.chars();
+    while start < chars.len() {
+        if prepared_character_class(&chars[start], content_objects)
+            != PreparedCharacterClass::Formula
+        {
+            start += 1;
+            continue;
+        }
+        let mut end = start + 1;
+        while end < chars.len()
+            && prepared_character_class(&chars[end], content_objects)
+                == PreparedCharacterClass::Formula
+        {
+            end += 1;
+        }
+        let bounds = chars[start..end]
+            .iter()
+            .flat_map(|character| [character.r#box, character.visual_bbox])
+            .filter(|bounds| rect_is_finite(*bounds))
+            .reduce(Rect::union)?;
+        formulas.push(FormulaContinuityFormula {
+            formula_index: formulas.len(),
+            bounds,
+            line_left: paragraph.bounds.left,
+        });
+        start = end;
+    }
+    Some(formulas)
+}
+
+fn formula_continuity_limit(paragraph: &Paragraph, content_objects: &BTreeSet<u32>) -> Option<f64> {
+    let chars = paragraph.chars();
+    let em = median(
+        chars
+            .iter()
+            .map(|character| character.font_size)
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .collect(),
+    )?;
+    let mut word_spacing = chars
+        .iter()
+        .filter(|character| character.unicode.is_some_and(char::is_whitespace))
+        .map(|character| character.r#box.right - character.r#box.left)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .collect::<Vec<_>>();
+    word_spacing.extend(chars.windows(2).filter_map(|pair| {
+        let [left, right] = pair else {
+            return None;
+        };
+        if !right.implicit_space_before
+            || !matches!(
+                prepared_character_class(left, content_objects),
+                PreparedCharacterClass::Text { .. }
+            )
+            || !matches!(
+                prepared_character_class(right, content_objects),
+                PreparedCharacterClass::Text { .. }
+            )
+            || (left.baseline_origin.y - right.baseline_origin.y).abs()
+                > left.font_size.max(right.font_size) * 0.35
+        {
+            return None;
+        }
+        let gap = right.r#box.left - left.r#box.right;
+        (gap.is_finite() && gap > 0.0).then_some(gap)
+    }));
+    let source_spacing_limit = median(word_spacing).map_or(0.0, |spacing| 2.0 * spacing);
+    Some(source_spacing_limit.max(1.5 * em))
+}
+
+fn median(mut values: Vec<f64>) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(f64::total_cmp);
+    let middle = values.len() / 2;
+    if values.len().is_multiple_of(2) {
+        Some((values[middle - 1] + values[middle]) / 2.0)
+    } else {
+        Some(values[middle])
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FormulaContinuityItem {
+    is_formula: bool,
+    bounds: Rect,
+    line_left: f64,
+    starts_with_punctuation: bool,
+    ends_with_punctuation: bool,
+}
+
+fn formula_continuity_is_valid(
+    translated_segments: &[Vec<crate::translate::StyledCharacter>],
+    text: &[FormulaContinuityText],
+    formulas: &[FormulaContinuityFormula],
+    limit: f64,
+) -> bool {
+    if formulas.len() + 1 != translated_segments.len()
+        || !limit.is_finite()
+        || limit <= 0.0
+        || formulas
+            .iter()
+            .enumerate()
+            .any(|(index, formula)| formula.formula_index != index)
+    {
+        return false;
+    }
+    let mut text_by_segment = BTreeMap::new();
+    for placement in text {
+        if placement.segment_index >= translated_segments.len()
+            || text_by_segment
+                .insert(placement.segment_index, placement)
+                .is_some()
+        {
+            return false;
+        }
+    }
+    let mut items = Vec::new();
+    for segment_index in 0..translated_segments.len() {
+        if let Some(placement) = text_by_segment.get(&segment_index) {
+            items.extend(placement.lines.iter().map(|line| FormulaContinuityItem {
+                is_formula: false,
+                bounds: line.bounds,
+                line_left: line.line_left,
+                starts_with_punctuation: line.starts_with_punctuation,
+                ends_with_punctuation: line.ends_with_punctuation,
+            }));
+        }
+        if let Some(formula) = formulas.get(segment_index) {
+            items.push(FormulaContinuityItem {
+                is_formula: true,
+                bounds: formula.bounds,
+                line_left: formula.line_left,
+                starts_with_punctuation: false,
+                ends_with_punctuation: false,
+            });
+        }
+    }
+    if items
+        .first()
+        .is_some_and(|item| item.is_formula && item.bounds.left - item.line_left > limit + 0.01)
+    {
+        return false;
+    }
+    items.windows(2).all(|pair| {
+        let [left, right] = pair else {
+            return false;
+        };
+        if !left.is_formula && !right.is_formula {
+            return true;
+        }
+        let same_line = left.bounds.top > right.bounds.bottom + 0.01
+            && right.bounds.top > left.bounds.bottom + 0.01;
+        if (left.ends_with_punctuation || right.starts_with_punctuation) && !same_line {
+            return false;
+        }
+        if same_line {
+            right.bounds.left - left.bounds.right <= limit + 0.01
+        } else {
+            let left_center = (left.bounds.bottom + left.bounds.top) / 2.0;
+            let right_center = (right.bounds.bottom + right.bounds.top) / 2.0;
+            left_center > right_center + 0.01 && right.bounds.left - right.line_left <= limit + 0.01
+        }
     })
+}
+
+fn formula_adjacent_punctuation(value: char) -> bool {
+    value.is_ascii_punctuation()
+        || matches!(
+            value,
+            '\u{3001}'
+                | '\u{3002}'
+                | '\u{3008}'..='\u{3011}'
+                | '\u{3014}'..='\u{301f}'
+                | '\u{ff01}'
+                | '\u{ff08}'
+                | '\u{ff09}'
+                | '\u{ff0c}'
+                | '\u{ff0e}'
+                | '\u{ff1a}'
+                | '\u{ff1b}'
+                | '\u{ff1f}'
+        )
 }
 
 fn formula_validation_character(
@@ -10837,6 +11697,65 @@ mod tests {
     }
 
     #[test]
+    fn formula_boundary_completion_requires_a_model_anchor_and_no_word_break() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        for character in chars.iter_mut() {
+            let layout = character.layout.as_mut().unwrap();
+            layout.label = LayoutLabel::Text;
+            layout.source = LayoutSource::Model;
+            layout.policy = TranslationPolicy::Translate;
+        }
+        let content_objects = BTreeSet::from([chars[0].passthrough.content_object]);
+        let mut diagnostics = Vec::new();
+
+        complete_model_formula_boundaries(paragraph, &content_objects, 0, 0, &mut diagnostics);
+        assert!(diagnostics.is_empty());
+        assert!(
+            paragraph
+                .chars()
+                .iter()
+                .all(|character| { character.layout.unwrap().label == LayoutLabel::Text })
+        );
+
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars[0].layout.as_mut().unwrap().label = LayoutLabel::InlineFormula;
+        chars[0].layout.as_mut().unwrap().policy = TranslationPolicy::Passthrough;
+        chars[1].implicit_space_before = true;
+        complete_model_formula_boundaries(paragraph, &content_objects, 0, 0, &mut diagnostics);
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            paragraph.chars()[1].layout.unwrap().label,
+            LayoutLabel::Text
+        );
+
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars[1].implicit_space_before = false;
+        complete_model_formula_boundaries(paragraph, &content_objects, 0, 0, &mut diagnostics);
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            paragraph.chars()[1].layout.unwrap().label,
+            LayoutLabel::Text,
+            "an ASCII formula anchor does not prove that a shared prose font is mathematical"
+        );
+    }
+
+    #[test]
     fn nested_inline_formula_group_joins_its_translatable_model_owner() {
         let mut document = Document::for_inspection(fixture());
         let engine = FakeEngine::default();
@@ -10956,7 +11875,7 @@ mod tests {
         }
         for character in &mut chars[3..] {
             character.layout.as_mut().unwrap().bounds = Rect {
-                left: 130.0,
+                left: 97.0,
                 bottom: 90.0,
                 right: 180.0,
                 top: 135.0,
@@ -11188,6 +12107,283 @@ mod tests {
                 "formula operand bytes were not replayed"
             );
         }
+    }
+
+    #[test]
+    fn distant_fixed_formula_slot_falls_back_to_relocation() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("distant-fixed-formula-slot.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        pdf.get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(
+                b"BT /F1 12 Tf\n1 0 0 1 72 140 Tm\n(MIM) Tj\n1 0 0 1 220 140 Tm\n(U) Tj\n1 0 0 1 230 140 Tm\n(S) Tj\n1 0 0 1 72 126 Tm\n(MIMUS) Tj\nET\n"
+                    .to_vec(),
+            );
+        pdf.save(&input).unwrap();
+        let mut document = Document::for_inspection(&input);
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: "\u{4e2d}{v1}\u{6587}",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let mut chars = document.il.pages[0]
+            .paragraphs
+            .iter()
+            .flat_map(|paragraph| paragraph.chars().iter().cloned())
+            .collect::<Vec<_>>();
+        chars.sort_by(|left, right| {
+            right
+                .baseline_origin
+                .y
+                .total_cmp(&left.baseline_origin.y)
+                .then_with(|| left.baseline_origin.x.total_cmp(&right.baseline_origin.x))
+        });
+        assert_eq!(chars.len(), 10);
+        let owner = Rect {
+            left: 72.0,
+            bottom: 110.0,
+            right: 260.0,
+            top: 151.0,
+        };
+        for character in chars.iter_mut() {
+            character.layout.as_mut().unwrap().bounds = owner;
+        }
+        document.extracted_pages[0].layout_regions[0].bounds = owner;
+        let formula = chars
+            .iter_mut()
+            .find(|character| character.unicode == Some('U') && character.baseline_origin.x > 200.0)
+            .unwrap();
+        let formula_span = (
+            (formula.passthrough.content_object, 0),
+            formula.passthrough.byte_start,
+            formula.passthrough.byte_end,
+        );
+        let source_formula_x = formula.baseline_origin.x;
+        let layout = formula.layout.as_mut().unwrap();
+        layout.label = LayoutLabel::InlineFormula;
+        layout.policy = TranslationPolicy::Passthrough;
+        document.il.pages[0].paragraphs = vec![Paragraph {
+            reading_order: 0,
+            bounds: owner,
+            text: TextCarrier::Chars { chars },
+            translated_text: None,
+            preserved: None,
+        }];
+
+        styles_and_formulas(&mut document, &context).unwrap();
+        translate(&mut document, &context).unwrap();
+        typeset(&mut document, &context).unwrap();
+
+        assert_eq!(document.il.pages[0].paragraphs[0].preserved, None);
+        let replacement = document.rewrites[0]
+            .replacements
+            .iter()
+            .find(|replacement| {
+                (
+                    replacement.content_object,
+                    replacement.byte_start,
+                    replacement.byte_end,
+                ) == formula_span
+            })
+            .expect("continuity rejection must relocate the formula operand");
+        assert!(
+            replacement
+                .replacement
+                .windows(3)
+                .any(|window| window == b"(U)"),
+            "source formula bytes must be replayed"
+        );
+        let relocated_x = document.rewrites[0]
+            .typeset_characters
+            .iter()
+            .find(|character| character.unicode == 'U')
+            .unwrap()
+            .baseline_origin
+            .x;
+        assert!(relocated_x + 50.0 < source_formula_x);
+    }
+
+    #[test]
+    fn formula_continuity_limit_is_derived_from_source_spacing_and_em() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        {
+            let TextCarrier::Chars { chars } = &mut paragraph.text;
+            for character in chars.iter_mut() {
+                character.font_size = 12.0;
+                character.implicit_space_before = false;
+            }
+        }
+        let content_objects = paragraph
+            .chars()
+            .iter()
+            .map(|character| character.passthrough.content_object)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            formula_continuity_limit(paragraph, &content_objects),
+            Some(18.0)
+        );
+
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        let first_right = chars[0].r#box.right;
+        let width = chars[1].r#box.right - chars[1].r#box.left;
+        chars[1].r#box.left = first_right + 12.0;
+        chars[1].r#box.right = chars[1].r#box.left + width;
+        chars[1].implicit_space_before = true;
+        assert_eq!(
+            formula_continuity_limit(paragraph, &content_objects),
+            Some(24.0)
+        );
+    }
+
+    #[test]
+    fn shared_formula_continuity_oracle_rejects_split_punctuation_and_reordered_units() {
+        let styled = |value| crate::translate::StyledCharacter { value, bold: false };
+        let translated = vec![vec![styled('\u{4e2d}')], vec![styled('\u{ff0c}')]];
+        let text = vec![
+            FormulaContinuityText {
+                segment_index: 0,
+                lines: vec![FormulaContinuityLine {
+                    bounds: Rect {
+                        left: 72.0,
+                        bottom: 98.0,
+                        right: 84.0,
+                        top: 110.0,
+                    },
+                    line_left: 72.0,
+                    starts_with_punctuation: false,
+                    ends_with_punctuation: false,
+                }],
+            },
+            FormulaContinuityText {
+                segment_index: 1,
+                lines: vec![FormulaContinuityLine {
+                    bounds: Rect {
+                        left: 72.0,
+                        bottom: 82.0,
+                        right: 84.0,
+                        top: 94.0,
+                    },
+                    line_left: 72.0,
+                    starts_with_punctuation: true,
+                    ends_with_punctuation: true,
+                }],
+            },
+        ];
+        let formula = FormulaContinuityFormula {
+            formula_index: 0,
+            bounds: Rect {
+                left: 84.0,
+                bottom: 98.0,
+                right: 94.0,
+                top: 110.0,
+            },
+            line_left: 72.0,
+        };
+        assert!(!formula_continuity_is_valid(
+            &translated,
+            &text,
+            &[formula],
+            18.0,
+        ));
+
+        let translated = vec![Vec::new(), Vec::new(), Vec::new()];
+        let formulas = [
+            FormulaContinuityFormula {
+                formula_index: 0,
+                bounds: Rect {
+                    left: 90.0,
+                    bottom: 82.0,
+                    right: 100.0,
+                    top: 94.0,
+                },
+                line_left: 72.0,
+            },
+            FormulaContinuityFormula {
+                formula_index: 1,
+                bounds: Rect {
+                    left: 90.0,
+                    bottom: 98.0,
+                    right: 100.0,
+                    top: 110.0,
+                },
+                line_left: 72.0,
+            },
+        ];
+        assert!(!formula_continuity_is_valid(
+            &translated,
+            &[],
+            &formulas,
+            18.0,
+        ));
+    }
+
+    #[test]
+    fn punctuation_continuity_failure_does_not_enter_smaller_font_candidates() {
+        let output_fonts = test_output_fonts();
+        let faces = OutputFontFaces::parse(&output_fonts).unwrap();
+        let formula_bounds = Rect {
+            left: 0.0,
+            bottom: 0.0,
+            right: 10.0,
+            top: 12.0,
+        };
+        let formula_units = [SourceFormulaUnit {
+            chars: Vec::new(),
+            validation_characters: Vec::new(),
+            spans: Vec::new(),
+            split_glyphs: BTreeMap::new(),
+            bounds: formula_bounds,
+            ink_bounds: formula_bounds,
+            source_fonts: Vec::new(),
+        }];
+        let atoms = [
+            FormulaFlowAtom::Formula(0),
+            FormulaFlowAtom::Text {
+                segment_index: 1,
+                characters: vec![crate::translate::StyledCharacter {
+                    value: '\u{ff0c}',
+                    bold: false,
+                }],
+            },
+        ];
+        let slots = [TypesetLineSlot {
+            left: 0.0,
+            right: 15.0,
+            baseline_y: 10.0,
+        }];
+
+        assert!(matches!(
+            place_formula_flow(&atoms, &formula_units, &faces, 12.0, &slots),
+            Some(FormulaFlowAttempt::NoFit {
+                continuity_blocked: true
+            })
+        ));
     }
 
     #[test]

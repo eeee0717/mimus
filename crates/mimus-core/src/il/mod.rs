@@ -209,7 +209,6 @@ impl LayoutLabel {
             Self::Abstract
             | Self::AsideText
             | Self::Content
-            | Self::DocTitle
             | Self::FigureTitle
             | Self::Footnote
             | Self::ParagraphTitle
@@ -219,6 +218,7 @@ impl LayoutLabel {
             Self::Algorithm
             | Self::Chart
             | Self::DisplayFormula
+            | Self::DocTitle
             | Self::Footer
             | Self::FooterImage
             | Self::FormulaNumber

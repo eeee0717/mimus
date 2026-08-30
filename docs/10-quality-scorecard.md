@@ -112,9 +112,10 @@ bilingual review or a separately governed semantic evaluator.
 LAY-05 is reserved because current debug IL does not expose final output line boxes. The comparator
 ledger may compute it from pinned extractor XML; the harness must not invent it from string length.
 
-FOR-02 derives its bound per source paragraph. Source word gaps are positive same-baseline character
-box gaps above `0.1em`; the median is doubled and compared with `1.5` times the paragraph median font
-size. A neighbor is required only where the source formula unit immediately touched a translatable
+FOR-02 derives its bound per source paragraph. Source word-spacing samples are positive finite source
+whitespace-character widths plus same-baseline `implicit_space_before` gaps whose characters on both
+sides are `text/translate`; formula-adjacent gaps are excluded. The median is doubled and compared
+with `1.5` times the paragraph median font size. A neighbor is required only where the source formula unit immediately touched a translatable
 character on the same baseline. The output formula is matched by compact exact text and expected
 vertical position before its nearest left/right extracted lines are measured. Unmatched formula
 units remain visible in `formula_units` versus `matched_units`; v2 does not invent geometry for them.
@@ -139,7 +140,7 @@ contract for fixed-slot and relocation paths.
 | STR-02 | incremental-write prefix | output bytes begin with every input byte | critical | raw bytes |
 | STR-03 | non-text object inventory | recursive qpdf JSON counts of Form, Image, Link, Annot, Outlines match | critical | pinned qpdf JSON |
 | STR-04 | masked non-text pixels | identical RGB pixels / compared pixels after masking translated bboxes plus 2 pt | critical; `10 * (1-fidelity)*1000` | pinned Poppler PPM at 72 DPI |
-| STR-05 | title/complete-author-block conservation | page-0 title and every paragraph between title and abstract/first paragraph title are policy passthrough and write-IL identical | critical per failed binary invariant | ParagraphFind + Write IL |
+| STR-05 | title/complete-author-block conservation | page-0 title and every paragraph between title and abstract/first paragraph title are policy passthrough and write-IL identical, with canonical source/write hashes | critical per failed binary invariant | ParagraphFind + Write IL |
 
 The pixel check intentionally excludes text replacement footprints. It is sensitive to antialiasing
 and renderer versions, so comparisons must pin `pdftoppm`; it complements rather than replaces the
@@ -147,9 +148,10 @@ object and span checks.
 
 STR-05 is applicable only when both page-0 anchors exist. It reports four binary invariants: title
 policy, complete visual author-block policy, title identity, and author-block identity. Identity
-includes Unicode, source code, font, font size, baseline, metric box, passthrough payload, and absence
-of a non-identity translation. Missing anchors are fail-closed to `not-applicable`, not a guessed
-author range.
+includes Unicode, source code, font, font size, baseline, metric box, visual bbox, passthrough
+payload, and absence of a non-identity translation. Canonical SHA-256 values bind the complete
+selected source and Write blocks as evidence without adding another weighted invariant. Missing
+anchors are fail-closed to `not-applicable`, not a guessed author range.
 
 ### 2.7 Semantic QE sidecar
 
@@ -306,3 +308,4 @@ gaps indiscriminately.
 | 2026-08-29 | Formula-boundary leakage (`value ls]`) is a human-confirmed critical content defect. Fixed-slot and relocated formula continuity share one oracle. | FOR-01 is critical; FOR-02 and FOR-03 use one derived bound. The 1706 conclusion is blocked even if the numeric total is high. |
 | 2026-08-29 | Human-confirmed critical defects override automatic totals. | Reports retain the numeric score for diagnosis but cannot conclude release eligibility while `confirmed_criticals` is non-empty. |
 | 2026-08-30 | A real `Internal/6` is always a production bug. | Cluster rows remain failed/N/A; they may not be relabelled as typed degradation or assigned fabricated scores. |
+| 2026-08-30 | During the formula/title stack rebase, schema-v1 verdict and STR-06 were classified as duplicates of schema-v2 conclusion and STR-05. The old identifiers are not retained. | STR-05 absorbs only the unique dual-box identity and canonical source/write hash evidence, with its four existing weighted invariants unchanged. |

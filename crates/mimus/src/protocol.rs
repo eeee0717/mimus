@@ -488,6 +488,20 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 paragraph_index + 1
             );
         }
+        DiagnosticEvent::FormulaBoundaryExpanded {
+            page_index,
+            paragraph_index,
+            reading_order,
+            expanded_character_count,
+            evidence,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "info[formula_boundary_expanded]: page {} paragraph {} model formula {reading_order} expanded by {expanded_character_count} characters ({evidence:?})",
+                page_index + 1,
+                paragraph_index + 1
+            );
+        }
         DiagnosticEvent::UnsupportedOutputGlyph {
             page_index,
             reading_order,

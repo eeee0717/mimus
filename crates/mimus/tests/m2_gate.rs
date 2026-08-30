@@ -1465,7 +1465,7 @@ fn math_shaped_fallback_text_bypasses_translation_without_hiding_prose() {
 }
 
 #[test]
-fn short_cjk_title_fits_a_tight_single_line_container() {
+fn doc_title_passthrough_keeps_tight_source_identity() {
     let directory = tempfile::tempdir().unwrap();
     let debug = directory.path().join("debug");
     let output_path = directory.path().join("tight-title.pdf");
@@ -1490,49 +1490,34 @@ fn short_cjk_title_fits_a_tight_single_line_container() {
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );
-    let requests = server.requests();
-    assert_eq!(requests.len(), 1);
-    let expected = deterministic_translation(&requests[0].input)
-        .replace("<b1>", "")
-        .replace("</b1>", "");
-    assert_eq!(
-        translated_han_strings(&debug.join("06-translate.il.json")),
-        std::slice::from_ref(&expected)
-    );
-    assert_eq!(
-        translated_han_strings(&debug.join("07-typeset.il.json")),
-        [expected]
-    );
+    assert!(server.requests().is_empty());
+    assert!(translated_han_strings(&debug.join("06-translate.il.json")).is_empty());
+    assert!(translated_han_strings(&debug.join("07-typeset.il.json")).is_empty());
     let events = parse_events(&output.stdout);
-    let expansion = events
-        .iter()
-        .find(|event| event["id"] == "single_line_bounds_expanded")
-        .unwrap();
-    assert_eq!(expansion["page_index"], 0);
-    assert_eq!(expansion["reading_order"], 0);
-    assert!(expansion["overflow_top_pt"].as_f64().unwrap() <= 3.0);
-    assert!(expansion["overflow_bottom_pt"].as_f64().unwrap() <= 3.0);
     assert!(
         events
             .iter()
-            .all(|event| event["id"] != "degradation_summary"),
+            .all(|event| event["id"] != "single_line_bounds_expanded"
+                && event["id"] != "degradation_summary"),
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );
     assert_valid_pdf(&output_path, "unit-type-01-single-line-tight");
+    let input_path = repo_root()
+        .join("corpus/fixtures/unit-type-01-single-line-tight/unit-type-01-single-line-tight.pdf");
+    let input = std::fs::read(&input_path).unwrap();
+    let published = std::fs::read(&output_path).unwrap();
+    assert!(published.starts_with(&input));
+    assert_eq!(
+        decoded_page_streams(&output_path, 1),
+        decoded_page_streams(&input_path, 1)
+    );
     let pdf = lopdf::Document::load(&output_path).unwrap();
     let page = pdf.get_pages()[&1];
     assert!(
-        pdf.get_page_fonts(page)
+        !pdf.get_page_fonts(page)
             .unwrap()
             .contains_key(b"MimusB".as_slice())
-    );
-    assert_ne!(
-        std::fs::read(&output_path).unwrap(),
-        std::fs::read(repo_root().join(
-            "corpus/fixtures/unit-type-01-single-line-tight/unit-type-01-single-line-tight.pdf"
-        ))
-        .unwrap()
     );
     server.assert_clean();
 }
@@ -1815,6 +1800,82 @@ fn multiline_inline_formulas_flow_with_translation_and_keep_source_operands() {
 }
 
 #[test]
+fn distant_fixed_formula_slot_is_rejected_and_relocated_beside_short_translation() {
+    const TRANSLATION: &str = "\u{4e2d}{v1}\u{6587}";
+    const RESTORED: &str = "\u{4e2d}\u{6587}";
+
+    let directory = tempfile::tempdir().unwrap();
+    let debug = directory.path().join("debug");
+    let output_path = directory.path().join("formula-continuity.pdf");
+    let server = GateResponsesServer::start([ScriptedReply::Output(TRANSLATION)]);
+    let output = run_openai(
+        "unit-type-14-formula-continuity",
+        &server,
+        RunOptions {
+            output: &output_path,
+            debug: Some(&debug),
+            cache: None,
+            model: "m3-formula-continuity-model",
+            target_language: "zh-CN",
+            glossary: None,
+            auto_terms: false,
+            strict: false,
+        },
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].input.matches("{v").count(), 1);
+    assert_eq!(
+        translated_han_strings(&debug.join("06-translate.il.json")),
+        [RESTORED]
+    );
+    assert_eq!(
+        translated_han_strings(&debug.join("07-typeset.il.json")),
+        [RESTORED]
+    );
+    let events = parse_events(&output.stdout);
+    assert!(events.iter().all(|event| {
+        event["id"] != "degradation_summary"
+            || event["preserved_paragraphs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|paragraph| paragraph["reason"] != "typeset_overflow")
+    }));
+    for extractor in ["poppler", "mupdf"] {
+        let extracted = extract_pdf_text(&output_path, extractor);
+        let han = extracted
+            .chars()
+            .filter(|character| ('\u{4e00}'..='\u{9fff}').contains(character))
+            .collect::<String>();
+        assert_eq!(han, RESTORED, "{extractor}: {extracted:?}");
+        assert_eq!(
+            extracted.matches('U').count(),
+            1,
+            "{extractor}: {extracted:?}"
+        );
+    }
+    let streams = decoded_page_streams(&output_path, 1);
+    let rewritten = std::str::from_utf8(streams.last().unwrap()).unwrap();
+    assert!(
+        rewritten.contains("(U)"),
+        "source formula bytes missing: {rewritten}"
+    );
+    assert!(
+        !rewritten.contains("1 0 0 1 220 140 Tm\n(U) Tj"),
+        "fixed formula slot was republished: {rewritten}"
+    );
+    assert_valid_pdf(&output_path, "unit-type-14-formula-continuity");
+    server.assert_clean();
+}
+
+#[test]
 fn shared_tj_and_tj_array_formula_operands_split_without_replaying_source_text() {
     const TRANSLATION: &str = "模型数据验证论文翻译{v1}结果保持结构流程稳定缓存重试诊断排版字体安全边界模型数据{v2}验证论文翻译结果保持结构流程稳定{v3}安全边界";
     const RESTORED: &str = "模型数据验证论文翻译结果保持结构流程稳定缓存重试诊断排版字体安全边界模型数据验证论文翻译结果保持结构流程稳定安全边界";
@@ -2083,9 +2144,9 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
         "unit-scan-01-image-only".to_owned(),
         "unit-scan-02-invisible-ocr".to_owned(),
     ]);
-    assert_eq!(ids.len(), 155, "Corpus fixture inventory changed");
-    assert_eq!(unique_cases.len(), 90, "Corpus case inventory changed");
-    assert_eq!(legal.len(), 113, "legal fixture inventory changed");
+    assert_eq!(ids.len(), 157, "Corpus fixture inventory changed");
+    assert_eq!(unique_cases.len(), 92, "Corpus case inventory changed");
+    assert_eq!(legal.len(), 115, "legal fixture inventory changed");
     assert!(rejected.is_subset(&legal));
 
     let directory = tempfile::tempdir().unwrap();
@@ -2164,10 +2225,10 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
             output_count += 1;
         }
     }
-    assert_eq!(output_count, 106);
+    assert_eq!(output_count, 108);
     assert_eq!(
         server.request_count(),
-        139,
+        142,
         "eligible corpus request inventory changed"
     );
     assert!(server.requests().iter().all(|request| {

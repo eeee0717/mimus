@@ -1,0 +1,78 @@
+# unit-form-09-formula-boundary -- expected manifest
+#
+# This manifest is written before compiling the hand-authored Typst source.
+
+schema_version = 1
+
+[identity]
+id = "unit-form-09-formula-boundary"
+name = "Partially labelled inline formula boundaries"
+class = "unit"
+legality = "legal"
+cases = ["FORM-09"]
+priority = "M3"
+variable = "A model formula region omits an attached script or closing delimiter"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-form-09-formula-boundary.typ"
+pdf = "unit-form-09-formula-boundary.pdf"
+pdf_sha256 = "725fe81b4625c756da660a83ea01a59ae4470da9d3c3a071cb764834a5116b8b"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 420.0, 180.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 3
+columns = 1
+
+[[expected.block]]
+key = "F1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "Width is 𝑑model = 512, then continue."
+
+[[expected.block]]
+key = "F2"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "We use 𝜀ls = 0.1[36] during training."
+
+[[expected.block]]
+key = "F3"
+page = 0
+column = "full"
+draw_order = 3
+reading_order = 3
+text = "Sequence (𝑥1, …, 𝑥𝑛) is preserved."
+
+[[expected.behaviour]]
+id = "FORM-09-model-authority"
+assertion = "Boundary completion only expands an existing model inline_formula region and never creates one from ordinary prose"
+observable_via = "recorded layout, StylesAndFormulas IL, and captured translation requests"
+
+[[expected.behaviour]]
+id = "FORM-09-complete-units"
+assertion = "model, ls, script digits and closing delimiters remain source formula operands and never enter a translation request"
+observable_via = "captured translation requests, typed diagnostics, and source/write operand identity"
+
+[[expected.behaviour]]
+id = "FORM-09-prose-guard"
+assertion = "Prose immediately following each formula remains eligible for translation"
+observable_via = "captured translation requests and Translate IL"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "glyphs", "render"]

@@ -21,7 +21,7 @@
 | 12 | 流水线：固定顺序 pass 链（`fn(&mut Document, &PassContext)`——`Document` 只装数据：原始字节/lopdf 文档/IL/诊断；`PassContext` 装引擎实例/配置/事件钩子；无 pass 框架）；pass 内按页 rayon 并行；`--debug` 逐 pass 落盘 IL | — |
 | 13 | 阶段草案：Parse → ScanDetect(拒绝) → Layout → ParagraphFind → StylesAndFormulas → ExtractTerms → Translate → Typeset → FontEmbed → Write | — |
 | 14 | 阅读顺序：以 V3 模型输出为准 + 几何排序兜底；实测 `[M,7]` 第 7 列是 RT-DETR query id，同时可作页内阅读顺序键；同 query 多类别先取最高分，排序键为 `(page_index, col7)` | [ADR-0002](docs/adr/0002-pp-doclayoutv3.md) |
-| 15 | 翻译政策表（见下）；表体默认不翻留 `--translate-table` 实验开关 | — |
+| 15 | 翻译政策表（见下）；`doc_title` 原样保留；页 0 在 `doc_title` 与 `abstract`/首个 `paragraph_title` 双锚之间的完整视觉作者块原样保留；表体默认不翻留 `--translate-table` 实验开关 | — |
 | 16 | 错误恢复：三层降级（段→页→文档，宁保原文不出坏译文）+ 结束汇总 + `--strict`；畸形 PDF fail-fast、修复函数语料驱动；退出码 0/1/2/3/4/5/6 分类（Usage/Input/Asset/Translation/Io/Internal） | [ADR-0011](docs/adr/0011-cli-machine-protocol.md)、[ADR-0017](docs/adr/0017-translation-degradation-and-strict.md) |
 | 17 | V1 单进程；PDFium 崩溃（abort）接受，子进程隔离推 V2 | — |
 | 18 | 输出字体按字符级走主字体 Noto Sans SC 2.004 → 回退字体 DejaVu Sans 2.35；两族各有 Regular/Bold 槽，均按 flag > env > config > SHA 缓存 > manifest 下载解析，经 `PassContext` 注入并按需子集化；主槽用 `--font`/`--font-bold`，回退槽用 `--font-fallback`/`--font-fallback-bold`。两族皆缺才整段 `unsupported_font`，诊断列出双方身份；italic 映射正常字重。Noto 主字体仍以同一份可变字体承载两个逻辑槽，静态双字重仍是 follow-up | [ADR-0018](docs/adr/0018-output-font-assets.md) |
@@ -54,13 +54,15 @@
 | 45 | 已翻译多行段内、独占 text-show operand span 的 inline formula 可与译文共同进入行流：原 operand 字节、源字体对象/子集标签及单元内部相对几何不变，只允许整体平移；display formula、段外/未翻译段公式及共享 operand 继续透传或段级 fail closed。L5-2 离线回放恢复 9/11 个混排段，双提取器 Han 保留率 96.82% | [ADR-0020](docs/adr/0020-inline-formula-flow-relocation.md) |
 | 46 | Form XObject 的 `/BBox` 按 §8.10.2 Table 95 当裁剪框生效：取 `Matrix ∘ CTM` 变换后的轴对齐外接框（旋转/斜切时**故意取超集**，宁可少裁不误裁），沿嵌套链求交；只有 metric box **整体**落在框外的字符才 `visible=false`，且仍留在走查结果里以保住跨引擎对齐的字符序列；被裁内容按页记一次 `content_recovered` / `clipped_form_content` 并附所属 form 对象号。裁掉的墨迹不再充当排版障碍——L5-4 唯一阻塞 `(12,69)` 即由此虚假障碍造成 | [ADR-0013](docs/adr/0013-bounded-walk-and-graded-degradation.md) |
 | 47 | M3 质量以六个封顶维度度量：覆盖缺口、过度翻译、误译风险代理、版面漂移、排版 lint、结构保真；严重度加权错误按每千输出字符归一化，六维等权汇总。schema v2 增加内容守恒、公式完整性/连续性/空洞、title/author 守恒与过程指标；reference-free QE 是独立 sidecar，不混入六维总分。旧 fake 的内容守恒明确 N/A；人工确认的 critical 永远覆盖自动结论。离线 `scorecard` 只消费公开 NDJSON/IL/PDF，不依赖生产 crate；阈值是待用户裁定的提案，不进 CI。真实输入出现 `Internal/6` 永远是 bug，合法终态只有发布成功或 ADR-0013 分级 typed 降级 | [docs/10-quality-scorecard.md](docs/10-quality-scorecard.md)、[docs/11-quality-scorecard-v2-baseline.md](docs/11-quality-scorecard-v2-baseline.md) |
+| 48 | model `inline_formula` 仍是公式存在性的唯一权威；StylesAndFormulas 只可在同段、同行、紧邻且有脚本基线、定界符配平、经 Mathematical Alphanumeric Symbols 锚证明的同数学字体连续 run 或紧连数学后缀证据时扩展既有公式边界，不得凭启发式新建或收缩 model 公式。每类扩展发 `formula_boundary_expanded` typed info，扩入字符继续受 ADR-0020 的源字节、字体和相对几何合同保护 | [ADR-0020](docs/adr/0020-inline-formula-flow-relocation.md) |
+| 49 | inline formula 的 fixed-slot 与 relocation 成功路径共用一个阅读连续性 oracle：同行邻接与跨行前导空洞上界为 `max(2×源 text→text 词间距中位数, 1.5×源字号中位数)`，公式间距不得污染样本；公式邻接标点不拆行、单元阅读序不逆转。fixed 不连续先尝试既有边界内的 relocation，仍失败则 `typeset_overflow` typed 段级保留；不得靠缩字号或扩大碰撞容差满足 oracle | [ADR-0020](docs/adr/0020-inline-formula-flow-relocation.md) §6 |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
 | 政策 | 类别 |
 |---|---|
-| 翻译 | text, paragraph_title, doc_title, abstract, content, figure_title, footnote, vision_footnote, aside_text |
-| 不翻·原样保留 | header, footer, header_image, footer_image, image, chart, seal, algorithm, display_formula, formula_number, number, vertical_text, reference, reference_content, table（表体，`--translate-table` 可开） |
+| 翻译 | text, paragraph_title, abstract, content, figure_title, footnote, vision_footnote, aside_text |
+| 不翻·原样保留 | doc_title, header, footer, header_image, footer_image, image, chart, seal, algorithm, display_formula, formula_number, number, vertical_text, reference, reference_content, table（表体，`--translate-table` 可开） |
 | 占位符处理 | inline_formula（在所属段落内以 `{v1}` 占位送翻，返回后还原） |
 
 公式漏检兜底政策（#35）：生产 layout 模型接入（#84）后，偏保守的数学形状启发式仅对
@@ -71,10 +73,22 @@ passthrough，不进入翻译请求，并按命中单元发出不计 degradation
 留为原文，也不允许模型漏检区的公式内容被译坏；真实 `display_formula` passthrough 与
 `inline_formula` `{vN}` 占位符协议不经过该启发式。
 
+model `inline_formula` 的**存在性**保持绝对权威，但模型框边缘不再被误当作完整数学单元
+边界。StylesAndFormulas 可把相邻 `text/translate` 字符提升为 `inline_formula/passthrough`，
+前提是已有 model 公式锚，且字符在同段、同行、无词间边界并满足脚本基线、定界符配平、
+经 Mathematical Alphanumeric Symbols 锚证明的同数学字体连续 run 或紧连数学后缀之一。该过程只扩展、不新建、不收缩；每个公式锚和
+证据类别发一条 `formula_boundary_expanded` info，扩入字符不再进入翻译请求。
+
 政策表按**版面类别**划分，生效前提是 layout detector 已给出对应标签。PP-DocLayoutV3
 接入生产后，recording replay 仍只证明已提供标签下的确定性政策行为；真实模型资格测试与
 真实论文离线报告分别证明推理合同和语料分类表现。与类别正交的还有一条按**文本朝向**的划分：**非直立文本一律
 不翻译、原样 passthrough**，优先于类别政策（决策 #32）。
+
+作者块没有 PP-DocLayoutV3 独立类别，按结构锚确定：仅页 0，`doc_title` 为上锚，
+`abstract` 或首个 `paragraph_title` 为下锚；两锚齐备时，其间完整标为 `text` 的段落
+整体改为 typed passthrough，覆盖姓名、角标、机构与邮箱。任一锚缺失时不猜测作者块，
+保留原 `text` 翻译政策。该合同不依赖 LLM identity，受保护字符的源 operand 字节、字体
+引用与几何必须贯穿 Write 保持不变。
 
 ## 术语表
 

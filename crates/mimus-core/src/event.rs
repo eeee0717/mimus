@@ -248,11 +248,21 @@ pub enum DiagnosticId {
     PlaceholderViolation,
     TranslationFailureProfile,
     MathPassthrough,
+    FormulaBoundaryExpanded,
     UnsupportedOutputGlyph,
     SingleLineBoundsExpanded,
     MultiLineBoundsExpanded,
     TypesetOverflowDetail,
     DroppedDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum FormulaBoundaryEvidence {
+    ScriptBaseline,
+    DelimiterCompletion,
+    SameMathFontRun,
+    TightlyAttachedSuffix,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -473,6 +483,13 @@ pub enum Diagnostic {
         reading_order: usize,
         source_characters: usize,
     },
+    FormulaBoundaryExpanded {
+        page_index: usize,
+        paragraph_index: usize,
+        reading_order: usize,
+        expanded_character_count: usize,
+        evidence: FormulaBoundaryEvidence,
+    },
     UnsupportedOutputGlyph {
         page_index: usize,
         reading_order: usize,
@@ -528,6 +545,7 @@ impl Diagnostic {
             Self::PlaceholderViolation { .. } => DiagnosticId::PlaceholderViolation,
             Self::TranslationFailureProfile { .. } => DiagnosticId::TranslationFailureProfile,
             Self::MathPassthrough { .. } => DiagnosticId::MathPassthrough,
+            Self::FormulaBoundaryExpanded { .. } => DiagnosticId::FormulaBoundaryExpanded,
             Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
             Self::SingleLineBoundsExpanded { .. } => DiagnosticId::SingleLineBoundsExpanded,
             Self::MultiLineBoundsExpanded { .. } => DiagnosticId::MultiLineBoundsExpanded,
@@ -542,6 +560,7 @@ impl Diagnostic {
             Self::TranslationIdentity { .. }
                 | Self::TranslationFailureProfile { .. }
                 | Self::MathPassthrough { .. }
+                | Self::FormulaBoundaryExpanded { .. }
                 | Self::SingleLineBoundsExpanded { .. }
                 | Self::MultiLineBoundsExpanded { .. }
         )
@@ -670,6 +689,13 @@ pub enum DiagnosticEvent {
         reading_order: usize,
         source_characters: usize,
     },
+    FormulaBoundaryExpanded {
+        page_index: usize,
+        paragraph_index: usize,
+        reading_order: usize,
+        expanded_character_count: usize,
+        evidence: FormulaBoundaryEvidence,
+    },
     UnsupportedOutputGlyph {
         page_index: usize,
         reading_order: usize,
@@ -727,6 +753,7 @@ impl DiagnosticEvent {
             Self::PlaceholderViolation { .. } => DiagnosticId::PlaceholderViolation,
             Self::TranslationFailureProfile { .. } => DiagnosticId::TranslationFailureProfile,
             Self::MathPassthrough { .. } => DiagnosticId::MathPassthrough,
+            Self::FormulaBoundaryExpanded { .. } => DiagnosticId::FormulaBoundaryExpanded,
             Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
             Self::SingleLineBoundsExpanded { .. } => DiagnosticId::SingleLineBoundsExpanded,
             Self::MultiLineBoundsExpanded { .. } => DiagnosticId::MultiLineBoundsExpanded,
@@ -927,6 +954,19 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 reading_order: *reading_order,
                 source_characters: *source_characters,
             },
+            Diagnostic::FormulaBoundaryExpanded {
+                page_index,
+                paragraph_index,
+                reading_order,
+                expanded_character_count,
+                evidence,
+            } => Self::FormulaBoundaryExpanded {
+                page_index: *page_index,
+                paragraph_index: *paragraph_index,
+                reading_order: *reading_order,
+                expanded_character_count: *expanded_character_count,
+                evidence: *evidence,
+            },
             Diagnostic::UnsupportedOutputGlyph {
                 page_index,
                 reading_order,
@@ -1051,6 +1091,7 @@ impl Diagnostics {
                     DiagnosticId::TranslationIdentity
                         | DiagnosticId::TranslationFailureProfile
                         | DiagnosticId::MathPassthrough
+                        | DiagnosticId::FormulaBoundaryExpanded
                         | DiagnosticId::SingleLineBoundsExpanded
                         | DiagnosticId::MultiLineBoundsExpanded
                 )
@@ -1603,6 +1644,31 @@ mod tests {
                 count: 3,
             }]
         ));
+    }
+
+    #[test]
+    fn formula_boundary_expansion_has_typed_informational_evidence() {
+        let diagnostic = Diagnostic::FormulaBoundaryExpanded {
+            page_index: 1,
+            paragraph_index: 11,
+            reading_order: 42,
+            expanded_character_count: 5,
+            evidence: FormulaBoundaryEvidence::ScriptBaseline,
+        };
+        let mut diagnostics = Diagnostics::default();
+        diagnostics.push(diagnostic.clone());
+        assert_eq!(diagnostics.warning_count(), 0);
+
+        let event = DiagnosticEvent::from(&diagnostic);
+        assert_eq!(event.id(), DiagnosticId::FormulaBoundaryExpanded);
+        let value =
+            serde_json::to_value(Event::new(EventKind::Diagnostic { diagnostic: event })).unwrap();
+        assert_eq!(value["id"], "formula_boundary_expanded");
+        assert_eq!(value["page_index"], 1);
+        assert_eq!(value["paragraph_index"], 11);
+        assert_eq!(value["reading_order"], 42);
+        assert_eq!(value["expanded_character_count"], 5);
+        assert_eq!(value["evidence"], "script_baseline");
     }
 
     #[test]

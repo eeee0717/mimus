@@ -63,6 +63,17 @@ impl FakeResponsesServer {
     fn requests(&self) -> Vec<String> {
         self.requests.lock().unwrap().clone()
     }
+
+    fn wait_for_requests(&self, expected: usize) -> Vec<String> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let requests = self.requests();
+            if requests.len() >= expected || std::time::Instant::now() >= deadline {
+                return requests;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
 }
 
 impl Drop for FakeResponsesServer {
@@ -1279,8 +1290,8 @@ fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 155, "M1 closure fixture inventory changed");
-    assert_eq!(cases.len(), 90, "M1 closure case inventory changed");
+    assert_eq!(ids.len(), 157, "M1 closure fixture inventory changed");
+    assert_eq!(cases.len(), 92, "M1 closure case inventory changed");
 
     for id in ids {
         let input = fixture_path(&id);
@@ -2040,6 +2051,250 @@ fn one_model_region_with_two_author_columns_preserves_column_ownership() {
         summaries[0].4 <= summaries[1].3,
         "author column typeset containers overlap: {summaries:?}"
     );
+}
+
+#[test]
+fn page_zero_title_and_bounded_author_block_are_policy_passthrough() {
+    let output = run_inspect_with_recording(
+        "unit-para-17-author-columns",
+        "unit-para-17-title-author-abstract",
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = parse_events(&output.stdout);
+    assert_one_terminal_last(&events, "result");
+    let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap();
+    assert_eq!(paragraphs.len(), 3, "{paragraphs:#?}");
+    for paragraph in &paragraphs[..2] {
+        assert!(
+            paragraph["text"]["chars"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|character| character["layout"]["policy"] == "passthrough"),
+            "{paragraph:#?}"
+        );
+    }
+    assert!(
+        paragraphs[2]["text"]["chars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|character| character["layout"]["policy"] == "translate"),
+        "{:#?}",
+        paragraphs[2]
+    );
+
+    let missing_anchor = run_inspect_with_recording(
+        "unit-para-17-author-columns",
+        "unit-para-17-title-without-lower-anchor",
+    );
+    assert!(
+        missing_anchor.status.success(),
+        "{}",
+        String::from_utf8_lossy(&missing_anchor.stderr)
+    );
+    let events = parse_events(&missing_anchor.stdout);
+    let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap();
+    assert!(
+        paragraphs[1..]
+            .iter()
+            .flat_map(|paragraph| paragraph["text"]["chars"].as_array().unwrap())
+            .all(|character| character["layout"]["policy"] == "translate"),
+        "{paragraphs:#?}"
+    );
+}
+
+#[test]
+fn title_and_author_passthrough_skip_translation_and_keep_source_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("title-author.pdf");
+    let debug = directory.path().join("debug");
+    let server = FakeResponsesServer::start();
+    let mut command = Command::new(BIN);
+    configure_test_fonts(&mut command);
+    let output = command
+        .env(PDFIUM_ENV, pdfium_library())
+        .env("API_KEY", "mimus-title-author-test-key")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "openai",
+            "--endpoint",
+            &server.endpoint,
+            "--model",
+            "title-author-test-model",
+            "--no-auto-terms",
+            "--no-cache",
+            "--layout-replay",
+        ])
+        .arg(layout_recording_path("unit-para-17-title-author-abstract"))
+        .arg("--debug")
+        .arg(&debug)
+        .arg("--output")
+        .arg(&output_path)
+        .arg(fixture_path("unit-para-17-author-columns"))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(server.requests(), vec!["M M"]);
+
+    let read_il = |stage: &str| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(debug.join(stage)).unwrap()).unwrap()
+    };
+    let before = read_il("03-paragraph_find.il.json");
+    let after = read_il("09-write.il.json");
+    for paragraph_index in 0..=1 {
+        let before_chars = before["pages"][0]["paragraphs"][paragraph_index]["text"]["chars"]
+            .as_array()
+            .unwrap();
+        let after_chars = after["pages"][0]["paragraphs"][paragraph_index]["text"]["chars"]
+            .as_array()
+            .unwrap();
+        assert_eq!(before_chars.len(), after_chars.len());
+        for (before, after) in before_chars.iter().zip(after_chars) {
+            assert_eq!(after["unicode"], before["unicode"]);
+            assert_eq!(after["passthrough"], before["passthrough"]);
+            assert_eq!(after["font"], before["font"]);
+            assert_eq!(after["font_size"], before["font_size"]);
+            assert_eq!(after["baseline_origin"], before["baseline_origin"]);
+            assert_eq!(after["box"], before["box"]);
+            assert_eq!(after["visual_bbox"], before["visual_bbox"]);
+        }
+    }
+}
+
+#[test]
+fn partial_model_formula_regions_are_completed_before_translation() {
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("formula-boundary.pdf");
+    let debug = directory.path().join("debug");
+    let server = FakeResponsesServer::start();
+    let mut command = Command::new(BIN);
+    configure_test_fonts(&mut command);
+    let output = command
+        .env(PDFIUM_ENV, pdfium_library())
+        .env("API_KEY", "mimus-formula-boundary-test-key")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "openai",
+            "--endpoint",
+            &server.endpoint,
+            "--model",
+            "formula-boundary-test-model",
+            "--no-auto-terms",
+            "--no-cache",
+            "--layout-replay",
+        ])
+        .arg(layout_recording_path("unit-form-09-formula-boundary"))
+        .arg("--debug")
+        .arg(&debug)
+        .arg("--output")
+        .arg(&output_path)
+        .arg(fixture_path("unit-form-09-formula-boundary"))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let mut requests = server.wait_for_requests(6);
+    requests.sort();
+    requests.dedup();
+    assert_eq!(
+        requests,
+        [
+            "Sequence {v1} is preserved.",
+            "We use {v1} during training.",
+            "Width is {v1}, then continue.",
+        ]
+    );
+
+    let read_il = |stage: &str| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(debug.join(stage)).unwrap()).unwrap()
+    };
+    let before = read_il("03-paragraph_find.il.json");
+    let prepared = read_il("04-styles_and_formulas.il.json");
+    let after = read_il("09-write.il.json");
+    let completed = ["𝑑model=512", "𝜀ls=0.1[36]", "(𝑥1,…,𝑥𝑛)"];
+    for (paragraph_index, expected) in completed.into_iter().enumerate() {
+        let prepared_chars = prepared["pages"][0]["paragraphs"][paragraph_index]["text"]["chars"]
+            .as_array()
+            .unwrap();
+        let formula = prepared_chars
+            .iter()
+            .filter(|character| character["layout"]["label"] == "inline_formula")
+            .filter_map(|character| character["unicode"].as_str())
+            .collect::<String>();
+        assert_eq!(formula, expected);
+
+        let before_chars = before["pages"][0]["paragraphs"][paragraph_index]["text"]["chars"]
+            .as_array()
+            .unwrap();
+        let after_chars = after["pages"][0]["paragraphs"][paragraph_index]["text"]["chars"]
+            .as_array()
+            .unwrap();
+        for index in prepared_chars
+            .iter()
+            .enumerate()
+            .filter_map(|(index, character)| {
+                (character["layout"]["label"] == "inline_formula").then_some(index)
+            })
+        {
+            assert_eq!(
+                after_chars[index]["unicode"],
+                before_chars[index]["unicode"]
+            );
+            assert_eq!(
+                after_chars[index]["passthrough"],
+                before_chars[index]["passthrough"]
+            );
+            assert_eq!(after_chars[index]["font"], before_chars[index]["font"]);
+            assert_eq!(
+                after_chars[index]["font_size"],
+                before_chars[index]["font_size"]
+            );
+            assert_eq!(
+                after_chars[index]["baseline_origin"],
+                before_chars[index]["baseline_origin"]
+            );
+            assert_eq!(after_chars[index]["box"], before_chars[index]["box"]);
+            assert_eq!(
+                after_chars[index]["visual_bbox"],
+                before_chars[index]["visual_bbox"]
+            );
+        }
+    }
+
+    let events = parse_events(&output.stdout);
+    let evidence = events
+        .iter()
+        .filter(|event| event["event"] == "diagnostic")
+        .filter_map(|event| event["evidence"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(evidence.contains("script_baseline"));
+    assert!(evidence.contains("delimiter_completion"));
 }
 
 #[test]

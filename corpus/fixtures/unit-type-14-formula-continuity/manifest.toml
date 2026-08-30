@@ -1,25 +1,24 @@
-# unit-type-01-single-line-tight -- expected manifest
+# unit-type-14-formula-continuity -- expected manifest
 #
-# This specification predates the exact writer recipe. Geometry is derived
-# from the pinned font's TrueType tables (2048 units/em) and PDF text-state
-# arithmetic: baseline (72, 120), 12 pt, widths in PDF 1000-unit text space.
+# Geometry is derived from the pinned font's TrueType tables (2048 units/em)
+# and PDF text-state arithmetic at the two declared baselines.
 
 schema_version = 1
 
 [identity]
-id = "unit-type-01-single-line-tight"
-name = "Tight single-line title container"
+id = "unit-type-14-formula-continuity"
+name = "Shared inline-formula reading continuity"
 class = "unit"
 legality = "legal"
-cases = ["TYPE-01"]
+cases = ["TYPE-14"]
 priority = "M3"
-variable = "A single Latin title whose layout container is exactly its one-line ink bounds"
+variable = "A shorter translation leaves an otherwise collision-free fixed formula slot beyond the source-derived reading-continuity bound"
 
 [source]
 method = "exact-writer"
 generator = "corpus-exact-writer-v1"
-pdf = "unit-type-01-single-line-tight.pdf"
-pdf_sha256 = "aba85a2e5594376dab30cc94cfae3df64acc525f4d12d52cc61f6cb805ae7c3d"
+pdf = "unit-type-14-formula-continuity.pdf"
+pdf_sha256 = "0f15b140cba8f845a5d84a134b908da45960735b5cb381dd70d3e33d6ec1787a"
 font_provenance = "vendored"
 fonts = [
     { file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" },
@@ -41,13 +40,13 @@ header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
 object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 root_object = 1
 xref_kind = "table"
-trailer_id_hex = "756e69742d747970652d30312d73696e"
+trailer_id_hex = "756e69742d747970652d31342d666f72"
 info_dictionary = false
 metadata_streams = 0
 
 [expected.structure]
 pages = 1
-blocks = 1
+blocks = 2
 columns = 1
 bookmarks = 0
 bookmark_depth = 0
@@ -58,23 +57,40 @@ named_destinations = 0
 uri_actions = 0
 
 [[expected.block]]
-key = "T1"
+key = "TEXT_OWNER"
 page = 0
 column = "full"
 draw_order = 1
 reading_order = 1
-text = "MIMUS MIMUS"
-baseline_origin = [72.0, 120.0]
-metric_box = [72.0, 117.168, 157.128, 131.136]
-visual_bbox = [73.177734, 119.830078, 156.457219, 128.90625]
+text = "MIM\nMIMUS"
+baseline_origin = [72.0, 140.0]
+metric_box = [72.0, 123.168, 112.656, 151.136]
+visual_bbox = [73.177734, 125.830078, 111.985219, 148.748047]
+
+[[expected.block]]
+key = "DISTANT_FORMULA_SLOT"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "US"
+baseline_origin = [220.0, 140.0]
+metric_box = [220.0, 137.168, 237.62, 151.136]
+visual_bbox = [221.042969, 139.830078, 236.949219, 148.90625]
 
 [[expected.content_stream]]
 object = 9
 compressed = false
 bytes = """BT
 /F1 12 Tf
-1 0 0 1 72 120 Tm
-(MIMUS MIMUS) Tj
+1 0 0 1 72 140 Tm
+(MIM) Tj
+1 0 0 1 72 126 Tm
+(MIMUS) Tj
+1 0 0 1 220 140 Tm
+(U) Tj
+1 0 0 1 230 140 Tm
+(S) Tj
 ET
 """
 
@@ -124,19 +140,14 @@ path = ["/FontFile2"]
 to_object = 7
 
 [[expected.behaviour]]
-id = "TYPE-01-tight-height"
-assertion = "The title layout bounds equal the Latin outline ink height and remain source geometry under doc_title passthrough"
-observable_via = "hand-written visual bbox, layout recording, and write-stage IL"
+id = "TYPE-14-source-derived-bound"
+assertion = "The maximum formula-neighbor gap is max(2 times source median word spacing, 1.5 source em), not a path-specific constant"
+observable_via = "source IL geometry and the fixed-plan continuity assessment"
 
 [[expected.behaviour]]
-id = "TYPE-01-bounded-single-line"
-assertion = "A doc_title never enters the translation or typeset request set and preserves its source operand bytes and geometry"
-observable_via = "captured translation requests, source/write IL, and output PDF bytes"
-
-[[expected.behaviour]]
-id = "TYPE-01-bold-title"
-assertion = "The doc_title recording preserves the source title font instead of embedding an output-font replacement"
-observable_via = "layout recording label, source/write font references, and output PDF resources"
+id = "TYPE-14-fixed-to-relocation"
+assertion = "A collision-free fixed plan beyond the continuity bound is rejected and the source formula operand is relocated beside its translated neighbors"
+observable_via = "typeset-stage geometry, decoded incremental content, source/output font resources, and dual-extractor formula text"
 
 [oracle]
 checks = [
@@ -149,8 +160,3 @@ checks = [
     "pdf-structure",
     "render",
 ]
-
-[[adjudication]]
-date = "2026-08-26"
-issue = "MuPDF stext character quads use horizontal advance bounds, not outline ink bounds"
-resolution = "Keep the hand-derived visual bbox and validate it from MuPDF SVG glyph paths with exact Bezier extrema"
