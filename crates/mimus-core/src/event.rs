@@ -263,6 +263,7 @@ pub enum FormulaBoundaryEvidence {
     DelimiterCompletion,
     SameMathFontRun,
     TightlyAttachedSuffix,
+    ContiguousDigitRun,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]

@@ -2228,7 +2228,7 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
     assert_eq!(output_count, 109);
     assert_eq!(
         server.request_count(),
-        143,
+        145,
         "eligible corpus request inventory changed"
     );
     assert!(server.requests().iter().all(|request| {

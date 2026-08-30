@@ -2,7 +2,7 @@
 
 - 状态：已接受（2026-08-27）
 - 决策层级：难逆（公式保真边界、写回字节合同和几何验收建立其上）
-- 修订：2026-08-29 补充 StylesAndFormulas 的公式单元边界合同与 Typeset 阅读连续性
+- 修订：2026-08-30 补充数字串尾、相邻公式原子链与源 radical 附着合同
 
 ## 背景
 
@@ -91,6 +91,8 @@ PP-DocLayoutV3 的 `inline_formula` label 是公式**存在性**的唯一权威�
   同一数学字体的连续字母数字 run，或属于紧连的数学后缀。其中“数学字体”必须由该
   字体内已有 model 锚的 Unicode Mathematical Alphanumeric Symbols 字符证明；普通
   ASCII 公式锚与正文共用字体时，不得据此吞入相邻散文；
+- model 公式以 ASCII 数字结尾、紧连的 `text/translate` 后缀仍是 ASCII 数字时，扩展
+  必须通过整个无间隔数字串；句点、单位、字母和存在词间边界的数字不属于该证据；
 - 只改变 layout label/policy；Unicode/code、源 operand 引用与编码字节、字体引用、
   字号、baseline、metric box 和 visual box 均不改变。
 
@@ -122,8 +124,19 @@ oracle 按 `RestoredTranslation` 的 text/formula segment 顺序检查：
 - 语义邻居换行时，新行首项到所属行槽左边界的距离不得超过同一上界，防止 fixed
   formula 独自留在源行中部；
 - 相邻项的阅读序与公式单元顺序不得逆转；
+- 源中间没有可翻文本的相邻公式单元必须保持源次序和邻接。relocation 装箱把完整的
+  相邻公式链作为不可拆原子计算宽度，不得只约束链中第一对；
 - 与公式邻接的标点不得拆行。relocation 放置器在装箱前把公式与相邻标点视为不可拆
   组合，oracle 再作最终验证。
+
+PDF 提取阅读序可能把一个源 `√` 放进前一 text segment，虽然其源几何紧贴后一个
+model-labelled operand。为避免改动翻译输入，Typeset 可以把这个源 radical 并入后续公式
+刚体，但必须同时证明：同一段中只有一个几何附着候选；radical 的 text-show span 只含该
+字符且由本段完整拥有；对应译文 segment 恰有一个 `√`。规划器从译文输出和文本替换集
+各移除该 radical，再以源编码字节、源字体和源相对几何把它前置到 operand relocation
+unit；fixed-slot 的连续性 bounds 同样包含它。这个操作不改变 model label、placeholder、
+翻译请求或 cache key，也不把 fallback 形状启发式提升为公式存在性权威。源候选、译文
+候选、span 所有权或几何附着任一不唯一时，整段 `typeset_protocol` fail closed。
 
 门禁顺序固定为：fixed-slot 几何成功但连续性失败 → 在 ADR 本节之前已允许的范围内尝试
 relocation → relocation 仍失败或不具备重定位资格 → `typeset_overflow` typed 段级保留。
@@ -148,3 +161,6 @@ oracle 拒绝后不得通过继续缩字号、扩大碰撞容差、删除公式�
 - `unit-type-14-formula-continuity` 钉死短译文造成的 fixed-slot 超界空洞：固定计划虽无
   碰撞仍必须失败，随后以相同字号重定位源公式 operand；标点拆行和多公式逆序由共享
   oracle 单测覆盖。
+- `unit-form-09-formula-boundary` 钉死 `h=6|4` 的连续数字尾，以及阅读序落入译文、但
+  源几何紧贴 `d_model` 的 radical。后者保持翻译请求不变，并要求双提取器最终只看到
+  源 `√d_model` 邻接序列；多 radical 候选必须 typed fail closed。
