@@ -33,6 +33,12 @@
    - `/ActualText` 与 PDFium generated character 造成的提取展开——额外的提取文本不是额外的墨迹；
    - 顺序：匹配按几何不按序——顺序的事实层是 content stream 绘制序，顺序差异不再是分歧。
 
+   增量写回后的混合输出往返校验沿用同一事实层，并补充两条有界的提取视图等价：
+   - content stream 在同一 baseline 重复绘制同一 Unicode 时，PDFium 可能把多个 show 折叠成一个提取字符。只有先以 Unicode 与既有 baseline 容差证明过的 typeset 墨迹，才可满足后续同 Unicode、同 baseline 的期望；不同 Unicode、不同 baseline 或唯一缺失字符仍为 `output_mismatch`；
+   - 输入 PDFium 视图中的行末连字符标记 `U+0002`，在未修改字节经过增量写回后可能暴露为字面 `-`。只接受同 baseline 的这个单向等价，且候选同时存在时优先精确 Unicode 匹配。
+
+   这两条不以 PDFium 证明写回正确：content show 与 ToUnicode 仍由 qpdf/走查确认，Poppler 与 MuPDF 负责独立验证可提取文本；PDFium 只解释为何其输出快照的 multiplicity 或标记值不同。
+
    等价类清单钉为常量表，扩充须有对应 fixture。
 3. **窗口阶段**：对残差在逐 source-run 的动态误差包络内配对，不设全页通用的 point 半径。候选位置须投影到该 run 的 writing direction：垂直误差只接受 CTM/text matrix 的数值舍入上界，平行误差再累加逐字符宽度来源误差与浮点 advance 累积上界；包络接近相邻 baseline、跨行或出现多个候选即拒绝配对。具体推导路径见 [调研报告 §6.1](../08-alignment-provenance-feasibility.md#61-应推导的是动态误差包络)，公式参数与数值仍须由 fixture 先验钉死，实验 5 的 0.5 pt 只是语料探索上界，不得反推生产值。
 4. **来源信息分为两层，不存在 PDFium 直达源字节的桥**：
@@ -78,6 +84,6 @@
 
 - ADR-0013 §7 的对齐分级表由本 ADR 取代（该 ADR 已加指针注记）；其 §6 几何断言与 §2/§5 降级形状不变。
 - `validate_character_alignment` 重写为分类器：产出 per-char 匹配链接（供 §5 采纳 tight_box）、聚合诊断与保留标记。`InputReason::EngineMismatch` 从字符对齐路径退场，错误码保留给几何断言。新增分类诊断类型按 ADR-0011 只增不删；既有 `EngineBaselineMismatch` 语义不变，`EngineCharacterMismatch` 类型保留作分类器不可用时的兜底。
-- corpus 需覆盖：独立空格 show（`(A) Tj [( )] TJ` 最小复现已有）、连字标记、非 BMP 代理项、连字展开、ToUnicode→非字符、`/ActualText` 提取展开、double-draw 多重集；启用 E 保留前另须新增真正 engine-only 墨迹 fixture。
+- corpus 需覆盖：独立空格 show（`(A) Tj [( )] TJ` 最小复现已有）、连字标记、非 BMP 代理项、连字展开、ToUnicode→非字符、`/ActualText` 提取展开、double-draw 多重集、输出侧同 Unicode 同 baseline 的 coincident show 折叠；启用 E 保留前另须新增真正 engine-only 墨迹 fixture。
 - `Checking list.pdf` 与 8/10 被拒论文回到可处理路径；按语料量级，新增保留面极小（弱冲突 413 字符、非字符 4 字符）。
 - 待复议 / 证据缺口：动态误差包络参数（fixture 钉死）；backend-neutral owned 对象/字体/mark snapshot 与 walk source-run 保守相关；真正 engine-only 墨迹 fixture；端到端视觉质量（实验 5 未执行翻译与 rewrite，由质量四件套与发布前真实语料 checklist 承接）；若强冲突在非字符规则之外再现，升级政策另行复议。
