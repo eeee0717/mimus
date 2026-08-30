@@ -2641,6 +2641,7 @@ fn complete_model_formula_boundaries(
 
     let mut expanded = BTreeMap::<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>::new();
     expand_script_runs(chars, content_objects, &anchors, &mut expanded);
+    expand_contiguous_digit_runs(chars, content_objects, &anchors, &mut expanded);
     loop {
         let before = expanded.values().map(BTreeSet::len).sum::<usize>();
         expand_same_math_font_runs(chars, content_objects, &anchors, &mut expanded);
@@ -2660,6 +2661,50 @@ fn complete_model_formula_boundaries(
             expanded_character_count: indices.len(),
             evidence,
         });
+    }
+}
+
+fn expand_contiguous_digit_runs(
+    chars: &mut [Char],
+    content_objects: &BTreeSet<u32>,
+    anchors: &[(usize, usize)],
+    expanded: &mut BTreeMap<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>,
+) {
+    let mut index = 1_usize;
+    while index < chars.len() {
+        if !formula_character(&chars[index - 1], content_objects)
+            || !chars[index - 1]
+                .unicode
+                .is_some_and(|value| value.is_ascii_digit())
+            || !formula_boundary_candidate(&chars[index], content_objects)
+            || !chars[index]
+                .unicode
+                .is_some_and(|value| value.is_ascii_digit())
+            || !characters_are_attached(&chars[index - 1], &chars[index])
+        {
+            index += 1;
+            continue;
+        }
+        let Some(reading_order) = nearest_formula_reading_order(chars, anchors, index) else {
+            index += 1;
+            continue;
+        };
+        while index < chars.len()
+            && formula_boundary_candidate(&chars[index], content_objects)
+            && chars[index]
+                .unicode
+                .is_some_and(|value| value.is_ascii_digit())
+            && characters_are_attached(&chars[index - 1], &chars[index])
+        {
+            mark_formula_extension(
+                chars,
+                index,
+                reading_order,
+                FormulaBoundaryEvidence::ContiguousDigitRun,
+                expanded,
+            );
+            index += 1;
+        }
     }
 }
 
@@ -4091,6 +4136,19 @@ fn plan_paragraph<'a>(
     )
     .map_err(TypesetPlanError::Preserved)?;
     let mixed_with_formula = source_segments.len() > 1;
+    if mixed_with_formula {
+        let formulas = raw_fixed_formula_continuity(paragraph, &content_object_numbers).ok_or(
+            TypesetPlanError::Preserved(il::PreservedReason::TypesetProtocol),
+        )?;
+        attach_translated_radicals_to_formula_operands(
+            &mut source_segments,
+            &formulas,
+            &mut translated_segments,
+        )
+        .ok_or(TypesetPlanError::Preserved(
+            il::PreservedReason::TypesetProtocol,
+        ))?;
+    }
     let shared_formula_operand = paragraph_has_shared_formula_operand(
         paragraph,
         geometry.content_objects,
@@ -4491,6 +4549,65 @@ fn source_text_segments<'a>(
         start = end;
     }
     segments
+}
+
+fn attach_translated_radicals_to_formula_operands(
+    source_segments: &mut [Vec<&Char>],
+    formulas: &[FormulaContinuityFormula],
+    translated_segments: &mut [Vec<crate::translate::StyledCharacter>],
+) -> Option<()> {
+    if !source_segments
+        .iter()
+        .flatten()
+        .any(|character| character.unicode == Some('\u{221a}'))
+    {
+        return Some(());
+    }
+    if formulas.len() + 1 != source_segments.len()
+        || translated_segments.len() != source_segments.len()
+    {
+        return None;
+    }
+    for (formula_index, formula) in formulas.iter().enumerate() {
+        let Some(source_index) =
+            attached_source_radical_index(&source_segments[formula_index], formula.bounds)?
+        else {
+            continue;
+        };
+        let matching = translated_segments[formula_index]
+            .iter()
+            .enumerate()
+            .filter_map(|(index, character)| (character.value == '\u{221a}').then_some(index))
+            .collect::<Vec<_>>();
+        let [translated_index] = matching.as_slice() else {
+            return None;
+        };
+        source_segments[formula_index].remove(source_index);
+        translated_segments[formula_index].remove(*translated_index);
+    }
+    Some(())
+}
+
+fn attached_source_radical_index(source: &[&Char], formula_bounds: Rect) -> Option<Option<usize>> {
+    let matching = source
+        .iter()
+        .enumerate()
+        .filter(|(_, character)| character.unicode == Some('\u{221a}'))
+        .filter(|(_, character)| {
+            let bounds = character.r#box.union(character.visual_bbox);
+            let em = character.font_size.max(0.01);
+            let gap = formula_bounds.left - bounds.right;
+            let overlaps_vertically = bounds.top > formula_bounds.bottom + 0.01
+                && formula_bounds.top > bounds.bottom + 0.01;
+            overlaps_vertically && gap >= -0.05 * em && gap <= 0.25 * em
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    match matching.as_slice() {
+        [] => Some(None),
+        [index] => Some(Some(*index)),
+        _ => None,
+    }
 }
 
 fn retain_shared_section_number_prefix<'a>(
@@ -4925,7 +5042,7 @@ fn source_formula_units<'a>(
     if !current.is_empty() {
         grouped.push(current);
     }
-    grouped
+    let mut units = grouped
         .into_iter()
         .map(|chars| {
             if chars.iter().any(|character| {
@@ -5022,7 +5139,50 @@ fn source_formula_units<'a>(
                 source_fonts,
             })
         })
-        .collect()
+        .collect::<Option<Vec<_>>>()?;
+    let source_segments = source_text_segments(paragraph.chars(), content_object_numbers);
+    if source_segments.len() != units.len() + 1 {
+        return None;
+    }
+    for (formula_index, unit) in units.iter_mut().enumerate() {
+        let Some(source_index) =
+            attached_source_radical_index(&source_segments[formula_index], unit.bounds)?
+        else {
+            continue;
+        };
+        let radical = source_segments[formula_index][source_index];
+        let object_id = unique_page_content(radical, content_objects)
+            .ok()
+            .flatten()?;
+        let span = span_key(radical, object_id);
+        let span_character_count = paragraph
+            .chars()
+            .iter()
+            .filter(|character| {
+                unique_page_content(character, content_objects)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|candidate| span_key(character, candidate) == span)
+            })
+            .count();
+        if span_character_count != 1
+            || !paragraph_owns_walked_span(paragraph, extracted, span, content_objects)
+        {
+            return None;
+        }
+        unit.chars.insert(0, radical);
+        unit.validation_characters
+            .insert(0, formula_validation_character(extracted, radical)?);
+        unit.spans.push(span);
+        unit.spans.sort_unstable();
+        unit.spans.dedup();
+        unit.bounds = unit.bounds.union(radical.r#box).union(radical.visual_bbox);
+        unit.ink_bounds = unit.ink_bounds.union(radical.visual_bbox);
+        unit.source_fonts.push(radical.font.clone());
+        unit.source_fonts.sort();
+        unit.source_fonts.dedup();
+    }
+    Some(units)
 }
 
 fn paragraph_owns_walked_span(
@@ -5111,13 +5271,15 @@ fn place_formula_flow(
                 unit.bounds.right - unit.bounds.left
             }
         };
-        let attached_width = match atoms
-            .get(atom_index + 1)
-            .filter(|next| formula_flow_atoms_must_stay_together(atom, next))
-        {
-            Some(next) => formula_flow_atom_width(next, formula_units, faces, size)?,
-            None => 0.0,
-        };
+        let mut attached_width = 0.0;
+        let mut previous = atom;
+        for next in &atoms[atom_index + 1..] {
+            if !formula_flow_atoms_must_stay_together(previous, next) {
+                break;
+            }
+            attached_width += formula_flow_atom_width(next, formula_units, faces, size)?;
+            previous = next;
+        }
         let unbreakable_width = width + attached_width;
         loop {
             let Some(slot) = slots.get(slot_index) else {
@@ -5214,6 +5376,7 @@ fn formula_flow_atom_width(
 
 fn formula_flow_atoms_must_stay_together(left: &FormulaFlowAtom, right: &FormulaFlowAtom) -> bool {
     match (left, right) {
+        (FormulaFlowAtom::Formula(_), FormulaFlowAtom::Formula(_)) => true,
         (FormulaFlowAtom::Formula(_), FormulaFlowAtom::Text { characters, .. }) => characters
             .iter()
             .find(|character| !character.value.is_whitespace())
@@ -5311,6 +5474,31 @@ fn formula_continuity_lines(
 }
 
 fn fixed_formula_continuity(
+    paragraph: &Paragraph,
+    content_objects: &BTreeSet<u32>,
+) -> Option<Vec<FormulaContinuityFormula>> {
+    let chars = paragraph.chars();
+    let mut formulas = raw_fixed_formula_continuity(paragraph, content_objects)?;
+    let source_segments = source_text_segments(chars, content_objects);
+    if source_segments.len() != formulas.len() + 1 {
+        return None;
+    }
+    for (formula_index, formula) in formulas.iter_mut().enumerate() {
+        let Some(source_index) =
+            attached_source_radical_index(&source_segments[formula_index], formula.bounds)?
+        else {
+            continue;
+        };
+        let radical = source_segments[formula_index][source_index];
+        formula.bounds = formula
+            .bounds
+            .union(radical.r#box)
+            .union(radical.visual_bbox);
+    }
+    Some(formulas)
+}
+
+fn raw_fixed_formula_continuity(
     paragraph: &Paragraph,
     content_objects: &BTreeSet<u32>,
 ) -> Option<Vec<FormulaContinuityFormula>> {
@@ -12511,6 +12699,247 @@ mod tests {
                 continuity_blocked: true
             })
         ));
+    }
+
+    #[test]
+    fn adjacent_radical_and_operand_formula_units_are_placed_atomically() {
+        let output_fonts = test_output_fonts();
+        let faces = OutputFontFaces::parse(&output_fonts).unwrap();
+        let formula_unit = |unicode, left| {
+            let bounds = Rect {
+                left,
+                bottom: 0.0,
+                right: left + 8.0,
+                top: 12.0,
+            };
+            SourceFormulaUnit {
+                chars: Vec::new(),
+                validation_characters: vec![TypesetCharacter {
+                    unicode,
+                    baseline_origin: il::Point { x: left, y: 0.0 },
+                }],
+                spans: Vec::new(),
+                split_glyphs: BTreeMap::new(),
+                bounds,
+                ink_bounds: bounds,
+                source_fonts: Vec::new(),
+            }
+        };
+        let formula_units = [formula_unit('\u{221a}', 0.0), formula_unit('d', 8.0)];
+        let atoms = [FormulaFlowAtom::Formula(0), FormulaFlowAtom::Formula(1)];
+        let slots = [
+            TypesetLineSlot {
+                left: 0.0,
+                right: 10.0,
+                baseline_y: 24.0,
+            },
+            TypesetLineSlot {
+                left: 0.0,
+                right: 20.0,
+                baseline_y: 10.0,
+            },
+        ];
+
+        let FormulaFlowAttempt::Placed(placement) =
+            place_formula_flow(&atoms, &formula_units, &faces, 12.0, &slots).unwrap()
+        else {
+            panic!("the adjacent formula group fits in the second slot");
+        };
+        let relocated = placement
+            .formula_relocations
+            .iter()
+            .map(|relocation| relocation.characters[0].baseline_origin)
+            .collect::<Vec<_>>();
+        assert_eq!(relocated.len(), 2);
+        assert!((relocated[0].y - relocated[1].y).abs() <= 0.01);
+        assert!((relocated[1].x - relocated[0].x - 8.0).abs() <= 0.01);
+    }
+
+    #[test]
+    fn uniquely_matched_translated_radical_moves_beside_its_source_formula_operand() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars.truncate(5);
+        chars[1].unicode = Some('\u{221a}');
+        chars[1].r#box = Rect {
+            left: 92.0,
+            bottom: 100.0,
+            right: 100.0,
+            top: 112.0,
+        };
+        chars[1].visual_bbox = chars[1].r#box;
+        let mut source_segments = vec![chars[..4].iter().collect::<Vec<_>>(), Vec::new()];
+        let formulas = [FormulaContinuityFormula {
+            formula_index: 0,
+            bounds: Rect {
+                left: 100.0,
+                bottom: 98.0,
+                right: 108.0,
+                top: 110.0,
+            },
+            line_left: 72.0,
+        }];
+        let styled = |value| crate::translate::StyledCharacter { value, bold: false };
+        let mut translated_segments = vec![
+            vec![styled('\u{4e2d}'), styled('\u{221a}'), styled('\u{6587}')],
+            Vec::new(),
+        ];
+
+        attach_translated_radicals_to_formula_operands(
+            &mut source_segments,
+            &formulas,
+            &mut translated_segments,
+        )
+        .unwrap();
+
+        assert_eq!(
+            translated_segments[0]
+                .iter()
+                .map(|character| character.value)
+                .collect::<String>(),
+            "\u{4e2d}\u{6587}"
+        );
+        assert!(
+            source_segments[0]
+                .iter()
+                .all(|character| character.unicode != Some('\u{221a}'))
+        );
+    }
+
+    #[test]
+    fn ambiguous_translated_radical_attachment_fails_closed() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars.truncate(5);
+        chars[1].unicode = Some('\u{221a}');
+        chars[1].r#box = Rect {
+            left: 92.0,
+            bottom: 100.0,
+            right: 100.0,
+            top: 112.0,
+        };
+        chars[1].visual_bbox = chars[1].r#box;
+        let mut source_segments = vec![chars[..4].iter().collect::<Vec<_>>(), Vec::new()];
+        let formulas = [FormulaContinuityFormula {
+            formula_index: 0,
+            bounds: Rect {
+                left: 100.0,
+                bottom: 98.0,
+                right: 108.0,
+                top: 110.0,
+            },
+            line_left: 72.0,
+        }];
+        let styled = |value| crate::translate::StyledCharacter { value, bold: false };
+        let mut translated_segments = vec![
+            vec![styled('\u{221a}'), styled('A'), styled('\u{221a}')],
+            Vec::new(),
+        ];
+
+        assert!(
+            attach_translated_radicals_to_formula_operands(
+                &mut source_segments,
+                &formulas,
+                &mut translated_segments,
+            )
+            .is_none()
+        );
+        assert_eq!(
+            translated_segments[0]
+                .iter()
+                .map(|character| character.value)
+                .collect::<String>(),
+            "\u{221a}A\u{221a}"
+        );
+        assert!(
+            source_segments[0]
+                .iter()
+                .any(|character| character.unicode == Some('\u{221a}'))
+        );
+    }
+
+    #[test]
+    fn formula_boundary_expands_through_a_contiguous_digit_run() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars.truncate(5);
+        for (index, (character, unicode)) in
+            chars.iter_mut().zip(['h', '=', '6', '4', '.']).enumerate()
+        {
+            character.unicode = Some(unicode);
+            character.implicit_space_before = false;
+            let layout = character.layout.as_mut().unwrap();
+            layout.source = LayoutSource::Model;
+            if index <= 2 {
+                layout.label = LayoutLabel::InlineFormula;
+                layout.policy = TranslationPolicy::Passthrough;
+            } else {
+                layout.label = LayoutLabel::Text;
+                layout.policy = TranslationPolicy::Translate;
+            }
+        }
+        let content_objects = BTreeSet::from([chars[0].passthrough.content_object]);
+        let mut diagnostics = Vec::new();
+
+        complete_model_formula_boundaries(paragraph, &content_objects, 0, 0, &mut diagnostics);
+
+        assert_eq!(
+            paragraph.chars()[3].layout.unwrap().label,
+            LayoutLabel::InlineFormula
+        );
+        assert_eq!(
+            paragraph.chars()[4].layout.unwrap().label,
+            LayoutLabel::Text,
+            "the sentence punctuation is not part of the digit run"
+        );
+        let evidence = diagnostics
+            .iter()
+            .map(|diagnostic| serde_json::to_value(diagnostic).unwrap())
+            .filter_map(|diagnostic| diagnostic["evidence"].as_str().map(str::to_owned))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            evidence,
+            BTreeSet::from(["contiguous_digit_run".to_owned()])
+        );
     }
 
     #[test]

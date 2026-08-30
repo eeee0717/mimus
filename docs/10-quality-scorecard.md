@@ -72,9 +72,16 @@ Fake translation cannot establish meaning. This dimension therefore reports risk
 
 CON-01 uses one conservative lexer on both sides. It recognizes signed integers, decimals,
 percentages and scientific notation; a fixed unit vocabulary only when a unit follows numeric
-context; and bracketed numeric references such as `[36]` or `[4,27,28,22]`. Tokens are compared as
-exact multisets, so `4` is not satisfied by `40`. Number words and semantic unit conversions are out
-of scope. Only source characters that match production translation eligibility participate:
+context; and bracketed numeric references such as `[36]` or `[4,27,28,22]`. Ordinary tokens are
+compared as exact multisets, so `4` is not satisfied by `40`. The lexer canonicalizes only
+lexically explicit localized quantities: valid comma grouping; attached `K/M/B` magnitude suffixes
+(`40K`), English `thousand/million/billion`, Chinese `万/亿`, and explicit Arabic or Chinese
+fractions (`1/4` / `四分之一`). Thus `36M` equals `3600 万` and `4.5 million` equals `450 万`.
+Whitespace keeps an otherwise ambiguous `K` in the unit vocabulary (`40 K` is Kelvin), and no
+unmarked number-word or inferred semantic conversion is accepted. Latin magnitude/unit lexemes end
+before a non-ASCII script, so `40K训练` is tokenized as `40K` plus Han text, while `40KB` remains
+the longer byte unit. Only source characters that
+match production translation eligibility participate:
 visible, upright, `translate` policy, and owned by one of the page's direct `/Contents` objects.
 The direct object set comes from structured pinned `qpdf` page JSON; text reached through Form
 XObjects is not mistaken for request input. Tokens are lexed within continuous eligible runs after

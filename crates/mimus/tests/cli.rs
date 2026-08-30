@@ -104,6 +104,8 @@ fn handle_responses_request(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<Str
             "400 Bad Request",
             r#"{"error":"injected table-cell failure"}"#,
         )
+    } else if input == "Scale by √{v1}, then continue." {
+        ("200 OK", r#"{"output_text":"A√B{v1}."}"#)
     } else {
         ("200 OK", r#"{"output_text":"M"}"#)
     };
@@ -2219,12 +2221,14 @@ fn partial_model_formula_regions_are_completed_before_translation() {
         String::from_utf8_lossy(&output.stderr),
         String::from_utf8_lossy(&output.stdout)
     );
-    let mut requests = server.wait_for_requests(6);
+    let mut requests = server.wait_for_requests(9);
     requests.sort();
     requests.dedup();
     assert_eq!(
         requests,
         [
+            "Heads use {v1}, then continue.",
+            "Scale by √{v1}, then continue.",
             "Sequence {v1} is preserved.",
             "We use {v1} during training.",
             "Width is {v1}, then continue.",
@@ -2236,8 +2240,9 @@ fn partial_model_formula_regions_are_completed_before_translation() {
     };
     let before = read_il("03-paragraph_find.il.json");
     let prepared = read_il("04-styles_and_formulas.il.json");
+    let translated_snapshot = read_il("06-translate.il.json");
     let after = read_il("09-write.il.json");
-    let completed = ["𝑑model=512", "𝜀ls=0.1[36]", "(𝑥1,…,𝑥𝑛)"];
+    let completed = ["𝑑model=512", "𝜀ls=0.1[36]", "(𝑥1,…,𝑥𝑛)", "ℎ=64", "𝑑model"];
     for (paragraph_index, expected) in completed.into_iter().enumerate() {
         let prepared_chars = prepared["pages"][0]["paragraphs"][paragraph_index]["text"]["chars"]
             .as_array()
@@ -2295,6 +2300,40 @@ fn partial_model_formula_regions_are_completed_before_translation() {
         .collect::<BTreeSet<_>>();
     assert!(evidence.contains("script_baseline"));
     assert!(evidence.contains("delimiter_completion"));
+    assert!(evidence.contains("contiguous_digit_run"));
+
+    let translated = translated_snapshot["pages"][0]["paragraphs"][4]["translated_text"]
+        .as_str()
+        .unwrap();
+    assert_eq!(translated, "A√B.");
+    let final_paragraph = &after["pages"][0]["paragraphs"][4];
+    assert!(
+        final_paragraph.get("preserved").is_none(),
+        "{final_paragraph:#}"
+    );
+    assert_eq!(final_paragraph["translated_text"], "A√B.");
+    for extractor in ["poppler", "mupdf"] {
+        let extracted = match extractor {
+            "poppler" => Command::new("pdftotext")
+                .arg(&output_path)
+                .arg("-")
+                .output()
+                .unwrap(),
+            "mupdf" => Command::new("mutool")
+                .args(["draw", "-F", "txt"])
+                .arg(&output_path)
+                .output()
+                .unwrap(),
+            _ => unreachable!(),
+        };
+        assert!(extracted.status.success(), "{extractor}");
+        let compact = String::from_utf8_lossy(&extracted.stdout)
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        assert!(compact.contains("√𝑑model"), "{extractor}: {compact:?}");
+        assert!(!compact.contains("A√B"), "{extractor}: {compact:?}");
+    }
 }
 
 #[test]

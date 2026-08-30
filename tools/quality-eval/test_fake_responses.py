@@ -34,6 +34,13 @@ class FakeResponsesTest(unittest.TestCase):
         self.assertNotIn("Method A", translated)
         self.assertTrue(translated.endswith("20 A"))
 
+    def test_conserving_mode_preserves_explicit_magnitude_lexemes(self) -> None:
+        source = "3.8B, 36M, 40K, 4.5 million, and standalone B"
+        translated = FAKE.conserving_translation(source)
+        for token in ("3.8B", "36M", "40K", "4.5 million"):
+            self.assertIn(token, translated)
+        self.assertNotIn("standalone B", translated)
+
 
 if __name__ == "__main__":
     unittest.main()
