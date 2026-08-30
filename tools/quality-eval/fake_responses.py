@@ -19,6 +19,7 @@ UNITS = (
     "GHz", "MHz", "kHz", "dpi", "bits", "bytes", "bit", "byte", "km", "cm", "mm",
     "ms", "Hz", "KB", "MB", "GB", "TB", "mV", "mA", "kW", "dB", "px", "pt", "°C",
     "min", "s", "h", "m", "K", "V", "A", "W",
+    "M", "B", "thousand", "million", "billion",
 )
 NUMBER = re.compile(r"[+\-−]?\d+(?:\.\d+)?(?:[eE][+\-−]?\d+)?%?")
 
