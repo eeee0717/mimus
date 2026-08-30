@@ -1168,6 +1168,7 @@ dependencies = [
  "insta",
  "lopdf",
  "mimus-core",
+ "mimus-quality-contract",
  "quick-xml",
  "reqwest",
  "secrecy",

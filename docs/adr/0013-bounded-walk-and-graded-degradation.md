@@ -46,11 +46,15 @@ Typeset 的恒等守卫从「全段单一 upright 字体 run」收窄为「**替
 |---|---|---|---|
 | **文档级** | 加密、页树环、ObjStm 损坏、关键位置 dangling ref | 分类退出、不产出输出文件 | 现有 `MimusError`（不新增 reason，复用 `pdf_parse`/`unsupported_pdf`） |
 | **页级** | tokenizer fatal（未闭合字符串/数组/hex、嵌套超限）、坏 BBox/Matrix、缺 XObject 资源、非法 `/Rotate`、坏 MediaBox | 该页不产生 `PageRewrite`，原 content stream 逐字节保留；其余页继续 | `ExtractedPage.degraded`（pub(crate)） |
-| **段级** | 字体或 Unicode 不可信（见 ADR-0014）、退化文本矩阵导致不可定位 | 该段全部区间不替换，`translated_text` 保持 `None` | `il::Paragraph.preserved`（可选字段） |
+| **段级** | 字体或 Unicode 不可信（见 ADR-0014）、退化文本矩阵导致不可定位、翻译响应连续两次违反占位符或内容守恒合同 | 该段全部区间不替换，`translated_text` 保持 `None` | `il::Paragraph.preserved`（可选字段） |
 
 「**单元**」不是新的 IL 层级。IL 保持 Document → Page → Paragraph → Char 四级，单元 = **段内连续的、同一隔离原因的字符区间**，由 Typeset 从 `Char.text_transform` 与可见性标记动态聚合。理由：M1 的隔离语义只需要回答「哪些区间不替换」，派生分组零 schema 成本；#20 若需要更强结构再升 IL 版本。
 
 `il::Paragraph` 新增 `preserved: Option<PreservedReason>`（serde `default`，IL `schema_version` 保持 1）。ADR-0007 本就不承诺跨版本 IR 兼容，ADR-0011 §6 允许 IL 独立演进；additive 可选字段不破坏既有快照消费者。段级保留时 `translated_text` 恒为 `None`，两者语义自洽。
+
+`content_conservation` 是 additive typed reason：生产 executor 与 scorecard 共用
+`mimus-quality-contract` 的保守数字/单位/方括号引用 lexer；首个违规响应只允许一次带
+缺失 token 提示的纠错重试，第二次仍违规时整段保留。无效响应不得写入翻译 cache。
 
 ### 3. 有界失败模型
 

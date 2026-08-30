@@ -83,7 +83,7 @@ PP-DocLayoutV3 的 `inline_formula` label 是公式**存在性**的唯一权威�
 启发式不得据此新建 model 公式；StylesAndFormulas 也不得收缩模型已经标出的字符。
 
 模型框可能漏掉同一数学单元的下标、上标或末尾定界符。已有 model 公式锚时，可以把
-相邻 `text/translate` 字符提升为 `inline_formula/passthrough`，但必须同时满足：
+视觉相邻的 `text/translate` 字符提升为 `inline_formula/passthrough`，但必须同时满足：
 
 - 与锚在同一段和同一视觉行，水平间距按相邻字号的 em 有界，且没有显式或推导出的
   词间边界；
@@ -91,10 +91,16 @@ PP-DocLayoutV3 的 `inline_formula` label 是公式**存在性**的唯一权威�
   同一数学字体的连续字母数字 run，或属于紧连的数学后缀。其中“数学字体”必须由该
   字体内已有 model 锚的 Unicode Mathematical Alphanumeric Symbols 字符证明；普通
   ASCII 公式锚与正文共用字体时，不得据此吞入相邻散文；
+- 提取数组不相邻或字符带 `implicit_space_before` 时，只有唯一几何 **ASCII 数字脚标**
+  证据可以覆盖该提取提示：候选字号为锚字号的 0.4–0.85 倍、基线差为 0.05–0.75 em、
+  左右 metric box 间距落在 ±0.25 em，且候选只匹配一个既有 model 公式字符。匹配零个
+  或多个锚均不扩展；跨序字母仍可能是正文，必须保留原有相邻 run 证据。这条规则只
+  补全既有公式，仍不得新建公式；
 - model 公式以 ASCII 数字结尾、紧连的 `text/translate` 后缀仍是 ASCII 数字时，扩展
   必须通过整个无间隔数字串；句点、单位、字母和存在词间边界的数字不属于该证据；
-- 只改变 layout label/policy；Unicode/code、源 operand 引用与编码字节、字体引用、
-  字号、baseline、metric box 和 visual box 均不改变。
+- 只改变 layout label/policy，并在跨提取顺序扩展时把候选归到唯一锚的 model reading
+  order；Unicode/code、源 operand 引用与编码字节、字体引用、字号、baseline、metric
+  box 和 visual box 均不改变。
 
 每个公式锚和证据类别发一条 informational `formula_boundary_expanded`，字段包含页、段、
 model reading order 和扩入字符数。事件受现有逐 ID 有界诊断预算约束，超额仍由
@@ -166,8 +172,10 @@ relocation → relocation 仍失败或不具备重定位资格 → `typeset_over
 oracle 拒绝后不得通过继续缩字号、扩大碰撞容差、删除公式字符或重绘公式来换取成功；
 既有字号搜索只服务于进入 oracle 之前的几何装箱。
 
-界与矩形邻接算术的数值实现唯一位于无引擎依赖的
-`mimus-quality-contract::{formula_continuity_limit, formula_items_are_adjacent}`。
+界、视觉同行与矩形邻接算术的数值实现唯一位于无引擎依赖的
+`mimus-quality-contract::{formula_continuity_limit, formula_items_share_line,
+formula_items_are_adjacent}`。视觉同行以两项垂直区间存在正重叠为准，不另设 top-edge
+差阈值；紧凑上标公式并集不得因此把实际重叠的等号或公式名前缀排除为邻居。
 生产 `mimus-core` 与离线 `scorecard` 分别筛选本节规定的源样本，再调用同一纯函数；两侧
 不得复制 median、`max(2 * spacing, 1.5em)` 或同行间距判定算式。scorecard 仍不依赖
 生产 crate；MuPDF 把 radical、operand、脚本拆成多个相邻 text line 时，scorecard 按

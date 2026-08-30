@@ -2377,6 +2377,17 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                 violation: retry.violation,
             });
         }
+        for retry in execution.content_conservation_retries {
+            document
+                .diagnostics
+                .push(Diagnostic::ContentConservationRetry {
+                    page_index: job.page_index,
+                    paragraph_index: job.paragraph_index,
+                    attempt: retry.attempt,
+                    missing_token_count: retry.missing_token_count,
+                    missing_tokens: retry.missing_tokens,
+                });
+        }
         let paragraph = document
             .il
             .pages
@@ -2427,6 +2438,21 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                     violation,
                     profile,
                 );
+            }
+            Ok(crate::translate::executor::TranslationOutcome::ContentConservationViolation {
+                missing_token_count,
+                missing_tokens,
+            }) => {
+                paragraph.translated_text = None;
+                paragraph.preserved = Some(il::PreservedReason::ContentConservation);
+                document
+                    .diagnostics
+                    .push(Diagnostic::ContentConservationViolation {
+                        page_index: job.page_index,
+                        paragraph_index: job.paragraph_index,
+                        missing_token_count,
+                        missing_tokens,
+                    });
             }
             Err(error) if matches!(error.reason(), ErrorReason::Translation(_)) => {
                 paragraph.translated_text = None;
@@ -2497,6 +2523,7 @@ fn translate_none(document: &mut Document, context: &PassContext<'_>) -> Result<
                             target_language: &context.config.target_language,
                             glossary: &document.glossary,
                             placeholder_correction: None,
+                            content_correction: None,
                         },
                     )?);
                 } else {
@@ -2628,7 +2655,7 @@ fn complete_model_formula_boundaries(
     paragraph_index: usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let chars = paragraph_chars_mut(paragraph);
+    let TextCarrier::Chars { chars } = &mut paragraph.text;
     let anchors = chars
         .iter()
         .enumerate()
@@ -2638,8 +2665,15 @@ fn complete_model_formula_boundaries(
     if anchors.is_empty() {
         return;
     }
-
     let mut expanded = BTreeMap::<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>::new();
+    normalize_geometrically_attached_script_order(chars, content_objects, &mut expanded);
+    let anchors = chars
+        .iter()
+        .enumerate()
+        .filter(|(_, character)| model_formula_character(character, content_objects))
+        .map(|(index, character)| (index, character.layout.unwrap().reading_order))
+        .collect::<Vec<_>>();
+
     expand_script_runs(chars, content_objects, &anchors, &mut expanded);
     expand_contiguous_digit_runs(chars, content_objects, &anchors, &mut expanded);
     loop {
@@ -2670,6 +2704,30 @@ fn expand_contiguous_digit_runs(
     anchors: &[(usize, usize)],
     expanded: &mut BTreeMap<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>,
 ) {
+    let mut index = chars.len().saturating_sub(1);
+    while index > 0 {
+        if formula_character(&chars[index], content_objects)
+            && chars[index]
+                .unicode
+                .is_some_and(|value| value.is_ascii_digit())
+            && formula_boundary_candidate(&chars[index - 1], content_objects)
+            && chars[index - 1]
+                .unicode
+                .is_some_and(|value| value.is_ascii_digit())
+            && characters_are_attached(&chars[index - 1], &chars[index])
+            && let Some(reading_order) = nearest_formula_reading_order(chars, anchors, index - 1)
+        {
+            mark_formula_extension(
+                chars,
+                index - 1,
+                reading_order,
+                FormulaBoundaryEvidence::ContiguousDigitRun,
+                expanded,
+            );
+        }
+        index -= 1;
+    }
+
     let mut index = 1_usize;
     while index < chars.len() {
         if !formula_character(&chars[index - 1], content_objects)
@@ -2747,6 +2805,17 @@ fn characters_are_attached(left: &Char, right: &Char) -> bool {
         && (left.baseline_origin.y - right.baseline_origin.y).abs() <= em * 0.35
 }
 
+fn formula_delimiter_is_attached(left: &Char, right: &Char) -> bool {
+    if characters_are_attached(left, right) {
+        return true;
+    }
+    let em = left.font_size.max(right.font_size);
+    let gap = right.r#box.left - left.r#box.right;
+    gap >= -em * 0.25
+        && gap <= em * 0.25
+        && rects_overlap_vertically(left.visual_bbox, right.visual_bbox)
+}
+
 fn mark_formula_extension(
     chars: &mut [Char],
     index: usize,
@@ -2809,6 +2878,190 @@ fn expand_script_runs(
             }
         }
     }
+}
+
+fn normalize_geometrically_attached_script_order(
+    chars: &mut [Char],
+    content_objects: &BTreeSet<u32>,
+    expanded: &mut BTreeMap<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>,
+) {
+    normalize_geometrically_attached_signed_scripts(chars, content_objects, expanded);
+
+    // A geometric script can be emitted before an intervening prose run. Move only
+    // uniquely attached ASCII digits; the ordinary adjacent-script rule remains the
+    // authority that promotes the reordered character into the formula unit.
+    loop {
+        let anchors = chars
+            .iter()
+            .enumerate()
+            .filter(|(_, character)| model_formula_character(character, content_objects))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let next_move = chars
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| {
+                formula_boundary_candidate(candidate, content_objects)
+                    && candidate
+                        .unicode
+                        .is_some_and(|value| value.is_ascii_digit())
+            })
+            .find_map(|(candidate_index, candidate)| {
+                let matches = anchors
+                    .iter()
+                    .copied()
+                    .filter(|anchor_index| {
+                        geometrically_proves_script(&chars[*anchor_index], candidate)
+                    })
+                    .collect::<Vec<_>>();
+                matches
+                    .first()
+                    .filter(|_| matches.len() == 1)
+                    .and_then(|&anchor_index| {
+                        let anchor = &chars[anchor_index];
+                        let script_is_right =
+                            candidate.r#box.left >= anchor.r#box.right - anchor.font_size * 0.25;
+                        let already_adjacent = if script_is_right {
+                            candidate_index == anchor_index + 1
+                        } else {
+                            candidate_index + 1 == anchor_index
+                        };
+                        (!already_adjacent).then_some((
+                            candidate_index,
+                            anchor_index,
+                            script_is_right,
+                        ))
+                    })
+            });
+        let Some((candidate_index, anchor_index, script_is_right)) = next_move else {
+            break;
+        };
+        let reading_order = chars[anchor_index]
+            .layout
+            .expect("model formula anchors have layout")
+            .reading_order;
+        mark_formula_extension(
+            chars,
+            candidate_index,
+            reading_order,
+            FormulaBoundaryEvidence::ScriptBaseline,
+            expanded,
+        );
+        chars[candidate_index]
+            .layout
+            .as_mut()
+            .expect("formula boundary candidates have model layout")
+            .reading_order = reading_order;
+        chars[candidate_index].implicit_space_before = false;
+        if script_is_right {
+            if candidate_index < anchor_index {
+                chars[candidate_index..=anchor_index].rotate_left(1);
+            } else {
+                chars[anchor_index + 1..=candidate_index].rotate_right(1);
+            }
+        } else if candidate_index < anchor_index {
+            chars[candidate_index..anchor_index].rotate_left(1);
+        } else {
+            chars[anchor_index..=candidate_index].rotate_right(1);
+        }
+    }
+}
+
+fn normalize_geometrically_attached_signed_scripts(
+    chars: &mut [Char],
+    content_objects: &BTreeSet<u32>,
+    expanded: &mut BTreeMap<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>,
+) {
+    loop {
+        let matches = chars
+            .iter()
+            .enumerate()
+            .filter(|(_, anchor)| {
+                model_formula_character(anchor, content_objects)
+                    && anchor.unicode.is_some_and(|value| value.is_ascii_digit())
+            })
+            .filter_map(|(anchor_index, anchor)| {
+                let sign_index = anchor_index.checked_sub(1)?;
+                let sign = &chars[sign_index];
+                if !formula_boundary_candidate(sign, content_objects)
+                    || !sign
+                        .unicode
+                        .is_some_and(|value| matches!(value, '+' | '-' | '−'))
+                    || (sign.font_size - anchor.font_size).abs() > anchor.font_size * 0.1
+                    || (sign.baseline_origin.y - anchor.baseline_origin.y).abs()
+                        > anchor.font_size * 0.1
+                    || !characters_are_attached(sign, anchor)
+                {
+                    return None;
+                }
+                let bases = chars
+                    .iter()
+                    .enumerate()
+                    .filter(|(base_index, base)| {
+                        *base_index != sign_index
+                            && formula_boundary_candidate(base, content_objects)
+                            && base.unicode.is_some_and(|value| value.is_ascii_digit())
+                            && geometrically_proves_script(base, sign)
+                    })
+                    .map(|(base_index, _)| base_index)
+                    .collect::<Vec<_>>();
+                bases
+                    .first()
+                    .filter(|_| bases.len() == 1)
+                    .map(|&base_index| (sign_index, anchor_index, base_index))
+            })
+            .collect::<Vec<_>>();
+        let Some(&(sign_index, anchor_index, base_index)) = matches.first() else {
+            break;
+        };
+        if matches.len() != 1 {
+            break;
+        }
+        let reading_order = chars[anchor_index]
+            .layout
+            .expect("model formula anchors have layout")
+            .reading_order;
+        for index in [sign_index, base_index] {
+            mark_formula_extension(
+                chars,
+                index,
+                reading_order,
+                FormulaBoundaryEvidence::ScriptBaseline,
+                expanded,
+            );
+            chars[index]
+                .layout
+                .as_mut()
+                .expect("formula boundary candidates have model layout")
+                .reading_order = reading_order;
+            chars[index].implicit_space_before = false;
+        }
+        if anchor_index < base_index {
+            chars[sign_index..=base_index].rotate_left(2);
+        } else if base_index + 1 != sign_index {
+            chars[base_index + 1..=anchor_index].rotate_right(2);
+        }
+    }
+}
+
+fn geometrically_proves_script(anchor: &Char, candidate: &Char) -> bool {
+    let em = anchor.font_size;
+    if !em.is_finite()
+        || em <= 0.0
+        || !candidate.font_size.is_finite()
+        || candidate.font_size < em * 0.4
+        || candidate.font_size > em * 0.85
+    {
+        return false;
+    }
+    let baseline_delta = (candidate.baseline_origin.y - anchor.baseline_origin.y).abs();
+    if baseline_delta < em * 0.05 || baseline_delta > em * 0.75 {
+        return false;
+    }
+    let right_gap = candidate.r#box.left - anchor.r#box.right;
+    let left_gap = anchor.r#box.left - candidate.r#box.right;
+    (right_gap >= -em * 0.25 && right_gap <= em * 0.25)
+        || (left_gap >= -em * 0.25 && left_gap <= em * 0.25)
 }
 
 fn nearest_formula_reading_order(
@@ -2982,7 +3235,7 @@ fn expand_balancing_delimiters(
             && end < chars.len()
             && formula_boundary_candidate(&chars[end], content_objects)
             && chars[end].unicode == Some(expected)
-            && characters_are_attached(&chars[end - 1], &chars[end])
+            && formula_delimiter_is_attached(&chars[end - 1], &chars[end])
         {
             let Some(reading_order) = nearest_formula_reading_order(chars, anchors, end) else {
                 start = end;
@@ -2999,7 +3252,7 @@ fn expand_balancing_delimiters(
             && start > 0
             && formula_boundary_candidate(&chars[start - 1], content_objects)
             && chars[start - 1].unicode == Some(expected)
-            && characters_are_attached(&chars[start - 1], &chars[start])
+            && formula_delimiter_is_attached(&chars[start - 1], &chars[start])
         {
             let index = start - 1;
             let Some(reading_order) = nearest_formula_reading_order(chars, anchors, index) else {
@@ -5781,8 +6034,12 @@ fn formula_continuity_is_valid(
         if !left.is_formula && !right.is_formula {
             return true;
         }
-        let same_line = left.bounds.top > right.bounds.bottom + 0.01
-            && right.bounds.top > left.bounds.bottom + 0.01;
+        let same_line = mimus_quality_contract::formula_items_share_line(
+            left.bounds.bottom,
+            left.bounds.top,
+            right.bounds.bottom,
+            right.bounds.top,
+        );
         if (left.ends_with_punctuation || right.starts_with_punctuation) && !same_line {
             return false;
         }
@@ -12197,6 +12454,257 @@ mod tests {
     }
 
     #[test]
+    fn formula_boundary_attaches_a_unique_geometric_superscript_across_extraction_order() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars.truncate(5);
+
+        // The real (6,1) shape differs from an adjacent script run: PDF extraction
+        // places the raised `2` before intervening prose even though it is visually
+        // attached to the model-owned final `d` at the end of the formula.
+        for (index, character) in chars.iter_mut().enumerate() {
+            character.unicode = Some(['x', '2', 'p', 'q', 'd'][index]);
+            character.implicit_space_before = index == 1;
+            character.font_size = 10.0;
+            character.baseline_origin = Point {
+                x: 100.0 + index as f64 * 20.0,
+                y: 100.0,
+            };
+            character.r#box = Rect {
+                left: character.baseline_origin.x,
+                bottom: 98.0,
+                right: character.baseline_origin.x + 6.0,
+                top: 108.0,
+            };
+            character.visual_bbox = character.r#box;
+            let layout = character.layout.as_mut().unwrap();
+            layout.source = LayoutSource::Model;
+            layout.label = LayoutLabel::Text;
+            layout.policy = TranslationPolicy::Translate;
+        }
+        chars[4].layout.as_mut().unwrap().label = LayoutLabel::InlineFormula;
+        chars[4].layout.as_mut().unwrap().policy = TranslationPolicy::Passthrough;
+        chars[4].layout.as_mut().unwrap().reading_order = 114;
+        chars[4].r#box = Rect {
+            left: 246.404,
+            bottom: 582.625,
+            right: 251.590,
+            top: 591.472,
+        };
+        chars[4].visual_bbox = chars[4].r#box;
+        chars[4].baseline_origin = Point {
+            x: 246.404,
+            y: 584.558,
+        };
+
+        chars[1].font_size = 6.974;
+        chars[1].r#box = Rect {
+            left: 251.590,
+            bottom: 586.820,
+            right: 255.562,
+            top: 593.013,
+        };
+        chars[1].visual_bbox = chars[1].r#box;
+        chars[1].baseline_origin = Point {
+            x: 251.590,
+            y: 588.173,
+        };
+
+        let content_objects = BTreeSet::from([chars[0].passthrough.content_object]);
+        let cross_order = paragraph.clone();
+        let mut diagnostics = Vec::new();
+        complete_model_formula_boundaries(paragraph, &content_objects, 6, 1, &mut diagnostics);
+
+        assert_eq!(
+            paragraph
+                .chars()
+                .iter()
+                .filter_map(|character| character.unicode)
+                .collect::<String>(),
+            "xpqd2"
+        );
+        assert_eq!(
+            paragraph.chars()[4].layout.unwrap(),
+            LayoutAssignment {
+                label: LayoutLabel::InlineFormula,
+                policy: TranslationPolicy::Passthrough,
+                reading_order: 114,
+                ..paragraph.chars()[4].layout.unwrap()
+            }
+        );
+        assert!(
+            paragraph.chars()[0..3]
+                .iter()
+                .all(|character| character.layout.unwrap().label == LayoutLabel::Text)
+        );
+        assert_eq!(
+            paragraph.chars()[3].layout.unwrap().label,
+            LayoutLabel::InlineFormula
+        );
+        assert!(diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            Diagnostic::FormulaBoundaryExpanded {
+                evidence: FormulaBoundaryEvidence::ScriptBaseline,
+                expanded_character_count: 1,
+                ..
+            }
+        )));
+
+        *paragraph = cross_order.clone();
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars[1].unicode = Some('d');
+        diagnostics.clear();
+
+        complete_model_formula_boundaries(paragraph, &content_objects, 6, 1, &mut diagnostics);
+
+        assert_eq!(
+            paragraph.chars()[1].layout.unwrap().label,
+            LayoutLabel::Text,
+            "cross-order alphabetic scripts remain ambiguous with prose"
+        );
+        assert!(diagnostics.is_empty());
+
+        *paragraph = cross_order;
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars[3].layout.as_mut().unwrap().label = LayoutLabel::InlineFormula;
+        chars[3].layout.as_mut().unwrap().policy = TranslationPolicy::Passthrough;
+        chars[3].layout.as_mut().unwrap().reading_order = 115;
+        chars[3].r#box = chars[4].r#box;
+        chars[3].visual_bbox = chars[4].visual_bbox;
+        chars[3].baseline_origin = chars[4].baseline_origin;
+        diagnostics.clear();
+
+        complete_model_formula_boundaries(paragraph, &content_objects, 6, 1, &mut diagnostics);
+
+        assert_eq!(
+            paragraph.chars()[1].layout.unwrap().label,
+            LayoutLabel::Text
+        );
+        assert!(
+            diagnostics.is_empty(),
+            "ambiguous geometry must fail closed"
+        );
+    }
+
+    #[test]
+    fn formula_boundary_reorders_a_signed_superscript_with_its_numeric_base() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars.truncate(5);
+        for (index, character) in chars.iter_mut().enumerate() {
+            character.unicode = Some(['−', '9', 'x', '1', '0'][index]);
+            character.font_size = 9.9626;
+            character.baseline_origin = Point {
+                x: 100.0 + index as f64 * 10.0,
+                y: 206.268,
+            };
+            character.r#box = Rect {
+                left: character.baseline_origin.x,
+                bottom: 204.0,
+                right: character.baseline_origin.x + 5.0,
+                top: 214.0,
+            };
+            character.visual_bbox = character.r#box;
+            character.implicit_space_before = false;
+            let layout = character.layout.as_mut().unwrap();
+            layout.source = LayoutSource::Model;
+            layout.label = LayoutLabel::Text;
+            layout.policy = TranslationPolicy::Translate;
+            layout.reading_order = 220;
+        }
+        chars[1].layout.as_mut().unwrap().label = LayoutLabel::InlineFormula;
+        chars[1].layout.as_mut().unwrap().policy = TranslationPolicy::Passthrough;
+        chars[1].layout.as_mut().unwrap().reading_order = 240;
+        for character in chars.iter_mut().take(2) {
+            character.font_size = 6.9738;
+            character.baseline_origin.y = 209.883;
+        }
+        chars[0].r#box = Rect {
+            left: 396.409,
+            bottom: 208.0,
+            right: 402.636,
+            top: 214.0,
+        };
+        chars[0].visual_bbox = chars[0].r#box;
+        chars[1].r#box = Rect {
+            left: 402.636,
+            bottom: 208.0,
+            right: 406.607,
+            top: 214.0,
+        };
+        chars[1].visual_bbox = chars[1].r#box;
+        chars[3].r#box = Rect {
+            left: 386.449,
+            bottom: 204.0,
+            right: 391.430,
+            top: 214.0,
+        };
+        chars[3].visual_bbox = chars[3].r#box;
+        chars[4].r#box = Rect {
+            left: 391.430,
+            bottom: 204.0,
+            right: 396.411,
+            top: 214.0,
+        };
+        chars[4].visual_bbox = chars[4].r#box;
+
+        let content_objects = BTreeSet::from([chars[0].passthrough.content_object]);
+        let mut diagnostics = Vec::new();
+        complete_model_formula_boundaries(paragraph, &content_objects, 6, 10, &mut diagnostics);
+
+        assert_eq!(
+            paragraph
+                .chars()
+                .iter()
+                .filter_map(|character| character.unicode)
+                .collect::<String>(),
+            "x10−9"
+        );
+        assert_eq!(
+            paragraph.chars()[0].layout.unwrap().label,
+            LayoutLabel::Text
+        );
+        assert!(
+            paragraph.chars()[1..]
+                .iter()
+                .all(|character| character.layout.unwrap().label == LayoutLabel::InlineFormula)
+        );
+        assert!(diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            Diagnostic::FormulaBoundaryExpanded {
+                evidence: FormulaBoundaryEvidence::ScriptBaseline,
+                expanded_character_count: 2,
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn nested_inline_formula_group_joins_its_translatable_model_owner() {
         let mut document = Document::for_inspection(fixture());
         let engine = FakeEngine::default();
@@ -13361,6 +13869,66 @@ mod tests {
         assert_eq!(
             evidence,
             BTreeSet::from(["contiguous_digit_run".to_owned()])
+        );
+    }
+
+    #[test]
+    fn repeated_content_conservation_failure_preserves_the_whole_paragraph() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: "translated without the number",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let TextCarrier::Chars { chars } = &mut document.il.pages[0].paragraphs[0].text;
+        chars[0].unicode = Some('4');
+
+        styles_and_formulas(&mut document, &context).unwrap();
+        translate(&mut document, &context).unwrap();
+
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            document.il.pages[0].paragraphs[0].preserved,
+            Some(il::PreservedReason::ContentConservation)
+        );
+        assert_eq!(document.il.pages[0].paragraphs[0].translated_text, None);
+        assert!(
+            document
+                .diagnostics
+                .entries()
+                .iter()
+                .any(|diagnostic| matches!(
+                    diagnostic,
+                    Diagnostic::ContentConservationRetry {
+                        missing_token_count: 1,
+                        missing_tokens,
+                        ..
+                    } if missing_tokens == &["4".to_owned()]
+                ))
+        );
+        assert!(
+            document
+                .diagnostics
+                .entries()
+                .iter()
+                .any(|diagnostic| matches!(
+                    diagnostic,
+                    Diagnostic::ContentConservationViolation {
+                        missing_token_count: 1,
+                        missing_tokens,
+                        ..
+                    } if missing_tokens == &["4".to_owned()]
+                ))
         );
     }
 

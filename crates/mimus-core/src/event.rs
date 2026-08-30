@@ -241,11 +241,13 @@ pub enum DiagnosticId {
     ContentRecovered,
     TranslationRetry,
     PlaceholderRetry,
+    ContentConservationRetry,
     DegradationSummary,
     TranslationIdentity,
     SuspiciousEcho,
     SuspiciousTranslationEchoRate,
     PlaceholderViolation,
+    ContentConservationViolation,
     TranslationFailureProfile,
     MathPassthrough,
     FormulaBoundaryExpanded,
@@ -442,6 +444,13 @@ pub enum Diagnostic {
         attempt: usize,
         violation: crate::translate::PlaceholderViolation,
     },
+    ContentConservationRetry {
+        page_index: usize,
+        paragraph_index: usize,
+        attempt: usize,
+        missing_token_count: usize,
+        missing_tokens: Vec<String>,
+    },
     DegradationSummary {
         degraded_page_indices: Vec<usize>,
         degraded_pages: usize,
@@ -469,6 +478,12 @@ pub enum Diagnostic {
         page_index: usize,
         paragraph_index: usize,
         violation: crate::translate::PlaceholderViolation,
+    },
+    ContentConservationViolation {
+        page_index: usize,
+        paragraph_index: usize,
+        missing_token_count: usize,
+        missing_tokens: Vec<String>,
     },
     TranslationFailureProfile {
         page_index: usize,
@@ -537,6 +552,7 @@ impl Diagnostic {
             Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
             Self::TranslationRetry { .. } => DiagnosticId::TranslationRetry,
             Self::PlaceholderRetry { .. } => DiagnosticId::PlaceholderRetry,
+            Self::ContentConservationRetry { .. } => DiagnosticId::ContentConservationRetry,
             Self::DegradationSummary { .. } => DiagnosticId::DegradationSummary,
             Self::TranslationIdentity { .. } => DiagnosticId::TranslationIdentity,
             Self::SuspiciousEcho { .. } => DiagnosticId::SuspiciousEcho,
@@ -544,6 +560,7 @@ impl Diagnostic {
                 DiagnosticId::SuspiciousTranslationEchoRate
             }
             Self::PlaceholderViolation { .. } => DiagnosticId::PlaceholderViolation,
+            Self::ContentConservationViolation { .. } => DiagnosticId::ContentConservationViolation,
             Self::TranslationFailureProfile { .. } => DiagnosticId::TranslationFailureProfile,
             Self::MathPassthrough { .. } => DiagnosticId::MathPassthrough,
             Self::FormulaBoundaryExpanded { .. } => DiagnosticId::FormulaBoundaryExpanded,
@@ -648,6 +665,13 @@ pub enum DiagnosticEvent {
         attempt: usize,
         violation: crate::translate::PlaceholderViolation,
     },
+    ContentConservationRetry {
+        page_index: usize,
+        paragraph_index: usize,
+        attempt: usize,
+        missing_token_count: usize,
+        missing_tokens: Vec<String>,
+    },
     DegradationSummary {
         degraded_page_indices: Vec<usize>,
         degraded_pages: usize,
@@ -675,6 +699,12 @@ pub enum DiagnosticEvent {
         page_index: usize,
         paragraph_index: usize,
         violation: crate::translate::PlaceholderViolation,
+    },
+    ContentConservationViolation {
+        page_index: usize,
+        paragraph_index: usize,
+        missing_token_count: usize,
+        missing_tokens: Vec<String>,
     },
     TranslationFailureProfile {
         page_index: usize,
@@ -745,6 +775,7 @@ impl DiagnosticEvent {
             Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
             Self::TranslationRetry { .. } => DiagnosticId::TranslationRetry,
             Self::PlaceholderRetry { .. } => DiagnosticId::PlaceholderRetry,
+            Self::ContentConservationRetry { .. } => DiagnosticId::ContentConservationRetry,
             Self::DegradationSummary { .. } => DiagnosticId::DegradationSummary,
             Self::TranslationIdentity { .. } => DiagnosticId::TranslationIdentity,
             Self::SuspiciousEcho { .. } => DiagnosticId::SuspiciousEcho,
@@ -752,6 +783,7 @@ impl DiagnosticEvent {
                 DiagnosticId::SuspiciousTranslationEchoRate
             }
             Self::PlaceholderViolation { .. } => DiagnosticId::PlaceholderViolation,
+            Self::ContentConservationViolation { .. } => DiagnosticId::ContentConservationViolation,
             Self::TranslationFailureProfile { .. } => DiagnosticId::TranslationFailureProfile,
             Self::MathPassthrough { .. } => DiagnosticId::MathPassthrough,
             Self::FormulaBoundaryExpanded { .. } => DiagnosticId::FormulaBoundaryExpanded,
@@ -878,6 +910,19 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 attempt: *attempt,
                 violation: *violation,
             },
+            Diagnostic::ContentConservationRetry {
+                page_index,
+                paragraph_index,
+                attempt,
+                missing_token_count,
+                missing_tokens,
+            } => Self::ContentConservationRetry {
+                page_index: *page_index,
+                paragraph_index: *paragraph_index,
+                attempt: *attempt,
+                missing_token_count: *missing_token_count,
+                missing_tokens: missing_tokens.clone(),
+            },
             Diagnostic::DegradationSummary {
                 degraded_page_indices,
                 degraded_pages,
@@ -928,6 +973,17 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 page_index: *page_index,
                 paragraph_index: *paragraph_index,
                 violation: *violation,
+            },
+            Diagnostic::ContentConservationViolation {
+                page_index,
+                paragraph_index,
+                missing_token_count,
+                missing_tokens,
+            } => Self::ContentConservationViolation {
+                page_index: *page_index,
+                paragraph_index: *paragraph_index,
+                missing_token_count: *missing_token_count,
+                missing_tokens: missing_tokens.clone(),
             },
             Diagnostic::TranslationFailureProfile {
                 page_index,

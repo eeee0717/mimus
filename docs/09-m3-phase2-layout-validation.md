@@ -241,3 +241,71 @@ Under the accepted baseline of BabelDOC parity, the real-paper translation is **
 loss, zero degraded pages, zero overflow, an intact graphics layer, and heading placement that
 matches the baseline. The remaining open work is tracked in #105-#108 and #38 and is not a blocker
 for this judgement.
+
+## L5-5R2 formula-gated acceptance
+
+- Date: 2026-08-30 (Asia/Shanghai)
+- Base stack: PR #138 plus the L5-5R2 conservation/formula-alignment layer
+- Input SHA-256: `bdfaa68d8984f0dc02beaca527b76f207d99b666d31d1da728ee0728182df697`
+- Output SHA-256: `569095268cd54cdff6bc680f47300ad7f17fb0c177d998cfdc7896f52a41b64a`
+- Cache SHA-256: `9e1642bf1b391589a525bd2b531274f3e6463d0a30a1a685a9186f2c1cb238f1`
+- Result: **PASS**
+- Evidence: `.context/real-pdf-test-2026-08-30-l5-5r2/final/`
+
+The acceptance method is now document-wide. A named paragraph remains a regression sample but can
+no longer release the artifact: every one of the 54 formula paragraphs must have a published or
+typed state and must pass unit completeness, unit order/adjacency, neighbor gap/inline-hole, glyph
+replay, and script-baseline checks. The archived audit covers 74 extraction-order formula units, 468
+formula characters, 307 exclusive operand spans, three shared operand spans, and seven formula
+glyphs from shared spans. It classifies all 18 noncontiguous extractor records and all six residual
+FOR-01 proxy candidates; none is unexplained.
+
+The final scorecard is `98.067441` with conclusion `automatic_score_only`. FOR-02/FOR-03 have zero
+violations, the largest measured formula-neighbor gap is 9 pt, CON-01 is 162/162 (100%), title and
+complete author policy conservation has zero failures, and no confirmed critical remains. The two
+typed paragraphs are `(3,12)` `unreliable_unicode` and `(4,6)` `typeset_overflow`; neither is an
+unexplained content loss. Translate/Typeset/Poppler/MuPDF Han counts are 6,887/6,878/6,878/6,878;
+the nine-character difference is exactly the typed `(4,6)` paragraph.
+
+### Eight-round comparison
+
+The first five columns retain the previously accepted historical counts. The last three use the
+scorecard-v2 formula/CON contracts; their automatic totals should not be compared to pre-v2 scores.
+
+| Metric | L5 | L5-2 | L5-3 | L5-4 | L5-4R | L5-5 | L5-5R | L5-5R2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Result | FAIL | FAIL | PASS | FAIL | PASS | FAIL | FAIL | **PASS** |
+| Translate Han | 5,786 | 6,498 | 6,501 | 6,936 | 6,936 | 6,867 | 6,887 | **6,887** |
+| Published Han | 5,506 | 5,209 | 6,294 | 6,930 | 6,936 | 6,858 | 6,878 | **6,878** |
+| Preserved paragraphs | 9 | 17 | 4 | 2 | 1 | 2 | 2 | **2** |
+| CON-01 | N/A | N/A | N/A | N/A | N/A | 94.83% | 99.39% | **100%** |
+| FOR-01 proxy | N/A | N/A | N/A | N/A | N/A | 12 | 9 | **6 explained** |
+| FOR-02 / FOR-03 | N/A | N/A | N/A | N/A | N/A | 1 / 1 | 1 / 1 | **0 / 0** |
+| Title/author failures | N/A | N/A | N/A | N/A | N/A | 0 | 0 | **0** |
+| Scorecard conclusion | N/A | N/A | N/A | N/A | N/A | critical-blocked | critical-blocked | **non-blocking** |
+
+### Detection/execution closure
+
+Two production gaps caused L5-5R to remain blocked. First, extraction-order superscript evidence did
+not attach the `2` in `(6,1)` to the existing model formula, so the translation request could omit
+it. The boundary rule now accepts only a uniquely matched ASCII numeric script proven by font size,
+baseline delta, and metric-box attachment. Second, MuPDF split `(6,10)` into visually overlapping
+lines; the scorecard's old top-edge heuristic excluded `epsilon` and `=`, then measured a false 23 pt
+gap from the preceding prose. Production and scorecard now share the vertical-overlap rule from
+`mimus-quality-contract`; the actual `=` to `10^-9` gap is 9 pt, below the source-derived 14.9439 pt
+limit.
+
+The translation layer independently enforces CON-01 with the same lexer used by the scorecard: a
+missing numeric/unit/reference token causes one corrective retry and a second failure preserves the
+whole paragraph as typed `content_conservation`. Invalid responses are never cached. The final
+20-paper conserving-fake sweep published 20/20 with zero Internal/6, zero conservation retry, and
+zero `content_conservation` degradation across pdfTeX 8/8, XeTeX 4/4, LuaTeX 4/4, and Word 4/4.
+
+### API and strict controls
+
+Seven real Responses calls were made across L5-5R2, all paragraph translation calls and no term
+extraction calls. The user subsequently relaxed the ten-call ceiling; no additional call was needed.
+The final primary replay had 136 cache hits and one miss. The accepted strict replay had 137/137
+hits, made zero calls through a closed loopback proxy, exited 4 with `strict_degradation`, listed only
+the two reviewed typed paragraphs, and produced no output PDF. An earlier strict attempt used the
+wrong glossary fingerprint and is excluded from acceptance evidence.

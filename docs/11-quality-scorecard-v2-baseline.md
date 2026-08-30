@@ -1,6 +1,7 @@
 # M3 scorecard v2 baseline
 
-Date: 2026-08-30. Schema: scorecard v2. Thresholds remain proposals pending user approval.
+Date: 2026-08-30. Schema: scorecard v2. Thresholds remain proposals pending user approval. Sections
+1-6 preserve the pre-fix baseline; section 7 is the superseding L5-5R2 acceptance baseline.
 
 ## 1. Evidence and conclusion
 
@@ -126,3 +127,46 @@ ADR-0013 typed degradation. After that, the data favors #118 before broad #38 fi
 1,639/2,997 paragraphs (54.7%), while #38 remains at 1/46 M3 fixture coverage. Rerun this exact
 schema after the recovery round; if realized recovery is materially below the estimate, use the
 bucket residuals to choose the next fixtures rather than filling all gaps indiscriminately.
+
+## 7. Superseding L5-5R2 baseline
+
+The anchor now publishes with automatic score `98.067441` and conclusion `automatic_score_only`.
+No human-confirmed critical remains. This does not erase the six FOR-01 proxy findings: the
+document-wide audit explains each with source bytes, source/output extraction order, or the adjacent
+conserved text that completes the model-labelled formula. The human/artifact classifications live in
+`.context/real-pdf-test-2026-08-30-l5-5r2/final/acceptance/full-formula-audit.md`.
+
+| Contract | Pre-fix baseline | L5-5R2 | Disposition |
+| --- | ---: | ---: | --- |
+| CON-01 | 92.1788% | **162/162 (100%)** | runtime retry then typed `content_conservation` uses the scorecard lexer |
+| FOR-01 proxy | 33 | **6** | all six explained by full-artifact audit; zero unexplained |
+| FOR-02 excessive gap | 8 | **0** | production and scorecard share bound and visual-line membership |
+| FOR-03 unexplained hole | 8 | **0** | same execution contract as FOR-02 |
+| STR-05 title/author failures | 4 | **0** | structure-owned typed passthrough |
+| Confirmed criticals | formula leakage + title/author | **none** | automatic conclusion is non-blocking |
+
+The full formula population is 54 paragraphs: 52 published and two typed (`(3,12)`
+`unreliable_unicode`, `(4,6)` `typeset_overflow`). The replay proves all 307 exclusive formula
+operand spans, all three shared spans/seven shared glyphs, all source font references, and all 468
+formula characters. FOR-02/FOR-03 measure 64 neighbor gaps with a maximum of 9 pt and no violation.
+Eighteen noncontiguous extractor records preserve the same source extraction-order shape; they are
+not glyph loss.
+
+The final 20-paper conserving-fake regression publishes 20/20 with Internal/6 = 0, zero degraded
+pages, zero `content_conservation_retry`, and zero `content_conservation` typed reason. Preserved
+paragraph counts are workload characteristics, not publication failures:
+
+| Producer | Published | Internal/6 | Papers' preserved-paragraph range |
+| --- | ---: | ---: | ---: |
+| pdfTeX | 8/8 | 0 | 121-480 |
+| XeTeX | 4/4 | 0 | 85-1,210 |
+| LuaTeX | 4/4 | 0 | 106-536 |
+| Word | 4/4 | 0 | 21-287 |
+
+The runtime conservation net changes #118's expected behavior: a wild paragraph whose translation
+drops a conservatively detectable number, unit, or bracketed reference now receives one corrective
+retry, then publishes the original paragraph under typed `content_conservation` instead of caching
+or typesetting damaged text. Recovery estimates for the 2,997-paragraph matrix must therefore report
+three outcomes per bucket: translated recovery, typed conservation fallback, and other typed residue.
+The existing 54.7% recovery estimate remains the reason to run #118 before the broad #38 fixture
+backfill, but it must be remeasured under this fail-closed split.

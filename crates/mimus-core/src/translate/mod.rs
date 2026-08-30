@@ -711,6 +711,7 @@ pub struct TranslationRequest<'a> {
     pub target_language: &'a str,
     pub glossary: &'a Glossary,
     pub placeholder_correction: Option<&'a str>,
+    pub content_correction: Option<&'a str>,
 }
 
 pub struct TermExtractionRequest<'a> {
@@ -818,6 +819,13 @@ impl Translator for OpenAiTranslator {
         if let Some(correction) = request.placeholder_correction {
             write!(instructions, " Placeholder correction: {correction}")
                 .expect("writing to a String cannot fail");
+        }
+        if let Some(correction) = request.content_correction {
+            write!(
+                instructions,
+                " Content conservation correction: {correction}"
+            )
+            .expect("writing to a String cannot fail");
         }
         self.response_text(instructions, request.text)
     }
@@ -1106,6 +1114,7 @@ mod tests {
             target_language: "zh-CN",
             glossary: &EMPTY_GLOSSARY,
             placeholder_correction: None,
+            content_correction: None,
         }
     }
 

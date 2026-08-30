@@ -129,8 +129,12 @@ after the complete formula is audited as one unit. Source-unit adjacency uses me
 radical ink overhang does not masquerade as reversed source order; the final output gap retains the
 strict lower bound. The output formula is matched by compact exact text and expected vertical
 position; adjacent MuPDF glyph lines may jointly satisfy the complete exact text, and their bbox union
-is measured against the nearest left/right extracted lines. This prevents a standalone radical on
-the same page from satisfying a complete `sqrt` unit. Unmatched formula
+is measured against the nearest left/right extracted lines. Candidate neighbors share a visual line
+when their vertical intervals overlap under the shared
+`mimus-quality-contract::formula_items_share_line` rule; top-edge deltas are not a second threshold.
+This prevents a compact superscript union from excluding visually overlapping `=` or formula-name
+spans, and prevents a standalone radical on the same page from satisfying a complete `sqrt` unit.
+Unmatched formula
 units remain visible in `formula_units` versus `matched_units`; v2 does not invent geometry for them.
 FOR-03 intentionally shares FOR-02's derived bound, matching the adjudicated single continuity
 contract for fixed-slot and relocation paths.
@@ -146,7 +150,7 @@ pipeline handled the defect.
 | CON-01 | `mimus-quality-contract::conserved_tokens` is called by `translate::executor::execute`; the same function feeds `scorecard::conservation_measurement` | one corrective translation retry; a second violation preserves the whole paragraph with typed `content_conservation` (introduced by the stacked T2 PR) |
 | CON-02 | prompt construction injects the exact version-1 glossary; scorecard remains the independent aligned-output detector | documented exemption: glossary consistency is a semantic release proposal pending user approval, not a conservative runtime identity predicate; no production typed degradation is claimed |
 | FOR-01 | `pass::complete_model_formula_boundaries`, placeholder restoration, formula byte/font identity replay, and output round-trip validation | ambiguous boundary or replay evidence becomes `typeset_protocol`; unplaceable complete units become `typeset_overflow`; the scorecard heuristic remains an independent proxy |
-| FOR-02 | `pass::plan_paragraph` runs `normalize_formula_interleaved_punctuation_order` and `formula_continuity_is_valid` for fixed-slot and relocated plans; bound arithmetic comes only from `mimus-quality-contract::formula_continuity_limit` | repair by evidence-based segment normalization/relocation; otherwise `typeset_overflow` |
+| FOR-02 | `pass::plan_paragraph` runs `normalize_formula_interleaved_punctuation_order` and `formula_continuity_is_valid` for fixed-slot and relocated plans; bound arithmetic and visual-line membership come only from `mimus-quality-contract::{formula_continuity_limit, formula_items_share_line}` | repair by evidence-based segment normalization/relocation; otherwise `typeset_overflow` |
 | FOR-03 | same execution point and bound as FOR-02; it is the area projection of the same excessive gap, not a separate threshold | same repair/typed action as FOR-02 |
 
 Test-level alignment checklist:
