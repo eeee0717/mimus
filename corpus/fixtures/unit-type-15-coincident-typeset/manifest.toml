@@ -1,0 +1,137 @@
+# unit-type-15-coincident-typeset -- expected manifest
+#
+# Geometry is derived from the pinned font's TrueType tables and PDF text-state
+# arithmetic. The two shows are byte-identical and share one baseline origin.
+
+schema_version = 1
+
+[identity]
+id = "unit-type-15-coincident-typeset"
+name = "Coincident typeset extraction multiplicity"
+class = "unit"
+legality = "legal"
+cases = ["TYPE-15"]
+priority = "M3"
+variable = "The same encoded glyph is painted twice at exactly the same baseline in one text object, matching the extraction shape produced by Word-derived translated spans"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-type-15-coincident-typeset.pdf"
+pdf_sha256 = "5ffbe28b2fdf139b6884e0cca5f6ea15939e93121e78018fe2ca9947b0b6404e"
+font_provenance = "vendored"
+fonts = [
+    { file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" },
+]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d747970652d31352d636f69"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "T15"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "M"
+visual_text = "MM"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.168, 82.356, 131.136]
+visual_bbox = [73.177734, 120.0, 81.181641, 128.748047]
+
+[[expected.alignment]]
+page = 0
+diagnostic = true
+walked_text = "MM"
+walked_character_count = 2
+engine_character_count = 1
+extraction_equivalent_count = 0
+explained_count = 0
+strong_unicode_conflict_count = 0
+weak_unicode_conflict_count = 0
+unresolved_unicode_count = 0
+walk_only_count = 0
+engine_only_count = 0
+residual_count = 3
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 120 Tm
+(M) Tj
+1 0 0 1 72 120 Tm
+(M) Tj
+ET
+"""
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 9
+
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 5
+
+[[expected.reference]]
+from_object = 5
+path = ["/FontDescriptor"]
+to_object = 6
+
+[[expected.reference]]
+from_object = 5
+path = ["/ToUnicode"]
+to_object = 8
+
+[[expected.reference]]
+from_object = 6
+path = ["/FontFile2"]
+to_object = 7
+
+[[expected.behaviour]]
+id = "TYPE-15-extraction-equivalence"
+assertion = "The content stream paints both identical shows, while PDFium, Poppler, and MuPDF may expose one semantic character at their shared baseline"
+observable_via = "qpdf expanded content plus the three independent extraction views"
+
+[[expected.behaviour]]
+id = "TYPE-15-roundtrip-negative-control"
+assertion = "Round-trip validation accepts only coincident duplicates with identical Unicode; a missing different character or a same character at a distinct baseline remains output_mismatch"
+observable_via = "mimus-core mixed-output validation regression tests"
+
+[oracle]
+checks = ["determinism", "legality", "structure", "page-geometry", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]
+
+[[adjudication]]
+date = "2026-08-30"
+issue = "Word-derived translated output contains byte-identical same-origin shows that PDFium folds in its extraction view, while the content stream and ToUnicode mapping remain complete"
+resolution = "Model extraction multiplicity explicitly and constrain equivalence to identical Unicode at the same baseline; do not weaken distinct-character or distinct-position validation"
+
+[[adjudication]]
+date = "2026-08-30"
+issue = "The initial outline expectation used the single-show M bounds rather than the coincident-draw SVG bounds"
+resolution = "Use the independently measured coincident-draw bounds shared with ALIGN-06; baseline and metric-box derivations remain unchanged"

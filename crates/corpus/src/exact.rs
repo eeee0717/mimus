@@ -50,6 +50,11 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
             repo_root,
             b"BT\n/F1 12 Tf\n1 0 0 1 72 140 Tm\n(MIM) Tj\n1 0 0 1 72 126 Tm\n(MIMUS) Tj\n1 0 0 1 220 140 Tm\n(U) Tj\n1 0 0 1 230 140 Tm\n(S) Tj\nET\n",
         ),
+        "unit-type-15-coincident-typeset" => basic_text(
+            fixture_id,
+            repo_root,
+            b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(M) Tj\n1 0 0 1 72 120 Tm\n(M) Tj\nET\n",
+        ),
         "unit-para-17-author-columns" => basic_text(
             fixture_id,
             repo_root,

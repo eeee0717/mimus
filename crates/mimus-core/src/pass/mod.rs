@@ -7316,6 +7316,7 @@ fn validate_mixed_output_characters(
             matched[owner] = true;
         }
     }
+    let mut proven_typeset_ink: Vec<ExpectedOutputCharacter> = Vec::new();
     for character in typeset {
         let expected_character = ExpectedOutputCharacter {
             unicode: Some(character.unicode),
@@ -7325,6 +7326,16 @@ fn validate_mixed_output_characters(
         else {
             // PDFium's extraction view may omit whitespace that is present in the content stream.
             if character.unicode.is_whitespace() {
+                continue;
+            }
+            if proven_typeset_ink.iter().any(|proven| {
+                proven.unicode == expected_character.unicode
+                    && point_close(
+                        proven.baseline_origin,
+                        expected_character.baseline_origin,
+                        tolerance,
+                    )
+            }) {
                 continue;
             }
             let observed = actual
@@ -7355,15 +7366,24 @@ fn validate_mixed_output_characters(
         for owner in owners {
             matched[owner] = true;
         }
+        proven_typeset_ink.push(expected_character);
     }
-    if actual
+    if let Some(character) = actual
         .iter()
         .zip(&matched)
-        .any(|(character, matched)| !matched && !is_pdfium_c0_extraction_marker(character))
+        .find_map(|(character, matched)| {
+            (!matched
+                && !is_pdfium_c0_extraction_marker(character)
+                && !retained_marker_matches_output_hyphen(retained, character, tolerance))
+            .then_some(character)
+        })
     {
         return Err(output_mismatch(format!(
-            "output page {} has an unexpected extracted character",
-            page_index + 1
+            "output page {} has unexpected extracted character U+{:04X} at ({:.6}, {:.6})",
+            page_index + 1,
+            character.unicode_value,
+            character.baseline_origin.x,
+            character.baseline_origin.y,
         )));
     }
     Ok(())
@@ -7388,9 +7408,15 @@ fn match_output_character(
                 )
         })
         .min_by(|(_, left), (_, right)| {
-            point_distance_squared(expected.baseline_origin, left.baseline_origin).total_cmp(
-                &point_distance_squared(expected.baseline_origin, right.baseline_origin),
-            )
+            (left.unicode != expected.unicode)
+                .cmp(&(right.unicode != expected.unicode))
+                .then_with(|| {
+                    point_distance_squared(expected.baseline_origin, left.baseline_origin)
+                        .total_cmp(&point_distance_squared(
+                            expected.baseline_origin,
+                            right.baseline_origin,
+                        ))
+                })
         })
         .map(|(index, _)| vec![index]);
     if scalar_match.is_some() {
@@ -7424,6 +7450,18 @@ fn match_output_character(
 
 fn output_unicode_matches(expected: Option<char>, actual: &PageCharSnapshot) -> bool {
     actual.unicode == expected || (expected == Some('-') && actual.unicode_value == 2)
+}
+
+fn retained_marker_matches_output_hyphen(
+    retained: &[ExpectedOutputCharacter],
+    actual: &PageCharSnapshot,
+    tolerance: f64,
+) -> bool {
+    actual.unicode == Some('-')
+        && retained.iter().any(|expected| {
+            expected.unicode == Some('\u{2}')
+                && point_close(expected.baseline_origin, actual.baseline_origin, tolerance)
+        })
 }
 
 fn point_distance_squared(left: il::Point, right: il::Point) -> f64 {
@@ -9991,6 +10029,50 @@ mod tests {
     }
 
     #[test]
+    fn mixed_output_validation_prefers_exact_hyphen_over_pdfium_marker() {
+        let expected = TypesetCharacter {
+            unicode: '-',
+            baseline_origin: Point { x: 10.0, y: 20.0 },
+        };
+        let marker = PageCharSnapshot {
+            index: 0,
+            unicode: Some('\u{2}'),
+            unicode_value: 2,
+            is_hyphen: None,
+            baseline_origin: expected.baseline_origin,
+            tight_box: Rect::default(),
+            loose_box: Rect::default(),
+        };
+        let exact = PageCharSnapshot {
+            index: 1,
+            unicode: Some('-'),
+            unicode_value: u32::from('-'),
+            ..marker.clone()
+        };
+
+        validate_mixed_output_characters(0, &[], &[expected], &[marker, exact], 0.001).unwrap();
+    }
+
+    #[test]
+    fn mixed_output_validation_accepts_retained_marker_as_output_hyphen() {
+        let retained = ExpectedOutputCharacter {
+            unicode: Some('\u{2}'),
+            baseline_origin: Point { x: 10.0, y: 20.0 },
+        };
+        let actual = PageCharSnapshot {
+            index: 0,
+            unicode: Some('-'),
+            unicode_value: u32::from('-'),
+            is_hyphen: None,
+            baseline_origin: retained.baseline_origin,
+            tight_box: Rect::default(),
+            loose_box: Rect::default(),
+        };
+
+        validate_mixed_output_characters(0, &[retained], &[], &[actual], 0.001).unwrap();
+    }
+
+    #[test]
     fn mixed_output_validation_consumes_both_pdfium_utf16_surrogates() {
         let expected = TypesetCharacter {
             unicode: '\u{1D44E}',
@@ -10028,6 +10110,51 @@ mod tests {
 
         validate_mixed_output_characters(0, &[marker], &[], &[], 0.001).unwrap();
         validate_mixed_output_characters(0, &[], &[], &[actual_marker], 0.001).unwrap();
+    }
+
+    #[test]
+    fn mixed_output_validation_accepts_coincident_pdfium_extraction_multiplicity() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "../../corpus/fixtures/unit-type-15-coincident-typeset/unit-type-15-coincident-typeset.pdf",
+        );
+        let candidate = std::fs::read(fixture).unwrap();
+        let pdfium = crate::engine::pdfium::PdfiumEngine::from_environment().unwrap();
+        let actual = pdfium.page_characters(&candidate, 0).unwrap();
+        let coincident = TypesetCharacter {
+            unicode: 'M',
+            baseline_origin: Point { x: 72.0, y: 120.0 },
+        };
+
+        assert_eq!(actual.len(), 1, "PDFium folds the two coincident shows");
+        validate_typeset_characters(0, &[coincident.clone(), coincident.clone()], &actual, 0.001)
+            .unwrap();
+
+        let missing_distinct_character = TypesetCharacter {
+            unicode: 'I',
+            ..coincident.clone()
+        };
+        assert!(
+            validate_typeset_characters(
+                0,
+                &[coincident.clone(), missing_distinct_character],
+                &actual,
+                0.001,
+            )
+            .is_err()
+        );
+        let missing_distinct_position = TypesetCharacter {
+            baseline_origin: Point { x: 73.0, y: 120.0 },
+            ..coincident.clone()
+        };
+        assert!(
+            validate_typeset_characters(
+                0,
+                &[coincident, missing_distinct_position],
+                &actual,
+                0.001,
+            )
+            .is_err()
+        );
     }
 
     #[test]
