@@ -1,0 +1,12 @@
+[package]
+name = "mimus-quality-contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Pure quality contracts shared by mimus production gates and offline scorecards."
+
+[lib]
+path = "src/lib.rs"

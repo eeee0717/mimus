@@ -120,7 +120,8 @@ max(2 * median(source inline word spacing), 1.5 * median(source font size))
 
 oracle 按 `RestoredTranslation` 的 text/formula segment 顺序检查：
 
-- 同行公式与前后语义邻居的间距不得超过推导上界；
+- 同行公式与前后语义邻居的间距必须在 `[-0.01pt, 推导上界 + 0.01pt]` 内；超过
+  `0.01pt` 的负间距表示提取序语义项在几何上逆转，不得因“仍小于上界”而放行；
 - 语义邻居换行时，新行首项到所属行槽左边界的距离不得超过同一上界，防止 fixed
   formula 独自留在源行中部；
 - 相邻项的阅读序与公式单元顺序不得逆转；
@@ -128,6 +129,28 @@ oracle 按 `RestoredTranslation` 的 text/formula segment 顺序检查：
   相邻公式链作为不可拆原子计算宽度，不得只约束链中第一对；
 - 与公式邻接的标点不得拆行。relocation 放置器在装箱前把公式与相邻标点视为不可拆
   组合，oracle 再作最终验证。
+
+PDF 提取序也可能把一个仅含标点的 text segment 插在两个 model 公式单元之间，而其
+源几何实际位于后一公式之后。Typeset 可以在不改变 prepared request/cache key 的前提下
+把该 source/translated segment 一起移到后一公式之后，但必须同时证明：中间源段的非空
+字符全是标点；它与后一公式同一视觉行且位于其右侧、间距不超过本节推导界；后一公式
+后的 source/translated segment 均为空。任一证据不满足即不重排，由 fixed 与 relocation
+共用 oracle 拒绝，最终 `typeset_overflow` 段级保留。这个形状不同于下一段的 radical
+attachment：前后两端都已经是 model 公式，不能把中间标点或任一公式重新分类。
+
+同一类提取逆序还可能把公式头（例如 `√`）、视觉上位于完整公式之后的一整段正文、
+公式尾（例如 `d_k`）依次写入 IL。只有以下证据同时成立时，Typeset 才可把整个中间
+source/translated segment 前置合并到后一 text segment，使两个公式片段重新相邻：
+
+- 公式头与公式尾至少各有一个字符共享完全相同的 model `inline_formula` assignment；
+- 两个公式片段的源 metric box 同行相邻，间距不超过本节推导界；源归并证据故意不用
+  visual ink box，因为 radical 等字形可自然伸出 advance box；
+- 中间段的第一个非空字符是公式邻接标点，中间段每个字符都与公式尾处于同一视觉行，
+  且中间段整体位于公式尾右侧、间距不超过同一推导界。
+
+任一证据不满足即不重排。metric box 只用于判断源单元归属；输出连续性 oracle 仍按
+实际计划 bounds 执行严格的 `-0.01pt` 下界，不因源字形 ink 外伸而放宽最终发布门禁。
+这个归并不改变 layout label、翻译请求、cache key、公式源字节或字体身份。
 
 PDF 提取阅读序可能把一个源 `√` 放进前一 text segment，虽然其源几何紧贴后一个
 model-labelled operand。为避免改动翻译输入，Typeset 可以把这个源 radical 并入后续公式
@@ -142,6 +165,14 @@ unit；fixed-slot 的连续性 bounds 同样包含它。这个操作不改变 mo
 relocation → relocation 仍失败或不具备重定位资格 → `typeset_overflow` typed 段级保留。
 oracle 拒绝后不得通过继续缩字号、扩大碰撞容差、删除公式字符或重绘公式来换取成功；
 既有字号搜索只服务于进入 oracle 之前的几何装箱。
+
+界与矩形邻接算术的数值实现唯一位于无引擎依赖的
+`mimus-quality-contract::{formula_continuity_limit, formula_items_are_adjacent}`。
+生产 `mimus-core` 与离线 `scorecard` 分别筛选本节规定的源样本，再调用同一纯函数；两侧
+不得复制 median、`max(2 * spacing, 1.5em)` 或同行间距判定算式。scorecard 仍不依赖
+生产 crate；MuPDF 把 radical、operand、脚本拆成多个相邻 text line 时，scorecard 按
+源归并后的完整公式文本匹配整组相邻 glyph line，再以其并集测量邻接，禁止退回单独
+radical 的歧义匹配。
 
 ## 后果
 

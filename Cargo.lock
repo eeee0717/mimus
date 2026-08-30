@@ -1185,6 +1185,7 @@ version = "0.0.0"
 dependencies = [
  "image",
  "lopdf",
+ "mimus-quality-contract",
  "ort",
  "pdfium-render",
  "rayon",
@@ -1200,6 +1201,10 @@ dependencies = [
  "toml",
  "ttf-parser",
 ]
+
+[[package]]
+name = "mimus-quality-contract"
+version = "0.0.0"
 
 [[package]]
 name = "miniz_oxide"
@@ -1772,6 +1777,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "mimus-quality-contract",
  "serde",
  "serde_json",
  "sha2 0.10.9",
