@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use mimus_quality_contract::missing_conserved_tokens;
+
 use super::cache::{CachedTranslation, TranslationCache, TranslationCacheKey};
 use super::{
     Glossary, PlaceholderViolation, PreparedTranslation, RedactedTranslationProfile,
@@ -10,6 +12,7 @@ use crate::event::CacheStatus;
 
 const MAX_RETRIES: usize = 3;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+const MAX_CONSERVATION_TOKEN_SAMPLE: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RetryAttempt {
@@ -28,6 +31,10 @@ pub(crate) enum TranslationOutcome {
         violation: PlaceholderViolation,
         profile: RedactedTranslationProfile,
     },
+    ContentConservationViolation {
+        missing_token_count: usize,
+        missing_tokens: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,10 +43,18 @@ pub(crate) struct PlaceholderRetryAttempt {
     pub violation: PlaceholderViolation,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContentConservationRetryAttempt {
+    pub attempt: usize,
+    pub missing_token_count: usize,
+    pub missing_tokens: Vec<String>,
+}
+
 pub(crate) struct TranslationExecution {
     pub cache_status: Option<CacheStatus>,
     pub retries: Vec<RetryAttempt>,
     pub placeholder_retries: Vec<PlaceholderRetryAttempt>,
+    pub content_conservation_retries: Vec<ContentConservationRetryAttempt>,
     pub outcome: Result<TranslationOutcome>,
 }
 
@@ -63,17 +78,22 @@ pub(crate) fn execute(
                     cache_status: Some(CacheStatus::Hit),
                     retries: Vec::new(),
                     placeholder_retries: Vec::new(),
+                    content_conservation_retries: Vec::new(),
                     outcome: Ok(TranslationOutcome::Identity {
                         suspicious: request.prepared.echo_retry_eligible(),
                     }),
                 };
             }
             Ok(Some(CachedTranslation::Translated(validated))) => {
-                if let Ok(restored) = request.prepared.restore(&validated) {
+                if missing_conserved_tokens(request.prepared.request_text(), validated.as_str())
+                    .is_empty()
+                    && let Ok(restored) = request.prepared.restore(&validated)
+                {
                     return TranslationExecution {
                         cache_status: Some(CacheStatus::Hit),
                         retries: Vec::new(),
                         placeholder_retries: Vec::new(),
+                        content_conservation_retries: Vec::new(),
                         outcome: Ok(TranslationOutcome::Translated(restored)),
                     };
                 }
@@ -85,6 +105,7 @@ pub(crate) fn execute(
                     cache_status: None,
                     retries: Vec::new(),
                     placeholder_retries: Vec::new(),
+                    content_conservation_retries: Vec::new(),
                     outcome: Err(error),
                 };
             }
@@ -95,9 +116,12 @@ pub(crate) fn execute(
 
     let mut retries = Vec::new();
     let mut placeholder_retries = Vec::new();
+    let mut content_conservation_retries = Vec::new();
     let mut echo_retried = false;
     let mut placeholder_retried = false;
+    let mut content_conservation_retried = false;
     let mut placeholder_correction = None;
+    let mut content_correction = None;
     let mut response_attempt = 0;
     let outcome = loop {
         let provider_request = TranslationRequest {
@@ -105,6 +129,7 @@ pub(crate) fn execute(
             target_language: request.target_language,
             glossary: request.glossary,
             placeholder_correction: placeholder_correction.as_deref(),
+            content_correction: content_correction.as_deref(),
         };
         let (output, attempt_retries) =
             translate_with_retry(translator, sleeper, &provider_request);
@@ -133,6 +158,26 @@ pub(crate) fn execute(
                 validated,
                 restored,
             } => {
+                let missing =
+                    missing_conserved_tokens(request.prepared.request_text(), validated.as_str());
+                if !missing.is_empty() && !content_conservation_retried {
+                    content_conservation_retried = true;
+                    let missing_token_count = missing.len();
+                    let missing_tokens = bounded_conservation_tokens(&missing);
+                    content_correction = Some(content_conservation_correction(&missing_tokens));
+                    content_conservation_retries.push(ContentConservationRetryAttempt {
+                        attempt: response_attempt,
+                        missing_token_count,
+                        missing_tokens,
+                    });
+                    continue;
+                }
+                if !missing.is_empty() {
+                    break Ok(TranslationOutcome::ContentConservationViolation {
+                        missing_token_count: missing.len(),
+                        missing_tokens: bounded_conservation_tokens(&missing),
+                    });
+                }
                 let result = cache
                     .map(|cache| cache.insert(request.cache_key, &validated))
                     .transpose()
@@ -163,8 +208,24 @@ pub(crate) fn execute(
         cache_status,
         retries,
         placeholder_retries,
+        content_conservation_retries,
         outcome,
     }
+}
+
+fn bounded_conservation_tokens(tokens: &[String]) -> Vec<String> {
+    tokens
+        .iter()
+        .take(MAX_CONSERVATION_TOKEN_SAMPLE)
+        .cloned()
+        .collect()
+}
+
+fn content_conservation_correction(missing_tokens: &[String]) -> String {
+    format!(
+        "the previous response omitted conserved source tokens: {}. preserve every listed token or a lexically explicit equivalent.",
+        missing_tokens.join(", ")
+    )
 }
 
 enum ClassifiedOutcome {
@@ -256,6 +317,7 @@ mod tests {
     struct ScriptedTranslator {
         outputs: Mutex<VecDeque<&'static str>>,
         placeholder_corrections: Mutex<Vec<Option<String>>>,
+        content_corrections: Mutex<Vec<Option<String>>>,
         calls: AtomicUsize,
     }
 
@@ -264,12 +326,17 @@ mod tests {
             Self {
                 outputs: Mutex::new(outputs.into_iter().collect()),
                 placeholder_corrections: Mutex::new(Vec::new()),
+                content_corrections: Mutex::new(Vec::new()),
                 calls: AtomicUsize::new(0),
             }
         }
 
         fn placeholder_corrections(&self) -> Vec<Option<String>> {
             self.placeholder_corrections.lock().unwrap().clone()
+        }
+
+        fn content_corrections(&self) -> Vec<Option<String>> {
+            self.content_corrections.lock().unwrap().clone()
         }
     }
 
@@ -280,6 +347,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(request.placeholder_correction.map(str::to_owned));
+            self.content_corrections
+                .lock()
+                .unwrap()
+                .push(request.content_correction.map(str::to_owned));
             Ok(self
                 .outputs
                 .lock()
@@ -599,6 +670,62 @@ mod tests {
                 violation: PlaceholderViolation::Missing,
             }]
         );
+    }
+
+    #[test]
+    fn missing_conserved_content_gets_one_corrected_retry() {
+        let prepared = PreparedTranslation::new([PreparedPart::Text {
+            text: "At 3.5 days, latency was 20 ms.".to_owned(),
+            bold: false,
+        }]);
+        let translator = ScriptedTranslator::new(["延迟为 20 ms。", "在 3.5 天时，延迟为 20 ms。"]);
+
+        let execution =
+            execute_prepared_without_cache(&prepared, &translator, &RecordingSleeper::default());
+
+        assert!(matches!(
+            execution.outcome,
+            Ok(TranslationOutcome::Translated(_))
+        ));
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            translator.content_corrections(),
+            [
+                None,
+                Some(
+                    "the previous response omitted conserved source tokens: 3.5. preserve every listed token or a lexically explicit equivalent."
+                        .to_owned()
+                ),
+            ]
+        );
+        assert_eq!(
+            execution.content_conservation_retries,
+            [ContentConservationRetryAttempt {
+                attempt: 1,
+                missing_token_count: 1,
+                missing_tokens: vec!["3.5".to_owned()],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_second_conservation_failure_returns_an_enumerable_violation() {
+        let prepared = PreparedTranslation::new([PreparedPart::Text {
+            text: "Use 4 models and see [7].".to_owned(),
+            bold: false,
+        }]);
+        let translator = ScriptedTranslator::new(["使用模型。", "仍然使用模型。。"]);
+
+        let execution =
+            execute_prepared_without_cache(&prepared, &translator, &RecordingSleeper::default());
+
+        assert!(matches!(
+            execution.outcome,
+            Ok(TranslationOutcome::ContentConservationViolation { ref missing_tokens, .. })
+                if missing_tokens == &["4".to_owned(), "[7]".to_owned()]
+        ));
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(execution.content_conservation_retries.len(), 1);
     }
 
     #[test]

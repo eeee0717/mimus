@@ -337,6 +337,10 @@ fn deterministic_translation(input: &str) -> String {
             emitted_text = true;
             segment_index += 1;
         }
+        for token in mimus_quality_contract::conserved_tokens(segment) {
+            output.push(' ');
+            output.push_str(&token);
+        }
         rest = &rest[segment.len()..];
     }
     if !emitted_text && output.is_empty() {
@@ -879,6 +883,39 @@ fn write_nested_form_with_bad_matrix(directory: &Path) -> PathBuf {
             "Matrix",
             lopdf::Object::Array(vec![1.into(), 0.into(), 0.into(), 1.into()]),
         );
+    document.save(&output).unwrap();
+    output
+}
+
+fn write_numeric_conservation_fixture(directory: &Path) -> PathBuf {
+    let input =
+        repo_root().join("corpus/fixtures/unit-base-01-single-line/unit-base-01-single-line.pdf");
+    let output = directory.join("numeric-conservation.pdf");
+    let mut document = lopdf::Document::load(input).unwrap();
+    document
+        .get_object_mut((5, 0))
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .get_mut(b"Widths")
+        .unwrap()
+        .as_array_mut()
+        .unwrap()[52 - 32] = 636.into();
+    document
+        .get_object_mut((8, 0))
+        .unwrap()
+        .as_stream_mut()
+        .unwrap()
+        .set_plain_content(
+            b"/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /MimusExact-UCS def\n/CMapType 2 def\n1 begincodespacerange\n<00> <FF>\nendcodespacerange\n5 beginbfchar\n<34> <0034>\n<49> <0049>\n<4D> <004D>\n<53> <0053>\n<55> <0055>\nendbfchar\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n"
+                .to_vec(),
+        );
+    document
+        .get_object_mut((9, 0))
+        .unwrap()
+        .as_stream_mut()
+        .unwrap()
+        .set_plain_content(b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(M4MUS) Tj\nET\n".to_vec());
     document.save(&output).unwrap();
     output
 }
@@ -2214,7 +2251,11 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
                                 paragraphs.iter().any(|paragraph| {
                                     matches!(
                                         paragraph["reason"].as_str(),
-                                        Some("translation_failure" | "placeholder_violation")
+                                        Some(
+                                            "translation_failure"
+                                                | "placeholder_violation"
+                                                | "content_conservation"
+                                        )
                                     )
                                 })
                             })
@@ -2624,6 +2665,103 @@ fn semantic_retries_recover_once_and_never_cache_invalid_placeholder_responses()
                 .contains("previous response introduced unknown placeholders")
         );
     }
+    invalid_server.assert_clean();
+    assert_tree_has_no_secret(directory.path());
+}
+
+#[test]
+fn content_conservation_retry_is_injected_and_repeated_failure_is_never_cached() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = write_numeric_conservation_fixture(directory.path());
+    let recovered_server =
+        GateResponsesServer::start([ScriptedReply::Output("中"), ScriptedReply::Output("中4")]);
+    let recovered = run_openai_path(
+        &input,
+        None,
+        &recovered_server,
+        RunOptions {
+            output: &directory.path().join("conservation-recovered.pdf"),
+            debug: None,
+            cache: None,
+            model: "m3-content-conservation-recovery-model",
+            target_language: "zh-CN",
+            glossary: None,
+            auto_terms: false,
+            strict: false,
+        },
+    );
+    assert!(recovered.status.success());
+    let recovered_events = parse_events(&recovered.stdout);
+    assert!(
+        recovered_events.iter().any(|event| {
+            event["id"] == "content_conservation_retry"
+                && event["attempt"] == 1
+                && event["missing_token_count"] == 1
+                && event["missing_tokens"] == serde_json::json!(["4"])
+        }),
+        "{}",
+        String::from_utf8_lossy(&recovered.stdout)
+    );
+    assert!(
+        recovered_events
+            .iter()
+            .all(|event| event["id"] != "content_conservation_violation")
+    );
+    let recovered_requests = recovered_server.requests();
+    assert_eq!(recovered_requests.len(), 2);
+    assert!(
+        !recovered_requests[0]
+            .instructions
+            .contains("conserved source tokens")
+    );
+    assert!(
+        recovered_requests[1]
+            .instructions
+            .contains("omitted conserved source tokens: 4")
+    );
+    recovered_server.assert_clean();
+
+    let cache = directory.path().join("invalid-conservation.redb");
+    let invalid_server = GateResponsesServer::start([
+        ScriptedReply::Output("中"),
+        ScriptedReply::Output("中"),
+        ScriptedReply::Output("中"),
+        ScriptedReply::Output("中"),
+    ]);
+    for run in 0..2 {
+        let invalid = run_openai_path(
+            &input,
+            None,
+            &invalid_server,
+            RunOptions {
+                output: &directory
+                    .path()
+                    .join(format!("conservation-invalid-{run}.pdf")),
+                debug: None,
+                cache: Some(&cache),
+                model: "m3-content-conservation-invalid-model",
+                target_language: "zh-CN",
+                glossary: None,
+                auto_terms: false,
+                strict: false,
+            },
+        );
+        assert_single_preserved_paragraph(&invalid, "content_conservation");
+        let events = parse_events(&invalid.stdout);
+        assert!(events.iter().any(|event| {
+            event["id"] == "content_conservation_violation" && event["missing_token_count"] == 1
+        }));
+        assert!(
+            events.iter().any(|event| {
+                event["event"] == "translation_cache" && event["status"] == "miss"
+            })
+        );
+    }
+    assert_eq!(
+        invalid_server.request_count(),
+        4,
+        "a content-conservation violation entered the translation cache"
+    );
     invalid_server.assert_clean();
     assert_tree_has_no_secret(directory.path());
 }

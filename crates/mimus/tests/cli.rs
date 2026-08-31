@@ -102,12 +102,21 @@ fn handle_responses_request(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<Str
     let (status, body) = if input == "first" {
         (
             "400 Bad Request",
-            r#"{"error":"injected table-cell failure"}"#,
+            r#"{"error":"injected table-cell failure"}"#.to_owned(),
         )
     } else if input == "Scale by √{v1}, then continue." {
-        ("200 OK", r#"{"output_text":"A√B{v1}."}"#)
+        ("200 OK", r#"{"output_text":"A√B{v1}."}"#.to_owned())
+    } else if matches!(
+        input.as_str(),
+        "1204 ops" | "1198 ops" | "8.1 ms" | "8.3 ms"
+    ) {
+        let tokens = mimus_quality_contract::conserved_tokens(&input).join(" ");
+        (
+            "200 OK",
+            serde_json::json!({ "output_text": format!("M{tokens}") }).to_string(),
+        )
     } else {
-        ("200 OK", r#"{"output_text":"M"}"#)
+        ("200 OK", r#"{"output_text":"M"}"#.to_owned())
     };
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -2307,11 +2316,10 @@ fn partial_model_formula_regions_are_completed_before_translation() {
         .unwrap();
     assert_eq!(translated, "A√B.");
     let final_paragraph = &after["pages"][0]["paragraphs"][4];
-    assert!(
-        final_paragraph.get("preserved").is_none(),
-        "{final_paragraph:#}"
-    );
-    assert_eq!(final_paragraph["translated_text"], "A√B.");
+    // The source root rule shares an unsafe graphics-state scope. The short fake translation
+    // exceeds the source-derived fixed-slot continuity limit, so relocation must fail closed.
+    assert_eq!(final_paragraph["preserved"], "typeset_protocol");
+    assert!(final_paragraph["translated_text"].is_null());
     for extractor in ["poppler", "mupdf"] {
         let extracted = match extractor {
             "poppler" => Command::new("pdftotext")
@@ -2553,12 +2561,19 @@ fn enabled_table_translation_uses_cells_and_preserves_only_the_failed_cell() {
     assert_eq!(il_paragraph_text(preserved[0]), "first");
     assert_eq!(preserved[0]["preserved"], "translation_failure");
     assert!(preserved[0]["translated_text"].is_null());
-    assert!(
-        paragraphs
-            .iter()
-            .filter(|paragraph| paragraph.get("preserved").is_none())
-            .all(|paragraph| paragraph["translated_text"] == "M")
-    );
+    assert!(paragraphs.iter().all(|paragraph| {
+        if paragraph.get("preserved").is_some() {
+            return true;
+        }
+        let source = il_paragraph_text(paragraph);
+        let tokens = mimus_quality_contract::conserved_tokens(&source).join(" ");
+        let expected = if tokens.is_empty() {
+            "M".to_owned()
+        } else {
+            format!("M{tokens}")
+        };
+        paragraph["translated_text"] == expected
+    }));
 }
 
 #[test]

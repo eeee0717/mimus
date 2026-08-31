@@ -241,3 +241,79 @@ Under the accepted baseline of BabelDOC parity, the real-paper translation is **
 loss, zero degraded pages, zero overflow, an intact graphics layer, and heading placement that
 matches the baseline. The remaining open work is tracked in #105-#108 and #38 and is not a blocker
 for this judgement.
+
+## L5-5R2 formula-gated acceptance
+
+- Date: 2026-08-30; replacement accepted 2026-08-31 (Asia/Shanghai)
+- Base stack: PR #138 plus the L5-5R2 conservation/formula-alignment layer
+- Input SHA-256: `bdfaa68d8984f0dc02beaca527b76f207d99b666d31d1da728ee0728182df697`
+- Replacement output SHA-256: `b3de6f10522f64a7e8bedba292c01d51724fb616f298bd4917ed8e54a475c0ef`
+- Replacement cache SHA-256: `e5e825564ff2166c672db271c48745b1e467057ab8be09d51f4adca14f58e94c`
+- Result: **PASS (replacement)**; the original `569095...b64a` acceptance remains withdrawn
+- Evidence: `.context/vector-formula-fix/real6/`
+
+The 2026-08-30 text-only audit is retained as a negative control: it omitted vector and raster formula
+ink, so its `98.067441` score could not release the artifact. The replacement method is document-wide
+and ink-closed. Every one of the 54 formula paragraphs has a published or ADR-0013 typed state and is
+audited for unit completeness, order/adjacency, neighbor gap/inline hole, glyph replay, script
+baseline, vector paths, and inline images. The replacement score is `97.988578`, with no confirmed
+critical: FOR-04 is `0/71`, FOR-05 is `0/4`, FOR-02/FOR-03 are `0/0`, and CON-01 is `161/161`.
+
+The screenshot regression at `(3,4)` now replays the detached radical and `d_k` under one page-space
+delta. `(3,9)` likewise moves the numerator, fraction/radical paths, and operand as one rigid body;
+`(4,21)` moves its radical overbar with the operand. Named rows remain regression samples, not a
+substitute for the 54-row audit.
+
+### Eight-round comparison
+
+The first five columns retain the previously accepted historical counts. The last three use the
+scorecard-v2 formula/CON contracts; their automatic totals should not be compared to pre-v2 scores.
+
+| Metric | L5 | L5-2 | L5-3 | L5-4 | L5-4R | L5-5 | L5-5R | L5-5R2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Result | FAIL | FAIL | PASS | FAIL | PASS | FAIL | FAIL | **PASS (replacement)** |
+| Translate Han | 5,786 | 6,498 | 6,501 | 6,936 | 6,936 | 6,867 | 6,887 | **6,887** |
+| Published Han | 5,506 | 5,209 | 6,294 | 6,930 | 6,936 | 6,858 | 6,878 | **6,878** |
+| Preserved paragraphs | 9 | 17 | 4 | 2 | 1 | 2 | 2 | **2** |
+| CON-01 | N/A | N/A | N/A | N/A | N/A | 94.83% | 99.39% | **100%** |
+| FOR-01 proxy | N/A | N/A | N/A | N/A | N/A | 12 | 9 | **6 explained** |
+| FOR-02 / FOR-03 | N/A | N/A | N/A | N/A | N/A | 1 / 1 | 1 / 1 | **0 / 0** |
+| FOR-04 / FOR-05 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | **0/71 / 0/4** |
+| Title/author failures | N/A | N/A | N/A | N/A | N/A | 0 | 0 | **0** |
+| Scorecard conclusion | N/A | N/A | N/A | N/A | N/A | critical-blocked | critical-blocked | **non-blocking** |
+
+### Detection/execution closure
+
+Four production gaps caused the withdrawn artifacts to remain blocked. First, extraction-order
+superscript evidence did not attach the `2` in `(6,1)` to the existing model formula, so the
+translation request could omit it. The boundary rule now accepts only a uniquely matched ASCII
+numeric script proven by font size, baseline delta, and metric-box attachment. Second, MuPDF split
+`(6,10)` into visually overlapping
+lines; the scorecard's old top-edge heuristic excluded `epsilon` and `=`, then measured a false 23 pt
+gap from the preceding prose. Production and scorecard now share the vertical-overlap rule from
+`mimus-quality-contract`; the actual `=` to `10^-9` gap is 9 pt, below the source-derived 14.9439 pt
+limit.
+
+Third, formula relocation owned only text-show operands: fraction/radical paths could remain in the
+source slot while glyphs moved. The walker now exposes bounded path/image spans, ownership requires a
+unique complete graphics scope, and Typeset applies the glyph delta to the whole ink-closed unit or
+preserves the paragraph as typed `typeset_protocol`. Fourth, extraction order could place a detached
+radical in an earlier text segment. Whole-paragraph visual ownership now attaches it only when it
+uniquely matches one existing model formula; formula existence remains model-owned. FOR-04 detects
+source-slot residue, while FOR-05 independently detects missing or differently translated components.
+
+The translation layer independently enforces CON-01 with the same lexer used by the scorecard: a
+missing numeric/unit/reference token causes one corrective retry and a second failure preserves the
+whole paragraph as typed `content_conservation`. Invalid responses are never cached. The final
+20-paper conserving-fake sweep published 20/20 with zero Internal/6, zero conservation retry, and
+zero `content_conservation` degradation across pdfTeX 8/8, XeTeX 4/4, LuaTeX 4/4, and Word 4/4.
+
+### API and strict controls
+
+The original L5-5R2 used seven real Responses calls. The vector/radical replacement used eight more
+successful paragraph calls through the counting proxy (two in the first repair pass and six in the
+conservation follow-up, including one corrective retry); term extraction remained zero. The user had
+relaxed the earlier ten-call ceiling before these calls. The accepted primary replay is 137/137 cache
+hits and zero provider calls. The accepted strict replay is also 137/137 hits, made zero calls through
+a closed loopback endpoint, exited 4 with `strict_degradation`, listed only the two reviewed typed
+paragraphs, and produced no output PDF.

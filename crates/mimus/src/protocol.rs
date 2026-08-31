@@ -371,6 +371,20 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 violation.wire_name()
             );
         }
+        DiagnosticEvent::ContentConservationRetry {
+            page_index,
+            paragraph_index,
+            attempt,
+            missing_token_count,
+            missing_tokens,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[content_conservation_retry]: page {} paragraph {} response attempt {attempt} omitted {missing_token_count} conserved tokens {missing_tokens:?}; retrying once",
+                page_index + 1,
+                paragraph_index + 1
+            );
+        }
         DiagnosticEvent::DegradationSummary {
             degraded_page_indices,
             degraded_pages,
@@ -458,6 +472,19 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 page_index + 1,
                 paragraph_index + 1,
                 violation.wire_name()
+            );
+        }
+        DiagnosticEvent::ContentConservationViolation {
+            page_index,
+            paragraph_index,
+            missing_token_count,
+            missing_tokens,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning[content_conservation_violation]: page {} paragraph {} kept as source text after omitting {missing_token_count} conserved tokens {missing_tokens:?}",
+                page_index + 1,
+                paragraph_index + 1
             );
         }
         DiagnosticEvent::TranslationFailureProfile {
@@ -576,6 +603,7 @@ const fn human_preserved_reason(reason: PreservedReason) -> &'static str {
         PreservedReason::TypesetOverflow => "typeset_overflow",
         PreservedReason::TypesetProtocol => "typeset_protocol",
         PreservedReason::PlaceholderViolation => "placeholder_violation",
+        PreservedReason::ContentConservation => "content_conservation",
         PreservedReason::TranslationFailure => "translation_failure",
     }
 }

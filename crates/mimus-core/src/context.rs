@@ -178,6 +178,8 @@ pub(crate) struct ExtractedPage {
     pub degraded: Option<PageDegradeReason>,
     pub recoveries: BTreeSet<RecoveryKind>,
     pub walked_characters: Vec<WalkedChar>,
+    pub vector_paths: Vec<crate::walk::WalkedVectorPath>,
+    pub inline_images: Vec<crate::walk::WalkedInlineImage>,
     pub content_streams: Vec<WalkedContentStream>,
     pub engine_characters: Vec<PageCharSnapshot>,
     pub character_alignment: CharacterAlignment,

@@ -337,6 +337,8 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
             degraded: None,
             recoveries: BTreeSet::new(),
             walked_characters: Vec::new(),
+            vector_paths: Vec::new(),
+            inline_images: Vec::new(),
             content_streams: Vec::new(),
             engine_characters: Vec::new(),
             character_alignment: CharacterAlignment::default(),
@@ -653,6 +655,8 @@ pub fn scan_detect(document: &mut Document, context: &PassContext<'_>) -> Result
                     });
                 }
                 page.walked_characters = walked.characters;
+                page.vector_paths = walked.vector_paths;
+                page.inline_images = walked.inline_images;
                 page.content_streams = walked.content_streams;
             }
             Err(PageWalkError::Degraded { reason, .. }) => {
@@ -2377,6 +2381,17 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                 violation: retry.violation,
             });
         }
+        for retry in execution.content_conservation_retries {
+            document
+                .diagnostics
+                .push(Diagnostic::ContentConservationRetry {
+                    page_index: job.page_index,
+                    paragraph_index: job.paragraph_index,
+                    attempt: retry.attempt,
+                    missing_token_count: retry.missing_token_count,
+                    missing_tokens: retry.missing_tokens,
+                });
+        }
         let paragraph = document
             .il
             .pages
@@ -2427,6 +2442,21 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                     violation,
                     profile,
                 );
+            }
+            Ok(crate::translate::executor::TranslationOutcome::ContentConservationViolation {
+                missing_token_count,
+                missing_tokens,
+            }) => {
+                paragraph.translated_text = None;
+                paragraph.preserved = Some(il::PreservedReason::ContentConservation);
+                document
+                    .diagnostics
+                    .push(Diagnostic::ContentConservationViolation {
+                        page_index: job.page_index,
+                        paragraph_index: job.paragraph_index,
+                        missing_token_count,
+                        missing_tokens,
+                    });
             }
             Err(error) if matches!(error.reason(), ErrorReason::Translation(_)) => {
                 paragraph.translated_text = None;
@@ -2497,6 +2527,7 @@ fn translate_none(document: &mut Document, context: &PassContext<'_>) -> Result<
                             target_language: &context.config.target_language,
                             glossary: &document.glossary,
                             placeholder_correction: None,
+                            content_correction: None,
                         },
                     )?);
                 } else {
@@ -2553,6 +2584,11 @@ fn prepare_translations(document: &mut Document) -> Result<()> {
                 .collect::<BTreeSet<_>>()
         })
         .collect::<Vec<_>>();
+    let page_vector_paths = document
+        .extracted_pages
+        .iter()
+        .map(|page| page.vector_paths.clone())
+        .collect::<Vec<_>>();
     let mut prepared = BTreeMap::new();
     let mut math_diagnostics = Vec::new();
     for page in &mut document.il.pages {
@@ -2565,13 +2601,23 @@ fn prepare_translations(document: &mut Document) -> Result<()> {
                 ),
             )
         })?;
+        let vector_paths = page_vector_paths.get(page.index).ok_or_else(|| {
+            MimusError::internal(
+                InternalReason::InvariantViolation,
+                format!(
+                    "StylesAndFormulas could not find vector paths for page {}",
+                    page.index
+                ),
+            )
+        })?;
         for (paragraph_index, paragraph) in page.paragraphs.iter_mut().enumerate() {
             if paragraph.preserved.is_some() {
                 continue;
             }
-            complete_model_formula_boundaries(
+            complete_model_formula_boundaries_with_paths(
                 paragraph,
                 content_objects,
+                vector_paths,
                 page.index,
                 paragraph_index,
                 &mut math_diagnostics,
@@ -2621,6 +2667,7 @@ fn prepare_translations(document: &mut Document) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn complete_model_formula_boundaries(
     paragraph: &mut Paragraph,
     content_objects: &BTreeSet<u32>,
@@ -2628,7 +2675,25 @@ fn complete_model_formula_boundaries(
     paragraph_index: usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let chars = paragraph_chars_mut(paragraph);
+    complete_model_formula_boundaries_with_paths(
+        paragraph,
+        content_objects,
+        &[],
+        page_index,
+        paragraph_index,
+        diagnostics,
+    );
+}
+
+fn complete_model_formula_boundaries_with_paths(
+    paragraph: &mut Paragraph,
+    content_objects: &BTreeSet<u32>,
+    vector_paths: &[crate::walk::WalkedVectorPath],
+    page_index: usize,
+    paragraph_index: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let TextCarrier::Chars { chars } = &mut paragraph.text;
     let anchors = chars
         .iter()
         .enumerate()
@@ -2638,8 +2703,16 @@ fn complete_model_formula_boundaries(
     if anchors.is_empty() {
         return;
     }
-
     let mut expanded = BTreeMap::<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>::new();
+    expand_fraction_rule_numerators(chars, content_objects, vector_paths, &mut expanded);
+    normalize_geometrically_attached_script_order(chars, content_objects, &mut expanded);
+    let anchors = chars
+        .iter()
+        .enumerate()
+        .filter(|(_, character)| model_formula_character(character, content_objects))
+        .map(|(index, character)| (index, character.layout.unwrap().reading_order))
+        .collect::<Vec<_>>();
+
     expand_script_runs(chars, content_objects, &anchors, &mut expanded);
     expand_contiguous_digit_runs(chars, content_objects, &anchors, &mut expanded);
     loop {
@@ -2652,6 +2725,7 @@ fn complete_model_formula_boundaries(
             break;
         }
     }
+    normalize_fragmented_model_formula_order(chars, content_objects);
 
     for ((reading_order, evidence), indices) in expanded {
         diagnostics.push(Diagnostic::FormulaBoundaryExpanded {
@@ -2664,12 +2738,133 @@ fn complete_model_formula_boundaries(
     }
 }
 
+fn expand_fraction_rule_numerators(
+    chars: &mut [Char],
+    content_objects: &BTreeSet<u32>,
+    vector_paths: &[crate::walk::WalkedVectorPath],
+    expanded: &mut BTreeMap<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>,
+) {
+    let model_anchors = chars
+        .iter()
+        .enumerate()
+        .filter(|(_, character)| model_formula_character(character, content_objects))
+        .map(|(index, character)| {
+            (
+                index,
+                character
+                    .layout
+                    .expect("model formula characters have layout")
+                    .reading_order,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut additions = Vec::new();
+    for (candidate_index, candidate) in chars.iter().enumerate() {
+        if !formula_boundary_candidate(candidate, content_objects)
+            || !candidate
+                .unicode
+                .is_some_and(|value| value.is_ascii_digit())
+        {
+            continue;
+        }
+        let mut reading_orders = BTreeSet::new();
+        for path in vector_paths
+            .iter()
+            .filter(|path| fraction_rule_covers_numerator(path, candidate))
+        {
+            for (anchor_index, reading_order) in &model_anchors {
+                if fraction_rule_covers_anchor(path, &chars[*anchor_index]) {
+                    reading_orders.insert(*reading_order);
+                }
+            }
+        }
+        if reading_orders.len() == 1 {
+            additions.push((candidate_index, *reading_orders.first().unwrap()));
+        }
+    }
+    for (index, reading_order) in additions {
+        mark_formula_extension(
+            chars,
+            index,
+            reading_order,
+            FormulaBoundaryEvidence::FractionRuleNumerator,
+            expanded,
+        );
+        let layout = chars[index]
+            .layout
+            .as_mut()
+            .expect("formula boundary candidates have layout");
+        layout.reading_order = reading_order;
+        chars[index].implicit_space_before = false;
+    }
+}
+
+fn fraction_rule_covers_numerator(path: &crate::walk::WalkedVectorPath, candidate: &Char) -> bool {
+    if path.content_object.0 != candidate.passthrough.content_object {
+        return false;
+    }
+    let left = path.start.x.min(path.end.x);
+    let right = path.start.x.max(path.end.x);
+    let y = (path.start.y + path.end.y) / 2.0;
+    let center_x = (candidate.r#box.left + candidate.r#box.right) / 2.0;
+    let em = candidate.font_size;
+    center_x >= left - em * 0.1
+        && center_x <= right + em * 0.1
+        && candidate.baseline_origin.y > y
+        && candidate.r#box.bottom >= y - em * 0.25
+        && candidate.passthrough.byte_end <= path.byte_start
+        && path.byte_start - candidate.passthrough.byte_end <= 256
+}
+
+fn fraction_rule_covers_anchor(path: &crate::walk::WalkedVectorPath, anchor: &Char) -> bool {
+    if path.content_object.0 != anchor.passthrough.content_object {
+        return false;
+    }
+    let left = path.start.x.min(path.end.x);
+    let right = path.start.x.max(path.end.x);
+    let y = (path.start.y + path.end.y) / 2.0;
+    let overlap = (right.min(anchor.r#box.right) - left.max(anchor.r#box.left)).max(0.0);
+    let anchor_width = anchor.r#box.right - anchor.r#box.left;
+    let byte_distance = if path.byte_end <= anchor.passthrough.byte_start {
+        anchor.passthrough.byte_start - path.byte_end
+    } else {
+        path.byte_start.saturating_sub(anchor.passthrough.byte_end)
+    };
+    anchor.baseline_origin.y < y + anchor.font_size * 0.25
+        && overlap >= anchor_width.min(right - left) * 0.5
+        && byte_distance <= 256
+}
+
 fn expand_contiguous_digit_runs(
     chars: &mut [Char],
     content_objects: &BTreeSet<u32>,
     anchors: &[(usize, usize)],
     expanded: &mut BTreeMap<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>,
 ) {
+    let mut index = chars.len().saturating_sub(1);
+    while index > 0 {
+        if formula_character(&chars[index], content_objects)
+            && chars[index]
+                .unicode
+                .is_some_and(|value| value.is_ascii_digit())
+            && formula_boundary_candidate(&chars[index - 1], content_objects)
+            && chars[index - 1]
+                .unicode
+                .is_some_and(|value| value.is_ascii_digit())
+            && characters_are_attached(&chars[index - 1], &chars[index])
+            && let Some(reading_order) = nearest_formula_reading_order(chars, anchors, index - 1)
+        {
+            mark_formula_extension(
+                chars,
+                index - 1,
+                reading_order,
+                FormulaBoundaryEvidence::ContiguousDigitRun,
+                expanded,
+            );
+        }
+        index -= 1;
+    }
+
     let mut index = 1_usize;
     while index < chars.len() {
         if !formula_character(&chars[index - 1], content_objects)
@@ -2747,6 +2942,17 @@ fn characters_are_attached(left: &Char, right: &Char) -> bool {
         && (left.baseline_origin.y - right.baseline_origin.y).abs() <= em * 0.35
 }
 
+fn formula_delimiter_is_attached(left: &Char, right: &Char) -> bool {
+    if characters_are_attached(left, right) {
+        return true;
+    }
+    let em = left.font_size.max(right.font_size);
+    let gap = right.r#box.left - left.r#box.right;
+    gap >= -em * 0.25
+        && gap <= em * 0.25
+        && rects_overlap_vertically(left.visual_bbox, right.visual_bbox)
+}
+
 fn mark_formula_extension(
     chars: &mut [Char],
     index: usize,
@@ -2760,10 +2966,155 @@ fn mark_formula_extension(
         .expect("formula boundary candidates have model layout");
     layout.label = LayoutLabel::InlineFormula;
     layout.policy = TranslationPolicy::Passthrough;
+    layout.reading_order = reading_order;
     expanded
         .entry((reading_order, evidence))
         .or_default()
         .insert(index);
+}
+
+fn normalize_fragmented_model_formula_order(
+    chars: &mut Vec<Char>,
+    content_objects: &BTreeSet<u32>,
+) {
+    let reading_orders = chars
+        .iter()
+        .filter(|character| {
+            prepared_character_class(character, content_objects) == PreparedCharacterClass::Formula
+        })
+        .filter_map(|character| character.layout.map(|layout| layout.reading_order))
+        .collect::<BTreeSet<_>>();
+    for reading_order in reading_orders {
+        let indices = chars
+            .iter()
+            .enumerate()
+            .filter_map(|(index, character)| {
+                character
+                    .layout
+                    .filter(|layout| {
+                        layout.source == LayoutSource::Model
+                            && layout.label == LayoutLabel::InlineFormula
+                            && layout.policy == TranslationPolicy::Passthrough
+                            && layout.reading_order == reading_order
+                    })
+                    .map(|_| index)
+            })
+            .collect::<Vec<_>>();
+        if indices.len() < 2 || indices.windows(2).all(|pair| pair[1] == pair[0] + 1) {
+            continue;
+        }
+        let formula = indices
+            .iter()
+            .map(|index| chars[*index].clone())
+            .collect::<Vec<_>>();
+        if !formula_characters_form_one_compound_unit(&formula) {
+            continue;
+        }
+        let bounds = formula
+            .iter()
+            .flat_map(|character| [character.r#box, character.visual_bbox])
+            .reduce(Rect::union)
+            .expect("fragmented formula has characters");
+        let em = formula
+            .iter()
+            .map(|character| character.font_size)
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .fold(0.0_f64, f64::max);
+        if em <= 0.0 || !rect_is_finite(bounds) {
+            continue;
+        }
+        let remaining = chars
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| indices.binary_search(index).is_err())
+            .map(|(_, character)| character.clone())
+            .collect::<Vec<_>>();
+        let candidates = remaining
+            .windows(2)
+            .enumerate()
+            .filter_map(|(index, pair)| {
+                let [left, right] = pair else {
+                    return None;
+                };
+                if !matches!(
+                    prepared_character_class(left, content_objects),
+                    PreparedCharacterClass::Text { .. }
+                ) || !matches!(
+                    prepared_character_class(right, content_objects),
+                    PreparedCharacterClass::Text { .. }
+                ) || !rects_overlap_vertically(left.r#box, bounds)
+                    || !rects_overlap_vertically(right.r#box, bounds)
+                {
+                    return None;
+                }
+                let left_gap = bounds.left - left.r#box.right;
+                let right_gap = right.r#box.left - bounds.right;
+                (left_gap >= -em * 0.25
+                    && left_gap <= em * 1.5
+                    && right_gap >= -em * 0.25
+                    && right_gap <= em * 1.5)
+                    .then_some(index + 1)
+            })
+            .collect::<Vec<_>>();
+        let [insertion] = candidates.as_slice() else {
+            continue;
+        };
+        let mut reordered = Vec::with_capacity(chars.len());
+        reordered.extend_from_slice(&remaining[..*insertion]);
+        reordered.extend(formula);
+        reordered.extend_from_slice(&remaining[*insertion..]);
+        *chars = reordered;
+    }
+}
+
+fn formula_characters_form_one_compound_unit(chars: &[Char]) -> bool {
+    let Some(content_object) = chars
+        .first()
+        .map(|character| character.passthrough.content_object)
+    else {
+        return false;
+    };
+    if content_object == 0
+        || chars
+            .iter()
+            .any(|character| character.passthrough.content_object != content_object)
+    {
+        return false;
+    }
+    let em = chars
+        .iter()
+        .map(|character| character.font_size)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .fold(0.0_f64, f64::max);
+    if em <= 0.0 {
+        return false;
+    }
+    let mut connected = BTreeSet::from([0_usize]);
+    loop {
+        let before = connected.len();
+        for (index, character) in chars.iter().enumerate() {
+            if connected.contains(&index) {
+                continue;
+            }
+            let candidate = character.r#box.union(character.visual_bbox);
+            if connected.iter().any(|owner| {
+                let owner = chars[*owner].r#box.union(chars[*owner].visual_bbox);
+                let horizontal_gap = (candidate.left - owner.right)
+                    .max(owner.left - candidate.right)
+                    .max(0.0);
+                let vertical_gap = (candidate.bottom - owner.top)
+                    .max(owner.bottom - candidate.top)
+                    .max(0.0);
+                horizontal_gap <= em * 0.5 && vertical_gap <= em * 0.5
+            }) {
+                connected.insert(index);
+            }
+        }
+        if connected.len() == before {
+            break;
+        }
+    }
+    connected.len() == chars.len()
 }
 
 fn expand_script_runs(
@@ -2809,6 +3160,190 @@ fn expand_script_runs(
             }
         }
     }
+}
+
+fn normalize_geometrically_attached_script_order(
+    chars: &mut [Char],
+    content_objects: &BTreeSet<u32>,
+    expanded: &mut BTreeMap<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>,
+) {
+    normalize_geometrically_attached_signed_scripts(chars, content_objects, expanded);
+
+    // A geometric script can be emitted before an intervening prose run. Move only
+    // uniquely attached ASCII digits; the ordinary adjacent-script rule remains the
+    // authority that promotes the reordered character into the formula unit.
+    loop {
+        let anchors = chars
+            .iter()
+            .enumerate()
+            .filter(|(_, character)| model_formula_character(character, content_objects))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let next_move = chars
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| {
+                formula_boundary_candidate(candidate, content_objects)
+                    && candidate
+                        .unicode
+                        .is_some_and(|value| value.is_ascii_digit())
+            })
+            .find_map(|(candidate_index, candidate)| {
+                let matches = anchors
+                    .iter()
+                    .copied()
+                    .filter(|anchor_index| {
+                        geometrically_proves_script(&chars[*anchor_index], candidate)
+                    })
+                    .collect::<Vec<_>>();
+                matches
+                    .first()
+                    .filter(|_| matches.len() == 1)
+                    .and_then(|&anchor_index| {
+                        let anchor = &chars[anchor_index];
+                        let script_is_right =
+                            candidate.r#box.left >= anchor.r#box.right - anchor.font_size * 0.25;
+                        let already_adjacent = if script_is_right {
+                            candidate_index == anchor_index + 1
+                        } else {
+                            candidate_index + 1 == anchor_index
+                        };
+                        (!already_adjacent).then_some((
+                            candidate_index,
+                            anchor_index,
+                            script_is_right,
+                        ))
+                    })
+            });
+        let Some((candidate_index, anchor_index, script_is_right)) = next_move else {
+            break;
+        };
+        let reading_order = chars[anchor_index]
+            .layout
+            .expect("model formula anchors have layout")
+            .reading_order;
+        mark_formula_extension(
+            chars,
+            candidate_index,
+            reading_order,
+            FormulaBoundaryEvidence::ScriptBaseline,
+            expanded,
+        );
+        chars[candidate_index]
+            .layout
+            .as_mut()
+            .expect("formula boundary candidates have model layout")
+            .reading_order = reading_order;
+        chars[candidate_index].implicit_space_before = false;
+        if script_is_right {
+            if candidate_index < anchor_index {
+                chars[candidate_index..=anchor_index].rotate_left(1);
+            } else {
+                chars[anchor_index + 1..=candidate_index].rotate_right(1);
+            }
+        } else if candidate_index < anchor_index {
+            chars[candidate_index..anchor_index].rotate_left(1);
+        } else {
+            chars[anchor_index..=candidate_index].rotate_right(1);
+        }
+    }
+}
+
+fn normalize_geometrically_attached_signed_scripts(
+    chars: &mut [Char],
+    content_objects: &BTreeSet<u32>,
+    expanded: &mut BTreeMap<(usize, FormulaBoundaryEvidence), BTreeSet<usize>>,
+) {
+    loop {
+        let matches = chars
+            .iter()
+            .enumerate()
+            .filter(|(_, anchor)| {
+                model_formula_character(anchor, content_objects)
+                    && anchor.unicode.is_some_and(|value| value.is_ascii_digit())
+            })
+            .filter_map(|(anchor_index, anchor)| {
+                let sign_index = anchor_index.checked_sub(1)?;
+                let sign = &chars[sign_index];
+                if !formula_boundary_candidate(sign, content_objects)
+                    || !sign
+                        .unicode
+                        .is_some_and(|value| matches!(value, '+' | '-' | '−'))
+                    || (sign.font_size - anchor.font_size).abs() > anchor.font_size * 0.1
+                    || (sign.baseline_origin.y - anchor.baseline_origin.y).abs()
+                        > anchor.font_size * 0.1
+                    || !characters_are_attached(sign, anchor)
+                {
+                    return None;
+                }
+                let bases = chars
+                    .iter()
+                    .enumerate()
+                    .filter(|(base_index, base)| {
+                        *base_index != sign_index
+                            && formula_boundary_candidate(base, content_objects)
+                            && base.unicode.is_some_and(|value| value.is_ascii_digit())
+                            && geometrically_proves_script(base, sign)
+                    })
+                    .map(|(base_index, _)| base_index)
+                    .collect::<Vec<_>>();
+                bases
+                    .first()
+                    .filter(|_| bases.len() == 1)
+                    .map(|&base_index| (sign_index, anchor_index, base_index))
+            })
+            .collect::<Vec<_>>();
+        let Some(&(sign_index, anchor_index, base_index)) = matches.first() else {
+            break;
+        };
+        if matches.len() != 1 {
+            break;
+        }
+        let reading_order = chars[anchor_index]
+            .layout
+            .expect("model formula anchors have layout")
+            .reading_order;
+        for index in [sign_index, base_index] {
+            mark_formula_extension(
+                chars,
+                index,
+                reading_order,
+                FormulaBoundaryEvidence::ScriptBaseline,
+                expanded,
+            );
+            chars[index]
+                .layout
+                .as_mut()
+                .expect("formula boundary candidates have model layout")
+                .reading_order = reading_order;
+            chars[index].implicit_space_before = false;
+        }
+        if anchor_index < base_index {
+            chars[sign_index..=base_index].rotate_left(2);
+        } else if base_index + 1 != sign_index {
+            chars[base_index + 1..=anchor_index].rotate_right(2);
+        }
+    }
+}
+
+fn geometrically_proves_script(anchor: &Char, candidate: &Char) -> bool {
+    let em = anchor.font_size;
+    if !em.is_finite()
+        || em <= 0.0
+        || !candidate.font_size.is_finite()
+        || candidate.font_size < em * 0.4
+        || candidate.font_size > em * 0.85
+    {
+        return false;
+    }
+    let baseline_delta = (candidate.baseline_origin.y - anchor.baseline_origin.y).abs();
+    if baseline_delta < em * 0.05 || baseline_delta > em * 0.75 {
+        return false;
+    }
+    let right_gap = candidate.r#box.left - anchor.r#box.right;
+    let left_gap = anchor.r#box.left - candidate.r#box.right;
+    (right_gap >= -em * 0.25 && right_gap <= em * 0.25)
+        || (left_gap >= -em * 0.25 && left_gap <= em * 0.25)
 }
 
 fn nearest_formula_reading_order(
@@ -2982,7 +3517,7 @@ fn expand_balancing_delimiters(
             && end < chars.len()
             && formula_boundary_candidate(&chars[end], content_objects)
             && chars[end].unicode == Some(expected)
-            && characters_are_attached(&chars[end - 1], &chars[end])
+            && formula_delimiter_is_attached(&chars[end - 1], &chars[end])
         {
             let Some(reading_order) = nearest_formula_reading_order(chars, anchors, end) else {
                 start = end;
@@ -2999,7 +3534,7 @@ fn expand_balancing_delimiters(
             && start > 0
             && formula_boundary_candidate(&chars[start - 1], content_objects)
             && chars[start - 1].unicode == Some(expected)
-            && characters_are_attached(&chars[start - 1], &chars[start])
+            && formula_delimiter_is_attached(&chars[start - 1], &chars[start])
         {
             let index = start - 1;
             let Some(reading_order) = nearest_formula_reading_order(chars, anchors, index) else {
@@ -3370,7 +3905,20 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
             };
             match plan_paragraph(paragraph, translated, restored, output_fonts, &geometry) {
                 Ok(paragraph_plans) => {
-                    planned_paragraphs.push((paragraph.reading_order, paragraph_plans));
+                    if paragraph_plans_leave_orphan_source_ink(
+                        paragraph,
+                        extracted,
+                        &content_objects,
+                        &paragraph_plans,
+                    )? {
+                        preserved.push((
+                            page.index,
+                            paragraph.reading_order,
+                            il::PreservedReason::TypesetProtocol,
+                        ));
+                    } else {
+                        planned_paragraphs.push((paragraph.reading_order, paragraph_plans));
+                    }
                 }
                 Err(TypesetPlanError::Preserved(reason)) => {
                     if reason == il::PreservedReason::TypesetOverflow {
@@ -3701,6 +4249,96 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
     Ok(())
 }
 
+fn paragraph_plans_leave_orphan_source_ink(
+    paragraph: &Paragraph,
+    extracted: &ExtractedPage,
+    content_objects: &BTreeSet<lopdf::ObjectId>,
+    plans: &[TypesetPlan],
+) -> Result<bool> {
+    let claimed = plans
+        .iter()
+        .flat_map(plan_modified_spans)
+        .collect::<BTreeSet<_>>();
+    let moved_formula_spans = plans
+        .iter()
+        .flat_map(|plan| &plan.formula_relocations)
+        .filter(|relocation| {
+            relocation.delta_x_pt.abs() > 0.01 || relocation.delta_y_pt.abs() > 0.01
+        })
+        .flat_map(|relocation| relocation.spans.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let owner_chars = paragraph
+        .chars()
+        .iter()
+        .filter(|character| {
+            character.layout.is_some_and(|layout| {
+                layout.label == LayoutLabel::InlineFormula
+                    && layout.policy == TranslationPolicy::Passthrough
+            })
+        })
+        .filter_map(|character| {
+            let object = unique_page_content(character, content_objects)
+                .ok()
+                .flatten()?;
+            moved_formula_spans
+                .contains(&span_key(character, object))
+                .then_some(character)
+        })
+        .collect::<Vec<_>>();
+    let Some(owner_bounds) = owner_chars
+        .iter()
+        .map(|character| character.r#box.union(character.visual_bbox))
+        .reduce(Rect::union)
+    else {
+        return Ok(false);
+    };
+    let em = owner_chars
+        .iter()
+        .map(|character| character.font_size)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .fold(0.0_f64, f64::max);
+    if em <= 0.0 {
+        return Ok(false);
+    }
+    for path in &extracted.vector_paths {
+        let span = (path.content_object, path.byte_start, path.byte_end);
+        if claimed.contains(&span) {
+            continue;
+        }
+        let left = path.start.x.min(path.end.x);
+        let right = path.start.x.max(path.end.x);
+        let y = (path.start.y + path.end.y) / 2.0;
+        let width = right - left;
+        let overlap = (right.min(owner_bounds.right) - left.max(owner_bounds.left)).max(0.0);
+        if width > 0.01
+            && width <= owner_bounds.right - owner_bounds.left + em
+            && overlap >= width.min(owner_bounds.right - owner_bounds.left) * 0.5
+            && y >= owner_bounds.bottom - em * 0.25
+            && y <= owner_bounds.top + em * 0.5
+        {
+            return Ok(true);
+        }
+    }
+    for image in &extracted.inline_images {
+        let span = (image.content_object, image.byte_start, image.byte_end);
+        if claimed.contains(&span) {
+            continue;
+        }
+        let width = image.bounds.right - image.bounds.left;
+        let height = image.bounds.top - image.bounds.bottom;
+        if width <= owner_bounds.right - owner_bounds.left + em
+            && height <= owner_bounds.top - owner_bounds.bottom + em
+            && image.bounds.right >= owner_bounds.left - em * 0.25
+            && image.bounds.left <= owner_bounds.right + em * 0.25
+            && image.bounds.top >= owner_bounds.bottom - em * 0.25
+            && image.bounds.bottom <= owner_bounds.top + em * 0.25
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// 逐段 `typeset_overflow` 明细。之前 NDJSON 里只有 `degradation_summary` 一行汇总，
 /// 无法回答「哪个障碍挡住了哪个字号」；这里公开容器盒、按与容器重叠面积排序的有界
 /// 障碍样本，以及 `plan_text_segment` 实际走过的字号序列（`preferred` 起每次 −0.5，
@@ -3806,11 +4444,17 @@ fn paragraph_typeset_obstacles(
 }
 
 fn plan_modified_spans(plan: &TypesetPlan) -> impl Iterator<Item = SpanKey> + '_ {
-    plan.spans.iter().copied().chain(
-        plan.formula_relocations
-            .iter()
-            .flat_map(|relocation| relocation.spans.iter().copied()),
-    )
+    plan.spans
+        .iter()
+        .copied()
+        .chain(plan.formula_relocations.iter().flat_map(|relocation| {
+            relocation
+                .spans
+                .iter()
+                .copied()
+                .chain(relocation.vector_paths.iter().map(|path| path.span))
+                .chain(relocation.inline_images.iter().map(|image| image.span))
+        }))
 }
 
 pub fn font_embed(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
@@ -3853,10 +4497,18 @@ struct TypesetPlan {
 struct FormulaRelocation {
     spans: Vec<SpanKey>,
     split_glyphs: BTreeMap<SpanKey, Vec<FormulaGlyphReplay>>,
+    vector_paths: Vec<FormulaVectorReplay>,
+    inline_images: Vec<FormulaVectorReplay>,
     delta_x_pt: f64,
     delta_y_pt: f64,
     characters: Vec<TypesetCharacter>,
     source_fonts: Vec<il::FontRef>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FormulaVectorReplay {
+    span: SpanKey,
+    content_transform: [f64; 6],
 }
 
 #[derive(Debug, Clone)]
@@ -4029,6 +4681,7 @@ const LINE_ADVANCE_EM: f64 = 1.5;
 const SINGLE_LINE_MAX_VERTICAL_OVERFLOW_EM: f64 = 0.25;
 const SINGLE_LINE_MAX_VERTICAL_OVERFLOW_PT: f64 = 3.0;
 
+#[derive(Debug)]
 enum TypesetPlanError<'a> {
     Preserved(il::PreservedReason),
     MissingGlyphs {
@@ -4274,6 +4927,7 @@ fn prepare_shared_formula_fixed_plans(
         extracted,
         content_objects,
         content_object_numbers,
+        false,
     )?;
     let shared_spans = formula_units
         .iter()
@@ -4322,6 +4976,8 @@ fn prepare_shared_formula_fixed_plans(
                 plans[owner].formula_relocations.push(FormulaRelocation {
                     spans: vec![span],
                     split_glyphs: BTreeMap::from([(span, glyphs)]),
+                    vector_paths: Vec::new(),
+                    inline_images: Vec::new(),
                     delta_x_pt: 0.0,
                     delta_y_pt: 0.0,
                     characters,
@@ -4371,6 +5027,8 @@ fn prepare_shared_formula_fixed_plans(
             Some(FormulaRelocation {
                 spans: unit.spans,
                 split_glyphs: unit.split_glyphs,
+                vector_paths: unit.vector_paths,
+                inline_images: unit.inline_images,
                 delta_x_pt: 0.0,
                 delta_y_pt: 0.0,
                 characters,
@@ -4578,46 +5236,83 @@ fn attach_translated_radicals_to_formula_operands(
     {
         return None;
     }
-    for (formula_index, formula) in formulas.iter().enumerate() {
-        let Some(source_index) =
-            attached_source_radical_index(&source_segments[formula_index], formula.bounds)?
-        else {
-            continue;
-        };
-        let matching = translated_segments[formula_index]
+    let attachments = uniquely_attached_source_radicals(source_segments, formulas)?;
+    let mut by_segment = BTreeMap::<usize, Vec<usize>>::new();
+    for attachment in attachments {
+        by_segment
+            .entry(attachment.source_segment_index)
+            .or_default()
+            .push(attachment.source_character_index);
+    }
+    for (segment_index, mut source_indices) in by_segment {
+        let matching = translated_segments[segment_index]
             .iter()
             .enumerate()
             .filter_map(|(index, character)| (character.value == '\u{221a}').then_some(index))
             .collect::<Vec<_>>();
-        let [translated_index] = matching.as_slice() else {
+        if !matching.is_empty() && matching.len() != source_indices.len() {
             return None;
-        };
-        source_segments[formula_index].remove(source_index);
-        translated_segments[formula_index].remove(*translated_index);
+        }
+        for translated_index in matching.into_iter().rev() {
+            translated_segments[segment_index].remove(translated_index);
+        }
+        source_indices.sort_unstable();
+        for source_index in source_indices.into_iter().rev() {
+            source_segments[segment_index].remove(source_index);
+        }
     }
     Some(())
 }
 
-fn attached_source_radical_index(source: &[&Char], formula_bounds: Rect) -> Option<Option<usize>> {
-    let matching = source
-        .iter()
-        .enumerate()
-        .filter(|(_, character)| character.unicode == Some('\u{221a}'))
-        .filter(|(_, character)| {
-            let bounds = character.r#box.union(character.visual_bbox);
-            let em = character.font_size.max(0.01);
-            let gap = formula_bounds.left - bounds.right;
-            let overlaps_vertically = bounds.top > formula_bounds.bottom + 0.01
-                && formula_bounds.top > bounds.bottom + 0.01;
-            overlaps_vertically && gap >= -0.05 * em && gap <= 0.25 * em
-        })
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    match matching.as_slice() {
-        [] => Some(None),
-        [index] => Some(Some(*index)),
-        _ => None,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceRadicalAttachment {
+    source_segment_index: usize,
+    source_character_index: usize,
+    formula_index: usize,
+}
+
+fn uniquely_attached_source_radicals(
+    source_segments: &[Vec<&Char>],
+    formulas: &[FormulaContinuityFormula],
+) -> Option<Vec<SourceRadicalAttachment>> {
+    let mut attachments = Vec::new();
+    let mut claimed_formulas = BTreeSet::new();
+    for (source_segment_index, source) in source_segments.iter().enumerate() {
+        for (source_character_index, character) in source.iter().enumerate() {
+            if character.unicode != Some('\u{221a}') {
+                continue;
+            }
+            let matching = formulas
+                .iter()
+                .enumerate()
+                .filter_map(|(formula_index, formula)| {
+                    source_radical_attaches_to_formula(character, formula.bounds)
+                        .then_some(formula_index)
+                })
+                .collect::<Vec<_>>();
+            match matching.as_slice() {
+                [] => {}
+                [formula_index] if claimed_formulas.insert(*formula_index) => {
+                    attachments.push(SourceRadicalAttachment {
+                        source_segment_index,
+                        source_character_index,
+                        formula_index: *formula_index,
+                    });
+                }
+                _ => return None,
+            }
+        }
     }
+    Some(attachments)
+}
+
+fn source_radical_attaches_to_formula(character: &Char, formula_bounds: Rect) -> bool {
+    let bounds = character.r#box.union(character.visual_bbox);
+    let em = character.font_size.max(0.01);
+    let gap = formula_bounds.left - bounds.right;
+    let overlaps_vertically =
+        bounds.top > formula_bounds.bottom + 0.01 && formula_bounds.top > bounds.bottom + 0.01;
+    overlaps_vertically && gap >= -0.05 * em && gap <= 0.25 * em
 }
 
 fn retain_shared_section_number_prefix<'a>(
@@ -4758,6 +5453,8 @@ struct SourceFormulaUnit<'a> {
     validation_characters: Vec<TypesetCharacter>,
     spans: Vec<SpanKey>,
     split_glyphs: BTreeMap<SpanKey, Vec<FormulaGlyphReplay>>,
+    vector_paths: Vec<FormulaVectorReplay>,
+    inline_images: Vec<FormulaVectorReplay>,
     bounds: Rect,
     ink_bounds: Rect,
     source_fonts: Vec<il::FontRef>,
@@ -4805,6 +5502,7 @@ fn plan_relocated_formula_flow<'a>(
         extracted,
         content_objects,
         &content_object_numbers,
+        true,
     )
     .ok_or(TypesetPlanError::Preserved(
         il::PreservedReason::TypesetProtocol,
@@ -5023,6 +5721,7 @@ fn source_formula_units<'a>(
     extracted: &ExtractedPage,
     content_objects: &BTreeSet<lopdf::ObjectId>,
     content_object_numbers: &BTreeSet<u32>,
+    attach_relocated_ink: bool,
 ) -> Option<Vec<SourceFormulaUnit<'a>>> {
     let mut span_classes = BTreeMap::<SpanKey, (bool, bool, bool)>::new();
     for character in paragraph.chars() {
@@ -5144,6 +5843,8 @@ fn source_formula_units<'a>(
                 validation_characters,
                 spans,
                 split_glyphs,
+                vector_paths: Vec::new(),
+                inline_images: Vec::new(),
                 bounds,
                 ink_bounds: visual_bounds,
                 source_fonts,
@@ -5154,13 +5855,19 @@ fn source_formula_units<'a>(
     if source_segments.len() != units.len() + 1 {
         return None;
     }
-    for (formula_index, unit) in units.iter_mut().enumerate() {
-        let Some(source_index) =
-            attached_source_radical_index(&source_segments[formula_index], unit.bounds)?
-        else {
-            continue;
-        };
-        let radical = source_segments[formula_index][source_index];
+    let formulas = units
+        .iter()
+        .enumerate()
+        .map(|(formula_index, unit)| FormulaContinuityFormula {
+            formula_index,
+            bounds: unit.bounds,
+            line_left: paragraph.bounds.left,
+        })
+        .collect::<Vec<_>>();
+    for attachment in uniquely_attached_source_radicals(&source_segments, &formulas)? {
+        let unit = &mut units[attachment.formula_index];
+        let radical =
+            source_segments[attachment.source_segment_index][attachment.source_character_index];
         let object_id = unique_page_content(radical, content_objects)
             .ok()
             .flatten()?;
@@ -5192,7 +5899,212 @@ fn source_formula_units<'a>(
         unit.source_fonts.sort();
         unit.source_fonts.dedup();
     }
+    if attach_relocated_ink {
+        attach_uniquely_owned_formula_ink(&mut units, extracted)?;
+    }
     Some(units)
+}
+
+fn attach_uniquely_owned_formula_ink(
+    units: &mut [SourceFormulaUnit<'_>],
+    extracted: &ExtractedPage,
+) -> Option<()> {
+    for path in &extracted.vector_paths {
+        let candidates = units
+            .iter()
+            .enumerate()
+            .filter_map(|(index, unit)| formula_owns_vector_path(unit, path).then_some(index))
+            .collect::<Vec<_>>();
+        let suspicious = units
+            .iter()
+            .any(|unit| formula_may_own_vector_path(unit, path));
+        match candidates.as_slice() {
+            [] if !suspicious => continue,
+            [index] if path.safe_to_replay => {
+                let left = path.start.x.min(path.end.x);
+                let right = path.start.x.max(path.end.x);
+                let y = (path.start.y + path.end.y) / 2.0;
+                let path_bounds = Rect {
+                    left,
+                    bottom: y - 0.01,
+                    right,
+                    top: y + 0.01,
+                };
+                units[*index].vector_paths.push(FormulaVectorReplay {
+                    span: (path.content_object, path.byte_start, path.byte_end),
+                    content_transform: path.content_transform,
+                });
+                units[*index].bounds = units[*index].bounds.union(path_bounds);
+                units[*index].ink_bounds = units[*index].ink_bounds.union(path_bounds);
+            }
+            _ => return None,
+        }
+    }
+    for image in &extracted.inline_images {
+        let candidates = units
+            .iter()
+            .enumerate()
+            .filter_map(|(index, unit)| formula_owns_inline_image(unit, image).then_some(index))
+            .collect::<Vec<_>>();
+        match candidates.as_slice() {
+            [] => continue,
+            [index] => {
+                units[*index].inline_images.push(FormulaVectorReplay {
+                    span: (image.content_object, image.byte_start, image.byte_end),
+                    content_transform: image.content_transform,
+                });
+                units[*index].bounds = units[*index].bounds.union(image.bounds);
+                units[*index].ink_bounds = units[*index].ink_bounds.union(image.bounds);
+            }
+            _ => return None,
+        }
+    }
+    Some(())
+}
+
+fn formula_may_own_vector_path(
+    unit: &SourceFormulaUnit<'_>,
+    path: &crate::walk::WalkedVectorPath,
+) -> bool {
+    let em = unit
+        .chars
+        .iter()
+        .map(|character| character.font_size)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .fold(0.0_f64, f64::max);
+    let left = path.start.x.min(path.end.x);
+    let right = path.start.x.max(path.end.x);
+    let y = (path.start.y + path.end.y) / 2.0;
+    let width = right - left;
+    let unit_width = unit.bounds.right - unit.bounds.left;
+    let overlap = (right.min(unit.bounds.right) - left.max(unit.bounds.left)).max(0.0);
+    em > 0.0
+        && path.content_object.0 != 0
+        && width > 0.01
+        && width <= em * 4.0
+        && width <= unit_width + em
+        && overlap >= width.min(unit_width) * 0.5
+        && y >= unit.bounds.bottom - em * 0.25
+        && y <= unit.bounds.top + em * 0.5
+}
+
+fn formula_owns_vector_path(
+    unit: &SourceFormulaUnit<'_>,
+    path: &crate::walk::WalkedVectorPath,
+) -> bool {
+    if !formula_may_own_vector_path(unit, path) {
+        return false;
+    }
+    let em = unit
+        .chars
+        .iter()
+        .map(|character| character.font_size)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .fold(0.0_f64, f64::max);
+    if em <= 0.0 || path.content_object.0 == 0 {
+        return false;
+    }
+    let left = path.start.x.min(path.end.x);
+    let right = path.start.x.max(path.end.x);
+    let y = (path.start.y + path.end.y) / 2.0;
+    let width = right - left;
+    let unit_width = unit.bounds.right - unit.bounds.left;
+    if width <= 0.01 || width > em * 4.0 || width > unit_width + em {
+        return false;
+    }
+    let highest_baseline = unit
+        .chars
+        .iter()
+        .map(|character| character.baseline_origin.y)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let caps_formula = y >= highest_baseline - em * 0.05 && y <= unit.bounds.top + em * 0.5;
+    let separates_formula_rows = unit
+        .chars
+        .iter()
+        .any(|character| character.baseline_origin.y > y + em * 0.05)
+        && unit
+            .chars
+            .iter()
+            .any(|character| character.baseline_origin.y < y - em * 0.05);
+    if !caps_formula && !separates_formula_rows {
+        return false;
+    }
+    let overlap = (right.min(unit.bounds.right) - left.max(unit.bounds.left)).max(0.0);
+    let comparable_width = width.min(unit_width);
+    if comparable_width <= 0.01 || overlap < comparable_width * 0.5 {
+        return false;
+    }
+    let matching_spans = unit
+        .spans
+        .iter()
+        .filter(|span| span.0 == path.content_object)
+        .collect::<Vec<_>>();
+    let Some(first) = matching_spans.iter().map(|span| span.1).min() else {
+        return false;
+    };
+    let last = matching_spans
+        .iter()
+        .map(|span| span.2)
+        .max()
+        .expect("matching formula spans are non-empty");
+    let byte_distance = if path.byte_end <= first {
+        first - path.byte_end
+    } else {
+        path.byte_start.saturating_sub(last)
+    };
+    byte_distance <= 256
+}
+
+fn formula_owns_inline_image(
+    unit: &SourceFormulaUnit<'_>,
+    image: &crate::walk::WalkedInlineImage,
+) -> bool {
+    let em = unit
+        .chars
+        .iter()
+        .map(|character| character.font_size)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .fold(0.0_f64, f64::max);
+    if em <= 0.0
+        || image.content_object.0 == 0
+        || image.bounds.right <= image.bounds.left
+        || image.bounds.top <= image.bounds.bottom
+        || image.bounds.right - image.bounds.left > unit.bounds.right - unit.bounds.left + em
+        || image.bounds.top - image.bounds.bottom > unit.bounds.top - unit.bounds.bottom + em
+    {
+        return false;
+    }
+    let overlap_x = (image.bounds.right.min(unit.bounds.right)
+        - image.bounds.left.max(unit.bounds.left))
+    .max(0.0);
+    let overlap_y = (image.bounds.top.min(unit.bounds.top)
+        - image.bounds.bottom.max(unit.bounds.bottom))
+    .max(0.0);
+    if overlap_x <= 0.01 || overlap_y <= 0.01 {
+        return false;
+    }
+    let Some(first) = unit
+        .spans
+        .iter()
+        .filter(|span| span.0 == image.content_object)
+        .map(|span| span.1)
+        .min()
+    else {
+        return false;
+    };
+    let last = unit
+        .spans
+        .iter()
+        .filter(|span| span.0 == image.content_object)
+        .map(|span| span.2)
+        .max()
+        .expect("matching formula spans are non-empty");
+    let byte_distance = if image.byte_end <= first {
+        first - image.byte_end
+    } else {
+        image.byte_start.saturating_sub(last)
+    };
+    byte_distance <= 256
 }
 
 fn paragraph_owns_walked_span(
@@ -5346,6 +6258,8 @@ fn place_formula_flow(
                 formula_relocations.push(FormulaRelocation {
                     spans: unit.spans.clone(),
                     split_glyphs: unit.split_glyphs.clone(),
+                    vector_paths: unit.vector_paths.clone(),
+                    inline_images: unit.inline_images.clone(),
                     delta_x_pt,
                     delta_y_pt,
                     characters,
@@ -5493,14 +6407,10 @@ fn fixed_formula_continuity(
     if source_segments.len() != formulas.len() + 1 {
         return None;
     }
-    for (formula_index, formula) in formulas.iter_mut().enumerate() {
-        let Some(source_index) =
-            attached_source_radical_index(&source_segments[formula_index], formula.bounds)?
-        else {
-            continue;
-        };
-        let radical = source_segments[formula_index][source_index];
-        formula.bounds = formula
+    for attachment in uniquely_attached_source_radicals(&source_segments, &formulas)? {
+        let radical =
+            source_segments[attachment.source_segment_index][attachment.source_character_index];
+        formulas[attachment.formula_index].bounds = formulas[attachment.formula_index]
             .bounds
             .union(radical.r#box)
             .union(radical.visual_bbox);
@@ -5781,8 +6691,12 @@ fn formula_continuity_is_valid(
         if !left.is_formula && !right.is_formula {
             return true;
         }
-        let same_line = left.bounds.top > right.bounds.bottom + 0.01
-            && right.bounds.top > left.bounds.bottom + 0.01;
+        let same_line = mimus_quality_contract::formula_items_share_line(
+            left.bounds.bottom,
+            left.bounds.top,
+            right.bounds.bottom,
+            right.bounds.top,
+        );
         if (left.ends_with_punctuation || right.starts_with_punctuation) && !same_line {
             return false;
         }
@@ -6869,6 +7783,41 @@ fn install_formula_relocation(
             return Err(MimusError::internal(
                 InternalReason::InvariantViolation,
                 "formula relocation overlaps another typeset replacement",
+            ));
+        }
+    }
+    for path in relocation
+        .vector_paths
+        .iter()
+        .chain(&relocation.inline_images)
+    {
+        let source = streams
+            .get(&path.span.0)
+            .and_then(|stream| stream.get(path.span.1..path.span.2))
+            .ok_or_else(|| span_out_of_bounds(path.span.0, path.span.1, path.span.2, 0))?;
+        let (delta_x, delta_y) = content_relative_delta(
+            path.content_transform,
+            relocation.delta_x_pt,
+            relocation.delta_y_pt,
+        )
+        .ok_or_else(|| {
+            MimusError::internal(
+                InternalReason::InvariantViolation,
+                "formula vector path has a singular content transform",
+            )
+        })?;
+        let mut replacement = format!(
+            "q\n1 0 0 1 {} {} cm\n",
+            pdf_number(delta_x),
+            pdf_number(delta_y)
+        )
+        .into_bytes();
+        replacement.extend_from_slice(source);
+        replacement.extend_from_slice(b"\nQ\n");
+        if replacements.insert(path.span, replacement).is_some() {
+            return Err(MimusError::internal(
+                InternalReason::InvariantViolation,
+                "formula vector relocation overlaps another typeset replacement",
             ));
         }
     }
@@ -10767,6 +11716,8 @@ mod tests {
             .push(FormulaRelocation {
                 spans: vec![first],
                 split_glyphs: BTreeMap::new(),
+                vector_paths: Vec::new(),
+                inline_images: Vec::new(),
                 delta_x_pt: 1.0,
                 delta_y_pt: 0.0,
                 characters: Vec::new(),
@@ -10898,6 +11849,7 @@ mod tests {
                 extracted,
                 &content_objects,
                 &content_object_numbers,
+                true,
             )
             .is_none()
         );
@@ -10943,6 +11895,7 @@ mod tests {
                 extracted,
                 &content_objects,
                 &content_object_numbers,
+                true,
             )
             .is_none()
         );
@@ -10987,6 +11940,7 @@ mod tests {
                 extracted,
                 &content_objects,
                 &content_object_numbers,
+                true,
             )
             .is_none()
         );
@@ -12197,6 +13151,257 @@ mod tests {
     }
 
     #[test]
+    fn formula_boundary_attaches_a_unique_geometric_superscript_across_extraction_order() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars.truncate(5);
+
+        // The real (6,1) shape differs from an adjacent script run: PDF extraction
+        // places the raised `2` before intervening prose even though it is visually
+        // attached to the model-owned final `d` at the end of the formula.
+        for (index, character) in chars.iter_mut().enumerate() {
+            character.unicode = Some(['x', '2', 'p', 'q', 'd'][index]);
+            character.implicit_space_before = index == 1;
+            character.font_size = 10.0;
+            character.baseline_origin = Point {
+                x: 100.0 + index as f64 * 20.0,
+                y: 100.0,
+            };
+            character.r#box = Rect {
+                left: character.baseline_origin.x,
+                bottom: 98.0,
+                right: character.baseline_origin.x + 6.0,
+                top: 108.0,
+            };
+            character.visual_bbox = character.r#box;
+            let layout = character.layout.as_mut().unwrap();
+            layout.source = LayoutSource::Model;
+            layout.label = LayoutLabel::Text;
+            layout.policy = TranslationPolicy::Translate;
+        }
+        chars[4].layout.as_mut().unwrap().label = LayoutLabel::InlineFormula;
+        chars[4].layout.as_mut().unwrap().policy = TranslationPolicy::Passthrough;
+        chars[4].layout.as_mut().unwrap().reading_order = 114;
+        chars[4].r#box = Rect {
+            left: 246.404,
+            bottom: 582.625,
+            right: 251.590,
+            top: 591.472,
+        };
+        chars[4].visual_bbox = chars[4].r#box;
+        chars[4].baseline_origin = Point {
+            x: 246.404,
+            y: 584.558,
+        };
+
+        chars[1].font_size = 6.974;
+        chars[1].r#box = Rect {
+            left: 251.590,
+            bottom: 586.820,
+            right: 255.562,
+            top: 593.013,
+        };
+        chars[1].visual_bbox = chars[1].r#box;
+        chars[1].baseline_origin = Point {
+            x: 251.590,
+            y: 588.173,
+        };
+
+        let content_objects = BTreeSet::from([chars[0].passthrough.content_object]);
+        let cross_order = paragraph.clone();
+        let mut diagnostics = Vec::new();
+        complete_model_formula_boundaries(paragraph, &content_objects, 6, 1, &mut diagnostics);
+
+        assert_eq!(
+            paragraph
+                .chars()
+                .iter()
+                .filter_map(|character| character.unicode)
+                .collect::<String>(),
+            "xpqd2"
+        );
+        assert_eq!(
+            paragraph.chars()[4].layout.unwrap(),
+            LayoutAssignment {
+                label: LayoutLabel::InlineFormula,
+                policy: TranslationPolicy::Passthrough,
+                reading_order: 114,
+                ..paragraph.chars()[4].layout.unwrap()
+            }
+        );
+        assert!(
+            paragraph.chars()[0..3]
+                .iter()
+                .all(|character| character.layout.unwrap().label == LayoutLabel::Text)
+        );
+        assert_eq!(
+            paragraph.chars()[3].layout.unwrap().label,
+            LayoutLabel::InlineFormula
+        );
+        assert!(diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            Diagnostic::FormulaBoundaryExpanded {
+                evidence: FormulaBoundaryEvidence::ScriptBaseline,
+                expanded_character_count: 1,
+                ..
+            }
+        )));
+
+        *paragraph = cross_order.clone();
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars[1].unicode = Some('d');
+        diagnostics.clear();
+
+        complete_model_formula_boundaries(paragraph, &content_objects, 6, 1, &mut diagnostics);
+
+        assert_eq!(
+            paragraph.chars()[1].layout.unwrap().label,
+            LayoutLabel::Text,
+            "cross-order alphabetic scripts remain ambiguous with prose"
+        );
+        assert!(diagnostics.is_empty());
+
+        *paragraph = cross_order;
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars[3].layout.as_mut().unwrap().label = LayoutLabel::InlineFormula;
+        chars[3].layout.as_mut().unwrap().policy = TranslationPolicy::Passthrough;
+        chars[3].layout.as_mut().unwrap().reading_order = 115;
+        chars[3].r#box = chars[4].r#box;
+        chars[3].visual_bbox = chars[4].visual_bbox;
+        chars[3].baseline_origin = chars[4].baseline_origin;
+        diagnostics.clear();
+
+        complete_model_formula_boundaries(paragraph, &content_objects, 6, 1, &mut diagnostics);
+
+        assert_eq!(
+            paragraph.chars()[1].layout.unwrap().label,
+            LayoutLabel::Text
+        );
+        assert!(
+            diagnostics.is_empty(),
+            "ambiguous geometry must fail closed"
+        );
+    }
+
+    #[test]
+    fn formula_boundary_reorders_a_signed_superscript_with_its_numeric_base() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars.truncate(5);
+        for (index, character) in chars.iter_mut().enumerate() {
+            character.unicode = Some(['−', '9', 'x', '1', '0'][index]);
+            character.font_size = 9.9626;
+            character.baseline_origin = Point {
+                x: 100.0 + index as f64 * 10.0,
+                y: 206.268,
+            };
+            character.r#box = Rect {
+                left: character.baseline_origin.x,
+                bottom: 204.0,
+                right: character.baseline_origin.x + 5.0,
+                top: 214.0,
+            };
+            character.visual_bbox = character.r#box;
+            character.implicit_space_before = false;
+            let layout = character.layout.as_mut().unwrap();
+            layout.source = LayoutSource::Model;
+            layout.label = LayoutLabel::Text;
+            layout.policy = TranslationPolicy::Translate;
+            layout.reading_order = 220;
+        }
+        chars[1].layout.as_mut().unwrap().label = LayoutLabel::InlineFormula;
+        chars[1].layout.as_mut().unwrap().policy = TranslationPolicy::Passthrough;
+        chars[1].layout.as_mut().unwrap().reading_order = 240;
+        for character in chars.iter_mut().take(2) {
+            character.font_size = 6.9738;
+            character.baseline_origin.y = 209.883;
+        }
+        chars[0].r#box = Rect {
+            left: 396.409,
+            bottom: 208.0,
+            right: 402.636,
+            top: 214.0,
+        };
+        chars[0].visual_bbox = chars[0].r#box;
+        chars[1].r#box = Rect {
+            left: 402.636,
+            bottom: 208.0,
+            right: 406.607,
+            top: 214.0,
+        };
+        chars[1].visual_bbox = chars[1].r#box;
+        chars[3].r#box = Rect {
+            left: 386.449,
+            bottom: 204.0,
+            right: 391.430,
+            top: 214.0,
+        };
+        chars[3].visual_bbox = chars[3].r#box;
+        chars[4].r#box = Rect {
+            left: 391.430,
+            bottom: 204.0,
+            right: 396.411,
+            top: 214.0,
+        };
+        chars[4].visual_bbox = chars[4].r#box;
+
+        let content_objects = BTreeSet::from([chars[0].passthrough.content_object]);
+        let mut diagnostics = Vec::new();
+        complete_model_formula_boundaries(paragraph, &content_objects, 6, 10, &mut diagnostics);
+
+        assert_eq!(
+            paragraph
+                .chars()
+                .iter()
+                .filter_map(|character| character.unicode)
+                .collect::<String>(),
+            "x10−9"
+        );
+        assert_eq!(
+            paragraph.chars()[0].layout.unwrap().label,
+            LayoutLabel::Text
+        );
+        assert!(
+            paragraph.chars()[1..]
+                .iter()
+                .all(|character| character.layout.unwrap().label == LayoutLabel::InlineFormula)
+        );
+        assert!(diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            Diagnostic::FormulaBoundaryExpanded {
+                evidence: FormulaBoundaryEvidence::ScriptBaseline,
+                expanded_character_count: 2,
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn nested_inline_formula_group_joins_its_translatable_model_owner() {
         let mut document = Document::for_inspection(fixture());
         let engine = FakeEngine::default();
@@ -12659,6 +13864,469 @@ mod tests {
     }
 
     #[test]
+    fn relocated_formula_moves_its_uniquely_owned_vector_rule() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("vector-formula-relocation.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        const RULE: &[u8] = b"q\n1 0 0 1 218 148 cm\n0 0 m 16 0 l S\nQ";
+        const INLINE_IMAGE: &[u8] =
+            b"q\n12 0 0 12 220 136 cm\nBI /W 1 /H 1 /BPC 1 /CS /G ID\n\x80\nEI\nQ";
+        const IMAGE_TOKEN: &[u8] = b"BI /W 1 /H 1 /BPC 1 /CS /G ID\n\x80\nEI";
+        pdf.get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(
+                [
+                    b"BT /F1 12 Tf\n1 0 0 1 72 140 Tm\n(MIM) Tj\n1 0 0 1 72 126 Tm\n(MIMUS) Tj\nET\n"
+                        .as_slice(),
+                    RULE,
+                    b"\n".as_slice(),
+                    INLINE_IMAGE,
+                    b"\nBT /F1 12 Tf\n1 0 0 1 220 140 Tm\n(U) Tj\n1 0 0 1 238 140 Tm\n(S) Tj\nET\n",
+                ]
+                .concat(),
+            );
+        pdf.save(&input).unwrap();
+        let mut document = Document::for_inspection(&input);
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: "\u{4e2d}{v1}\u{6587}",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let mut chars = document.il.pages[0]
+            .paragraphs
+            .iter()
+            .flat_map(|paragraph| paragraph.chars().iter().cloned())
+            .collect::<Vec<_>>();
+        chars.sort_by(|left, right| {
+            right
+                .baseline_origin
+                .y
+                .total_cmp(&left.baseline_origin.y)
+                .then_with(|| left.baseline_origin.x.total_cmp(&right.baseline_origin.x))
+        });
+        let owner = Rect {
+            left: 72.0,
+            bottom: 110.0,
+            right: 260.0,
+            top: 152.0,
+        };
+        for character in &mut chars {
+            character.layout.as_mut().unwrap().bounds = owner;
+        }
+        document.extracted_pages[0].layout_regions[0].bounds = owner;
+        let formula = chars
+            .iter_mut()
+            .find(|character| character.unicode == Some('U'))
+            .unwrap();
+        let source_formula_x = formula.baseline_origin.x;
+        let layout = formula.layout.as_mut().unwrap();
+        layout.label = LayoutLabel::InlineFormula;
+        layout.policy = TranslationPolicy::Passthrough;
+        document.il.pages[0].paragraphs = vec![Paragraph {
+            reading_order: 0,
+            bounds: owner,
+            text: TextCarrier::Chars { chars },
+            translated_text: None,
+            preserved: None,
+        }];
+
+        styles_and_formulas(&mut document, &context).unwrap();
+        translate(&mut document, &context).unwrap();
+        typeset(&mut document, &context).unwrap();
+
+        assert_eq!(document.il.pages[0].paragraphs[0].preserved, None);
+        let rewrite = &document.rewrites[0];
+        let relocated_x = rewrite
+            .typeset_characters
+            .iter()
+            .find(|character| character.unicode == 'U')
+            .unwrap()
+            .baseline_origin
+            .x;
+        assert!(relocated_x + 50.0 < source_formula_x);
+        let source_stream = &document.extracted_pages[0].content_streams[0].decoded;
+        let rule_start = source_stream
+            .windows(RULE.len())
+            .position(|window| window == RULE)
+            .unwrap();
+        let rule_end = rule_start + RULE.len();
+        let replacement = rewrite
+            .replacements
+            .iter()
+            .find(|replacement| {
+                replacement.byte_start == rule_start && replacement.byte_end == rule_end
+            })
+            .expect("the uniquely owned vector rule must be relocated with the formula glyph");
+        assert!(
+            replacement
+                .replacement
+                .windows(RULE.len())
+                .any(|window| window == RULE),
+            "the relocated rule must replay its exact source program"
+        );
+        let image_start = source_stream
+            .windows(IMAGE_TOKEN.len())
+            .position(|window| window == IMAGE_TOKEN)
+            .unwrap();
+        let image_replacement = rewrite
+            .replacements
+            .iter()
+            .find(|replacement| {
+                replacement.byte_start == image_start
+                    && replacement.byte_end == image_start + IMAGE_TOKEN.len()
+            })
+            .expect("the uniquely owned inline image must move with the formula glyph");
+        assert!(
+            image_replacement
+                .replacement
+                .windows(IMAGE_TOKEN.len())
+                .any(|window| window == IMAGE_TOKEN)
+        );
+    }
+
+    #[test]
+    fn formula_vector_scope_with_other_visible_content_fails_closed() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let character = &document.il.pages[0].paragraphs[0].chars()[0];
+        let mut units = vec![SourceFormulaUnit {
+            chars: vec![character],
+            validation_characters: Vec::new(),
+            spans: vec![(
+                (character.passthrough.content_object, 0),
+                character.passthrough.byte_start,
+                character.passthrough.byte_end,
+            )],
+            split_glyphs: BTreeMap::new(),
+            vector_paths: Vec::new(),
+            inline_images: Vec::new(),
+            bounds: character.r#box.union(character.visual_bbox),
+            ink_bounds: character.visual_bbox,
+            source_fonts: vec![character.font.clone()],
+        }];
+        document.extracted_pages[0].vector_paths = vec![crate::walk::WalkedVectorPath {
+            content_object: (character.passthrough.content_object, 0),
+            byte_start: character.passthrough.byte_end + 1,
+            byte_end: character.passthrough.byte_end + 20,
+            start: il::Point {
+                x: character.r#box.left,
+                y: character.baseline_origin.y + 2.0,
+            },
+            end: il::Point {
+                x: character.r#box.right,
+                y: character.baseline_origin.y + 2.0,
+            },
+            content_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            safe_to_replay: false,
+        }];
+
+        assert!(
+            attach_uniquely_owned_formula_ink(&mut units, &document.extracted_pages[0]).is_none(),
+            "a formula-related path that cannot be replayed independently must fail closed"
+        );
+    }
+
+    #[test]
+    fn fraction_rule_between_numerator_and_denominator_moves_with_the_formula() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory
+            .path()
+            .join("fraction-vector-formula-relocation.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        const FRACTION_RULE: &[u8] = b"q\n1 0 0 1 218 145 cm\n0 0 m 24 0 l S\nQ";
+        const RADICAL_RULE: &[u8] = b"q\n1 0 0 1 226 141 cm\n0 0 m 12 0 l S\nQ";
+        pdf.get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(
+                [
+                    b"BT /F1 12 Tf\n1 0 0 1 72 140 Tm\n(MIM) Tj\n1 0 0 1 226 150 Tm\n(U) Tj\n1 0 0 1 72 126 Tm\n(MIMUS) Tj\nET\n"
+                        .as_slice(),
+                    FRACTION_RULE,
+                    b"\nBT /F1 12 Tf\n1 0 0 1 220 135 Tm\n(U) Tj\nET\n".as_slice(),
+                    RADICAL_RULE,
+                    b"\nBT /F1 12 Tf\n1 0 0 1 228 135 Tm\n(M) Tj\n/F1 8 Tf\n1 0 0 1 237 132 Tm\n(I) Tj\n/F1 12 Tf\n1 0 0 1 250 135 Tm\n(S) Tj\nET\n",
+                ]
+                .concat(),
+            );
+        pdf.save(&input).unwrap();
+        let mut document = Document::for_inspection(&input);
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: "\u{4e2d}{v1}\u{6587}",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let mut chars = document.il.pages[0]
+            .paragraphs
+            .iter()
+            .flat_map(|paragraph| paragraph.chars().iter().cloned())
+            .collect::<Vec<_>>();
+        let owner = Rect {
+            left: 72.0,
+            bottom: 110.0,
+            right: 270.0,
+            top: 160.0,
+        };
+        for character in &mut chars {
+            character.layout.as_mut().unwrap().bounds = owner;
+            if (character.baseline_origin.x - 226.0).abs() <= 0.01
+                && (character.baseline_origin.y - 150.0).abs() <= 0.01
+            {
+                character.unicode = Some('1');
+                character.layout.as_mut().unwrap().source = LayoutSource::Model;
+                continue;
+            }
+            if character.baseline_origin.x >= 220.0 && character.baseline_origin.x < 245.0 {
+                let layout = character.layout.as_mut().unwrap();
+                layout.label = LayoutLabel::InlineFormula;
+                layout.policy = TranslationPolicy::Passthrough;
+                layout.reading_order = 7;
+                layout.source = LayoutSource::Model;
+            }
+        }
+        document.extracted_pages[0].layout_regions[0].bounds = owner;
+        document.il.pages[0].paragraphs = vec![Paragraph {
+            reading_order: 0,
+            bounds: owner,
+            text: TextCarrier::Chars { chars },
+            translated_text: None,
+            preserved: None,
+        }];
+
+        styles_and_formulas(&mut document, &context).unwrap();
+        let TextCarrier::Chars { chars } = &mut document.il.pages[0].paragraphs[0].text;
+        chars
+            .iter_mut()
+            .find(|character| character.unicode == Some('1'))
+            .unwrap()
+            .unicode = Some('U');
+        let content_objects = document.extracted_pages[0]
+            .content_streams
+            .iter()
+            .map(|stream| stream.object_id)
+            .collect::<BTreeSet<_>>();
+        let content_object_numbers = content_objects
+            .iter()
+            .map(|object_id| object_id.0)
+            .collect::<BTreeSet<_>>();
+        let units = source_formula_units(
+            &document.il.pages[0].paragraphs[0],
+            &document.extracted_pages[0],
+            &content_objects,
+            &content_object_numbers,
+            true,
+        )
+        .expect("the complete composite formula must have a relocatable unit");
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].vector_paths.len(), 2);
+        translate(&mut document, &context).unwrap();
+        typeset(&mut document, &context).unwrap();
+
+        assert_eq!(document.il.pages[0].paragraphs[0].preserved, None);
+        let rewrite = &document.rewrites[0];
+        let source_stream = &document.extracted_pages[0].content_streams[0].decoded;
+        for rule in [FRACTION_RULE, RADICAL_RULE] {
+            let start = source_stream
+                .windows(rule.len())
+                .position(|window| window == rule)
+                .unwrap();
+            let replacement = rewrite
+                .replacements
+                .iter()
+                .find(|replacement| {
+                    replacement.byte_start == start && replacement.byte_end == start + rule.len()
+                })
+                .expect("every uniquely owned formula rule must leave its source slot");
+            assert!(
+                replacement
+                    .replacement
+                    .windows(rule.len())
+                    .any(|w| w == rule)
+            );
+        }
+    }
+
+    #[test]
+    fn formula_vector_ownership_rejects_a_wider_neighboring_table_rule() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let character = &document.il.pages[0].paragraphs[0].chars()[0];
+        let unit = SourceFormulaUnit {
+            chars: vec![character],
+            validation_characters: Vec::new(),
+            spans: vec![(
+                (character.passthrough.content_object, 0),
+                character.passthrough.byte_start,
+                character.passthrough.byte_end,
+            )],
+            split_glyphs: BTreeMap::new(),
+            vector_paths: Vec::new(),
+            inline_images: Vec::new(),
+            bounds: character.r#box.union(character.visual_bbox),
+            ink_bounds: character.visual_bbox,
+            source_fonts: vec![character.font.clone()],
+        };
+        let path = crate::walk::WalkedVectorPath {
+            content_object: (character.passthrough.content_object, 0),
+            byte_start: character.passthrough.byte_start.saturating_sub(16),
+            byte_end: character.passthrough.byte_start.saturating_sub(1),
+            start: il::Point {
+                x: character.r#box.left - 12.0,
+                y: character.baseline_origin.y + 8.0,
+            },
+            end: il::Point {
+                x: character.r#box.right + 24.0,
+                y: character.baseline_origin.y + 8.0,
+            },
+            content_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            safe_to_replay: true,
+        };
+
+        assert!(
+            !formula_owns_vector_path(&unit, &path),
+            "a table or decoration rule wider than the formula must remain independent"
+        );
+    }
+
+    #[test]
+    fn fraction_rule_expands_its_unique_numerator_into_the_model_formula() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("fraction-numerator-boundary.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        pdf.get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(
+                b"BT /F1 12 Tf\n1 0 0 1 72 140 Tm\n(MIM) Tj\n1 0 0 1 226 150 Tm\n(1) Tj\n1 0 0 1 72 126 Tm\n(MIMUS) Tj\nET\nq\n1 0 0 1 220 145 cm\n0 0 m 25 0 l S\nQ\nBT /F1 12 Tf\n1 0 0 1 220 135 Tm\n(U) Tj\n1 0 0 1 230 135 Tm\n(M) Tj\n/F1 8 Tf\n1 0 0 1 239 132 Tm\n(I) Tj\n/F1 12 Tf\n1 0 0 1 250 135 Tm\n(S) Tj\nET\n"
+                    .to_vec(),
+            );
+        pdf.save(&input).unwrap();
+        let mut document = Document::for_inspection(&input);
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let mut chars = document.il.pages[0]
+            .paragraphs
+            .iter()
+            .flat_map(|paragraph| paragraph.chars().iter().cloned())
+            .collect::<Vec<_>>();
+        let owner = Rect {
+            left: 72.0,
+            bottom: 110.0,
+            right: 270.0,
+            top: 160.0,
+        };
+        for character in &mut chars {
+            character.layout.as_mut().unwrap().bounds = owner;
+            if (character.baseline_origin.x - 226.0).abs() <= 0.01
+                && (character.baseline_origin.y - 150.0).abs() <= 0.01
+            {
+                // MimusExact does not carry a digit glyph; the boundary contract is
+                // independent of font bytes, so give this hand-built numerator its
+                // intended decoded scalar after the production walk.
+                character.unicode = Some('1');
+                character.layout.as_mut().unwrap().source = LayoutSource::Model;
+            }
+            if matches!(character.unicode, Some('U' | 'M' | 'I'))
+                && character.baseline_origin.x >= 220.0
+            {
+                let layout = character.layout.as_mut().unwrap();
+                layout.label = LayoutLabel::InlineFormula;
+                layout.policy = TranslationPolicy::Passthrough;
+                layout.reading_order = 7;
+                layout.source = LayoutSource::Model;
+            }
+        }
+        document.extracted_pages[0].layout_regions[0].bounds = owner;
+        document.il.pages[0].paragraphs = vec![Paragraph {
+            reading_order: 0,
+            bounds: owner,
+            text: TextCarrier::Chars { chars },
+            translated_text: None,
+            preserved: None,
+        }];
+
+        styles_and_formulas(&mut document, &context).unwrap();
+
+        let paragraph = &document.il.pages[0].paragraphs[0];
+        let numerator = paragraph
+            .chars()
+            .iter()
+            .find(|character| character.unicode == Some('1'))
+            .unwrap();
+        assert_eq!(
+            numerator.layout.unwrap().label,
+            LayoutLabel::InlineFormula,
+            "the proven numerator must be part of the model-owned formula boundary"
+        );
+        let request = document
+            .prepared_translations
+            .get(&(0, 0))
+            .unwrap()
+            .request_text();
+        assert_eq!(request.matches("{v").count(), 1);
+        assert!(
+            !request.replace("{v1}", "").contains('1'),
+            "formula numerator leaked outside its placeholder in {request:?}"
+        );
+    }
+
+    #[test]
     fn extraction_order_punctuation_is_moved_after_the_following_formula_unit() {
         let mut document = Document::for_inspection(fixture());
         let engine = FakeEngine::default();
@@ -12903,6 +14571,99 @@ mod tests {
     }
 
     #[test]
+    fn fragmented_model_formula_is_coalesced_at_its_unique_visual_gap() {
+        // A fraction/radical can be emitted as numerator, prose, radical, prose,
+        // then operand. Unlike adjacent formulas, all four formula glyphs belong
+        // to one model region and geometry places that region in one unique gap.
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let template = paragraph.chars()[0].clone();
+        let text_layout = LayoutAssignment {
+            label: LayoutLabel::Text,
+            reading_order: 1,
+            bounds: paragraph.bounds,
+            source: LayoutSource::Model,
+            policy: TranslationPolicy::Translate,
+        };
+        let formula_layout = LayoutAssignment {
+            label: LayoutLabel::InlineFormula,
+            reading_order: 99,
+            bounds: Rect {
+                left: 118.0,
+                bottom: 94.0,
+                right: 138.0,
+                top: 112.0,
+            },
+            source: LayoutSource::Model,
+            policy: TranslationPolicy::Passthrough,
+        };
+        let chars = [
+            ('A', 100.0, 100.0, false),
+            ('1', 125.0, 108.0, true),
+            ('o', 108.0, 100.0, false),
+            ('f', 113.0, 100.0, false),
+            ('\u{221a}', 120.0, 101.0, true),
+            ('.', 139.0, 100.0, false),
+            ('B', 144.0, 100.0, false),
+            ('d', 127.0, 96.0, true),
+            ('k', 132.0, 94.0, true),
+            ('C', 100.0, 84.0, false),
+        ]
+        .into_iter()
+        .map(|(unicode, x, y, formula)| {
+            let mut character = template.clone();
+            character.unicode = Some(unicode);
+            character.baseline_origin = il::Point { x, y };
+            character.r#box = Rect {
+                left: x,
+                bottom: y - 2.0,
+                right: x + 4.0,
+                top: y + 8.0,
+            };
+            character.visual_bbox = character.r#box;
+            character.layout = Some(if formula { formula_layout } else { text_layout });
+            character
+        })
+        .collect::<Vec<_>>();
+        paragraph.text = TextCarrier::Chars { chars };
+        let content_objects = paragraph
+            .chars()
+            .iter()
+            .map(|character| character.passthrough.content_object)
+            .collect::<BTreeSet<_>>();
+
+        complete_model_formula_boundaries(paragraph, &content_objects, 0, 0, &mut Vec::new());
+
+        let formula = paragraph
+            .chars()
+            .iter()
+            .filter(|character| {
+                prepared_character_class(character, &content_objects)
+                    == PreparedCharacterClass::Formula
+            })
+            .filter_map(|character| character.unicode)
+            .collect::<String>();
+        assert_eq!(formula, "1\u{221a}dk");
+        assert_eq!(
+            source_text_segments(paragraph.chars(), &content_objects).len(),
+            2,
+            "one model-owned rigid formula must produce one placeholder"
+        );
+        assert_eq!(paragraph.source_text(), "Aof1\u{221a}dk.BC");
+    }
+
+    #[test]
     fn formula_continuity_limit_is_derived_from_source_spacing_and_em() {
         let mut document = Document::for_inspection(fixture());
         let engine = FakeEngine::default();
@@ -13095,6 +14856,8 @@ mod tests {
             validation_characters: Vec::new(),
             spans: Vec::new(),
             split_glyphs: BTreeMap::new(),
+            vector_paths: Vec::new(),
+            inline_images: Vec::new(),
             bounds: formula_bounds,
             ink_bounds: formula_bounds,
             source_fonts: Vec::new(),
@@ -13142,6 +14905,8 @@ mod tests {
                 }],
                 spans: Vec::new(),
                 split_glyphs: BTreeMap::new(),
+                vector_paths: Vec::new(),
+                inline_images: Vec::new(),
                 bounds,
                 ink_bounds: bounds,
                 source_fonts: Vec::new(),
@@ -13239,6 +15004,141 @@ mod tests {
                 .iter()
                 .all(|character| character.unicode != Some('\u{221a}'))
         );
+    }
+
+    #[test]
+    fn source_order_displaced_radical_attaches_to_its_unique_visual_formula() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        chars.truncate(5);
+        chars[1].unicode = Some('\u{221a}');
+        chars[1].r#box = Rect {
+            left: 92.0,
+            bottom: 100.0,
+            right: 100.0,
+            top: 112.0,
+        };
+        chars[1].visual_bbox = chars[1].r#box;
+
+        // pdfTeX can emit a radical before an unrelated formula in extraction order even though
+        // its visual ink belongs to a later operand. This is the shape from 1706 page 4 (3,4).
+        let mut source_segments = vec![Vec::new(), vec![&chars[1]], Vec::new(), Vec::new()];
+        let formulas = [
+            FormulaContinuityFormula {
+                formula_index: 0,
+                bounds: Rect {
+                    left: 20.0,
+                    bottom: 98.0,
+                    right: 28.0,
+                    top: 110.0,
+                },
+                line_left: 72.0,
+            },
+            FormulaContinuityFormula {
+                formula_index: 1,
+                bounds: Rect {
+                    left: 200.0,
+                    bottom: 98.0,
+                    right: 208.0,
+                    top: 110.0,
+                },
+                line_left: 72.0,
+            },
+            FormulaContinuityFormula {
+                formula_index: 2,
+                bounds: Rect {
+                    left: 100.0,
+                    bottom: 98.0,
+                    right: 108.0,
+                    top: 110.0,
+                },
+                line_left: 72.0,
+            },
+        ];
+        let mut translated_segments = vec![Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+
+        attach_translated_radicals_to_formula_operands(
+            &mut source_segments,
+            &formulas,
+            &mut translated_segments,
+        )
+        .unwrap();
+
+        assert!(
+            source_segments
+                .iter()
+                .flatten()
+                .all(|character| { character.unicode != Some('\u{221a}') })
+        );
+    }
+
+    #[test]
+    fn source_order_displaced_radical_expands_the_visual_formula_rigid_body() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        let template = chars[0].clone();
+        while chars.len() < 7 {
+            chars.push(template.clone());
+        }
+        chars.truncate(7);
+        for character in chars.iter_mut() {
+            let layout = character.layout.as_mut().unwrap();
+            layout.label = LayoutLabel::Text;
+            layout.policy = TranslationPolicy::Translate;
+        }
+        for (index, left) in [(1, 20.0), (3, 200.0), (5, 100.0)] {
+            chars[index].r#box = Rect {
+                left,
+                bottom: 100.0,
+                right: left + 8.0,
+                top: 110.0,
+            };
+            chars[index].visual_bbox = chars[index].r#box;
+            let layout = chars[index].layout.as_mut().unwrap();
+            layout.label = LayoutLabel::InlineFormula;
+            layout.policy = TranslationPolicy::Passthrough;
+        }
+        chars[2].unicode = Some('\u{221a}');
+        chars[2].r#box = Rect {
+            left: 92.0,
+            bottom: 100.0,
+            right: 100.0,
+            top: 112.0,
+        };
+        chars[2].visual_bbox = chars[2].r#box;
+        let content_objects = BTreeSet::from([chars[0].passthrough.content_object]);
+
+        let formulas = fixed_formula_continuity(paragraph, &content_objects).unwrap();
+
+        assert_eq!(formulas.len(), 3);
+        assert!((formulas[2].bounds.left - 92.0).abs() <= 0.01);
+        assert!((formulas[2].bounds.right - 108.0).abs() <= 0.01);
     }
 
     #[test]
@@ -13361,6 +15261,66 @@ mod tests {
         assert_eq!(
             evidence,
             BTreeSet::from(["contiguous_digit_run".to_owned()])
+        );
+    }
+
+    #[test]
+    fn repeated_content_conservation_failure_preserves_the_whole_paragraph() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: "translated without the number",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let TextCarrier::Chars { chars } = &mut document.il.pages[0].paragraphs[0].text;
+        chars[0].unicode = Some('4');
+
+        styles_and_formulas(&mut document, &context).unwrap();
+        translate(&mut document, &context).unwrap();
+
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            document.il.pages[0].paragraphs[0].preserved,
+            Some(il::PreservedReason::ContentConservation)
+        );
+        assert_eq!(document.il.pages[0].paragraphs[0].translated_text, None);
+        assert!(
+            document
+                .diagnostics
+                .entries()
+                .iter()
+                .any(|diagnostic| matches!(
+                    diagnostic,
+                    Diagnostic::ContentConservationRetry {
+                        missing_token_count: 1,
+                        missing_tokens,
+                        ..
+                    } if missing_tokens == &["4".to_owned()]
+                ))
+        );
+        assert!(
+            document
+                .diagnostics
+                .entries()
+                .iter()
+                .any(|diagnostic| matches!(
+                    diagnostic,
+                    Diagnostic::ContentConservationViolation {
+                        missing_token_count: 1,
+                        missing_tokens,
+                        ..
+                    } if missing_tokens == &["4".to_owned()]
+                ))
         );
     }
 

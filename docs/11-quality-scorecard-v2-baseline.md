@@ -1,6 +1,7 @@
 # M3 scorecard v2 baseline
 
-Date: 2026-08-30. Schema: scorecard v2. Thresholds remain proposals pending user approval.
+Date: 2026-08-30. Schema: scorecard v2. Thresholds remain proposals pending user approval. Sections
+1-6 preserve the pre-fix baseline; section 7 is the superseding L5-5R2 acceptance baseline.
 
 ## 1. Evidence and conclusion
 
@@ -126,3 +127,71 @@ ADR-0013 typed degradation. After that, the data favors #118 before broad #38 fi
 1,639/2,997 paragraphs (54.7%), while #38 remains at 1/46 M3 fixture coverage. Rerun this exact
 schema after the recovery round; if realized recovery is materially below the estimate, use the
 bucket residuals to choose the next fixtures rather than filling all gaps indiscriminately.
+
+## 7. L5-5R2 withdrawal and replacement baseline
+
+The 2026-08-30 acceptance remains withdrawn. Its `98.067441` automatic score and text-only formula audit
+did not cover vector paths or inline images. The 2026-08-31 FOR-04 replay finds six source-slot vector
+residues; `(3,9)` is confirmed critical because `sqrt(d_k)` moved while its fraction and radical rules
+stayed behind and numerator `1` was cleared. `(4,21)` was reopened for ink-closed review. These rows
+remain historical evidence and do not release the withdrawn PDF.
+
+| Contract | Pre-fix baseline | Withdrawn L5-5R2 | Disposition |
+| --- | ---: | ---: | --- |
+| CON-01 | 92.1788% | **162/162 (100%)** | runtime retry then typed `content_conservation` uses the scorecard lexer |
+| FOR-01 proxy | 33 | **6** | all six explained by full-artifact audit; zero unexplained |
+| FOR-02 excessive gap | 8 | **0** | production and scorecard share bound and visual-line membership |
+| FOR-03 unexplained hole | 8 | **0** | same execution contract as FOR-02 |
+| STR-05 title/author failures | 4 | **0** | structure-owned typed passthrough |
+| Confirmed criticals | formula leakage + title/author | **none** | automatic conclusion is non-blocking |
+| FOR-04 orphan source ink | not measured | **6** | blocking; text-only PASS withdrawn |
+
+The full formula population is 54 paragraphs: 52 published and two typed (`(3,12)`
+`unreliable_unicode`, `(4,6)` `typeset_overflow`). The replay proves all 307 exclusive formula
+operand spans, all three shared spans/seven shared glyphs, all source font references, and all 468
+formula characters. FOR-02/FOR-03 measure 64 neighbor gaps with a maximum of 9 pt and no violation.
+Eighteen noncontiguous extractor records preserve the same source extraction-order shape; they are
+not glyph loss.
+
+The final 20-paper conserving-fake regression publishes 20/20 with Internal/6 = 0, zero degraded
+pages, zero `content_conservation_retry`, and zero `content_conservation` typed reason. Preserved
+paragraph counts are workload characteristics, not publication failures:
+
+| Producer | Published | Internal/6 | Papers' preserved-paragraph range |
+| --- | ---: | ---: | ---: |
+| pdfTeX | 8/8 | 0 | 121-480 |
+| XeTeX | 4/4 | 0 | 86-1,223 |
+| LuaTeX | 4/4 | 0 | 126-536 |
+| Word | 4/4 | 0 | 21-287 |
+
+The runtime conservation net changes #118's expected behavior: a wild paragraph whose translation
+drops a conservatively detectable number, unit, or bracketed reference now receives one corrective
+retry, then publishes the original paragraph under typed `content_conservation` instead of caching
+or typesetting damaged text. Recovery estimates for the 2,997-paragraph matrix must therefore report
+three outcomes per bucket: translated recovery, typed conservation fallback, and other typed residue.
+The existing 54.7% recovery estimate remains the reason to run #118 before the broad #38 fixture
+backfill, but it must be remeasured under this fail-closed split.
+
+### 7.1 Ink-closed replacement (accepted 2026-08-31)
+
+The replacement artifact is `.context/vector-formula-fix/real6/1706.03762v7.zh.pdf`, SHA-256
+`b3de6f10522f64a7e8bedba292c01d51724fb616f298bd4917ed8e54a475c0ef`. Its score is
+`97.988578`, conclusion `automatic_score_only`, with no confirmed critical. The lower automatic
+total than the withdrawn artifact is not a regression verdict; the replacement adds FOR-05 and uses
+the ink-closed audit while retaining six independently explained FOR-01 proxy records.
+
+| Contract | Replacement | Disposition |
+| --- | ---: | --- |
+| CON-01 | **161/161 (100%)** | zero missing numeric/unit/reference occurrence |
+| FOR-01 proxy | **6** | all six individually explained; zero unexplained violation |
+| FOR-02 / FOR-03 | **0 / 0** | 61 measured neighbor gaps, maximum 9 pt |
+| FOR-04 orphan source ink | **0/71** | published units only; typed source-preserving rows are excluded |
+| FOR-05 rigid-body integrity | **0/4** | detached radical/vector units use one page-space delta |
+| STR-05 title/author failures | **0** | structure-owned typed passthrough |
+| Confirmed criticals | **none** | scorecard conclusion is non-blocking |
+
+The full population remains 54 formula paragraphs: 52 published and two source-preserving typed
+rows, `(3,12)` `unreliable_unicode` and `(4,6)` `typeset_overflow`. The audit explicitly records the
+screenshot regression `(3,4)` as complete `sqrt(d_k)`, plus complete rigid bodies at `(3,9)` and
+`(4,21)`. The accepted ordinary and strict replays both hit 137/137 cache entries and make zero
+provider calls; strict exits 4 for exactly those two reviewed typed paragraphs and publishes no PDF.
