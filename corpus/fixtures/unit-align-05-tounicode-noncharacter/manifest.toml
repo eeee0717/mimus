@@ -48,7 +48,7 @@ metric_box = [72.0,117.168,82.356,131.136]
 visual_bbox = [73.177734,120.0,81.181641,128.748047]
 [[expected.alignment]]
 page = 0
-diagnostic = true
+diagnostic = false
 walked_text = ""
 walked_character_count = 1
 engine_character_count = 1

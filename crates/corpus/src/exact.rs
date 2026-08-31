@@ -173,6 +173,7 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
         "unit-parse-11-outline-siblings" => outline_siblings(repo_root),
         "unit-parse-12-contents-array-tj-operand" => contents_array_tj_operand(repo_root),
         "unit-write-06-free-object-slot" => free_object_slot(repo_root),
+        "unit-write-07-link-borders" => link_borders(repo_root),
         "unit-doc-04-rotated-90" => geometry_text_page(
             repo_root,
             fixture_id,
@@ -1724,6 +1725,43 @@ fn structured_variant(repo_root: &Path, fixture_id: &str) -> Result<Vec<u8>> {
         .context("structured baseline trailer ID missing")?;
     bytes.splice(position..position + old.len(), new.into_bytes());
     Ok(bytes)
+}
+
+fn link_borders(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-write-07-link-borders");
+
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 9 0 R /Annots [10 0 R 11 0 R 12 0 R 13 0 R] >>",
+    )?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(
+        b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>",
+    )?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", to_unicode())?;
+    pdf.stream(b"", b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n")?;
+    pdf.object(
+        b"<< /Type /Annot /Subtype /Link /Rect [72 90 130 106] /Border [0 0 2] /A << /S /URI /URI (https://example.com/border) >> >>",
+    )?;
+    pdf.object(
+        b"<< /Type /Annot /Subtype /Link /Rect [135 90 193 106] /Border [0 0 0] /BS << /W 3 /S /D /D [3 2] >> /Dest [3 0 R /Fit] >>",
+    )?;
+    pdf.object(
+        b"<< /Type /Annot /Subtype /Link /Rect [198 90 256 106] /Border [0 0 0] /A << /S /URI /URI (https://example.com/none) >> >>",
+    )?;
+    pdf.object(
+        b"<< /Type /Annot /Subtype /Text /Rect [72 55 92 75] /Border [0 0 4] /BS << /W 2 /S /S >> /AP << /N 14 0 R >> /Contents (keep appearance) >>",
+    )?;
+    pdf.stream(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 20 20] /Resources << >>",
+        b"q\n1 0 0 rg\n0 0 20 20 re\nf\nQ\n",
+    )?;
+
+    pdf.finish(1)
 }
 
 fn simple_font_page(

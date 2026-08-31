@@ -53,14 +53,30 @@ pub struct WriteReport {
     pub output_bytes: usize,
     pub appended_bytes: usize,
     pub content_objects: Vec<ObjectId>,
+    pub stripped_link_border_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct WriteOptions {
+    pub strip_link_borders: bool,
+}
+
+#[cfg(test)]
 pub(crate) fn build_incremental(
     original_bytes: &[u8],
     original: &Document,
     rewrites: &[PageRewrite],
 ) -> Result<(Vec<u8>, WriteReport)> {
-    if rewrites.is_empty() {
+    build_incremental_with_options(original_bytes, original, rewrites, WriteOptions::default())
+}
+
+pub(crate) fn build_incremental_with_options(
+    original_bytes: &[u8],
+    original: &Document,
+    rewrites: &[PageRewrite],
+    options: WriteOptions,
+) -> Result<(Vec<u8>, WriteReport)> {
+    if rewrites.is_empty() && !options.strip_link_borders {
         return Ok((
             original_bytes.to_vec(),
             WriteReport {
@@ -68,6 +84,7 @@ pub(crate) fn build_incremental(
                 output_bytes: original_bytes.len(),
                 appended_bytes: 0,
                 content_objects: Vec::new(),
+                stripped_link_border_count: 0,
             },
         ));
     }
@@ -85,6 +102,11 @@ pub(crate) fn build_incremental(
     incremental.new_document.max_id = object_ceiling;
     let mut content_objects = Vec::new();
     let mut rewritten_pages = BTreeSet::new();
+    let stripped_link_border_count = if options.strip_link_borders {
+        strip_link_annotation_borders(original, &mut incremental)?
+    } else {
+        0
+    };
 
     for rewrite in rewrites {
         if !rewritten_pages.insert(rewrite.page_index) {
@@ -213,8 +235,177 @@ pub(crate) fn build_incremental(
         output_bytes: output.len(),
         appended_bytes: output.len() - original_bytes.len(),
         content_objects,
+        stripped_link_border_count,
     };
     Ok((output, report))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum AnnotationTarget {
+    Object(ObjectId),
+    PageArray { page_id: ObjectId, index: usize },
+    IndirectArray { array_id: ObjectId, index: usize },
+}
+
+fn strip_link_annotation_borders(
+    original: &Document,
+    incremental: &mut IncrementalDocument,
+) -> Result<usize> {
+    let mut targets = BTreeSet::new();
+    for page_id in original.get_pages().into_values() {
+        let Ok(page) = original.get_dictionary(page_id) else {
+            continue;
+        };
+        match page.get(b"Annots") {
+            Ok(Object::Array(annotations)) => collect_annotation_targets(
+                original,
+                annotations,
+                |index| AnnotationTarget::PageArray { page_id, index },
+                &mut targets,
+            ),
+            Ok(Object::Reference(array_id)) => {
+                let Ok(annotations) = original.get_object(*array_id).and_then(Object::as_array)
+                else {
+                    continue;
+                };
+                collect_annotation_targets(
+                    original,
+                    annotations,
+                    |index| AnnotationTarget::IndirectArray {
+                        array_id: *array_id,
+                        index,
+                    },
+                    &mut targets,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    for target in &targets {
+        match *target {
+            AnnotationTarget::Object(object_id) => {
+                incremental
+                    .opt_clone_object_to_new_document(object_id)
+                    .map_err(output_build_error)?;
+                let annotation = incremental
+                    .new_document
+                    .get_object_mut(object_id)
+                    .and_then(Object::as_dict_mut)
+                    .map_err(output_build_error)?;
+                strip_link_border_dictionary(annotation);
+            }
+            AnnotationTarget::PageArray { page_id, index } => {
+                incremental
+                    .opt_clone_object_to_new_document(page_id)
+                    .map_err(output_build_error)?;
+                let annotation = incremental
+                    .new_document
+                    .get_object_mut(page_id)
+                    .and_then(Object::as_dict_mut)
+                    .and_then(|page| page.get_mut(b"Annots"))
+                    .and_then(Object::as_array_mut)
+                    .and_then(|annotations| {
+                        annotations
+                            .get_mut(index)
+                            .ok_or(lopdf::Error::ObjectNotFound(page_id))
+                    })
+                    .and_then(Object::as_dict_mut)
+                    .map_err(output_build_error)?;
+                strip_link_border_dictionary(annotation);
+            }
+            AnnotationTarget::IndirectArray { array_id, index } => {
+                incremental
+                    .opt_clone_object_to_new_document(array_id)
+                    .map_err(output_build_error)?;
+                let annotation = incremental
+                    .new_document
+                    .get_object_mut(array_id)
+                    .and_then(Object::as_array_mut)
+                    .and_then(|annotations| {
+                        annotations
+                            .get_mut(index)
+                            .ok_or(lopdf::Error::ObjectNotFound(array_id))
+                    })
+                    .and_then(Object::as_dict_mut)
+                    .map_err(output_build_error)?;
+                strip_link_border_dictionary(annotation);
+            }
+        }
+    }
+    Ok(targets.len())
+}
+
+fn collect_annotation_targets(
+    original: &Document,
+    annotations: &[Object],
+    direct_target: impl Fn(usize) -> AnnotationTarget,
+    targets: &mut BTreeSet<AnnotationTarget>,
+) {
+    for (index, annotation) in annotations.iter().enumerate() {
+        match annotation {
+            Object::Reference(object_id) => {
+                let Ok(dictionary) = original.get_dictionary(*object_id) else {
+                    continue;
+                };
+                if link_border_is_visible(original, dictionary) {
+                    targets.insert(AnnotationTarget::Object(*object_id));
+                }
+            }
+            Object::Dictionary(dictionary) if link_border_is_visible(original, dictionary) => {
+                targets.insert(direct_target(index));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn link_border_is_visible(original: &Document, annotation: &Dictionary) -> bool {
+    if annotation
+        .get(b"Subtype")
+        .and_then(|subtype| original.dereference(subtype).map(|(_, subtype)| subtype))
+        .and_then(Object::as_name)
+        .ok()
+        != Some(b"Link".as_slice())
+    {
+        return false;
+    }
+    match annotation
+        .get(b"BS")
+        .and_then(|style| original.dereference(style).map(|(_, style)| style))
+    {
+        Ok(Object::Dictionary(style)) => style.get(b"W").ok().is_none_or(|width| {
+            original
+                .dereference(width)
+                .ok()
+                .and_then(|(_, width)| width.as_float().ok())
+                .is_none_or(|width| width > 0.0)
+        }),
+        Ok(_) => true,
+        Err(_) => annotation
+            .get(b"Border")
+            .ok()
+            .and_then(|border| original.dereference(border).ok())
+            .map(|(_, border)| border)
+            .and_then(|border| border.as_array().ok())
+            .and_then(|border| border.get(2))
+            .and_then(|width| original.dereference(width).ok())
+            .map(|(_, width)| width)
+            .and_then(|width| width.as_float().ok())
+            .is_none_or(|width| width > 0.0),
+    }
+}
+
+fn strip_link_border_dictionary(annotation: &mut Dictionary) {
+    annotation.set(
+        "Border",
+        Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(0),
+        ]),
+    );
+    annotation.remove(b"BS");
 }
 
 fn install_page_fonts(
@@ -578,6 +769,97 @@ mod tests {
         assert_eq!(report.input_bytes, report.output_bytes);
         assert_eq!(report.appended_bytes, 0);
         assert!(report.content_objects.is_empty());
+    }
+
+    #[test]
+    fn indirect_zero_width_link_styles_are_already_borderless() {
+        let mut document = Document::new();
+        let width = document.add_object(Object::Integer(0));
+        let style = document.add_object(dictionary! {
+            "W" => Object::Reference(width),
+        });
+        let border = document.add_object(Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(0),
+        ]));
+        let mut annotation = Dictionary::new();
+        annotation.set("Subtype", Object::Name(b"Link".to_vec()));
+        annotation.set("BS", Object::Reference(style));
+        assert!(!link_border_is_visible(&document, &annotation));
+
+        annotation.remove(b"BS");
+        annotation.set("Border", Object::Reference(border));
+        assert!(!link_border_is_visible(&document, &annotation));
+    }
+
+    #[test]
+    fn link_border_cleanup_is_opt_in_and_preserves_annotation_semantics() {
+        let input = std::fs::read(fixture_path("unit-write-07-link-borders")).unwrap();
+        let original = Document::load_mem(&input).unwrap();
+
+        let (default_output, default_report) = build_incremental(&input, &original, &[]).unwrap();
+        assert_eq!(default_output, input);
+        assert_eq!(default_report.stripped_link_border_count, 0);
+
+        let (output, report) = build_incremental_with_options(
+            &input,
+            &original,
+            &[],
+            WriteOptions {
+                strip_link_borders: true,
+            },
+        )
+        .unwrap();
+        assert!(output.starts_with(&input));
+        assert_eq!(report.stripped_link_border_count, 2);
+        assert!(report.content_objects.is_empty());
+
+        let output = Document::load_mem(&output).unwrap();
+        for object_id in [(10, 0), (11, 0)] {
+            let annotation = output.get_dictionary(object_id).unwrap();
+            assert_eq!(
+                annotation.get(b"Border").unwrap().as_array().unwrap(),
+                &vec![Object::Integer(0), Object::Integer(0), Object::Integer(0)]
+            );
+            assert!(!annotation.has(b"BS"));
+        }
+        for object_id in [(12, 0), (13, 0)] {
+            assert_eq!(
+                output.get_object(object_id).unwrap(),
+                original.get_object(object_id).unwrap(),
+                "control annotation {object_id:?} changed"
+            );
+        }
+
+        let input_link = original.get_dictionary((10, 0)).unwrap();
+        let output_link = output.get_dictionary((10, 0)).unwrap();
+        assert_eq!(
+            output_link.get(b"Rect").unwrap(),
+            input_link.get(b"Rect").unwrap()
+        );
+        assert_eq!(
+            output_link.get(b"A").unwrap(),
+            input_link.get(b"A").unwrap()
+        );
+        let input_link = original.get_dictionary((11, 0)).unwrap();
+        let output_link = output.get_dictionary((11, 0)).unwrap();
+        assert_eq!(
+            output_link.get(b"Rect").unwrap(),
+            input_link.get(b"Rect").unwrap()
+        );
+        assert_eq!(
+            output_link.get(b"Dest").unwrap(),
+            input_link.get(b"Dest").unwrap()
+        );
+        assert_eq!(
+            output.get_dictionary((13, 0)).unwrap().get(b"AP").unwrap(),
+            original
+                .get_dictionary((13, 0))
+                .unwrap()
+                .get(b"AP")
+                .unwrap()
+        );
     }
 
     #[test]

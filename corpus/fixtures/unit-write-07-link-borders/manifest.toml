@@ -1,0 +1,120 @@
+# unit-write-07-link-borders -- expected manifest
+
+schema_version = 1
+
+[identity]
+id = "unit-write-07-link-borders"
+name = "Link border cleanup controls"
+class = "unit"
+legality = "legal"
+cases = ["WRITE-06"]
+priority = "M3"
+variable = "Link annotations with explicit Border and BS styles beside borderless and non-Link controls"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-write-07-link-borders.pdf"
+pdf_sha256 = "c09e49adc93363547e2e746af1602248e4cca5e9910c09446b0df72fbd90afab"
+font_provenance = "vendored"
+fonts = [
+    { file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" },
+]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d77726974652d30372d6c69"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+bookmarks = 0
+bookmark_depth = 0
+annotations = 4
+form_fields = 0
+optional_content_groups = 0
+named_destinations = 0
+uri_actions = 2
+
+[[expected.block]]
+key = "L1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.168, 112.656, 131.136]
+visual_bbox = [73.177734, 119.830078, 111.985229, 128.90625]
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 120 Tm
+(MIMUS) Tj
+ET
+"""
+
+[[expected.annotation]]
+object = 10
+subtype = "link"
+rect = [72.0, 90.0, 130.0, 106.0]
+uri = "https://example.com/border"
+
+[[expected.annotation]]
+object = 11
+subtype = "link"
+rect = [135.0, 90.0, 193.0, 106.0]
+
+[[expected.annotation]]
+object = 12
+subtype = "link"
+rect = [198.0, 90.0, 256.0, 106.0]
+uri = "https://example.com/none"
+
+[[expected.annotation]]
+object = 13
+subtype = "text"
+rect = [72.0, 55.0, 92.0, 75.0]
+contents = "keep appearance"
+
+[[expected.behaviour]]
+id = "WRITE-06-link-border-controls"
+assertion = "Opt-in cleanup changes only visible Link border styling; Link targets and rectangles, the already borderless Link, and the non-Link annotation appearance remain unchanged"
+observable_via = "qpdf expanded object dictionaries before and after the production writer"
+
+[oracle]
+checks = [
+    "determinism",
+    "legality",
+    "structure",
+    "page-geometry",
+    "hand-written-geometry",
+    "pdf-bytes",
+    "pdf-structure",
+    "render",
+]
+
+[[adjudication]]
+date = "2026-08-31"
+issue = "Annotation borders and appearance streams do not contribute to the text block geometry but are part of the preserved object graph."
+resolution = "Use the hand-written annotation dictionaries as the structural oracle and independent render hashes for the complete page."

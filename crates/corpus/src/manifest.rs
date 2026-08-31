@@ -391,7 +391,9 @@ pub struct AlignmentExpectation {
     pub walked_text: String,
     pub walked_character_count: usize,
     pub engine_character_count: usize,
+    #[allow(dead_code)]
     pub extraction_equivalent_count: usize,
+    #[allow(dead_code)]
     pub explained_count: usize,
     pub strong_unicode_conflict_count: usize,
     pub weak_unicode_conflict_count: usize,
@@ -402,10 +404,8 @@ pub struct AlignmentExpectation {
 }
 
 impl AlignmentExpectation {
-    fn has_classified_difference(&self) -> bool {
-        self.extraction_equivalent_count
-            + self.explained_count
-            + self.strong_unicode_conflict_count
+    fn has_actionable_difference(&self) -> bool {
+        self.strong_unicode_conflict_count
             + self.weak_unicode_conflict_count
             + self.unresolved_unicode_count
             + self.walk_only_count
@@ -1192,9 +1192,9 @@ impl Manifest {
                 "alignment.walked_text 的 Unicode 字符数不得超过 walk 字符总数",
             )?;
             fail_if(
-                expected.diagnostic != expected.has_classified_difference(),
+                expected.diagnostic != expected.has_actionable_difference(),
                 "§2.7/ADR-0015",
-                "alignment.diagnostic 必须与分类计数是否非零一致",
+                "alignment.diagnostic 必须与可行动分类计数是否非零一致",
             )?;
         }
         fail_if(

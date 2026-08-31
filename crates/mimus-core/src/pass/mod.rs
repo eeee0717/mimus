@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::Path;
 
 use lopdf::{Document as LopdfDocument, Object, ObjectId};
 use rayon::prelude::*;
@@ -25,9 +26,11 @@ use crate::scan::{PageClass, prescan_page};
 #[cfg(test)]
 use crate::walk::walk_page;
 use crate::walk::{PageWalkError, UnicodeProvenance, walk_page_detailed_with_rotation};
+#[cfg(test)]
+use crate::write::build_incremental;
 use crate::write::{
-    ContentSpanReplacement, EmbeddedFont, PageRewrite, TypesetCharacter, build_incremental,
-    glyph_width_1000, publish,
+    ContentSpanReplacement, EmbeddedFont, PageRewrite, TypesetCharacter, WriteOptions,
+    build_incremental_with_options, glyph_width_1000, publish,
 };
 
 pub const ORDER: [Stage; 10] = [
@@ -2489,12 +2492,12 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
             Ok(crate::translate::executor::TranslationOutcome::Identity { suspicious }) => {
                 paragraph.translated_text = Some(paragraph.source_text());
                 prose_identity_count += usize::from(job.prose_shaped);
-                document.diagnostics.push(Diagnostic::TranslationIdentity {
-                    page_index: job.page_index,
-                    paragraph_index: job.paragraph_index,
-                    request_characters: job.prepared.request_text().chars().count(),
-                });
                 if suspicious {
+                    document.diagnostics.push(Diagnostic::TranslationIdentity {
+                        page_index: job.page_index,
+                        paragraph_index: job.paragraph_index,
+                        request_characters: job.prepared.request_text().chars().count(),
+                    });
                     document
                         .suspicious_echoes
                         .insert((job.page_index, job.paragraph_index));
@@ -8217,15 +8220,27 @@ pub fn write(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
             "Parse did not retain a PDF",
         )
     })?;
-    let output_path = document.output_path().ok_or_else(|| {
+    let output_path = document.output_path().map(Path::to_owned).ok_or_else(|| {
         MimusError::internal(
             InternalReason::InvariantViolation,
             "Write received a document with no output path",
         )
     })?;
-    let (candidate, report) = build_incremental(&document.original_bytes, pdf, &document.rewrites)?;
+    let (candidate, report) = build_incremental_with_options(
+        &document.original_bytes,
+        pdf,
+        &document.rewrites,
+        WriteOptions {
+            strip_link_borders: context.config.strip_link_borders,
+        },
+    )?;
     validate_output_roundtrip(document, context, &candidate)?;
-    publish(output_path, &candidate)?;
+    publish(&output_path, &candidate)?;
+    if report.stripped_link_border_count > 0 {
+        document.diagnostics.push(Diagnostic::LinkBordersStripped {
+            annotation_count: report.stripped_link_border_count,
+        });
+    }
     document.write_report = Some(report);
     Ok(())
 }
@@ -9089,9 +9104,7 @@ struct BaselineResiduals {
 
 impl AlignmentCounts {
     fn has_diagnostic(&self) -> bool {
-        self.extraction_equivalent
-            + self.explained
-            + self.strong_unicode_conflict
+        self.strong_unicode_conflict
             + self.weak_unicode_conflict
             + self.unresolved_unicode
             + self.walk_only
@@ -12926,16 +12939,7 @@ mod tests {
         assert_eq!(engine.len(), 1);
         assert_eq!(alignment.engine_indices_by_walk, [Some(0), None]);
         assert!(alignment.weak_unicode_conflicts.is_empty());
-        assert!(matches!(
-            diagnostics.entries(),
-            [Diagnostic::EngineCharacterAlignment {
-                extraction_equivalent_count: 1,
-                walk_only_count: 0,
-                engine_only_count: 0,
-                residual_count: 0,
-                ..
-            }]
-        ));
+        assert!(diagnostics.entries().is_empty());
     }
 
     #[test]
@@ -13009,16 +13013,7 @@ mod tests {
             paragraph_preserved_reason(walked.iter().enumerate(), &BTreeSet::new()),
             Some(il::PreservedReason::UnreliableUnicode)
         );
-        assert!(matches!(
-            diagnostics.entries(),
-            [Diagnostic::EngineCharacterAlignment {
-                explained_count: 3,
-                walk_only_count: 0,
-                engine_only_count: 0,
-                residual_count: 0,
-                ..
-            }]
-        ));
+        assert!(diagnostics.entries().is_empty());
     }
 
     #[test]
@@ -13083,16 +13078,7 @@ mod tests {
         );
 
         assert!(alignment.engine_indices_by_walk.iter().all(Option::is_some));
-        assert!(matches!(
-            diagnostics.entries(),
-            [Diagnostic::EngineCharacterAlignment {
-                extraction_equivalent_count: 3,
-                strong_unicode_conflict_count: 0,
-                weak_unicode_conflict_count: 0,
-                residual_count: 0,
-                ..
-            }]
-        ));
+        assert!(diagnostics.entries().is_empty());
     }
 
     #[test]
@@ -16333,6 +16319,50 @@ mod tests {
             );
         }
         assert_eq!(identity.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn expected_email_identity_does_not_emit_identity_or_echo_diagnostics() {
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: "a@b.c",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig {
+                auto_terms: false,
+                ..crate::context::PipelineConfig::default()
+            },
+        };
+        let mut document = Document::for_inspection(fixture());
+        inspect(&mut document, &context).unwrap();
+        let TextCarrier::Chars { chars } = &mut document.il.pages[0].paragraphs[0].text;
+        for (character, unicode) in chars.iter_mut().zip("a@b.c".chars()) {
+            character.unicode = Some(unicode);
+        }
+        styles_and_formulas(&mut document, &context).unwrap();
+        extract_terms(&mut document, &context).unwrap();
+        translate(&mut document, &context).unwrap();
+
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            document.il.pages[0].paragraphs[0]
+                .translated_text
+                .as_deref(),
+            Some("a@b.c")
+        );
+        assert!(!document.diagnostics.entries().iter().any(|diagnostic| {
+            matches!(
+                diagnostic,
+                Diagnostic::TranslationIdentity { .. } | Diagnostic::SuspiciousEcho { .. }
+            )
+        }));
     }
 
     #[test]

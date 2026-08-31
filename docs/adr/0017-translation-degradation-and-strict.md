@@ -46,7 +46,8 @@ existing destination.
    translated result, emits informational `translation_identity` plus the paragraph-scoped
    `suspicious_echo` warning, enters the separate identity cache, and appears in
    `degradation_summary.suspicious_echoes`. Email-shaped requests keep the original one-response
-   backend identity behavior and do not emit `suspicious_echo`.
+   backend identity behavior and emit neither diagnostic; expected identity shapes do not consume
+   the diagnostic budget.
 4. `suspicious_echo` is visible quality evidence, not hard degradation. It does not set
    `Paragraph.preserved`, does not block output, and does not make `--strict` fail. Strict output
    still lists it through the ordinary diagnostic stream and degradation summary, so automation or

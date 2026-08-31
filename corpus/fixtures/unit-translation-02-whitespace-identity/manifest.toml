@@ -59,7 +59,7 @@ uri_actions = 0
 
 [[expected.alignment]]
 page = 0
-diagnostic = true
+diagnostic = false
 walked_text = " "
 walked_character_count = 1
 engine_character_count = 0

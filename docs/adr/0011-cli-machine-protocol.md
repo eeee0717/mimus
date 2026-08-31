@@ -75,6 +75,9 @@ CLI 机器协议版本升为 2；IL 的 `schema_version` 独立保持 1。每行
 - 2026-08-28 #110：`content_recovered` 新增 `recovery` 取值 `clipped_form_content`（沿用同一对可选字段）；新增诊断 `typeset_overflow_detail { page_index, paragraph_index, container, attempted_font_sizes_pt, obstacle_count, obstacles }`——每个 `typeset_overflow` 保留段一条，`container` 与 `obstacles` 均为 `[left, bottom, right, top]`，`obstacles` 按与容器的重叠面积降序且最多 4 项、为空时省略，`attempted_font_sizes_pt` 最多 16 项。两者都是 additive，公开协议仍为 v2。
 - ADR-0018：`configuration_resolved` 增加 Regular/Bold 输出字体的 source 与 SHA-256；
   `unsupported_output_glyph` 增加缺字符样本与字体身份。两者均为 additive v2 扩展。
+- 2026-08-31 清扫轮：`configuration_resolved` 与 translate `result` 增加
+  `strip_link_borders`；开关实际修改时发
+  `link_borders_stripped { annotation_count }` typed info。默认关闭且不产生事件，公开协议仍为 v2。
 
 ## 后果
 

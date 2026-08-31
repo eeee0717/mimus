@@ -1309,7 +1309,7 @@ fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 162, "M1 closure fixture inventory changed");
+    assert_eq!(ids.len(), 163, "M1 closure fixture inventory changed");
     assert_eq!(cases.len(), 98, "M1 closure case inventory changed");
 
     for id in ids {
@@ -4238,6 +4238,100 @@ fn writeback_fixture_matrix_preserves_prefix_structure_and_resource_identity() {
         page_content_ids(&translated, 1)
             .iter()
             .all(|(object, _)| *object > 10)
+    );
+}
+
+#[test]
+fn strip_link_borders_is_opt_in_typed_and_annotation_scoped() {
+    let input = fixture_path("unit-write-07-link-borders");
+    let input_bytes = std::fs::read(&input).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let default_output = directory.path().join("default.pdf");
+    let default = run_none(&input, Some(&default_output), true);
+    assert!(
+        default.status.success(),
+        "{}",
+        String::from_utf8_lossy(&default.stderr)
+    );
+    assert!(
+        std::fs::read(&default_output)
+            .unwrap()
+            .starts_with(&input_bytes)
+    );
+    for object in [10, 11, 12, 13, 14] {
+        assert_eq!(
+            qpdf_object(&default_output, &object.to_string()),
+            qpdf_object(&input, &object.to_string()),
+            "unflagged annotation object {object} changed"
+        );
+    }
+    assert!(parse_events(&default.stdout).iter().all(|event| {
+        event.get("id").and_then(serde_json::Value::as_str) != Some("link_borders_stripped")
+    }));
+
+    let stripped_output = directory.path().join("stripped.pdf");
+    let mut command = Command::new(BIN);
+    command.env(PDFIUM_ENV, pdfium_library());
+    configure_test_fonts(&mut command);
+    let stripped = command
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "none",
+            "--layout",
+            "single-line",
+            "--strip-link-borders",
+            "--output",
+        ])
+        .arg(&stripped_output)
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        stripped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stripped.stderr)
+    );
+    assert!(stripped.stderr.is_empty());
+    let events = parse_events(&stripped.stdout);
+    assert_one_terminal_last(&events, "result");
+    let configuration = events
+        .iter()
+        .find(|event| event["event"] == "configuration_resolved")
+        .unwrap();
+    assert_eq!(configuration["strip_link_borders"], true);
+    assert_eq!(events.last().unwrap()["strip_link_borders"], true);
+    let diagnostic = events
+        .iter()
+        .find(|event| event["id"] == "link_borders_stripped")
+        .unwrap();
+    assert_eq!(diagnostic["annotation_count"], 2);
+
+    let output_bytes = std::fs::read(&stripped_output).unwrap();
+    assert!(output_bytes.starts_with(&input_bytes));
+    for object in [12, 13, 14] {
+        assert_eq!(
+            qpdf_object(&stripped_output, &object.to_string()),
+            qpdf_object(&input, &object.to_string()),
+            "control annotation {object} changed"
+        );
+    }
+    for object in [10, 11] {
+        let dictionary =
+            String::from_utf8(qpdf_object(&stripped_output, &object.to_string())).unwrap();
+        assert!(dictionary.contains("/Border [ 0 0 0 ]"), "{dictionary}");
+        assert!(!dictionary.contains("/BS"), "{dictionary}");
+    }
+    assert!(
+        String::from_utf8(qpdf_object(&stripped_output, "10"))
+            .unwrap()
+            .contains("https://example.com/border")
+    );
+    assert!(
+        String::from_utf8(qpdf_object(&stripped_output, "11"))
+            .unwrap()
+            .contains("/Dest [ 3 0 R /Fit ]")
     );
 }
 
