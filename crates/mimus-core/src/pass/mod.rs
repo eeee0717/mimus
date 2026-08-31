@@ -4148,6 +4148,16 @@ fn plan_paragraph<'a>(
         .ok_or(TypesetPlanError::Preserved(
             il::PreservedReason::TypesetProtocol,
         ))?;
+        normalize_formula_interleaved_punctuation_order(
+            paragraph,
+            &content_object_numbers,
+            &mut source_segments,
+            &formulas,
+            &mut translated_segments,
+            formula_continuity_limit(paragraph, &content_object_numbers).ok_or(
+                TypesetPlanError::Preserved(il::PreservedReason::TypesetProtocol),
+            )?,
+        );
     }
     let shared_formula_operand = paragraph_has_shared_formula_operand(
         paragraph,
@@ -5534,15 +5544,141 @@ fn raw_fixed_formula_continuity(
     Some(formulas)
 }
 
+fn normalize_formula_interleaved_punctuation_order(
+    paragraph: &Paragraph,
+    content_objects: &BTreeSet<u32>,
+    source_segments: &mut [Vec<&Char>],
+    formulas: &[FormulaContinuityFormula],
+    translated_segments: &mut [Vec<crate::translate::StyledCharacter>],
+    limit: f64,
+) {
+    if source_segments.len() != formulas.len() + 1
+        || translated_segments.len() != source_segments.len()
+        || !limit.is_finite()
+        || limit <= 0.0
+    {
+        return;
+    }
+    let formula_groups = contiguous_formula_character_groups(paragraph, content_objects);
+    for segment_index in 1..formulas.len() {
+        let punctuation = source_segments[segment_index]
+            .iter()
+            .filter_map(|character| character.unicode)
+            .filter(|value| !value.is_whitespace())
+            .collect::<Vec<_>>();
+        if source_segments[segment_index].is_empty() || punctuation.is_empty() {
+            continue;
+        }
+        let Some(bounds) = source_segments[segment_index]
+            .iter()
+            .flat_map(|character| [character.r#box, character.visual_bbox])
+            .filter(|bounds| rect_is_finite(*bounds))
+            .reduce(Rect::union)
+        else {
+            continue;
+        };
+        let following_formula = formulas[segment_index];
+        let segment_follows_formula =
+            formula_rects_are_adjacent(following_formula.bounds, bounds, limit);
+        let punctuation_only = punctuation
+            .iter()
+            .all(|value| formula_adjacent_punctuation(*value));
+        let short_extraction_inversion = punctuation_only
+            && source_segments[segment_index + 1].is_empty()
+            && translated_segments[segment_index + 1].is_empty();
+        let starts_with_punctuation = source_segments[segment_index]
+            .iter()
+            .find_map(|character| character.unicode)
+            .is_some_and(formula_adjacent_punctuation);
+        let shared_model_region = formula_groups
+            .get(segment_index - 1)
+            .zip(formula_groups.get(segment_index))
+            .is_some_and(|(left, right)| formula_groups_share_model_region(left, right));
+        let formulas_are_adjacent = formula_groups
+            .get(segment_index - 1)
+            .zip(formula_groups.get(segment_index))
+            .and_then(|(left, right)| {
+                Some((
+                    left.iter()
+                        .map(|character| character.r#box)
+                        .reduce(Rect::union)?,
+                    right
+                        .iter()
+                        .map(|character| character.r#box)
+                        .reduce(Rect::union)?,
+                ))
+            })
+            .is_some_and(|(left, right)| formula_rects_are_adjacent(left, right, limit));
+        let segment_is_on_formula_line = source_segments[segment_index].iter().all(|character| {
+            rects_overlap_vertically(character.r#box, following_formula.bounds)
+                || rects_overlap_vertically(character.visual_bbox, following_formula.bounds)
+        });
+        let complete_formula_inversion = starts_with_punctuation
+            && shared_model_region
+            && formulas_are_adjacent
+            && segment_is_on_formula_line;
+        if !segment_follows_formula || (!short_extraction_inversion && !complete_formula_inversion)
+        {
+            continue;
+        }
+        let mut source = std::mem::take(&mut source_segments[segment_index]);
+        source.append(&mut source_segments[segment_index + 1]);
+        source_segments[segment_index + 1] = source;
+        let mut translated = std::mem::take(&mut translated_segments[segment_index]);
+        translated.append(&mut translated_segments[segment_index + 1]);
+        translated_segments[segment_index + 1] = translated;
+    }
+}
+
+fn contiguous_formula_character_groups<'a>(
+    paragraph: &'a Paragraph,
+    content_objects: &BTreeSet<u32>,
+) -> Vec<Vec<&'a Char>> {
+    let mut groups = Vec::new();
+    let mut current = Vec::new();
+    for character in paragraph.chars() {
+        if prepared_character_class(character, content_objects) == PreparedCharacterClass::Formula {
+            current.push(character);
+        } else if !current.is_empty() {
+            groups.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    groups
+}
+
+fn formula_groups_share_model_region(left: &[&Char], right: &[&Char]) -> bool {
+    left.iter().any(|left| {
+        left.layout.is_some_and(|left_layout| {
+            left_layout.source == LayoutSource::Model
+                && left_layout.label == LayoutLabel::InlineFormula
+                && right.iter().any(|right| right.layout == Some(left_layout))
+        })
+    })
+}
+
+fn formula_rects_are_adjacent(left: Rect, right: Rect, limit: f64) -> bool {
+    mimus_quality_contract::formula_items_are_adjacent(
+        left.left,
+        left.bottom,
+        left.right,
+        left.top,
+        right.left,
+        right.bottom,
+        right.right,
+        right.top,
+        limit,
+    )
+}
+
+fn rects_overlap_vertically(left: Rect, right: Rect) -> bool {
+    left.top > right.bottom + 0.01 && right.top > left.bottom + 0.01
+}
+
 fn formula_continuity_limit(paragraph: &Paragraph, content_objects: &BTreeSet<u32>) -> Option<f64> {
     let chars = paragraph.chars();
-    let em = median(
-        chars
-            .iter()
-            .map(|character| character.font_size)
-            .filter(|value| value.is_finite() && *value > 0.0)
-            .collect(),
-    )?;
     let mut word_spacing = chars
         .iter()
         .filter(|character| character.unicode.is_some_and(char::is_whitespace))
@@ -5570,21 +5706,10 @@ fn formula_continuity_limit(paragraph: &Paragraph, content_objects: &BTreeSet<u3
         let gap = right.r#box.left - left.r#box.right;
         (gap.is_finite() && gap > 0.0).then_some(gap)
     }));
-    let source_spacing_limit = median(word_spacing).map_or(0.0, |spacing| 2.0 * spacing);
-    Some(source_spacing_limit.max(1.5 * em))
-}
-
-fn median(mut values: Vec<f64>) -> Option<f64> {
-    if values.is_empty() {
-        return None;
-    }
-    values.sort_by(f64::total_cmp);
-    let middle = values.len() / 2;
-    if values.len().is_multiple_of(2) {
-        Some((values[middle - 1] + values[middle]) / 2.0)
-    } else {
-        Some(values[middle])
-    }
+    mimus_quality_contract::formula_continuity_limit(
+        word_spacing,
+        chars.iter().map(|character| character.font_size),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -5662,7 +5787,8 @@ fn formula_continuity_is_valid(
             return false;
         }
         if same_line {
-            right.bounds.left - left.bounds.right <= limit + 0.01
+            let gap = right.bounds.left - left.bounds.right;
+            gap >= -0.01 && gap <= limit + 0.01
         } else {
             let left_center = (left.bounds.bottom + left.bounds.top) / 2.0;
             let right_center = (right.bounds.bottom + right.bounds.top) / 2.0;
@@ -12533,6 +12659,250 @@ mod tests {
     }
 
     #[test]
+    fn extraction_order_punctuation_is_moved_after_the_following_formula_unit() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        {
+            let TextCarrier::Chars { chars } = &mut paragraph.text;
+            chars.truncate(3);
+            chars[1].unicode = Some('.');
+            chars[1].r#box = Rect {
+                left: 118.0,
+                bottom: 98.0,
+                right: 124.0,
+                top: 110.0,
+            };
+            chars[1].visual_bbox = chars[1].r#box;
+        }
+        let TextCarrier::Chars { chars } = &paragraph.text;
+        let mut source_segments = vec![Vec::new(), vec![&chars[1]], Vec::new()];
+        let formulas = [
+            FormulaContinuityFormula {
+                formula_index: 0,
+                bounds: Rect {
+                    left: 100.0,
+                    bottom: 98.0,
+                    right: 108.0,
+                    top: 110.0,
+                },
+                line_left: 100.0,
+            },
+            FormulaContinuityFormula {
+                formula_index: 1,
+                bounds: Rect {
+                    left: 109.0,
+                    bottom: 98.0,
+                    right: 117.0,
+                    top: 110.0,
+                },
+                line_left: 100.0,
+            },
+        ];
+        let styled = |value| crate::translate::StyledCharacter { value, bold: false };
+        let mut translated_segments = vec![
+            Vec::new(),
+            "\u{7f29}\u{653e}\u{70b9}\u{79ef}\u{3002}"
+                .chars()
+                .map(styled)
+                .collect(),
+            Vec::new(),
+        ];
+
+        normalize_formula_interleaved_punctuation_order(
+            paragraph,
+            &BTreeSet::new(),
+            &mut source_segments,
+            &formulas,
+            &mut translated_segments,
+            18.0,
+        );
+
+        assert!(source_segments[1].is_empty());
+        assert_eq!(source_segments[2][0].unicode, Some('.'));
+        assert!(translated_segments[1].is_empty());
+        assert_eq!(
+            translated_segments[2]
+                .iter()
+                .map(|character| character.value)
+                .collect::<String>(),
+            "\u{7f29}\u{653e}\u{70b9}\u{79ef}\u{3002}"
+        );
+    }
+
+    #[test]
+    fn model_owned_formula_tail_moves_the_intervening_line_after_the_operand() {
+        // (3,9) differs from the adjacent-unit fixture at (4,21): the extractor
+        // emits `sqrt`, then the rest of the visual line, and only then `d_k`.
+        // The model assigns sqrt and d to one formula region, while geometry
+        // proves that the intervening line starts after the d_k operand.
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let formula_layout = LayoutAssignment {
+            label: LayoutLabel::InlineFormula,
+            reading_order: 99,
+            bounds: Rect {
+                left: 100.0,
+                bottom: 98.0,
+                right: 117.0,
+                top: 110.0,
+            },
+            source: LayoutSource::Model,
+            policy: TranslationPolicy::Passthrough,
+        };
+        {
+            let TextCarrier::Chars { chars } = &mut paragraph.text;
+            chars.push(chars.last().expect("fixture has characters").clone());
+            chars.truncate(6);
+            for (index, (unicode, bounds)) in [
+                (
+                    '√',
+                    Rect {
+                        left: 100.0,
+                        bottom: 98.0,
+                        right: 108.0,
+                        top: 110.0,
+                    },
+                ),
+                (
+                    '.',
+                    Rect {
+                        left: 118.0,
+                        bottom: 98.0,
+                        right: 120.0,
+                        top: 110.0,
+                    },
+                ),
+                (
+                    'A',
+                    Rect {
+                        left: 120.0,
+                        bottom: 98.0,
+                        right: 150.0,
+                        top: 110.0,
+                    },
+                ),
+                (
+                    'd',
+                    Rect {
+                        left: 109.0,
+                        bottom: 98.0,
+                        right: 113.0,
+                        top: 110.0,
+                    },
+                ),
+                (
+                    'k',
+                    Rect {
+                        left: 113.0,
+                        bottom: 96.0,
+                        right: 117.0,
+                        top: 104.0,
+                    },
+                ),
+                (
+                    't',
+                    Rect {
+                        left: 100.0,
+                        bottom: 84.0,
+                        right: 105.0,
+                        top: 94.0,
+                    },
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                chars[index].unicode = Some(unicode);
+                chars[index].r#box = bounds;
+                chars[index].visual_bbox = bounds;
+                chars[index].layout = Some(if matches!(index, 0 | 3 | 4) {
+                    formula_layout
+                } else {
+                    LayoutAssignment {
+                        label: LayoutLabel::Text,
+                        reading_order: 1,
+                        bounds: paragraph.bounds,
+                        source: LayoutSource::Model,
+                        policy: TranslationPolicy::Translate,
+                    }
+                });
+            }
+        }
+        let content_objects = paragraph
+            .chars()
+            .iter()
+            .map(|character| character.passthrough.content_object)
+            .collect::<BTreeSet<_>>();
+        let TextCarrier::Chars { chars } = &paragraph.text;
+        let mut source_segments = vec![Vec::new(), vec![&chars[1], &chars[2]], vec![&chars[5]]];
+        let formulas = [
+            FormulaContinuityFormula {
+                formula_index: 0,
+                bounds: chars[0].r#box,
+                line_left: 100.0,
+            },
+            FormulaContinuityFormula {
+                formula_index: 1,
+                bounds: chars[3].r#box.union(chars[4].r#box),
+                line_left: 100.0,
+            },
+        ];
+        let styled = |value| crate::translate::StyledCharacter { value, bold: false };
+        let mut translated_segments = vec![
+            Vec::new(),
+            ".after".chars().map(styled).collect(),
+            "tail".chars().map(styled).collect(),
+        ];
+
+        normalize_formula_interleaved_punctuation_order(
+            paragraph,
+            &content_objects,
+            &mut source_segments,
+            &formulas,
+            &mut translated_segments,
+            18.0,
+        );
+
+        assert!(source_segments[1].is_empty());
+        assert_eq!(
+            source_segments[2]
+                .iter()
+                .filter_map(|character| character.unicode)
+                .collect::<String>(),
+            ".At"
+        );
+        assert_eq!(
+            translated_segments[2]
+                .iter()
+                .map(|character| character.value)
+                .collect::<String>(),
+            ".aftertail"
+        );
+    }
+
+    #[test]
     fn formula_continuity_limit_is_derived_from_source_spacing_and_em() {
         let mut document = Document::for_inspection(fixture());
         let engine = FakeEngine::default();
@@ -12653,6 +13023,58 @@ mod tests {
         assert!(!formula_continuity_is_valid(
             &translated,
             &[],
+            &formulas,
+            18.0,
+        ));
+    }
+
+    #[test]
+    fn formula_continuity_oracle_rejects_extraction_order_text_after_following_formula() {
+        // `(4,21)` attached a radical from a text segment to one model formula.
+        // L5-5R `(3,9)` instead has two model formula units with an intervening
+        // extracted text segment whose geometry follows both units on the same line.
+        let styled = |value| crate::translate::StyledCharacter { value, bold: false };
+        let translated = vec![Vec::new(), vec![styled('\u{3002}')], Vec::new()];
+        let text = [FormulaContinuityText {
+            segment_index: 1,
+            lines: vec![FormulaContinuityLine {
+                bounds: Rect {
+                    left: 118.0,
+                    bottom: 98.0,
+                    right: 124.0,
+                    top: 110.0,
+                },
+                line_left: 100.0,
+                starts_with_punctuation: true,
+                ends_with_punctuation: true,
+            }],
+        }];
+        let formulas = [
+            FormulaContinuityFormula {
+                formula_index: 0,
+                bounds: Rect {
+                    left: 100.0,
+                    bottom: 98.0,
+                    right: 108.0,
+                    top: 110.0,
+                },
+                line_left: 100.0,
+            },
+            FormulaContinuityFormula {
+                formula_index: 1,
+                bounds: Rect {
+                    left: 109.0,
+                    bottom: 98.0,
+                    right: 117.0,
+                    top: 110.0,
+                },
+                line_left: 100.0,
+            },
+        ];
+
+        assert!(!formula_continuity_is_valid(
+            &translated,
+            &text,
             &formulas,
             18.0,
         ));

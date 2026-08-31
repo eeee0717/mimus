@@ -123,11 +123,43 @@ FOR-02 derives its bound per source paragraph. Source word-spacing samples are p
 whitespace-character widths plus same-baseline `implicit_space_before` gaps whose characters on both
 sides are `text/translate`; formula-adjacent gaps are excluded. The median is doubled and compared
 with `1.5` times the paragraph median font size. A neighbor is required only where the source formula unit immediately touched a translatable
-character on the same baseline. The output formula is matched by compact exact text and expected
-vertical position before its nearest left/right extracted lines are measured. Unmatched formula
+character on the same baseline. Formula-unit coverage uses the same evidence-backed extraction-order
+normalization as production: a model-owned formula head/tail split by text that is geometrically
+after the complete formula is audited as one unit. Source-unit adjacency uses metric boxes so natural
+radical ink overhang does not masquerade as reversed source order; the final output gap retains the
+strict lower bound. The output formula is matched by compact exact text and expected vertical
+position; adjacent MuPDF glyph lines may jointly satisfy the complete exact text, and their bbox union
+is measured against the nearest left/right extracted lines. This prevents a standalone radical on
+the same page from satisfying a complete `sqrt` unit. Unmatched formula
 units remain visible in `formula_units` versus `matched_units`; v2 does not invent geometry for them.
 FOR-03 intentionally shares FOR-02's derived bound, matching the adjudicated single continuity
 contract for fixed-slot and relocation paths.
+
+### 2.4.1 Detection/execution alignment ledger
+
+Every FOR/CON detector must name the production action that enforces the same conservative contract,
+or an explicit exemption. A detector-only critical rule is a release blocker, not evidence that the
+pipeline handled the defect.
+
+| Rule | Production execution point | Failure action / exemption |
+| --- | --- | --- |
+| CON-01 | `mimus-quality-contract::conserved_tokens` is called by `translate::executor::execute`; the same function feeds `scorecard::conservation_measurement` | one corrective translation retry; a second violation preserves the whole paragraph with typed `content_conservation` (introduced by the stacked T2 PR) |
+| CON-02 | prompt construction injects the exact version-1 glossary; scorecard remains the independent aligned-output detector | documented exemption: glossary consistency is a semantic release proposal pending user approval, not a conservative runtime identity predicate; no production typed degradation is claimed |
+| FOR-01 | `pass::complete_model_formula_boundaries`, placeholder restoration, formula byte/font identity replay, and output round-trip validation | ambiguous boundary or replay evidence becomes `typeset_protocol`; unplaceable complete units become `typeset_overflow`; the scorecard heuristic remains an independent proxy |
+| FOR-02 | `pass::plan_paragraph` runs `normalize_formula_interleaved_punctuation_order` and `formula_continuity_is_valid` for fixed-slot and relocated plans; bound arithmetic comes only from `mimus-quality-contract::formula_continuity_limit` | repair by evidence-based segment normalization/relocation; otherwise `typeset_overflow` |
+| FOR-03 | same execution point and bound as FOR-02; it is the area projection of the same excessive gap, not a separate threshold | same repair/typed action as FOR-02 |
+
+Test-level alignment checklist:
+
+| Contract | Automated assertion | Full-artifact audit |
+| --- | --- | --- |
+| continuity bound | `mimus-quality-contract` worked examples plus production and scorecard source-sampling tests | report each paragraph bound and its source samples |
+| fixed + relocated formula order/adjacency | `formula_continuity_oracle_rejects_extraction_order_text_after_following_formula`, punctuation normalization, atomic-chain and fixed-to-relocation tests | audit every formula paragraph for unit order, neighbor gap and inline hole |
+| formula glyph/unit completeness | boundary fixtures plus formula byte/font replay and round-trip tests | dual-extractor glyph inventory, script baseline and unit membership |
+| numeric/unit/reference conservation | shared lexer tests plus loopback retry/preserve tests in the stacked T2 PR | CON-01 must be 100%; every residual is typed or a blocking defect |
+
+Items that depend on visual or bilingual judgment remain explicit report rows; a named regression
+paragraph is only a sample and never substitutes for the full formula audit.
 
 ### 2.5 Typesetting lint (`typesetting_lint`)
 

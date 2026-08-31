@@ -144,10 +144,16 @@ struct Point {
     y: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 struct Layout {
     #[serde(default)]
     label: String,
+    #[serde(default)]
+    reading_order: usize,
+    #[serde(default)]
+    bounds: Rect,
+    #[serde(default)]
+    source: String,
     policy: String,
 }
 
@@ -1433,6 +1439,18 @@ struct FormulaUnit<'a> {
     expects_right_neighbor: bool,
 }
 
+#[derive(Debug)]
+struct FormulaRange {
+    start: usize,
+    end: usize,
+    text: String,
+    baseline_y: f64,
+    font_size: f64,
+    bounds: Option<Rect>,
+    metric_bounds: Option<Rect>,
+    model_regions: Vec<(usize, Rect)>,
+}
+
 fn formula_continuity(
     before: &Il,
     _translated: &Il,
@@ -1469,29 +1487,33 @@ fn formula_continuity(
             continue;
         }
         let used_page = used.entry(unit.page_index).or_default();
-        let candidate = lines.iter().enumerate().find(|(index, line)| {
-            let line_center = line.bbox.y + line.bbox.h / 2.0;
-            !used_page.contains(index)
-                && compact(&line.text) == normalized_formula
-                && (line_center - unit.expected_stext_y).abs() <= unit.font_size * 1.5
-        });
-        let Some((candidate_index, formula_line)) = candidate else {
+        let Some(candidate_indices) = match_formula_lines(
+            &lines,
+            used_page,
+            &normalized_formula,
+            unit.expected_stext_y,
+            unit.font_size,
+        ) else {
             continue;
         };
-        used_page.push(candidate_index);
+        used_page.extend(candidate_indices.iter().copied());
+        let formula_bbox = candidate_indices
+            .iter()
+            .map(|index| lines[*index].bbox)
+            .reduce(stext_box_union)?;
         matched_units += 1;
         let threshold = continuity_bound(unit.paragraph);
-        let baseline_tolerance = (formula_line.bbox.h * 0.35).max(1.5);
+        let baseline_tolerance = (formula_bbox.h * 0.35).max(1.5);
         let mut left_gap: Option<f64> = None;
         let mut right_gap: Option<f64> = None;
         for (index, neighbor) in lines.iter().enumerate() {
-            if index == candidate_index
-                || (neighbor.bbox.y - formula_line.bbox.y).abs() > baseline_tolerance
+            if candidate_indices.contains(&index)
+                || (neighbor.bbox.y - formula_bbox.y).abs() > baseline_tolerance
             {
                 continue;
             }
-            let formula_left = formula_line.bbox.x;
-            let formula_right = formula_line.bbox.x + formula_line.bbox.w;
+            let formula_left = formula_bbox.x;
+            let formula_right = formula_bbox.x + formula_bbox.w;
             let neighbor_left = neighbor.bbox.x;
             let neighbor_right = neighbor.bbox.x + neighbor.bbox.w;
             if neighbor_right <= formula_left {
@@ -1511,7 +1533,7 @@ fn formula_continuity(
             max_gap = max_gap.max(gap);
             if gap > threshold {
                 excessive += 1;
-                hole_area += gap * formula_line.bbox.h.max(1.0);
+                hole_area += gap * formula_bbox.h.max(1.0);
                 evidence.push(GapEvidence {
                     page_index: unit.page_index,
                     reading_order: unit.reading_order,
@@ -1535,66 +1557,271 @@ fn formula_continuity(
     })
 }
 
+fn match_formula_lines(
+    lines: &[StextLine],
+    used: &[usize],
+    formula: &str,
+    expected_y: f64,
+    font_size: f64,
+) -> Option<Vec<usize>> {
+    let mut candidates = lines
+        .iter()
+        .enumerate()
+        .filter(|(index, line)| {
+            let line_center = line.bbox.y + line.bbox.h / 2.0;
+            !used.contains(index)
+                && !compact(&line.text).is_empty()
+                && (line_center - expected_y).abs() <= font_size * 1.5
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|(_, left), (_, right)| left.bbox.x.total_cmp(&right.bbox.x));
+
+    for start in 0..candidates.len() {
+        let mut matched = String::new();
+        let mut indices = Vec::new();
+        for (index, line) in &candidates[start..] {
+            matched.push_str(&compact(&line.text));
+            if !formula.starts_with(&matched) {
+                break;
+            }
+            indices.push(*index);
+            if matched == formula {
+                return Some(indices);
+            }
+        }
+    }
+    None
+}
+
+fn stext_box_union(left: StextBox, right: StextBox) -> StextBox {
+    let x = left.x.min(right.x);
+    let y = left.y.min(right.y);
+    let right_edge = (left.x + left.w).max(right.x + right.w);
+    let bottom_edge = (left.y + left.h).max(right.y + right.h);
+    StextBox {
+        x,
+        y,
+        w: right_edge - x,
+        h: bottom_edge - y,
+    }
+}
+
 fn formula_units(il: &Il) -> Vec<FormulaUnit<'_>> {
     let mut out = Vec::new();
     for page in &il.pages {
         for paragraph in &page.paragraphs {
-            let mut current = String::new();
-            let mut baseline_y = 0.0;
-            let mut font_size = 0.0_f64;
-            let mut start_index = 0;
+            let mut ranges = Vec::<FormulaRange>::new();
+            let mut current = None::<FormulaRange>;
             for (index, c) in paragraph.text.chars.iter().enumerate() {
                 if is_inline_formula(c) {
-                    if current.is_empty() {
-                        baseline_y = c.baseline_origin.y;
-                        start_index = index;
-                    }
-                    font_size = font_size.max(c.font_size);
-                    current.push_str(c.unicode.as_deref().unwrap_or(""));
-                } else if !current.is_empty() {
-                    let (left, right) = expected_formula_neighbors(
-                        &paragraph.text.chars,
-                        start_index,
-                        index - 1,
-                        baseline_y,
-                        font_size,
-                    );
-                    out.push(FormulaUnit {
-                        page_index: page.index,
-                        reading_order: paragraph.reading_order,
-                        paragraph,
-                        text: std::mem::take(&mut current),
-                        expected_stext_y: page.geometry.height - baseline_y,
-                        font_size,
-                        expects_left_neighbor: left,
-                        expects_right_neighbor: right,
+                    let range = current.get_or_insert_with(|| FormulaRange {
+                        start: index,
+                        end: index,
+                        text: String::new(),
+                        baseline_y: c.baseline_origin.y,
+                        font_size: 0.0,
+                        bounds: None,
+                        metric_bounds: None,
+                        model_regions: Vec::new(),
                     });
-                    font_size = 0.0;
+                    range.end = index;
+                    range.font_size = range.font_size.max(c.font_size);
+                    range.bounds = match (range.bounds, char_bounds(std::slice::from_ref(c))) {
+                        (Some(left), Some(right)) => Some(rect_union(left, right)),
+                        (None, bounds) | (bounds, None) => bounds,
+                    };
+                    range.metric_bounds = Some(
+                        range
+                            .metric_bounds
+                            .map_or(c.box_, |bounds| rect_union(bounds, c.box_)),
+                    );
+                    range.text.push_str(c.unicode.as_deref().unwrap_or(""));
+                    if let Some(layout) = c.layout.as_ref().filter(|layout| {
+                        layout.source == "model" && layout.label == "inline_formula"
+                    }) {
+                        let region = (layout.reading_order, layout.bounds);
+                        if !range.model_regions.contains(&region) {
+                            range.model_regions.push(region);
+                        }
+                    }
+                } else if let Some(range) = current.take() {
+                    ranges.push(range);
                 }
             }
-            if !current.is_empty() {
-                let end_index = paragraph.text.chars.len() - 1;
+            if let Some(range) = current {
+                ranges.push(range);
+            }
+
+            let continuity_limit = continuity_bound(paragraph);
+            let mut range_index = 0;
+            while range_index < ranges.len() {
+                let mut range = FormulaRange {
+                    start: ranges[range_index].start,
+                    end: ranges[range_index].end,
+                    text: ranges[range_index].text.clone(),
+                    baseline_y: ranges[range_index].baseline_y,
+                    font_size: ranges[range_index].font_size,
+                    bounds: ranges[range_index].bounds,
+                    metric_bounds: ranges[range_index].metric_bounds,
+                    model_regions: ranges[range_index].model_regions.clone(),
+                };
+                let mut right_neighbor_override = false;
+                if let Some(following) = ranges.get(range_index + 1) {
+                    let between = &paragraph.text.chars[range.end + 1..following.start];
+                    let following_end = ranges
+                        .get(range_index + 2)
+                        .map_or(paragraph.text.chars.len(), |next| next.start);
+                    let after_following = &paragraph.text.chars[following.end + 1..following_end];
+                    if scorecard_interleaved_formula_segment(
+                        &range,
+                        between,
+                        following,
+                        after_following,
+                        continuity_limit,
+                    ) {
+                        range.end = following.end;
+                        range.text.push_str(&following.text);
+                        range.font_size = range.font_size.max(following.font_size);
+                        range.bounds = match (range.bounds, following.bounds) {
+                            (Some(left), Some(right)) => Some(rect_union(left, right)),
+                            (None, bounds) | (bounds, None) => bounds,
+                        };
+                        range.metric_bounds = match (range.metric_bounds, following.metric_bounds) {
+                            (Some(left), Some(right)) => Some(rect_union(left, right)),
+                            (None, bounds) | (bounds, None) => bounds,
+                        };
+                        for region in &following.model_regions {
+                            if !range.model_regions.contains(region) {
+                                range.model_regions.push(*region);
+                            }
+                        }
+                        right_neighbor_override = between.iter().any(qualifies_formula_neighbor);
+                        range_index += 1;
+                    }
+                }
                 let (left, right) = expected_formula_neighbors(
                     &paragraph.text.chars,
-                    start_index,
-                    end_index,
-                    baseline_y,
-                    font_size,
+                    range.start,
+                    range.end,
+                    range.baseline_y,
+                    range.font_size,
                 );
                 out.push(FormulaUnit {
                     page_index: page.index,
                     reading_order: paragraph.reading_order,
                     paragraph,
-                    text: current,
-                    expected_stext_y: page.geometry.height - baseline_y,
-                    font_size,
+                    text: range.text,
+                    expected_stext_y: page.geometry.height - range.baseline_y,
+                    font_size: range.font_size,
                     expects_left_neighbor: left,
-                    expects_right_neighbor: right,
+                    expects_right_neighbor: right || right_neighbor_override,
                 });
+                range_index += 1;
             }
         }
     }
     out
+}
+
+fn scorecard_interleaved_formula_segment(
+    preceding: &FormulaRange,
+    between: &[Char],
+    following: &FormulaRange,
+    after_following: &[Char],
+    limit: f64,
+) -> bool {
+    if between.is_empty()
+        || !limit.is_finite()
+        || limit <= 0.0
+        || !between.iter().any(|character| {
+            character
+                .unicode
+                .as_deref()
+                .is_some_and(|value| value.chars().any(|value| !value.is_whitespace()))
+        })
+    {
+        return false;
+    }
+    let Some(punctuation_bounds) = char_bounds(between) else {
+        return false;
+    };
+    let Some(formula_bounds) = following.bounds else {
+        return false;
+    };
+    let punctuation_only = between.iter().all(|character| {
+        character.unicode.as_deref().is_some_and(|value| {
+            value
+                .chars()
+                .all(|value| value.is_whitespace() || is_punctuation(value))
+        })
+    });
+    let short_extraction_inversion = punctuation_only && after_following.is_empty();
+    let complete_formula_inversion = between
+        .iter()
+        .filter_map(|character| character.unicode.as_deref())
+        .flat_map(str::chars)
+        .find(|value| !value.is_whitespace())
+        .is_some_and(is_punctuation)
+        && formula_ranges_share_model_region(preceding, following)
+        && preceding
+            .metric_bounds
+            .zip(following.metric_bounds)
+            .is_some_and(|(preceding_bounds, following_bounds)| {
+                formula_rects_are_adjacent(preceding_bounds, following_bounds, limit)
+            })
+        && between.iter().all(|character| {
+            char_bounds(std::slice::from_ref(character))
+                .is_some_and(|bounds| rects_overlap_vertically(bounds, formula_bounds))
+        });
+    formula_rects_are_adjacent(formula_bounds, punctuation_bounds, limit)
+        && (short_extraction_inversion || complete_formula_inversion)
+}
+
+fn formula_ranges_share_model_region(left: &FormulaRange, right: &FormulaRange) -> bool {
+    left.model_regions
+        .iter()
+        .any(|region| right.model_regions.contains(region))
+}
+
+fn char_bounds(chars: &[Char]) -> Option<Rect> {
+    chars
+        .iter()
+        .flat_map(|character| [Some(character.box_), character.visual_bbox])
+        .flatten()
+        .filter(|bounds| {
+            bounds.left.is_finite()
+                && bounds.bottom.is_finite()
+                && bounds.right.is_finite()
+                && bounds.top.is_finite()
+        })
+        .reduce(rect_union)
+}
+
+fn rect_union(left: Rect, right: Rect) -> Rect {
+    Rect {
+        left: left.left.min(right.left),
+        bottom: left.bottom.min(right.bottom),
+        right: left.right.max(right.right),
+        top: left.top.max(right.top),
+    }
+}
+
+fn formula_rects_are_adjacent(left: Rect, right: Rect, limit: f64) -> bool {
+    mimus_quality_contract::formula_items_are_adjacent(
+        left.left,
+        left.bottom,
+        left.right,
+        left.top,
+        right.left,
+        right.bottom,
+        right.right,
+        right.top,
+        limit,
+    )
+}
+
+fn rects_overlap_vertically(left: Rect, right: Rect) -> bool {
+    left.top > right.bottom + 0.01 && right.top > left.bottom + 0.01
 }
 
 fn expected_formula_neighbors(
@@ -1605,10 +1832,7 @@ fn expected_formula_neighbors(
     font_size: f64,
 ) -> (bool, bool) {
     let qualifies = |c: &Char| {
-        c.layout
-            .as_ref()
-            .is_some_and(|layout| layout.policy == "translate")
-            && (c.baseline_origin.y - baseline_y).abs() <= font_size * 0.3
+        qualifies_formula_neighbor(c) && (c.baseline_origin.y - baseline_y).abs() <= font_size * 0.3
     };
     (
         start
@@ -1616,6 +1840,13 @@ fn expected_formula_neighbors(
             .is_some_and(|index| qualifies(&chars[index])),
         chars.get(end + 1).is_some_and(qualifies),
     )
+}
+
+fn qualifies_formula_neighbor(character: &Char) -> bool {
+    character
+        .layout
+        .as_ref()
+        .is_some_and(|layout| layout.policy == "translate")
 }
 
 fn continuity_bound(paragraph: &Paragraph) -> f64 {
@@ -1653,15 +1884,14 @@ fn continuity_bound(paragraph: &Paragraph) -> f64 {
         let gap = right.box_.left - left.box_.right;
         (gap.is_finite() && gap > 0.0).then_some(gap)
     }));
-    let word_spacing = median(&mut word_gaps);
-    let mut font_sizes = paragraph
+    let font_sizes = paragraph
         .text
         .chars
         .iter()
         .map(|character| character.font_size)
         .filter(|size| size.is_finite() && *size > 0.0)
         .collect::<Vec<_>>();
-    (2.0 * word_spacing).max(1.5 * median(&mut font_sizes))
+    mimus_quality_contract::formula_continuity_limit(word_gaps, font_sizes).unwrap_or(0.0)
 }
 
 fn compact(text: &str) -> String {
@@ -2664,6 +2894,170 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(continuity_bound(&document.pages[0].paragraphs[0]), 15.0);
+    }
+
+    #[test]
+    fn extraction_order_punctuation_joins_the_complete_formula_audit_unit() {
+        // Unlike the ordinary adjacent formula shape at (4,21), (3,9) is extracted
+        // as `formula sqrt`, sentence punctuation, then the geometrically preceding
+        // `formula d_k`. Production moves that punctuation after the complete unit.
+        let character = |unicode: &str,
+                         left: f64,
+                         bottom: f64,
+                         right: f64,
+                         top: f64,
+                         label: &str,
+                         policy: &str| {
+            serde_json::json!({
+                "unicode": unicode,
+                "font_size": 10.0,
+                "baseline_origin": {"x": left, "y": 10.0},
+                "box": {"left": left, "bottom": bottom, "right": right, "top": top},
+                "visual_bbox": {"left": left, "bottom": bottom, "right": right, "top": top},
+                "layout": {"label": label, "policy": policy}
+            })
+        };
+        let document: Il = serde_json::from_value(serde_json::json!({
+            "pages": [{
+                "index": 3,
+                "geometry": {"height": 100.0},
+                "paragraphs": [{
+                    "reading_order": 9,
+                    "bounds": {"left": 0.0, "bottom": 5.0, "right": 28.0, "top": 15.0},
+                    "text": {"chars": [
+                        character("A", 0.0, 5.0, 5.0, 15.0, "text", "translate"),
+                        character("√", 10.0, 5.0, 16.0, 15.0, "inline_formula", "passthrough"),
+                        character(".", 26.0, 5.0, 28.0, 15.0, "text", "translate"),
+                        character("d", 16.0, 5.0, 21.0, 15.0, "inline_formula", "passthrough"),
+                        character("k", 21.0, 3.0, 25.0, 10.0, "inline_formula", "passthrough")
+                    ]}
+                }]
+            }]
+        }))
+        .unwrap();
+
+        let units = formula_units(&document);
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].text, "√dk");
+        assert!(units[0].expects_left_neighbor);
+        assert!(units[0].expects_right_neighbor);
+    }
+
+    #[test]
+    fn model_owned_formula_tail_joins_across_the_intervening_visual_line() {
+        let region = serde_json::json!({
+            "label": "inline_formula",
+            "reading_order": 99,
+            "bounds": {"left": 10.0, "bottom": 3.0, "right": 25.0, "top": 15.0},
+            "source": "model",
+            "policy": "passthrough"
+        });
+        let character =
+            |unicode: &str, left: f64, bottom: f64, right: f64, top: f64, layout: Value| {
+                serde_json::json!({
+                    "unicode": unicode,
+                    "font_size": 10.0,
+                    "baseline_origin": {"x": left, "y": 10.0},
+                    "box": {"left": left, "bottom": bottom, "right": right, "top": top},
+                    "visual_bbox": {"left": left, "bottom": bottom, "right": right, "top": top},
+                    "layout": layout
+                })
+            };
+        let text_layout = || {
+            serde_json::json!({
+                "label": "text",
+                "reading_order": 1,
+                "bounds": {"left": 0.0, "bottom": 0.0, "right": 60.0, "top": 20.0},
+                "source": "model",
+                "policy": "translate"
+            })
+        };
+        let document: Il = serde_json::from_value(serde_json::json!({
+            "pages": [{
+                "index": 3,
+                "geometry": {"height": 100.0},
+                "paragraphs": [{
+                    "reading_order": 8,
+                    "bounds": {"left": 0.0, "bottom": 0.0, "right": 60.0, "top": 20.0},
+                    "text": {"chars": [
+                        character("A", 0.0, 5.0, 5.0, 15.0, text_layout()),
+                        character("√", 10.0, 5.0, 16.0, 15.0, region.clone()),
+                        character(".", 26.0, 5.0, 28.0, 15.0, text_layout()),
+                        character("after", 28.0, 5.0, 55.0, 15.0, text_layout()),
+                        character("d", 16.0, 5.0, 21.0, 15.0, region.clone()),
+                        character("k", 21.0, 3.0, 25.0, 10.0, region.clone()),
+                        character("tail", 0.0, 0.0, 20.0, 2.0, text_layout())
+                    ]}
+                }]
+            }]
+        }))
+        .unwrap();
+
+        let units = formula_units(&document);
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].text, "√dk");
+        assert!(units[0].expects_left_neighbor);
+        assert!(units[0].expects_right_neighbor);
+    }
+
+    #[test]
+    fn complete_formula_matches_adjacent_split_stext_glyph_lines() {
+        let lines = vec![
+            StextLine {
+                bbox: StextBox {
+                    x: 0.0,
+                    y: 10.0,
+                    w: 50.0,
+                    h: 8.0,
+                },
+                text: "translated".into(),
+            },
+            StextLine {
+                bbox: StextBox {
+                    x: 50.0,
+                    y: 11.0,
+                    w: 6.0,
+                    h: 6.0,
+                },
+                text: "√".into(),
+            },
+            StextLine {
+                bbox: StextBox {
+                    x: 56.0,
+                    y: 8.0,
+                    w: 4.0,
+                    h: 4.0,
+                },
+                text: "d".into(),
+            },
+            StextLine {
+                bbox: StextBox {
+                    x: 60.0,
+                    y: 11.0,
+                    w: 3.0,
+                    h: 3.0,
+                },
+                text: "k".into(),
+            },
+            StextLine {
+                bbox: StextBox {
+                    x: 63.0,
+                    y: 7.0,
+                    w: 30.0,
+                    h: 8.0,
+                },
+                text: "缩放点积。".into(),
+            },
+        ];
+
+        assert_eq!(
+            match_formula_lines(&lines, &[], "√dk", 13.0, 10.0),
+            Some(vec![1, 2, 3])
+        );
+        assert_eq!(
+            match_formula_lines(&lines, &[], "√", 13.0, 10.0),
+            Some(vec![1])
+        );
     }
 
     #[test]

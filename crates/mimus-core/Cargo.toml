@@ -10,6 +10,7 @@ description = "Layout-preserving PDF translation core: IL, pass chain, engine tr
 [dependencies]
 image.workspace = true
 lopdf.workspace = true
+mimus-quality-contract.workspace = true
 ort.workspace = true
 pdfium-render.workspace = true
 rayon.workspace = true
