@@ -494,6 +494,7 @@ pub struct ObjectReference {
 #[serde(rename_all = "kebab-case")]
 pub enum BookmarkTarget {
     Xyz,
+    GotoXyz,
     Named,
     Uri,
 }
@@ -1613,7 +1614,7 @@ impl Manifest {
                 "bookmark 的 level/title/style_flags 无效",
             )?;
             let target_valid = match bookmark.target {
-                BookmarkTarget::Xyz => {
+                BookmarkTarget::Xyz | BookmarkTarget::GotoXyz => {
                     bookmark.page_object.is_some()
                         && bookmark.xyz.is_some()
                         && bookmark.name.is_none()

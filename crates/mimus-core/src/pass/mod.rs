@@ -96,7 +96,7 @@ pub fn run(document: &mut Document, context: &PassContext<'_>) -> Result<Transla
     })?;
     Ok(TranslationResult {
         output: output.to_string_lossy().into_owned(),
-        pages: document.il.pages.len(),
+        pages: document.il.pages.len() * if context.config.bilingual { 2 } else { 1 },
         warnings: document.diagnostics.warning_count(),
         appended_bytes: write_report.appended_bytes,
     })
@@ -8232,6 +8232,7 @@ pub fn write(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
         &document.rewrites,
         WriteOptions {
             strip_link_borders: context.config.strip_link_borders,
+            bilingual: context.config.bilingual,
         },
     )?;
     validate_output_roundtrip(document, context, &candidate)?;
@@ -8254,10 +8255,11 @@ fn validate_output_roundtrip(
         .engine
         .page_count(candidate)
         .map_err(|error| output_mismatch(format!("inspection engine rejected output: {error}")))?;
-    if page_count != document.extracted_pages.len() {
+    let expected_page_count =
+        document.extracted_pages.len() * if context.config.bilingual { 2 } else { 1 };
+    if page_count != expected_page_count {
         return Err(output_mismatch(format!(
-            "output has {page_count} pages; input had {}",
-            document.extracted_pages.len()
+            "output has {page_count} pages; expected {expected_page_count}"
         )));
     }
 
@@ -8270,13 +8272,21 @@ fn validate_output_roundtrip(
         if expected.degraded.is_some() && expected.frame.is_none() {
             continue;
         }
+        let translated_page_index = if context.config.bilingual {
+            expected.index * 2 + 1
+        } else {
+            expected.index
+        };
+        if context.config.bilingual {
+            validate_bilingual_source_page(context, candidate, expected)?;
+        }
         let geometry = context
             .engine
-            .page_geometry(candidate, expected.index)
+            .page_geometry(candidate, translated_page_index)
             .map_err(|error| {
                 output_mismatch(format!(
                     "inspection engine rejected output page {} geometry: {error}",
-                    expected.index + 1
+                    translated_page_index + 1
                 ))
             })?;
         validate_output_geometry(expected.index, expected.geometry, geometry)?;
@@ -8285,11 +8295,11 @@ fn validate_output_roundtrip(
         }
         let characters = context
             .engine
-            .page_characters(candidate, expected.index)
+            .page_characters(candidate, translated_page_index)
             .map_err(|error| {
                 output_mismatch(format!(
                     "inspection engine rejected output page {} text: {error}",
-                    expected.index + 1
+                    translated_page_index + 1
                 ))
             })?;
         let rewrite = document
@@ -8333,13 +8343,13 @@ fn validate_output_roundtrip(
             .engine
             .rasterize_page_at_scale(
                 candidate,
-                expected.index,
+                translated_page_index,
                 context.layout_detector.raster_pixels_per_point(),
             )
             .map_err(|error| {
                 output_mismatch(format!(
                     "inspection engine rejected output page {} raster: {error}",
-                    expected.index + 1
+                    translated_page_index + 1
                 ))
             })?;
         raster.validate().map_err(|error| {
@@ -8358,6 +8368,58 @@ fn validate_output_roundtrip(
         if rewrite.typeset_characters.is_empty() {
             validate_output_raster(expected.index, input_raster, &raster)?;
         }
+    }
+    Ok(())
+}
+
+fn validate_bilingual_source_page(
+    context: &PassContext<'_>,
+    candidate: &[u8],
+    expected: &ExtractedPage,
+) -> Result<()> {
+    let source_page_index = expected.index * 2;
+    let geometry = context
+        .engine
+        .page_geometry(candidate, source_page_index)
+        .map_err(|error| {
+            output_mismatch(format!(
+                "inspection engine rejected bilingual source page {} geometry: {error}",
+                source_page_index + 1
+            ))
+        })?;
+    validate_output_geometry(expected.index, expected.geometry, geometry)?;
+    let characters = context
+        .engine
+        .page_characters(candidate, source_page_index)
+        .map_err(|error| {
+            output_mismatch(format!(
+                "inspection engine rejected bilingual source page {} text: {error}",
+                source_page_index + 1
+            ))
+        })?;
+    validate_output_characters(
+        expected.index,
+        &expected.engine_characters,
+        &characters,
+        context.config.baseline_tolerance_pt,
+    )?;
+    if let Some(input_raster) = expected.input_raster.as_ref() {
+        let raster = context
+            .engine
+            .rasterize_page_at_scale(
+                candidate,
+                source_page_index,
+                context.layout_detector.raster_pixels_per_point(),
+            )
+            .map_err(|error| {
+                output_mismatch(format!(
+                    "inspection engine rejected bilingual source page {} raster: {error}",
+                    source_page_index + 1
+                ))
+            })?;
+        raster.validate()?;
+        input_raster.validate()?;
+        validate_output_raster(expected.index, input_raster, &raster)?;
     }
     Ok(())
 }

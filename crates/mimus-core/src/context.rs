@@ -28,6 +28,7 @@ pub struct PipelineConfig {
     pub strict: bool,
     pub translate_table: bool,
     pub strip_link_borders: bool,
+    pub bilingual: bool,
 }
 
 impl Default for PipelineConfig {
@@ -45,6 +46,7 @@ impl Default for PipelineConfig {
             strict: false,
             translate_table: false,
             strip_link_borders: false,
+            bilingual: false,
         }
     }
 }

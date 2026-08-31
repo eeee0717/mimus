@@ -1309,7 +1309,7 @@ fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 163, "M1 closure fixture inventory changed");
+    assert_eq!(ids.len(), 164, "M1 closure fixture inventory changed");
     assert_eq!(cases.len(), 98, "M1 closure case inventory changed");
 
     for id in ids {
@@ -2563,6 +2563,7 @@ fn table_translation_is_experimental_reported_and_off_without_remote_calls() {
     assert!(help.status.success());
     let help = String::from_utf8(help.stdout).unwrap();
     assert!(help.contains("--translate-table"));
+    assert!(help.contains("--bilingual"));
     assert!(help.contains("Experimental:"));
 
     let directory = tempfile::tempdir().unwrap();
@@ -4238,6 +4239,160 @@ fn writeback_fixture_matrix_preserves_prefix_structure_and_resource_identity() {
         page_content_ids(&translated, 1)
             .iter()
             .all(|(object, _)| *object > 10)
+    );
+}
+
+#[test]
+fn bilingual_is_opt_in_interleaved_and_additive_in_v2() {
+    let input = fixture_path("unit-write-08-bilingual-navigation");
+    let directory = tempfile::tempdir().unwrap();
+    let default_output = directory.path().join("default.pdf");
+    let default = run_none(&input, Some(&default_output), true);
+    assert!(
+        default.status.success(),
+        "{}",
+        String::from_utf8_lossy(&default.stderr)
+    );
+    let default_events = parse_events(&default.stdout);
+    assert_eq!(
+        default_events
+            .iter()
+            .find(|event| event["event"] == "configuration_resolved")
+            .unwrap()["bilingual"],
+        false
+    );
+    assert_eq!(default_events.last().unwrap()["bilingual"], false);
+    assert_eq!(default_events.last().unwrap()["pages"], 2);
+
+    let bilingual_output = directory.path().join("bilingual.pdf");
+    let mut command = Command::new(BIN);
+    command.env(PDFIUM_ENV, pdfium_library());
+    configure_test_fonts(&mut command);
+    command
+        .env("HTTP_PROXY", "http://127.0.0.1:9")
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env("OPENAI_API_KEY", "must-not-be-used")
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "none",
+            "--layout",
+            "single-line",
+            "--bilingual",
+            "--output",
+        ])
+        .arg(&bilingual_output)
+        .arg(&input);
+    let bilingual = command.output().unwrap();
+    assert!(
+        bilingual.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bilingual.stderr)
+    );
+    assert!(bilingual.stderr.is_empty());
+    let events = parse_events(&bilingual.stdout);
+    assert_one_terminal_last(&events, "result");
+    assert_eq!(
+        events
+            .iter()
+            .find(|event| event["event"] == "configuration_resolved")
+            .unwrap()["bilingual"],
+        true
+    );
+    assert_eq!(events.last().unwrap()["bilingual"], true);
+    assert_eq!(events.last().unwrap()["pages"], 4);
+
+    let input_bytes = std::fs::read(&input).unwrap();
+    let output_bytes = std::fs::read(&bilingual_output).unwrap();
+    assert!(output_bytes.starts_with(&input_bytes));
+    let original = lopdf::Document::load(&input).unwrap();
+    let output = lopdf::Document::load(&bilingual_output).unwrap();
+    let pages = output.get_pages().into_values().collect::<Vec<_>>();
+    assert_eq!(pages.len(), 4);
+    assert_eq!(pages[0], (3, 0));
+    assert_eq!(pages[2], (4, 0));
+    assert!(pages[1].0 > original.max_id && pages[3].0 > original.max_id);
+    for page_id in [(3, 0), (4, 0)] {
+        assert_eq!(
+            output.get_object(page_id).unwrap(),
+            original.get_object(page_id).unwrap(),
+            "source page {page_id:?} changed"
+        );
+    }
+    for page_id in [pages[1], pages[3]] {
+        assert!(!output.get_dictionary(page_id).unwrap().has(b"Annots"));
+    }
+
+    let outline_destination = output
+        .get_dictionary((13, 0))
+        .unwrap()
+        .get(b"Dest")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(outline_destination[0], lopdf::Object::Reference(pages[3]));
+    let goto_destination = output
+        .get_dictionary((15, 0))
+        .unwrap()
+        .get(b"A")
+        .unwrap()
+        .as_dict()
+        .unwrap()
+        .get(b"D")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(goto_destination[0], lopdf::Object::Reference(pages[1]));
+    let link_destination = output
+        .get_dictionary((17, 0))
+        .unwrap()
+        .get(b"A")
+        .unwrap()
+        .as_dict()
+        .unwrap()
+        .get(b"D")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(link_destination[0], lopdf::Object::Reference(pages[3]));
+    assert_eq!(
+        output.get_object((18, 0)).unwrap(),
+        original.get_object((18, 0)).unwrap(),
+        "URI action changed"
+    );
+    let labels = output
+        .get_dictionary((23, 0))
+        .unwrap()
+        .get(b"Nums")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    let starts = labels
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .map(|value| {
+            value
+                .as_dict()
+                .unwrap()
+                .get(b"St")
+                .unwrap()
+                .as_i64()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(starts, vec![3, 3, 7, 7]);
+
+    let qpdf = Command::new("qpdf")
+        .arg("--check")
+        .arg(&bilingual_output)
+        .output()
+        .unwrap();
+    assert!(
+        qpdf.status.success(),
+        "{}",
+        String::from_utf8_lossy(&qpdf.stderr)
     );
 }
 
