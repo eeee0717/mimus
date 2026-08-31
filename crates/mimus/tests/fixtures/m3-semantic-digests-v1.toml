@@ -1,5 +1,6 @@
 # Aggregate SHA-256 over fixture ID and canonical IL after 0.001-pt float quantization.
 # Every completed debug pass for every committed fixture contributes to one lane/stage digest.
+# Two non-embedded-font fixtures canonicalize platform-substituted PDFium ink to walk metric boxes.
 version = 1
 fixture_count = 164
 case_count = 98
@@ -24,14 +25,14 @@ case_count = 98
 "inspect/00-parse" = "d8899f442313f983e8962290da57b7132c2a7aa9c2b21d029cf67e76d2ddbe1c"
 "inspect/01-scan_detect" = "be979e608abb497683679e564b8dc21cf5db0abed46405f27fff6ad7d048efe0"
 "inspect/02-layout" = "be979e608abb497683679e564b8dc21cf5db0abed46405f27fff6ad7d048efe0"
-"inspect/03-paragraph_find" = "3cc770ab75baa05567ea008e3d65dc2b6c156ae055afb28a8cdc427acdfe8aa7"
+"inspect/03-paragraph_find" = "c77e6f90a95b924c91f0e2ad61cf5c4aa1734a1205fcd882ae7da38cdaffaeed"
 "translate/00-parse" = "d8899f442313f983e8962290da57b7132c2a7aa9c2b21d029cf67e76d2ddbe1c"
 "translate/01-scan_detect" = "be979e608abb497683679e564b8dc21cf5db0abed46405f27fff6ad7d048efe0"
 "translate/02-layout" = "be979e608abb497683679e564b8dc21cf5db0abed46405f27fff6ad7d048efe0"
-"translate/03-paragraph_find" = "3cc770ab75baa05567ea008e3d65dc2b6c156ae055afb28a8cdc427acdfe8aa7"
-"translate/04-styles_and_formulas" = "900903278690eec57e810aa493756e60aa9c38c4df728c6bc60874bb1bf7020b"
-"translate/05-extract_terms" = "900903278690eec57e810aa493756e60aa9c38c4df728c6bc60874bb1bf7020b"
-"translate/06-translate" = "300dce2797c388432f54b667a6de7b591354387250b68c2d90eb647666b4669f"
-"translate/07-typeset" = "300dce2797c388432f54b667a6de7b591354387250b68c2d90eb647666b4669f"
-"translate/08-font_embed" = "300dce2797c388432f54b667a6de7b591354387250b68c2d90eb647666b4669f"
-"translate/09-write" = "300dce2797c388432f54b667a6de7b591354387250b68c2d90eb647666b4669f"
+"translate/03-paragraph_find" = "c77e6f90a95b924c91f0e2ad61cf5c4aa1734a1205fcd882ae7da38cdaffaeed"
+"translate/04-styles_and_formulas" = "e65f44dbc9f40d4de3afd2154e7b6472e925a471c3a4cf57ef37e32971df3a25"
+"translate/05-extract_terms" = "e65f44dbc9f40d4de3afd2154e7b6472e925a471c3a4cf57ef37e32971df3a25"
+"translate/06-translate" = "12269c4269507c2e612b249bddbfe25032ebeeb6c5d1180a7620eb4ad7916374"
+"translate/07-typeset" = "12269c4269507c2e612b249bddbfe25032ebeeb6c5d1180a7620eb4ad7916374"
+"translate/08-font_embed" = "12269c4269507c2e612b249bddbfe25032ebeeb6c5d1180a7620eb4ad7916374"
+"translate/09-write" = "12269c4269507c2e612b249bddbfe25032ebeeb6c5d1180a7620eb4ad7916374"

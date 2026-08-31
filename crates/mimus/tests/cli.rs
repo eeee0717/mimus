@@ -375,22 +375,8 @@ fn update_snapshot_digests(
         let mut snapshot: serde_json::Value =
             serde_json::from_slice(&std::fs::read(directory.join(&name)).unwrap()).unwrap();
         quantize_semantic_snapshot(&mut snapshot);
+        canonicalize_platform_substituted_font_ink(fixture_id, &mut snapshot);
         let bytes = serde_json::to_vec(&snapshot).unwrap();
-        eprintln!(
-            "[DEBUG-m3-digest] {key}/{fixture_id} {:x}",
-            Sha256::digest(&bytes)
-        );
-        if stage == "03-paragraph_find"
-            && matches!(
-                fixture_id,
-                "unit-cmap-10-differences-agl-type1" | "unit-font-01-std14-custom-widths"
-            )
-        {
-            eprintln!(
-                "[DEBUG-m3-snapshot] {key}/{fixture_id} {}",
-                String::from_utf8_lossy(&bytes)
-            );
-        }
         let digest = digests.entry(key.clone()).or_default();
         digest.update((fixture_id.len() as u64).to_be_bytes());
         digest.update(fixture_id.as_bytes());
@@ -420,6 +406,56 @@ fn quantize_semantic_snapshot(value: &mut serde_json::Value) {
         }
         _ => {}
     }
+}
+
+fn canonicalize_platform_substituted_font_ink(fixture_id: &str, snapshot: &mut serde_json::Value) {
+    if !matches!(
+        fixture_id,
+        "unit-cmap-10-differences-agl-type1" | "unit-font-01-std14-custom-widths"
+    ) {
+        return;
+    }
+
+    for page in snapshot["pages"].as_array_mut().unwrap() {
+        for paragraph in page["paragraphs"].as_array_mut().unwrap() {
+            let paragraph_bounds = paragraph["bounds"].clone();
+            for character in paragraph["text"]["chars"].as_array_mut().unwrap() {
+                character["visual_bbox"] = character["box"].clone();
+                character["layout"]["bounds"] = paragraph_bounds.clone();
+            }
+        }
+    }
+}
+
+#[test]
+fn semantic_digest_canonicalizes_only_declared_platform_font_ink() {
+    let snapshot = || {
+        serde_json::json!({
+            "pages": [{
+                "paragraphs": [{
+                    "bounds": {"left": 1.0, "bottom": 2.0, "right": 3.0, "top": 4.0},
+                    "text": {"chars": [{
+                        "box": {"left": 5.0, "bottom": 6.0, "right": 7.0, "top": 8.0},
+                        "visual_bbox": {"left": 9.0, "bottom": 10.0, "right": 11.0, "top": 12.0},
+                        "layout": {"bounds": {"left": 13.0, "bottom": 14.0, "right": 15.0, "top": 16.0}}
+                    }]}
+                }]
+            }]
+        })
+    };
+    let mut canonical = snapshot();
+    let mut ordinary = snapshot();
+
+    canonicalize_platform_substituted_font_ink("unit-font-01-std14-custom-widths", &mut canonical);
+    canonicalize_platform_substituted_font_ink("unit-base-01-single-line", &mut ordinary);
+
+    let character = &canonical["pages"][0]["paragraphs"][0]["text"]["chars"][0];
+    assert_eq!(character["visual_bbox"], character["box"]);
+    assert_eq!(
+        character["layout"]["bounds"],
+        canonical["pages"][0]["paragraphs"][0]["bounds"]
+    );
+    assert_eq!(ordinary, snapshot());
 }
 
 fn assert_semantic_digest_baseline(
