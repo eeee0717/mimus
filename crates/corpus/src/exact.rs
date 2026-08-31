@@ -60,12 +60,22 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
             repo_root,
             b"BT\n/F1 12 Tf\n1 0 0 1 145 140 Tm\n(M) Tj\n1 0 0 1 180 140 Tm\n(M) Tj\n1 0 0 1 140 120 Tm\n(M) Tj\n1 0 0 1 180 120 Tm\n(M) Tj\n1 0 0 1 157 100 Tm\n(M) Tj\n1 0 0 1 180 100 Tm\n(M) Tj\nET\n",
         ),
+        "unit-para-18-scaled-tm-rule" => basic_text(
+            fixture_id,
+            repo_root,
+            b"q\n0.5 w\n60 132.5 m\n270 132.5 l\nS\nQ\nBT\n/F1 1 Tf\n12 0 0 12 72 150 Tm\n(MIMUS) Tj\n12 0 0 12 125 150 Tm\n(MIMUS) Tj\n12 0 0 12 72 136 Tm\n(MIMUS) Tj\n12 0 0 12 125 136 Tm\n(MIMUS) Tj\nET\n",
+        ),
         "unit-translation-01-section-title-number" => basic_text_with_page_size(
             fixture_id,
             repo_root,
             300,
             220,
             b"BT\n/F1 12 Tf\n1 0 0 1 125 195 Tm\n(MIMUS) Tj\n1 0 0 1 108 195 Tm\n(I) Tj\nET\n",
+        ),
+        "unit-translation-02-whitespace-identity" => basic_text(
+            fixture_id,
+            repo_root,
+            b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n( ) Tj\nET\n",
         ),
         "unit-base-03-structured" => structured(repo_root),
         "unit-parse-01-ascii85" => filtered_text(fixture_id, repo_root, FilterRecipe::Ascii85),

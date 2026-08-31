@@ -1212,7 +1212,7 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
                     code: walked.code,
                     visible: walked.visible,
                     font: walked.font.clone(),
-                    font_size: walked.font_size,
+                    font_size: page_space_font_size(walked),
                     baseline_origin: walked.baseline_origin,
                     r#box: walked.metric_box,
                     visual_bbox: extracted
@@ -1242,8 +1242,13 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
 
         let mut model_groups = Vec::<ModelGroup>::new();
         let mut fallback = Vec::new();
+        let mut invisible = Vec::new();
         let mut isolated = Vec::new();
         for positioned in positioned {
+            if !positioned.character.visible && positioned.locatable {
+                invisible.push(positioned);
+                continue;
+            }
             if !positioned.locatable {
                 isolated.push(positioned);
                 continue;
@@ -1317,6 +1322,15 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
                 });
             }
         }
+        for line in invisible_text_show_lines(invisible) {
+            drafts.push(ParagraphDraft {
+                model_order: None,
+                apparatus: false,
+                column_left: line.bounds.left,
+                top: line.bounds.top,
+                lines: vec![line],
+            });
+        }
         attach_isolated_chars(&mut drafts, isolated);
 
         drafts.sort_by(|left, right| match (left.model_order, right.model_order) {
@@ -1384,6 +1398,19 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
         document.diagnostics.push(diagnostic);
     }
     Ok(())
+}
+
+fn page_space_font_size(walked: &crate::walk::WalkedChar) -> f64 {
+    let [a, b, c, d, _, _] = walked.content_transform;
+    let [_, _, text_c, text_d, _, _] = walked.text_matrix_before_glyph;
+    let vertical_x = a * text_c + c * text_d;
+    let vertical_y = b * text_c + d * text_d;
+    let effective = walked.font_size.abs() * vertical_x.hypot(vertical_y);
+    if effective.is_finite() && effective > 0.0 {
+        effective
+    } else {
+        walked.font_size
+    }
 }
 
 fn apply_title_author_passthrough(paragraphs: &mut [Paragraph]) {
@@ -1649,6 +1676,30 @@ fn build_text_lines(mut chars: Vec<PositionedChar>) -> Vec<TextLine> {
         }
     }
     lines
+}
+
+fn invisible_text_show_lines(mut chars: Vec<PositionedChar>) -> Vec<TextLine> {
+    chars.sort_by_key(|character| character.walked_index);
+    let mut runs = Vec::<Vec<PositionedChar>>::new();
+    for character in chars {
+        let same_text_show = runs
+            .last()
+            .and_then(|run| run.last())
+            .is_some_and(|previous| {
+                previous.character.passthrough.content_object
+                    == character.character.passthrough.content_object
+                    && previous.character.passthrough.byte_start
+                        == character.character.passthrough.byte_start
+                    && previous.character.passthrough.byte_end
+                        == character.character.passthrough.byte_end
+            });
+        if same_text_show {
+            runs.last_mut().unwrap().push(character);
+        } else {
+            runs.push(vec![character]);
+        }
+    }
+    runs.into_iter().map(text_line).collect()
 }
 
 fn text_line(chars: Vec<PositionedChar>) -> TextLine {
@@ -2233,6 +2284,7 @@ pub fn extract_terms(document: &mut Document, context: &PassContext<'_>) -> Resu
     let document_text = document
         .prepared_translations
         .values()
+        .filter(|prepared| !prepared.is_local_identity())
         .map(crate::translate::PreparedTranslation::request_text)
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
@@ -2325,7 +2377,7 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                         format!("Translate could not find prepared paragraph {key:?}"),
                     )
                 })?;
-            if prepared.request_text().is_empty() {
+            if prepared.is_local_identity() {
                 paragraph.translated_text = Some(paragraph.source_text());
                 continue;
             }
@@ -2530,6 +2582,22 @@ fn translate_none(document: &mut Document, context: &PassContext<'_>) -> Result<
         for paragraph in &mut page.paragraphs {
             if paragraph.preserved.is_some() {
                 paragraph.translated_text = None;
+                continue;
+            }
+            let prepared = document
+                .prepared_translations
+                .get(&(page.index, paragraph.reading_order))
+                .ok_or_else(|| {
+                    MimusError::internal(
+                        InternalReason::InvariantViolation,
+                        format!(
+                            "Translate could not find prepared paragraph ({}, {})",
+                            page.index, paragraph.reading_order
+                        ),
+                    )
+                })?;
+            if prepared.is_local_identity() {
+                paragraph.translated_text = Some(paragraph.source_text());
                 continue;
             }
             let chars = paragraph.chars();
@@ -4464,6 +4532,36 @@ fn paragraph_typeset_obstacles(
             .map(|region| region.bounds)
             .filter(|bounds| rect_is_finite(*bounds)),
     );
+    let has_inline_formula = paragraph.chars().iter().any(|character| {
+        character
+            .layout
+            .is_some_and(|layout| layout.label == LayoutLabel::InlineFormula)
+    });
+    if !has_inline_formula {
+        obstacles.extend(extracted.vector_paths.iter().filter_map(|path| {
+            let left = path.start.x.min(path.end.x);
+            let right = path.start.x.max(path.end.x);
+            let y = (path.start.y + path.end.y) / 2.0;
+            let bounds = Rect {
+                left,
+                bottom: y - 0.01,
+                right,
+                top: y + 0.01,
+            };
+            (right > left + 0.01 && rect_is_finite(bounds)).then_some(bounds)
+        }));
+        obstacles.extend(
+            extracted
+                .inline_images
+                .iter()
+                .map(|image| image.bounds)
+                .filter(|bounds| {
+                    rect_is_finite(*bounds)
+                        && bounds.right > bounds.left + 0.01
+                        && bounds.top > bounds.bottom + 0.01
+                }),
+        );
+    }
     obstacles
 }
 
@@ -11160,6 +11258,61 @@ mod tests {
     }
 
     #[test]
+    fn normal_text_obstacles_include_retained_vector_and_inline_image_ink() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let translator = CountingTranslator::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let content_object = document.extracted_pages[0].content_streams[0].object_id;
+        document.extracted_pages[0].vector_paths = vec![crate::walk::WalkedVectorPath {
+            content_object,
+            byte_start: 1,
+            byte_end: 2,
+            start: Point { x: 60.0, y: 110.0 },
+            end: Point { x: 180.0, y: 110.0 },
+            content_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            safe_to_replay: true,
+        }];
+        let image = Rect {
+            left: 190.0,
+            bottom: 100.0,
+            right: 220.0,
+            top: 125.0,
+        };
+        document.extracted_pages[0].inline_images = vec![crate::walk::WalkedInlineImage {
+            content_object,
+            byte_start: 3,
+            byte_end: 4,
+            bounds: image,
+            content_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        }];
+
+        let obstacles = paragraph_typeset_obstacles(
+            &document.il.pages[0],
+            &document.extracted_pages[0],
+            &document.il.pages[0].paragraphs[0],
+            true,
+        );
+
+        assert!(obstacles.contains(&image));
+        assert!(obstacles.contains(&Rect {
+            left: 60.0,
+            bottom: 109.99,
+            right: 180.0,
+            top: 110.01,
+        }));
+    }
+
+    #[test]
     fn single_line_fit_always_tests_the_exact_minimum_font_size() {
         let translator = StaticTranslator {
             output: "中文测试中文测试",
@@ -13076,6 +13229,51 @@ mod tests {
         assert_eq!(paragraph.chars()[0].visual_bbox, expected_first_box);
         assert_eq!(paragraph.chars()[1].visual_bbox, paragraph.chars()[1].r#box);
         assert_eq!(paragraph.preserved, None);
+    }
+
+    #[test]
+    fn invisible_characters_do_not_join_visible_paragraphs_or_translation_requests() {
+        let engine = FakeEngine::default();
+        let translator = WrappingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        let mut document = Document::new(fixture(), "unused.pdf");
+        for pass in [parse as Pass, scan_detect, layout] {
+            pass(&mut document, &context).unwrap();
+        }
+        let mut invisible = document.extracted_pages[0].walked_characters[0].clone();
+        invisible.unicode = Some('X');
+        invisible.visible = false;
+        invisible.baseline_origin.x += 2.0;
+        invisible.metric_box.left += 2.0;
+        invisible.metric_box.right += 2.0;
+        document.extracted_pages[0]
+            .walked_characters
+            .push(invisible);
+
+        paragraph_find(&mut document, &context).unwrap();
+        translate(&mut document, &context).unwrap();
+
+        let visible = document.il.pages[0]
+            .paragraphs
+            .iter()
+            .find(|paragraph| paragraph.source_text() == "MIMUS")
+            .unwrap();
+        let invisible = document.il.pages[0]
+            .paragraphs
+            .iter()
+            .find(|paragraph| paragraph.source_text() == "X")
+            .unwrap();
+        assert_eq!(translator.inputs.lock().unwrap().as_slice(), ["MIMUS"]);
+        assert_eq!(visible.translated_text.as_deref(), Some("[MIMUS]"));
+        assert_eq!(invisible.translated_text.as_deref(), Some("X"));
     }
 
     #[test]
@@ -16527,6 +16725,100 @@ mod tests {
 
         assert_eq!(translator.term_calls.load(Ordering::SeqCst), 0);
         assert!(document.glossary.is_empty());
+    }
+
+    #[test]
+    fn whitespace_and_numeric_only_requests_are_local_identity_without_backend_or_ink() {
+        for source in ["     ", "2. 3 "] {
+            let mut document = Document::for_inspection(fixture());
+            let engine = FakeEngine::default();
+            let translator = GlossaryTranslator::default();
+            let events = RecordingEventSink::default();
+            let context = PassContext {
+                engine: &engine,
+                layout_detector: &SingleLineLayoutDetector,
+                translator: &translator,
+                events: &events,
+                snapshots: None,
+                config: crate::context::PipelineConfig::default(),
+            };
+            inspect(&mut document, &context).unwrap();
+            let TextCarrier::Chars { chars } = &mut document.il.pages[0].paragraphs[0].text;
+            for (character, unicode) in chars.iter_mut().zip(source.chars()) {
+                character.unicode = Some(unicode);
+            }
+
+            styles_and_formulas(&mut document, &context).unwrap();
+            extract_terms(&mut document, &context).unwrap();
+            translate(&mut document, &context).unwrap();
+            typeset(&mut document, &context).unwrap();
+
+            assert_eq!(
+                translator.term_calls.load(Ordering::SeqCst),
+                0,
+                "{source:?}"
+            );
+            assert!(
+                translator.translation_glossaries.lock().unwrap().is_empty(),
+                "{source:?}"
+            );
+            assert_eq!(
+                document.il.pages[0].paragraphs[0]
+                    .translated_text
+                    .as_deref(),
+                Some(source),
+                "{source:?}"
+            );
+            assert!(
+                document
+                    .rewrites
+                    .iter()
+                    .all(|rewrite| rewrite.typeset_ink_bounds.is_empty()),
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_only_requests_skip_the_none_backend_and_create_no_ink() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let translator = CountingTranslator::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig {
+                auto_terms: false,
+                ..crate::context::PipelineConfig::default()
+            },
+        };
+        inspect(&mut document, &context).unwrap();
+        let TextCarrier::Chars { chars } = &mut document.il.pages[0].paragraphs[0].text;
+        for (character, unicode) in chars.iter_mut().zip("2. 3 ".chars()) {
+            character.unicode = Some(unicode);
+        }
+
+        styles_and_formulas(&mut document, &context).unwrap();
+        translate(&mut document, &context).unwrap();
+        typeset(&mut document, &context).unwrap();
+
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            document.il.pages[0].paragraphs[0]
+                .translated_text
+                .as_deref(),
+            Some("2. 3 ")
+        );
+        assert!(
+            document
+                .rewrites
+                .iter()
+                .all(|rewrite| rewrite.typeset_ink_bounds.is_empty())
+        );
     }
 
     #[test]

@@ -106,6 +106,14 @@ fn handle_responses_request(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<Str
         )
     } else if input == "Scale by √{v1}, then continue." {
         ("200 OK", r#"{"output_text":"A√B{v1}."}"#.to_owned())
+    } else if input == "MIMUS MIMUS MIMUS MIMUS" {
+        (
+            "200 OK",
+            serde_json::json!({
+                "output_text": "模型数据验证论文翻译结果保持结构流程稳定缓存重试诊断排版字体安全边界模型数据验证论文翻译结果保持结构流程稳定缓存重试诊断排版字体安全边界模型数据验证论文翻译结果保持结构流程稳定缓存重试诊断排版字体安全边界"
+            })
+            .to_string(),
+        )
     } else if matches!(
         input.as_str(),
         "1204 ops" | "1198 ops" | "8.1 ms" | "8.3 ms"
@@ -1301,8 +1309,8 @@ fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 160, "M1 closure fixture inventory changed");
-    assert_eq!(cases.len(), 95, "M1 closure case inventory changed");
+    assert_eq!(ids.len(), 162, "M1 closure fixture inventory changed");
+    assert_eq!(cases.len(), 98, "M1 closure case inventory changed");
 
     for id in ids {
         let input = fixture_path(&id);
@@ -2062,6 +2070,150 @@ fn one_model_region_with_two_author_columns_preserves_column_ownership() {
         summaries[0].4 <= summaries[1].3,
         "author column typeset containers overlap: {summaries:?}"
     );
+}
+
+#[test]
+fn scaled_text_matrix_uses_page_space_em_and_retained_rule_blocks_expansion() {
+    let id = "unit-para-18-scaled-tm-rule";
+    let inspected = run_inspect_with_layout(id);
+    assert!(
+        inspected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let events = parse_events(&inspected.stdout);
+    assert_one_terminal_last(&events, "result");
+    let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap();
+    assert_eq!(paragraphs.len(), 1, "{paragraphs:#?}");
+    assert_eq!(il_paragraph_text(&paragraphs[0]), "MIMUS MIMUS MIMUS MIMUS");
+    assert!(
+        paragraphs[0]["text"]["chars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|character| { (character["font_size"].as_f64().unwrap() - 12.0).abs() <= 0.001 })
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("scaled-tm-rule.pdf");
+    let server = FakeResponsesServer::start();
+    let mut command = Command::new(BIN);
+    configure_test_fonts(&mut command);
+    let translated = command
+        .env(PDFIUM_ENV, pdfium_library())
+        .env("API_KEY", "mimus-scaled-tm-test-key")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "openai",
+            "--endpoint",
+            &server.endpoint,
+            "--model",
+            "scaled-tm-test-model",
+            "--no-auto-terms",
+            "--no-cache",
+            "--layout-replay",
+        ])
+        .arg(layout_recording_path(id))
+        .arg("--output")
+        .arg(&output_path)
+        .arg(fixture_path(id))
+        .output()
+        .unwrap();
+    assert!(
+        translated.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&translated.stderr),
+        String::from_utf8_lossy(&translated.stdout)
+    );
+    assert_eq!(server.requests(), vec!["MIMUS MIMUS MIMUS MIMUS"]);
+    let events = parse_events(&translated.stdout);
+    assert!(
+        events.iter().any(|event| {
+            event["event"] == "diagnostic"
+                && event["id"] == "typeset_overflow_detail"
+                && event["obstacle_count"]
+                    .as_u64()
+                    .is_some_and(|count| count >= 1)
+        }),
+        "{events:#?}"
+    );
+    let summary = events
+        .iter()
+        .find(|event| event["event"] == "diagnostic" && event["id"] == "degradation_summary")
+        .unwrap();
+    assert_eq!(summary["preserved_paragraph_count"], 1);
+    assert_eq!(
+        summary["preserved_paragraphs"][0]["reason"],
+        "typeset_overflow"
+    );
+    assert!(output_path.is_file());
+}
+
+#[test]
+fn whitespace_only_fixture_is_local_identity_without_a_backend_request_or_new_ink() {
+    let id = "unit-translation-02-whitespace-identity";
+    let inspected = run_inspect_with_layout(id);
+    assert!(
+        inspected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let events = parse_events(&inspected.stdout);
+    assert_one_terminal_last(&events, "result");
+    let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap();
+    assert_eq!(paragraphs.len(), 1, "{paragraphs:#?}");
+    assert_eq!(il_paragraph_text(&paragraphs[0]), " ");
+
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("whitespace-identity.pdf");
+    let server = FakeResponsesServer::start();
+    let mut command = Command::new(BIN);
+    configure_test_fonts(&mut command);
+    let translated = command
+        .env(PDFIUM_ENV, pdfium_library())
+        .env("API_KEY", "mimus-whitespace-identity-test-key")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "openai",
+            "--endpoint",
+            &server.endpoint,
+            "--model",
+            "whitespace-identity-test-model",
+            "--no-auto-terms",
+            "--no-cache",
+            "--layout-replay",
+        ])
+        .arg(layout_recording_path(id))
+        .arg("--output")
+        .arg(&output_path)
+        .arg(fixture_path(id))
+        .output()
+        .unwrap();
+    assert!(
+        translated.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&translated.stderr),
+        String::from_utf8_lossy(&translated.stdout)
+    );
+    assert!(server.requests().is_empty());
+    let events = parse_events(&translated.stdout);
+    assert_one_terminal_last(&events, "result");
+    assert!(!events.iter().any(|event| {
+        event["event"] == "diagnostic" && event["id"] == "typeset_overflow_detail"
+    }));
+    let input_bytes = std::fs::read(fixture_path(id)).unwrap();
+    let output_bytes = std::fs::read(&output_path).unwrap();
+    assert!(output_bytes.starts_with(&input_bytes));
 }
 
 #[test]
