@@ -239,6 +239,7 @@ pub enum DiagnosticId {
     ScanSummary,
     PageDegraded,
     ContentRecovered,
+    UnicodeRecovered,
     TranslationRetry,
     PlaceholderRetry,
     ContentConservationRetry,
@@ -432,6 +433,12 @@ pub enum Diagnostic {
         #[serde(skip_serializing_if = "usize_is_zero")]
         form_object_count: usize,
     },
+    UnicodeRecovered {
+        page_index: usize,
+        paragraph_index: usize,
+        reading_order: usize,
+        recovered_character_count: usize,
+    },
     TranslationRetry {
         page_index: usize,
         paragraph_index: usize,
@@ -551,6 +558,7 @@ impl Diagnostic {
             Self::ScanSummary { .. } => DiagnosticId::ScanSummary,
             Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
             Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
+            Self::UnicodeRecovered { .. } => DiagnosticId::UnicodeRecovered,
             Self::TranslationRetry { .. } => DiagnosticId::TranslationRetry,
             Self::PlaceholderRetry { .. } => DiagnosticId::PlaceholderRetry,
             Self::ContentConservationRetry { .. } => DiagnosticId::ContentConservationRetry,
@@ -576,7 +584,8 @@ impl Diagnostic {
     const fn is_warning(&self) -> bool {
         !matches!(
             self,
-            Self::TranslationIdentity { .. }
+            Self::UnicodeRecovered { .. }
+                | Self::TranslationIdentity { .. }
                 | Self::TranslationFailureProfile { .. }
                 | Self::MathPassthrough { .. }
                 | Self::FormulaBoundaryExpanded { .. }
@@ -652,6 +661,12 @@ pub enum DiagnosticEvent {
         form_object_ids: Vec<u32>,
         #[serde(skip_serializing_if = "usize_is_zero")]
         form_object_count: usize,
+    },
+    UnicodeRecovered {
+        page_index: usize,
+        paragraph_index: usize,
+        reading_order: usize,
+        recovered_character_count: usize,
     },
     TranslationRetry {
         page_index: usize,
@@ -774,6 +789,7 @@ impl DiagnosticEvent {
             Self::ScanSummary { .. } => DiagnosticId::ScanSummary,
             Self::PageDegraded { .. } => DiagnosticId::PageDegraded,
             Self::ContentRecovered { .. } => DiagnosticId::ContentRecovered,
+            Self::UnicodeRecovered { .. } => DiagnosticId::UnicodeRecovered,
             Self::TranslationRetry { .. } => DiagnosticId::TranslationRetry,
             Self::PlaceholderRetry { .. } => DiagnosticId::PlaceholderRetry,
             Self::ContentConservationRetry { .. } => DiagnosticId::ContentConservationRetry,
@@ -886,6 +902,17 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 form_cycle_paths: form_cycle_paths.clone(),
                 form_object_ids: form_object_ids.clone(),
                 form_object_count: *form_object_count,
+            },
+            Diagnostic::UnicodeRecovered {
+                page_index,
+                paragraph_index,
+                reading_order,
+                recovered_character_count,
+            } => Self::UnicodeRecovered {
+                page_index: *page_index,
+                paragraph_index: *paragraph_index,
+                reading_order: *reading_order,
+                recovered_character_count: *recovered_character_count,
             },
             Diagnostic::TranslationRetry {
                 page_index,
@@ -1146,7 +1173,8 @@ impl Diagnostics {
             .filter(|(id, _)| {
                 !matches!(
                     id,
-                    DiagnosticId::TranslationIdentity
+                    DiagnosticId::UnicodeRecovered
+                        | DiagnosticId::TranslationIdentity
                         | DiagnosticId::TranslationFailureProfile
                         | DiagnosticId::MathPassthrough
                         | DiagnosticId::FormulaBoundaryExpanded

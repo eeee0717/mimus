@@ -126,6 +126,8 @@ pub enum TextCarrier {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Char {
     pub unicode: Option<char>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unicode_source: Option<UnicodeSource>,
     pub code: u32,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub visible: bool,
@@ -145,6 +147,12 @@ pub struct Char {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<LayoutAssignment>,
     pub passthrough: PassthroughRef,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UnicodeSource {
+    DifferencesAgl,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]

@@ -1301,8 +1301,8 @@ fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 158, "M1 closure fixture inventory changed");
-    assert_eq!(cases.len(), 93, "M1 closure case inventory changed");
+    assert_eq!(ids.len(), 160, "M1 closure fixture inventory changed");
+    assert_eq!(cases.len(), 95, "M1 closure case inventory changed");
 
     for id in ids {
         let input = fixture_path(&id);
@@ -2760,6 +2760,61 @@ fn supported_font_and_cmap_fixtures_match_manifest_unicode_and_positive_advances
                 .any(|window| window == b"(cid:"),
             "fixture {id} output contains a CID literal"
         );
+    }
+}
+
+#[test]
+fn explicit_differences_agl_single_scalars_are_auditable_and_translatable() {
+    let directory = tempfile::tempdir().unwrap();
+    for id in [
+        "unit-cmap-10-differences-agl-type1",
+        "unit-cmap-11-differences-agl-type3",
+    ] {
+        let input = fixture_path(id);
+        let inspected = run_inspect(&input, true, None);
+        assert!(
+            inspected.status.success(),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&inspected.stderr)
+        );
+        let events = parse_events(&inspected.stdout);
+        assert_one_terminal_last(&events, "result");
+        let paragraph = &events.last().unwrap()["il"]["pages"][0]["paragraphs"][0];
+        assert!(
+            paragraph.get("preserved").is_none(),
+            "fixture {id} was preserved: {paragraph}"
+        );
+        assert_eq!(paragraph["text"]["chars"][0]["unicode"], "Á", "{id}");
+        assert_eq!(
+            paragraph["text"]["chars"][0]["unicode_source"], "differences_agl",
+            "{id}"
+        );
+        assert!(
+            events.iter().any(|event| {
+                event["event"] == "diagnostic"
+                    && event["id"] == "unicode_recovered"
+                    && event["page_index"] == 0
+                    && event["paragraph_index"] == 0
+                    && event["reading_order"] == 0
+                    && event["recovered_character_count"] == 1
+            }),
+            "fixture {id} has no typed recovery diagnostic: {events:?}"
+        );
+
+        let output = directory.path().join(format!("{id}.pdf"));
+        let debug = directory.path().join(format!("{id}-debug"));
+        let translated = run_none_with_debug(&input, &output, &debug, true);
+        assert!(
+            translated.status.success(),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&translated.stderr)
+        );
+        let il: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(debug.join("06-translate.il.json")).unwrap())
+                .unwrap();
+        let paragraph = &il["pages"][0]["paragraphs"][0];
+        assert_eq!(paragraph["translated_text"], "Á", "{id}");
+        assert!(paragraph.get("preserved").is_none(), "{id}");
     }
 }
 

@@ -88,6 +88,7 @@ enum EmbeddedUnicode {
 struct SimpleEncoding {
     unicode: Vec<Option<char>>,
     glyph_names: Vec<Option<Vec<u8>>>,
+    differences_agl: Vec<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -406,6 +407,11 @@ impl ResolvedFont {
                     let encoded = vec![*code];
                     let (unicode, unicode_provenance) = self.unicode_for(&encoded, || {
                         let candidate = font.encoding.unicode[usize::from(*code)];
+                        let provenance = if font.encoding.differences_agl[usize::from(*code)] {
+                            UnicodeProvenance::DifferencesAgl
+                        } else {
+                            UnicodeProvenance::SimpleEncoding
+                        };
                         match &font.embedded_unicode {
                             EmbeddedUnicode::Absent => candidate,
                             EmbeddedUnicode::Valid(characters) => {
@@ -413,7 +419,7 @@ impl ResolvedFont {
                             }
                             EmbeddedUnicode::Invalid => None,
                         }
-                        .map(|character| (character, UnicodeProvenance::SimpleEncoding))
+                        .map(|character| (character, provenance))
                     });
                     let width = font.widths.as_ref().and_then(|widths| {
                         usize::try_from(i64::from(*code) - font.first_char)
@@ -465,8 +471,14 @@ impl ResolvedFont {
                     let name = font.encoding.glyph_names[usize::from(*code)].as_ref();
                     let glyph = name.and_then(|name| font.glyphs.get(name));
                     let (unicode, unicode_provenance) = self.unicode_for(&encoded, || {
-                        font.encoding.unicode[usize::from(*code)]
-                            .map(|character| (character, UnicodeProvenance::SimpleEncoding))
+                        font.encoding.unicode[usize::from(*code)].map(|character| {
+                            let provenance = if font.encoding.differences_agl[usize::from(*code)] {
+                                UnicodeProvenance::DifferencesAgl
+                            } else {
+                                UnicodeProvenance::SimpleEncoding
+                            };
+                            (character, provenance)
+                        })
                     });
                     DecodedGlyph {
                         unicode,
@@ -663,7 +675,13 @@ fn read_simple_encoding(
                         Object::Integer(value) => code = u8::try_from(*value).ok(),
                         Object::Name(name) => {
                             let current = code.ok_or(FontFailure)?;
-                            encoding.unicode[usize::from(current)] = glyph_name_to_unicode(name);
+                            let existing = glyph_name_to_unicode(name);
+                            let recovered = existing.or_else(|| {
+                                mimus_quality_contract::differences_agl_single_scalar(name)
+                            });
+                            encoding.unicode[usize::from(current)] = recovered;
+                            encoding.differences_agl[usize::from(current)] =
+                                existing.is_none() && recovered.is_some();
                             encoding.glyph_names[usize::from(current)] = Some(name.clone());
                             code = current.checked_add(1);
                         }
@@ -681,6 +699,7 @@ fn base_encoding(name: &[u8]) -> SimpleEncoding {
     let mut encoding = SimpleEncoding {
         unicode: vec![None; 256],
         glyph_names: vec![None; 256],
+        differences_agl: vec![false; 256],
     };
     for code in 0_u8..=u8::MAX {
         let unicode = match name {
@@ -1406,6 +1425,14 @@ mod tests {
     }
 
     #[test]
+    fn implicit_standard_encoding_never_claims_differences_agl_provenance() {
+        let encoding = base_encoding(b"StandardEncoding");
+
+        assert_eq!(encoding.unicode[usize::from(b'A')], Some('A'));
+        assert!(!encoding.differences_agl[usize::from(b'A')]);
+    }
+
+    #[test]
     fn mixed_codespaces_segment_without_guessing_width() {
         let map = parse_encoding_cmap(
             b"2 begincodespacerange <00> <80> <8140> <FEFE> endcodespacerange \
@@ -1481,6 +1508,35 @@ mod tests {
         let decoded = font.unicode_for(b"A", || {
             fallback_called.set(true);
             Some(('Z', UnicodeProvenance::EmbeddedFontCmap))
+        });
+
+        assert_eq!(decoded, (Vec::new(), UnicodeProvenance::Unresolved));
+        assert!(!fallback_called.get());
+    }
+
+    #[test]
+    fn to_unicode_unmapped_codes_never_fall_back_to_differences() {
+        let font = ResolvedFont {
+            reference: FontRef {
+                resource_name: "F1".to_owned(),
+                object_number: 1,
+                generation: 0,
+            },
+            ascent_em: 0.8,
+            descent_em: -0.2,
+            engine_mismatch_tolerated: false,
+            supported: true,
+            unicode: UnicodeSource::Valid(UnicodeMap {
+                codespaces: Vec::new(),
+                chars: BTreeMap::from([(b"B".to_vec(), vec!['B'])]),
+            }),
+            kind: FontKind::Unknown,
+        };
+        let fallback_called = Cell::new(false);
+
+        let decoded = font.unicode_for(b"A", || {
+            fallback_called.set(true);
+            Some(('Á', UnicodeProvenance::DifferencesAgl))
         });
 
         assert_eq!(decoded, (Vec::new(), UnicodeProvenance::Unresolved));

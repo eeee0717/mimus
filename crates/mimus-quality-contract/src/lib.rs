@@ -1,5 +1,26 @@
 //! Pure, engine-independent quality contracts shared by execution and measurement.
 
+mod agl;
+
+/// Resolves an explicit PDF `/Differences` glyph name only when Adobe's
+/// legacy Glyph List maps it to exactly one safe Unicode scalar.
+///
+/// Suffixes follow the AGL production-name rule; composite names are rejected
+/// because this recovery path is single-scalar only.
+pub fn differences_agl_single_scalar(name: &[u8]) -> Option<char> {
+    let base = name.split(|byte| *byte == b'.').next()?;
+    if base.is_empty() || base.contains(&b'_') {
+        return None;
+    }
+    let character = agl::single_scalar(base)?;
+    (!character.is_control() && !is_unicode_noncharacter(character)).then_some(character)
+}
+
+fn is_unicode_noncharacter(character: char) -> bool {
+    let value = u32::from(character);
+    (0xfdd0..=0xfdef).contains(&value) || value & 0xffff >= 0xfffe
+}
+
 /// Derives the maximum readable gap around an inline formula from source facts.
 ///
 /// Callers own sample eligibility. Both production and scorecard pass only positive,
@@ -426,6 +447,18 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn differences_agl_accepts_only_single_safe_legacy_scalars() {
+        assert_eq!(differences_agl_single_scalar(b"Aacute"), Some('Á'));
+        assert_eq!(differences_agl_single_scalar(b"Aacute.alt"), Some('Á'));
+        assert_eq!(differences_agl_single_scalar(b"phi1"), Some('\u{03d5}'));
+        assert_eq!(differences_agl_single_scalar(b"diamond"), Some('\u{2666}'));
+        assert_eq!(differences_agl_single_scalar(b"epsilon1"), None);
+        assert_eq!(differences_agl_single_scalar(b"dalethatafpatah"), None);
+        assert_eq!(differences_agl_single_scalar(b"f_f_i"), None);
+        assert_eq!(differences_agl_single_scalar(b"unknown"), None);
+    }
 
     #[test]
     fn continuity_limit_uses_twice_median_spacing_or_one_and_a_half_em() {

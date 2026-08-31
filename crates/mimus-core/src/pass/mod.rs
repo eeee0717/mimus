@@ -1178,6 +1178,7 @@ struct ParagraphDraft {
 
 pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     let mut pages = Vec::with_capacity(document.extracted_pages.len());
+    let mut unicode_recoveries = Vec::new();
     for extracted in &document.extracted_pages {
         if !extracted.is_translatable() {
             pages.push(il::Page {
@@ -1205,6 +1206,9 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
                 force_no_space_before: false,
                 character: Char {
                     unicode: walked.unicode,
+                    unicode_source: (walked.unicode_provenance
+                        == UnicodeProvenance::DifferencesAgl)
+                        .then_some(il::UnicodeSource::DifferencesAgl),
                     code: walked.code,
                     visible: walked.visible,
                     font: walked.font.clone(),
@@ -1349,6 +1353,23 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
         if extracted.index == 0 {
             apply_title_author_passthrough(&mut paragraphs);
         }
+        for (paragraph_index, paragraph) in paragraphs.iter().enumerate() {
+            let recovered_character_count = paragraph
+                .chars()
+                .iter()
+                .filter(|character| {
+                    character.unicode_source == Some(il::UnicodeSource::DifferencesAgl)
+                })
+                .count();
+            if recovered_character_count > 0 {
+                unicode_recoveries.push(Diagnostic::UnicodeRecovered {
+                    page_index: extracted.index,
+                    paragraph_index,
+                    reading_order: paragraph.reading_order,
+                    recovered_character_count,
+                });
+            }
+        }
         pages.push(il::Page {
             index: extracted.index,
             geometry: extracted.geometry,
@@ -1359,6 +1380,9 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
         schema_version: il::SCHEMA_VERSION,
         pages,
     };
+    for diagnostic in unicode_recoveries {
+        document.diagnostics.push(diagnostic);
+    }
     Ok(())
 }
 
@@ -8310,6 +8334,17 @@ fn retained_input_characters(
         &mut engine_owners,
         baseline_tolerance_pt,
     );
+    inherit_pdfium_ligature_expansion_owners(
+        &page.walked_characters,
+        &page.engine_characters,
+        &mut engine_owners,
+    );
+    extend_engine_owners_by_contiguous_sequence(
+        &page.walked_characters,
+        &page.engine_characters,
+        &mut engine_owners,
+        baseline_tolerance_pt,
+    );
     inherit_pdfium_utf16_surrogate_owners(
         &page.walked_characters,
         &page.engine_characters,
@@ -8523,6 +8558,56 @@ fn inherit_pdfium_utf16_surrogate_owners(
     }
 }
 
+fn inherit_pdfium_ligature_expansion_owners(
+    walked: &[crate::walk::WalkedChar],
+    engine: &[PageCharSnapshot],
+    owners: &mut [Option<usize>],
+) {
+    if owners.len() != engine.len() {
+        return;
+    }
+    for (walk_index, walked_character) in walked.iter().enumerate() {
+        let Some(expansion) = walked_character.unicode.and_then(pdfium_ligature_expansion) else {
+            continue;
+        };
+        let mut candidate_starts = BTreeSet::new();
+        for (engine_index, owner) in owners.iter().enumerate() {
+            if *owner != Some(walk_index) {
+                continue;
+            }
+            for (component_index, component) in expansion.iter().enumerate() {
+                if engine[engine_index].unicode != Some(*component)
+                    || engine_index < component_index
+                {
+                    continue;
+                }
+                let start = engine_index - component_index;
+                let end = start + expansion.len();
+                if end <= engine.len()
+                    && engine[start..end]
+                        .iter()
+                        .map(|character| character.unicode)
+                        .eq(expansion.iter().copied().map(Some))
+                    && owners[start..end]
+                        .iter()
+                        .all(|owner| owner.is_none() || *owner == Some(walk_index))
+                {
+                    candidate_starts.insert(start);
+                }
+            }
+        }
+        if candidate_starts.len() != 1 {
+            continue;
+        }
+        let start = *candidate_starts
+            .first()
+            .expect("one ligature expansion candidate exists");
+        for owner in &mut owners[start..start + expansion.len()] {
+            *owner = Some(walk_index);
+        }
+    }
+}
+
 fn inherit_unique_explanation_owners(
     walked: &[crate::walk::WalkedChar],
     engine: &[PageCharSnapshot],
@@ -8570,9 +8655,37 @@ fn validate_mixed_output_characters(
         }
         let owners = match_output_character(expected_character, actual, &matched, tolerance)
             .ok_or_else(|| {
+                let unicode = expected_character
+                    .unicode
+                    .map(|character| format!("U+{:04X}", u32::from(character)))
+                    .unwrap_or_else(|| "unresolved Unicode".to_owned());
+                let observed = actual
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, actual_character)| {
+                        !matched[*index]
+                            && output_unicode_matches(
+                                expected_character.unicode,
+                                actual_character,
+                            )
+                    })
+                    .take(8)
+                    .map(|(_, actual_character)| {
+                        format!(
+                            "({:.6}, {:.6})",
+                            actual_character.baseline_origin.x,
+                            actual_character.baseline_origin.y
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 output_mismatch(format!(
-                    "output page {} is missing a preserved character",
-                    page_index + 1
+                    "output page {} is missing preserved character {} at ({:.6}, {:.6}); unmatched observed baselines: [{}]",
+                    page_index + 1,
+                    unicode,
+                    expected_character.baseline_origin.x,
+                    expected_character.baseline_origin.y,
+                    observed,
                 ))
             })?;
         for owner in owners {
@@ -8839,6 +8952,18 @@ const PDFIUM_LIGATURE_FIRST_COMPONENTS: [(char, char); 7] = [
     ('\u{FB06}', 's'),
 ];
 
+fn pdfium_ligature_expansion(character: char) -> Option<&'static [char]> {
+    match character {
+        '\u{FB00}' => Some(&['f', 'f']),
+        '\u{FB01}' => Some(&['f', 'i']),
+        '\u{FB02}' => Some(&['f', 'l']),
+        '\u{FB03}' => Some(&['f', 'f', 'i']),
+        '\u{FB04}' => Some(&['f', 'f', 'l']),
+        '\u{FB05}' | '\u{FB06}' => Some(&['s', 't']),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct BaselineMatch {
     walk_index: usize,
@@ -8931,7 +9056,7 @@ fn validate_character_alignment(
             UnicodeProvenance::ToUnicode | UnicodeProvenance::EmbeddedFontCmap => {
                 counts.strong_unicode_conflict += 1;
             }
-            UnicodeProvenance::SimpleEncoding => {
+            UnicodeProvenance::SimpleEncoding | UnicodeProvenance::DifferencesAgl => {
                 counts.weak_unicode_conflict += 1;
                 alignment.weak_unicode_conflicts.insert(pair.walk_index);
             }
@@ -10859,6 +10984,7 @@ mod tests {
             .enumerate()
             .map(|(index, unicode)| Char {
                 unicode: Some(unicode),
+                unicode_source: None,
                 code: unicode as u32,
                 visible: true,
                 font: crate::il::FontRef {
@@ -10962,6 +11088,7 @@ mod tests {
             text: TextCarrier::Chars {
                 chars: vec![Char {
                     unicode: Some('A'),
+                    unicode_source: None,
                     code: 65,
                     visible: true,
                     font: crate::il::FontRef {
@@ -11482,6 +11609,89 @@ mod tests {
         inherit_pdfium_utf16_surrogate_owners(&walked, &engine, &mut owners);
 
         assert_eq!(owners, [Some(0), Some(0)]);
+    }
+
+    #[test]
+    fn pdfium_ligature_expansion_components_share_one_walk_owner() {
+        let pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        let mut walked = walk_page(&pdf, page_id).unwrap().characters;
+        walked.truncate(1);
+        walked[0].unicode = Some('\u{FB03}');
+        let template = FakeEngine::default().page_characters(&[], 0).unwrap()[0].clone();
+        let engine = ['e', 'f', 'f', 'i', 'c']
+            .into_iter()
+            .enumerate()
+            .map(|(index, unicode)| PageCharSnapshot {
+                index: index as u32,
+                unicode: Some(unicode),
+                unicode_value: u32::from(unicode),
+                ..template.clone()
+            })
+            .collect::<Vec<_>>();
+        // Sequence alignment may choose either repeated `f`; all three PDFium
+        // extraction components still came from the one source `ffi` glyph.
+        let mut owners = vec![None, None, Some(0), None, None];
+
+        inherit_pdfium_ligature_expansion_owners(&walked, &engine, &mut owners);
+
+        assert_eq!(owners, [None, Some(0), Some(0), Some(0), None]);
+    }
+
+    #[test]
+    fn retained_character_owners_continue_after_ligature_expansion() {
+        let pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        let mut walked = walk_page(&pdf, page_id).unwrap().characters;
+        walked.truncate(2);
+        walked[0].unicode = Some('\u{FB03}');
+        walked[1].unicode = Some('c');
+        let template = FakeEngine::default().page_characters(&[], 0).unwrap()[0].clone();
+        let engine = ['f', 'f', 'i', 'c']
+            .into_iter()
+            .enumerate()
+            .map(|(index, unicode)| PageCharSnapshot {
+                index: index as u32,
+                unicode: Some(unicode),
+                unicode_value: u32::from(unicode),
+                baseline_origin: Point {
+                    x: index as f64,
+                    y: walked[index.min(1)].baseline_origin.y,
+                },
+                ..template.clone()
+            })
+            .collect::<Vec<_>>();
+        let mut owners = vec![None, Some(0), None, None];
+
+        inherit_pdfium_ligature_expansion_owners(&walked, &engine, &mut owners);
+        extend_engine_owners_by_contiguous_sequence(&walked, &engine, &mut owners, 0.001);
+
+        assert_eq!(owners, [Some(0), Some(0), Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn ambiguous_pdfium_ligature_expansion_is_not_claimed() {
+        let pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        let mut walked = walk_page(&pdf, page_id).unwrap().characters;
+        walked.truncate(1);
+        walked[0].unicode = Some('\u{FB00}');
+        let template = FakeEngine::default().page_characters(&[], 0).unwrap()[0].clone();
+        let engine = ['f', 'f', 'f']
+            .into_iter()
+            .enumerate()
+            .map(|(index, unicode)| PageCharSnapshot {
+                index: index as u32,
+                unicode: Some(unicode),
+                unicode_value: u32::from(unicode),
+                ..template.clone()
+            })
+            .collect::<Vec<_>>();
+        let mut owners = vec![None, Some(0), None];
+
+        inherit_pdfium_ligature_expansion_owners(&walked, &engine, &mut owners);
+
+        assert_eq!(owners, [None, Some(0), None]);
     }
 
     #[test]
@@ -12793,39 +13003,44 @@ mod tests {
 
     #[test]
     fn weak_unicode_conflicts_preserve_the_owning_paragraph() {
-        let pdf = LopdfDocument::load(fixture()).unwrap();
-        let page_id = pdf.get_pages()[&1];
-        let mut walked = walk_page(&pdf, page_id).unwrap().characters;
-        walked[0].unicode_provenance = UnicodeProvenance::SimpleEncoding;
-        let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap();
-        engine[0].unicode = Some('X');
-        engine[0].unicode_value = u32::from('X');
-        let mut diagnostics = Diagnostics::default();
+        for provenance in [
+            UnicodeProvenance::SimpleEncoding,
+            UnicodeProvenance::DifferencesAgl,
+        ] {
+            let pdf = LopdfDocument::load(fixture()).unwrap();
+            let page_id = pdf.get_pages()[&1];
+            let mut walked = walk_page(&pdf, page_id).unwrap().characters;
+            walked[0].unicode_provenance = provenance;
+            let mut engine = FakeEngine::default().page_characters(&[], 0).unwrap();
+            engine[0].unicode = Some('X');
+            engine[0].unicode_value = u32::from('X');
+            let mut diagnostics = Diagnostics::default();
 
-        let alignment = validate_character_alignment(
-            0,
-            FakeEngine::default().page_geometry(&[], 0).unwrap(),
-            &walked,
-            &engine,
-            0.001,
-            &mut diagnostics,
-        );
+            let alignment = validate_character_alignment(
+                0,
+                FakeEngine::default().page_geometry(&[], 0).unwrap(),
+                &walked,
+                &engine,
+                0.001,
+                &mut diagnostics,
+            );
 
-        assert_eq!(alignment.weak_unicode_conflicts, BTreeSet::from([0]));
-        assert_eq!(
-            paragraph_preserved_reason(
-                walked.iter().enumerate(),
-                &alignment.weak_unicode_conflicts
-            ),
-            Some(il::PreservedReason::UnreliableUnicode)
-        );
-        assert!(matches!(
-            diagnostics.entries(),
-            [Diagnostic::EngineCharacterAlignment {
-                weak_unicode_conflict_count: 1,
-                ..
-            }]
-        ));
+            assert_eq!(alignment.weak_unicode_conflicts, BTreeSet::from([0]));
+            assert_eq!(
+                paragraph_preserved_reason(
+                    walked.iter().enumerate(),
+                    &alignment.weak_unicode_conflicts
+                ),
+                Some(il::PreservedReason::UnreliableUnicode)
+            );
+            assert!(matches!(
+                diagnostics.entries(),
+                [Diagnostic::EngineCharacterAlignment {
+                    weak_unicode_conflict_count: 1,
+                    ..
+                }]
+            ));
+        }
     }
 
     #[test]

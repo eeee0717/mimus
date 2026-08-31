@@ -1,0 +1,90 @@
+schema_version = 1
+
+[identity]
+id = "unit-cmap-11-differences-agl-type3"
+name = "Type3 explicit Differences AGL single scalar"
+class = "unit"
+legality = "legal"
+cases = ["CMAP-11"]
+priority = "M3"
+variable = "A Type3 CharProc named Aacute is selected at code 193 by explicit Differences without ToUnicode"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-cmap-11-differences-agl-type3.pdf"
+pdf_sha256 = "e9e5a7cb0f69153ecd592c069bf661c1c88bc8fe8f605c5248fcf2d4e1f9fcad"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9,10,11]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d636d61702d31312d646966"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "AGL-T3"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "Á"
+baseline_origin = [72.0,120.0]
+metric_box = [72.0,120.0,84.0,132.0]
+visual_bbox = [72.0,120.0,84.0,132.0]
+
+[[expected.content_stream]]
+object = 10
+compressed = false
+bytes = """1000 0 d0
+0 0 1000 1000 re f
+"""
+
+[[expected.content_stream]]
+object = 11
+compressed = false
+bytes = """BT /FT3 12 Tf 1 0 0 1 72 120 Tm <C1> Tj ET
+"""
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 11
+
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/FT3"]
+to_object = 9
+
+[[expected.reference]]
+from_object = 9
+path = ["/CharProcs", "/Aacute"]
+to_object = 10
+
+[[expected.behaviour]]
+id = "CMAP-11-differences-agl-type3"
+assertion = "The Type3 CharProc remains the glyph and metric authority while its explicit Differences name recovers exactly U+00C1"
+observable_via = "CharProc and font dictionaries, AGL, independent extraction and production CLI v2/debug IL"
+
+[oracle]
+checks = ["determinism","legality","page-geometry","structure","type3-geometry","pdf-bytes","pdf-structure","render"]
