@@ -1224,7 +1224,7 @@ fn collect_page_label_rules(
                 "PageLabels Nums array has an odd number of entries",
             ));
         }
-        for pair in nums.chunks_exact(2) {
+        for pair in nums.chunks(2) {
             let index = pair[0].as_i64().map_err(output_build_error)?;
             let index = usize::try_from(index).map_err(output_build_error)?;
             let (_, rule) = original.dereference(&pair[1]).map_err(output_build_error)?;
