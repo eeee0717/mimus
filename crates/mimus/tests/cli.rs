@@ -380,6 +380,17 @@ fn update_snapshot_digests(
             "[DEBUG-m3-digest] {key}/{fixture_id} {:x}",
             Sha256::digest(&bytes)
         );
+        if stage == "03-paragraph_find"
+            && matches!(
+                fixture_id,
+                "unit-cmap-10-differences-agl-type1" | "unit-font-01-std14-custom-widths"
+            )
+        {
+            eprintln!(
+                "[DEBUG-m3-snapshot] {key}/{fixture_id} {}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
         let digest = digests.entry(key.clone()).or_default();
         digest.update((fixture_id.len() as u64).to_be_bytes());
         digest.update(fixture_id.as_bytes());
