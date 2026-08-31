@@ -376,6 +376,10 @@ fn update_snapshot_digests(
             serde_json::from_slice(&std::fs::read(directory.join(&name)).unwrap()).unwrap();
         quantize_semantic_snapshot(&mut snapshot);
         let bytes = serde_json::to_vec(&snapshot).unwrap();
+        eprintln!(
+            "[DEBUG-m3-digest] {key}/{fixture_id} {:x}",
+            Sha256::digest(&bytes)
+        );
         let digest = digests.entry(key.clone()).or_default();
         digest.update((fixture_id.len() as u64).to_be_bytes());
         digest.update(fixture_id.as_bytes());
