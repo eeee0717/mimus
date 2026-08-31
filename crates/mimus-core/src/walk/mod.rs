@@ -75,6 +75,7 @@ pub enum UnicodeProvenance {
     ToUnicode,
     EmbeddedFontCmap,
     SimpleEncoding,
+    DifferencesAgl,
     Unresolved,
 }
 

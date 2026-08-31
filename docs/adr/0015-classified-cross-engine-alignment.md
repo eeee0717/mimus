@@ -33,11 +33,12 @@
    - `/ActualText` 与 PDFium generated character 造成的提取展开——额外的提取文本不是额外的墨迹；
    - 顺序：匹配按几何不按序——顺序的事实层是 content stream 绘制序，顺序差异不再是分歧。
 
-   增量写回后的混合输出往返校验沿用同一事实层，并补充两条有界的提取视图等价：
+   增量写回后的混合输出往返校验沿用同一事实层，并补充三条有界的提取视图等价：
    - content stream 在同一 baseline 重复绘制同一 Unicode 时，PDFium 可能把多个 show 折叠成一个提取字符。只有先以 Unicode 与既有 baseline 容差证明过的 typeset 墨迹，才可满足后续同 Unicode、同 baseline 的期望；不同 Unicode、不同 baseline 或唯一缺失字符仍为 `output_mismatch`；
    - 输入 PDFium 视图中的行末连字符标记 `U+0002`，在未修改字节经过增量写回后可能暴露为字面 `-`。只接受同 baseline 的这个单向等价，且候选同时存在时优先精确 Unicode 匹配。
+   - 保留输入字符为 `U+FB00`–`U+FB06` 连字而 PDFium 将其展开为成分字符时，只有在完整展开序列连续、恰有一个候选且序列中已有字符由该 walk 连字拥有时，全部成分才继承同一个 walk owner；存在多个候选或任一成分已有别的 owner 即不认领。认领后重新运行连续序列传播，使紧随连字的保留字符仍能取得所有权。该规则只解释 PDFium 提取视图，不新建 walk 字符、不改变 Unicode，也不放宽不同字符或唯一缺失字符的 `output_mismatch`。
 
-   这两条不以 PDFium 证明写回正确：content show 与 ToUnicode 仍由 qpdf/走查确认，Poppler 与 MuPDF 负责独立验证可提取文本；PDFium 只解释为何其输出快照的 multiplicity 或标记值不同。
+   这三条不以 PDFium 证明写回正确：content show 与 ToUnicode 仍由 qpdf/走查确认，Poppler 与 MuPDF 负责独立验证可提取文本；PDFium 只解释为何其输出快照的 multiplicity、展开序列或标记值不同。
 
    等价类清单钉为常量表，扩充须有对应 fixture。
 3. **窗口阶段**：对残差在逐 source-run 的动态误差包络内配对，不设全页通用的 point 半径。候选位置须投影到该 run 的 writing direction：垂直误差只接受 CTM/text matrix 的数值舍入上界，平行误差再累加逐字符宽度来源误差与浮点 advance 累积上界；包络接近相邻 baseline、跨行或出现多个候选即拒绝配对。具体推导路径见 [调研报告 §6.1](../08-alignment-provenance-feasibility.md#61-应推导的是动态误差包络)，公式参数与数值仍须由 fixture 先验钉死，实验 5 的 0.5 pt 只是语料探索上界，不得反推生产值。
@@ -54,7 +55,7 @@
 | 提取视图等价 | §2.2 等价类命中 | 聚合诊断，继续 |
 | 解释边 | 非直立、`unicode=None` 或 advance 不可靠的 walk 字符在容差内有唯一 engine baseline 对应 | 吸收对应 engine 字符并单独计数；不使 walk 字符可翻译、不改变段级保留、不建立 `tight_box` 采纳链接 |
 | C-强冲突 | 已配对位置 Unicode 不等价，走查链为 `ToUnicode`/`EmbeddedFontCmap` | 走查胜出，诊断 + 继续；计数进结束汇总供人工审 |
-| C-弱冲突 | 已配对位置 Unicode 不等价，走查链为 `SimpleEncoding` | **段级保留** |
+| C-弱冲突 | 已配对位置 Unicode 不等价，走查链为 `SimpleEncoding` 或显式 `/Differences` → AGL 单标量恢复 | **段级保留** |
 | C-未解析 | 走查 `unicode=None` | ADR-0014 已段级保留；交叉侧仅诊断 |
 | D | walk-only 墨迹字符（窗口内无 engine 候选） | 诊断，继续（语料实测主体为 PDFium 非 BMP 提取缺失） |
 | E | 提取视图等价与解释边先行、窗口配对和保守源相关均无法解释，且独立证据证明存在额外墨迹的 engine-only 字符 | 与将被替换单元几何相交 → **该段保留**；否则诊断 |
@@ -68,6 +69,27 @@
 
 `ToUnicode` 产出 Unicode 非字符（U+FFFE/U+FFFF 及全部 66 个 noncharacter）→ 按「该字符未被映射」处理 → `unicode=None` → 既有段级保留。语料中仅有的 4 个强链冲突（`ToUnicode`→`U+FFFF` vs PDFium `U+0BDC`/`U+0BDD`）由此消解为解码失败——注意消解依据是「非字符不是合法映射目标」，不是采信 PDFium 的值；PDFium 仍不是 Unicode 事实层。
 
+### 4.1 显式 Differences + AGL 的弱来源恢复
+
+没有 `ToUnicode` 的简单字体可在逐 code 满足以下全部条件时恢复 Unicode：
+
+1. code 在字体 `/Encoding` 字典的显式 `/Differences` 数组中有 glyph name；隐式
+   `StandardEncoding` / `MacRomanEncoding` 条目不取得本恢复资格；
+2. glyph name 经 Adobe Glyph List 2.0（revision
+   `4036a9ca80a62f64f9de4f7321a9a045ad0ecfd6`）映射后恰为一个 Unicode scalar；
+3. 该 scalar 不是控制字符或 Unicode noncharacter。
+
+多组件或多标量 glyph name、未知 name、已有但未覆盖该 code 的 `ToUnicode`、复合字体
+fallback 均不恢复。`ToUnicode` 一旦存在便继续拥有优先权，不允许落回 AGL 补洞。
+恢复字符在 IL 以可选 `unicode_source = differences_agl` 留痕；ParagraphFind 按段发
+`unicode_recovered` typed info，包含 page、paragraph、reading order 与恢复字符数。
+
+该来源和 `SimpleEncoding` 一样属于弱链。PDFium/走查在已配对位置的 Unicode 不一致
+仍命中 C-弱冲突并以 `unreliable_unicode` 保留整段；恢复规则无权把 PDFium Unicode
+注入 IL。唯一判定实现是
+`mimus-quality-contract::differences_agl_single_scalar`，生产 walker 与离线桶分类不得
+各自维护另一份接受表。
+
 ### 5. `tight_box` 采纳改为按字符
 
 `engine_boxes_are_aligned` 的全页 zip 前提废除：`visual_bbox` 逐字符采纳几何匹配成功者的 engine tight_box，失配字符回退 `metric_box`。顺带消除「两侧顺序不同但 Unicode 序列逐位偶等时错位采纳 tight_box」的既有缺陷。layout 输入的现状（engine 快照，恢复页回退走查合成快照）不变。
@@ -75,7 +97,8 @@
 ### 6. 安全不变量
 
 1. 区间替换合同不变：替换区间的字节偏移只来自走查 tokenizer；未替换字节逐字节透传；`--backend none` 全文档字节恒等。
-2. ADR-0014 判定链不放宽（§4 反而收紧）。
+2. ADR-0014 判定链只增加 §4.1 的显式、逐字符可审计弱来源；隐式编码、ToUnicode
+   未映射和 composite fallback 均不放宽。
 3. **PDFium unicode 永不注入 IL**——`Char.unicode` 只来自走查解码链，交叉校验无权改写。
 4. 恢复警告页与降级页的既有处理路径保留。
 5. 等价类清单、窗口数值、保留判据均为钉死常量，修改须过 fixture 门禁。

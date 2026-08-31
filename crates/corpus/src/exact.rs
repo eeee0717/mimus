@@ -113,6 +113,8 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
         "unit-cmap-embedded-ok" => embedded_cmap_ok(repo_root),
         "unit-cmap-identity-alias" => identity_cmap_alias(repo_root),
         "unit-cmap-predefined-gb" => predefined_gb_cmap(repo_root),
+        "unit-cmap-10-differences-agl-type1" => differences_agl_type1(repo_root),
+        "unit-cmap-11-differences-agl-type3" => differences_agl_type3(repo_root),
         "intg-cmap-mixed-degrade" => mixed_cmap_degradation(repo_root),
         "unit-align-01-independent-space-show" => {
             alignment_fixture(fixture_id, repo_root, AlignmentRecipe::IndependentSpace)
@@ -761,6 +763,41 @@ fn type3_d0(repo_root: &Path) -> Result<Vec<u8>> {
     pdf.object(b"<< /Type /Font /Subtype /Type3 /Name /FT3 /FontBBox [0 0 1000 1000] /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /M 10 0 R >> /Encoding << /Type /Encoding /Differences [77 /M] >> /FirstChar 77 /LastChar 77 /Widths [1000] /Resources << >> >>")?;
     pdf.stream(b"", b"1000 0 d0\n0 0 1000 1000 re f\n")?;
     pdf.stream(b"", b"BT /FT3 12 Tf 1 0 0 1 72 120 Tm (M) Tj ET\n")?;
+    pdf.finish(1)
+}
+
+fn differences_agl_type1(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-cmap-10-differences-agl-type1");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 10 0 R >>")?;
+    pdf.object(b"<< /Font << /F0 5 0 R /F1 9 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.object(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 65 /LastChar 65 /Widths [667] /Encoding << /Type /Encoding /Differences [65 /Aacute] >> >>")?;
+    pdf.stream(b"", b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (A) Tj ET\n")?;
+    pdf.finish(1)
+}
+
+fn differences_agl_type3(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-cmap-11-differences-agl-type3");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 11 0 R >>")?;
+    pdf.object(b"<< /Font << /F0 5 0 R /FT3 9 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    // Unlike the Type1 fixture, glyph existence and advance come from the
+    // CharProc; Unicode still has only the explicit Differences name as proof.
+    pdf.object(b"<< /Type /Font /Subtype /Type3 /Name /FT3 /FontBBox [0 0 1000 1000] /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /Aacute 10 0 R >> /Encoding << /Type /Encoding /Differences [193 /Aacute] >> /FirstChar 193 /LastChar 193 /Widths [1000] /Resources << >> >>")?;
+    pdf.stream(b"", b"1000 0 d0\n0 0 1000 1000 re f\n")?;
+    pdf.stream(b"", b"BT /FT3 12 Tf 1 0 0 1 72 120 Tm <C1> Tj ET\n")?;
     pdf.finish(1)
 }
 

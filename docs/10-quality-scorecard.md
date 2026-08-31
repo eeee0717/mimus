@@ -86,10 +86,12 @@ the longer byte unit. Only source characters that
 match production translation eligibility participate:
 visible, upright, `translate` policy, and owned by one of the page's direct `/Contents` objects.
 The direct object set comes from structured pinned `qpdf` page JSON; text reached through Form
-XObjects is not mistaken for request input. Tokens are lexed within continuous eligible runs after
-StylesAndFormulas has finalized formula membership; skipped formula/passthrough/Form runs form
-boundaries, while spaces inside a
-run follow the public IL `implicit_space_before` contract used by production `request_text()`. The
+XObjects is not mistaken for request input. Tokens are lexed after StylesAndFormulas has finalized
+formula membership. Skipped formula/passthrough/Form characters do not manufacture whitespace:
+eligible characters on either side concatenate exactly as they do in the public formula-elided
+`translated_text` view. A real `implicit_space_before` on an eligible character is still honored,
+matching production `request_text()`. This distinction prevents a source shaped as
+`5 {formula} 1` from being compared as two invented tokens against the public `51` view. The
 evaluator never infers boundaries from geometry.
 
 CON-02 consumes the same version-1 TOML glossary used by the evaluator. Each source occurrence must
@@ -167,6 +169,7 @@ pipeline handled the defect.
 
 | Rule | Production execution point | Failure action / exemption |
 | --- | --- | --- |
+| COV-01 / RSK-01 Unicode reliability | `walk::font::read_simple_encoding` calls the single source `mimus-quality-contract::differences_agl_single_scalar` only for explicit `/Differences` names that the legacy decoder could not resolve; ParagraphFind writes additive IL `unicode_source=differences_agl` and emits typed `unicode_recovered` counts | unknown or multi-scalar names, implicit Standard/MacRoman entries, ToUnicode-unmapped codes, composite fallback, and any cross-engine weak conflict remain whole-paragraph typed `unreliable_unicode`; no retry or guessed scalar |
 | CON-01 | `mimus-quality-contract::conserved_tokens` is called by `translate::executor::execute`; the same function feeds `scorecard::conservation_measurement` | one corrective translation retry; a second violation preserves the whole paragraph with typed `content_conservation` (introduced by the stacked T2 PR) |
 | CON-02 | prompt construction injects the exact version-1 glossary; scorecard remains the independent aligned-output detector | documented exemption: glossary consistency is a semantic release proposal pending user approval, not a conservative runtime identity predicate; no production typed degradation is claimed |
 | FOR-01 | `pass::complete_model_formula_boundaries`, placeholder restoration, formula byte/font identity replay, and output round-trip validation | ambiguous boundary or replay evidence becomes `typeset_protocol`; unplaceable complete units become `typeset_overflow`; the scorecard heuristic remains an independent proxy |
@@ -179,6 +182,7 @@ Test-level alignment checklist:
 
 | Contract | Automated assertion | Full-artifact audit |
 | --- | --- | --- |
+| explicit Differences + AGL recovery | `CMAP-10` Type1 and `CMAP-11` Type3 public CLI/debug-IL fixtures; quality-contract acceptance/rejection table tests; implicit StandardEncoding, ToUnicode-unmapped and weak-conflict preservation tests | reconcile every `unicode_recovered` paragraph/count against the producer × font × ToUnicode × encoding bucket ledger; independently inspect five dense rendered pages |
 | continuity bound | `mimus-quality-contract` worked examples plus production and scorecard source-sampling tests | report each paragraph bound and its source samples |
 | fixed + relocated formula order/adjacency | `formula_continuity_oracle_rejects_extraction_order_text_after_following_formula`, punctuation normalization, atomic-chain and fixed-to-relocation tests | audit every formula paragraph for unit order, neighbor gap and inline hole |
 | formula glyph/unit completeness | boundary fixtures plus formula byte/font replay and round-trip tests | dual-extractor glyph inventory, script baseline and unit membership |
@@ -354,18 +358,30 @@ Under schema v1, the anchor measured 99.17% paragraph coverage (119/120), 100% H
 one typed `unreliable_unicode`, one suspicious echo, six expansions, zero placeholder residue, and
 99.9801% masked pixel fidelity. Its score does not erase the three human-confirmed defects above.
 
-## 7. Recovery-round input
+## 7. Recovery-round result
 
-For #118, preserve this schema and require before/after movement in COV-01/COV-02/RSK-01 by producer
-and by the existing 23 recovery buckets. The proposed target is to recover at least the conservative
-1,639/2,997 (54.7%) clustered paragraphs without increasing OVR-01, placeholder violations, typed
-Internal failures, or structure failures; remeasure the exact same corpus denominator.
+The 2026-08-31 conserving-fake refresh replaces the historical 2,997/23-bucket planning snapshot for
+this implementation round: current master publishes 20/20 with 5,030 `unreliable_unicode`
+paragraphs across 16 TeX papers and zero in the four Word papers. Splitting formula from
+text/numeric content yields 59 populated buckets. The strict
+explicit-Differences/AGL-single-scalar candidate scope is 1,945/5,030 paragraphs (38.7%): 1,128
+pdfTeX Type1 text/numeric, 155 pdfTeX Type1 formula, 376 LuaTeX Type1 text/numeric, 107 LuaTeX
+Type1 formula, 52 XeTeX Type1 text/numeric, 68 XeTeX Type1 formula, and 59 Type3.
 
-The data favors a #118 repair round before #38 gate engineering: the three TeX producer layers still
-contain 2,119 weak-Unicode preserved paragraphs in these final-run artifacts, whereas #38 remains a
-known 1/46 fixture-coverage gap. After recovery, rerun the matrix; if realized recovery is materially
-below the 54.7% estimate, use the per-bucket residuals to choose fixtures instead of filling all 45
-gaps indiscriminately.
+After the conservative decoder, `unreliable_unicode` falls from 5,030 to 3,149 (-1,881, 37.4%).
+Within the 1,945 candidate paragraphs, 1,878 become fully translated, 65 remain typed because the
+unchanged weak cross-engine conflict gate disagrees with the AGL result, and two split into a safe
+translated subparagraph plus a typed unknown subparagraph. Formula and text/numeric recovery remain
+separate: 308 formula paragraphs and 1,570 text/numeric paragraphs become fully translated. The
+after-change IL records 7,971 recovered characters, while unresolved portions retain typed
+`unreliable_unicode`.
+
+Seven excluded mixed buckets also split at existing paragraph boundaries into a safely decoded
+subparagraph and a still-typed unknown subparagraph. This is not policy expansion: implicit
+Standard/MacRoman paths, ToUnicode-unmapped or multiscalar codes, unknown/multiscalar Differences,
+composite fallback, and weak conflicts are never decoded by the new rule. The 20-paper replay stays
+20/20 published with `Internal/6 = 0`, CON-01 missing occurrences 0, FOR-04/FOR-05 0, and no new
+unexplained FOR-01...05 finding.
 
 ## 8. Adjudication log
 

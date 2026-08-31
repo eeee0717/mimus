@@ -2504,23 +2504,20 @@ fn translate_source_text_for_page(
     direct_content_objects: Option<&BTreeSet<u32>>,
 ) -> String {
     let mut output = String::new();
-    let mut previous_translatable_index = None;
-    for (index, current) in p.text.chars.iter().enumerate() {
+    for current in &p.text.chars {
         if !character_is_translation_source(current, direct_content_objects) {
             continue;
         }
         let Some(unicode) = current.unicode.as_deref() else {
             continue;
         };
-        if (previous_translatable_index.is_some_and(|previous| index != previous + 1)
-            || current.implicit_space_before)
+        if current.implicit_space_before
             && !output.ends_with(char::is_whitespace)
             && !unicode.starts_with(char::is_whitespace)
         {
             output.push(' ');
         }
         output.push_str(unicode);
-        previous_translatable_index = Some(index);
     }
     output
 }
@@ -3052,6 +3049,38 @@ mod tests {
         let source = translate_source_text(&document.pages[0].paragraphs[0]);
         assert_eq!(source, "[35, 2]7082");
         assert_eq!(conserved_tokens(&source), ["[35, 2]", "7082"]);
+    }
+
+    #[test]
+    fn translation_source_matches_the_formula_elided_translation_view() {
+        let characters = [
+            ("5", "text", "translate"),
+            ("˜", "inline_formula", "passthrough"),
+            ("1", "text", "translate"),
+        ]
+        .into_iter()
+        .map(|(character, label, policy)| {
+            serde_json::json!({
+                "unicode": character,
+                "font_size": 10.0,
+                "baseline_origin": {"x": 0.0, "y": 0.0},
+                "layout": {"label": label, "policy": policy}
+            })
+        })
+        .collect::<Vec<_>>();
+        let document: Il = serde_json::from_value(serde_json::json!({
+            "pages": [{"index": 0, "paragraphs": [{
+                "reading_order": 1,
+                "bounds": {"left": 0.0, "bottom": 0.0, "right": 1.0, "top": 1.0},
+                "text": {"chars": characters}
+            }]}]
+        }))
+        .unwrap();
+
+        let source = translate_source_text(&document.pages[0].paragraphs[0]);
+
+        assert_eq!(source, "51");
+        assert_eq!(conserved_tokens(&source), ["51"]);
     }
 
     #[test]

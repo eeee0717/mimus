@@ -1,0 +1,78 @@
+schema_version = 1
+
+[identity]
+id = "unit-cmap-10-differences-agl-type1"
+name = "Type1 explicit Differences AGL single scalar"
+class = "unit"
+legality = "legal"
+cases = ["CMAP-10"]
+priority = "M3"
+variable = "A Type1 font without ToUnicode maps code 65 through the explicit Differences name Aacute"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-cmap-10-differences-agl-type1.pdf"
+pdf_sha256 = "39720b42ef4436f11f8907ec6acf68e8bd20eed6089b8f6c9cf19d8020154311"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9,10]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d636d61702d31302d646966"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "AGL-T1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "Á"
+baseline_origin = [72.0,120.0]
+metric_box = [72.0,117.516,80.004,128.616]
+visual_bbox = [72.168,120.0,79.836,131.172]
+
+[[expected.content_stream]]
+object = 10
+compressed = false
+bytes = """BT /F1 12 Tf 1 0 0 1 72 120 Tm (A) Tj ET
+"""
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 10
+
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 9
+
+[[expected.behaviour]]
+id = "CMAP-10-differences-agl-type1"
+assertion = "The explicit Differences glyph name Aacute recovers exactly U+00C1; no implicit base encoding or ToUnicode evidence exists"
+observable_via = "font dictionary, AGL, independent extraction and production CLI v2/debug IL"
+
+[oracle]
+checks = ["determinism","legality","page-geometry","structure","font-advance","pdf-bytes","pdf-structure","render"]

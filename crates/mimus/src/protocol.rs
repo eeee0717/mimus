@@ -342,6 +342,19 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 human_recovery_kind(recovery)
             );
         }
+        DiagnosticEvent::UnicodeRecovered {
+            page_index,
+            paragraph_index,
+            reading_order,
+            recovered_character_count,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "info[unicode_recovered]: page {} paragraph {} reading order {reading_order} recovered {recovered_character_count} characters through explicit Differences and AGL",
+                page_index + 1,
+                paragraph_index + 1
+            );
+        }
         DiagnosticEvent::TranslationRetry {
             page_index,
             paragraph_index,
