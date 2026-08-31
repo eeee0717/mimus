@@ -2316,11 +2316,10 @@ fn partial_model_formula_regions_are_completed_before_translation() {
         .unwrap();
     assert_eq!(translated, "A√B.");
     let final_paragraph = &after["pages"][0]["paragraphs"][4];
-    assert!(
-        final_paragraph.get("preserved").is_none(),
-        "{final_paragraph:#}"
-    );
-    assert_eq!(final_paragraph["translated_text"], "A√B.");
+    // The source root rule shares an unsafe graphics-state scope. The short fake translation
+    // exceeds the source-derived fixed-slot continuity limit, so relocation must fail closed.
+    assert_eq!(final_paragraph["preserved"], "typeset_protocol");
+    assert!(final_paragraph["translated_text"].is_null());
     for extractor in ["poppler", "mupdf"] {
         let extracted = match extractor {
             "poppler" => Command::new("pdftotext")

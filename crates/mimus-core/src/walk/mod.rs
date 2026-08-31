@@ -2,6 +2,7 @@ mod font;
 mod tokenizer;
 
 use std::collections::BTreeSet;
+use std::ops::Range;
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
 
@@ -44,6 +45,29 @@ pub struct WalkedChar {
     pub content_object: ObjectId,
     pub byte_start: usize,
     pub byte_end: usize,
+}
+
+/// A byte-exact, self-contained horizontal stroke program whose graphics-state
+/// scope can be replayed as one unit. Ownership is deliberately decided later,
+/// against formula geometry; the walker only records safe candidates.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WalkedVectorPath {
+    pub content_object: ObjectId,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub start: Point,
+    pub end: Point,
+    pub content_transform: [f64; 6],
+    pub safe_to_replay: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WalkedInlineImage {
+    pub content_object: ObjectId,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub bounds: Rect,
+    pub content_transform: [f64; 6],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +144,7 @@ struct GraphicsState {
     leading: f64,
     rendering_mode: i32,
     rise: f64,
+    line_width: f64,
     phase: TextPhase,
 }
 
@@ -137,6 +162,7 @@ impl Default for GraphicsState {
             leading: 0.0,
             rendering_mode: 0,
             rise: 0.0,
+            line_width: 1.0,
             phase: TextPhase::Outside,
         }
     }
@@ -154,6 +180,8 @@ struct Walker<'a> {
     state: GraphicsState,
     operands: Vec<Token>,
     characters: Vec<WalkedChar>,
+    vector_paths: Vec<WalkedVectorPath>,
+    inline_images: Vec<WalkedInlineImage>,
     content_object: ObjectId,
     recoveries: BTreeSet<RecoveryKind>,
     graphics_stack: Vec<GraphicsState>,
@@ -167,6 +195,18 @@ struct Walker<'a> {
     clipped_form_object_ids: BTreeSet<ObjectId>,
     degradation: Option<PageDegradeReason>,
     visual_rotation: Matrix,
+    current_operator: Option<(ObjectId, Range<usize>)>,
+    vector_scopes: Vec<VectorScope>,
+}
+
+#[derive(Debug)]
+struct VectorScope {
+    content_object: ObjectId,
+    byte_start: usize,
+    content_transform: [f64; 6],
+    points: Vec<Point>,
+    stroke_count: usize,
+    safe: bool,
 }
 
 struct ScopeSnapshot {
@@ -186,6 +226,8 @@ struct ScopeSnapshot {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageWalk {
     pub characters: Vec<WalkedChar>,
+    pub(crate) vector_paths: Vec<WalkedVectorPath>,
+    pub(crate) inline_images: Vec<WalkedInlineImage>,
     pub recoveries: BTreeSet<RecoveryKind>,
     pub form_cycles: Vec<Vec<ObjectId>>,
     pub normalized_form_object_ids: BTreeSet<ObjectId>,
@@ -247,6 +289,8 @@ pub(crate) fn walk_page_detailed_with_rotation(
         state: GraphicsState::default(),
         operands: Vec::new(),
         characters: Vec::new(),
+        vector_paths: Vec::new(),
+        inline_images: Vec::new(),
         content_object: (0, 0),
         recoveries: BTreeSet::new(),
         graphics_stack: Vec::new(),
@@ -259,6 +303,8 @@ pub(crate) fn walk_page_detailed_with_rotation(
         clipped_form_object_ids: BTreeSet::new(),
         degradation: None,
         visual_rotation: Matrix::page_rotation(rotate_degrees),
+        current_operator: None,
+        vector_scopes: Vec::new(),
     };
     let mut content_streams = Vec::with_capacity(content_objects.len());
     for object_id in content_objects {
@@ -296,6 +342,8 @@ pub(crate) fn walk_page_detailed_with_rotation(
     walker.finish();
     Ok(PageWalk {
         characters: walker.characters,
+        vector_paths: walker.vector_paths,
+        inline_images: walker.inline_images,
         recoveries: walker.recoveries,
         form_cycles: walker.form_cycles,
         normalized_form_object_ids: walker.normalized_form_object_ids,
@@ -310,6 +358,39 @@ impl Walker<'_> {
             token.content_object = self.content_object;
             match &token.kind {
                 TokenKind::InlineImage { length_source, .. } => {
+                    if let Some(scope) = self.vector_scopes.last_mut() {
+                        scope.safe = false;
+                    }
+                    let corners = [
+                        self.state.ctm.point(0.0, 0.0),
+                        self.state.ctm.point(1.0, 0.0),
+                        self.state.ctm.point(0.0, 1.0),
+                        self.state.ctm.point(1.0, 1.0),
+                    ];
+                    self.inline_images.push(WalkedInlineImage {
+                        content_object: token.content_object,
+                        byte_start: token.span.start,
+                        byte_end: token.span.end,
+                        bounds: Rect {
+                            left: corners
+                                .iter()
+                                .map(|point| point.x)
+                                .fold(f64::INFINITY, f64::min),
+                            bottom: corners
+                                .iter()
+                                .map(|point| point.y)
+                                .fold(f64::INFINITY, f64::min),
+                            right: corners
+                                .iter()
+                                .map(|point| point.x)
+                                .fold(f64::NEG_INFINITY, f64::max),
+                            top: corners
+                                .iter()
+                                .map(|point| point.y)
+                                .fold(f64::NEG_INFINITY, f64::max),
+                        },
+                        content_transform: self.state.ctm.0,
+                    });
                     if !self.operands.is_empty() {
                         self.recoveries.insert(RecoveryKind::ArityExcess);
                         self.operands.clear();
@@ -319,6 +400,7 @@ impl Walker<'_> {
                     }
                 }
                 TokenKind::Operator(operator) => {
+                    self.current_operator = Some((token.content_object, token.span.clone()));
                     if let Some((first, second)) = split_double_decimal(operator) {
                         self.operands.push(number_token(
                             first,
@@ -331,6 +413,7 @@ impl Walker<'_> {
                             token.content_object,
                         ));
                         self.recoveries.insert(RecoveryKind::DoubleDecimal);
+                        self.current_operator = None;
                         continue;
                     }
                     if let Some((number, recovered_operator)) = split_glued_operator(operator) {
@@ -342,10 +425,12 @@ impl Walker<'_> {
                         let operands = std::mem::take(&mut self.operands);
                         self.apply_operator(recovered_operator, &operands)?;
                         self.recoveries.insert(RecoveryKind::GluedToken);
+                        self.current_operator = None;
                         continue;
                     }
                     let operands = std::mem::take(&mut self.operands);
                     self.apply_operator(operator, &operands)?;
+                    self.current_operator = None;
                 }
                 _ => self.operands.push(token),
             }
@@ -354,6 +439,25 @@ impl Walker<'_> {
     }
 
     fn apply_operator(&mut self, operator: &[u8], operands: &[Token]) -> Result<()> {
+        if let Some(scope) = self.vector_scopes.last_mut()
+            && !matches!(
+                operator,
+                b"q" | b"Q"
+                    | b"cm"
+                    | b"w"
+                    | b"J"
+                    | b"j"
+                    | b"M"
+                    | b"d"
+                    | b"ri"
+                    | b"i"
+                    | b"m"
+                    | b"l"
+                    | b"S"
+            )
+        {
+            scope.safe = false;
+        }
         match operator {
             b"BX" => self.compatibility_depth = self.compatibility_depth.saturating_add(1),
             b"EX" => {
@@ -363,8 +467,26 @@ impl Walker<'_> {
                     self.compatibility_depth -= 1;
                 }
             }
-            b"q" => self.graphics_stack.push(self.state.clone()),
-            b"Q" => self.restore_graphics_state(),
+            b"q" => {
+                if let Some(parent) = self.vector_scopes.last_mut() {
+                    parent.safe = false;
+                }
+                self.graphics_stack.push(self.state.clone());
+                if let Some((content_object, span)) = &self.current_operator {
+                    self.vector_scopes.push(VectorScope {
+                        content_object: *content_object,
+                        byte_start: span.start,
+                        content_transform: self.state.ctm.0,
+                        points: Vec::new(),
+                        stroke_count: 0,
+                        safe: true,
+                    });
+                }
+            }
+            b"Q" => {
+                self.finish_vector_scope();
+                self.restore_graphics_state();
+            }
             b"cm" => {
                 if let Some(values) = self.numeric_tail(operands, 6) {
                     self.state.ctm = self.state.ctm.then(Matrix::from_values(&values));
@@ -421,6 +543,16 @@ impl Walker<'_> {
             b"Ts" => self.set_text_number(operands, |state, value| {
                 state.rise = value;
             }),
+            b"w" => self.set_graphics_number(operands, |state, value| {
+                state.line_width = value;
+            }),
+            b"m" => self.record_vector_point(operands, true),
+            b"l" => self.record_vector_point(operands, false),
+            b"S" => {
+                if let Some(scope) = self.vector_scopes.last_mut() {
+                    scope.stroke_count += 1;
+                }
+            }
             b"Tj" => {
                 self.enter_text_phase();
                 if let Some(tail) = self.operand_tail(operands, 1) {
@@ -778,6 +910,7 @@ impl Walker<'_> {
             self.recoveries.insert(RecoveryKind::GraphicsStateUnclosed);
             self.graphics_stack.clear();
         }
+        self.vector_scopes.clear();
         if self.compatibility_depth != 0 {
             self.recoveries.insert(RecoveryKind::CompatibilityUnclosed);
             self.compatibility_depth = 0;
@@ -840,6 +973,65 @@ impl Walker<'_> {
         if let Some(values) = self.numeric_tail(operands, 1) {
             update(&mut self.state, values[0]);
         }
+    }
+
+    fn set_graphics_number(
+        &mut self,
+        operands: &[Token],
+        update: impl FnOnce(&mut GraphicsState, f64),
+    ) {
+        if let Some(values) = self.numeric_tail(operands, 1) {
+            update(&mut self.state, values[0]);
+        }
+    }
+
+    fn record_vector_point(&mut self, operands: &[Token], starts_path: bool) {
+        let Some(values) = self.numeric_tail(operands, 2) else {
+            if let Some(scope) = self.vector_scopes.last_mut() {
+                scope.safe = false;
+            }
+            return;
+        };
+        let point = self.state.ctm.point(values[0], values[1]);
+        let Some(scope) = self.vector_scopes.last_mut() else {
+            return;
+        };
+        if starts_path {
+            if !scope.points.is_empty() {
+                scope.safe = false;
+            }
+            scope.points.clear();
+        }
+        scope.points.push(point);
+    }
+
+    fn finish_vector_scope(&mut self) {
+        let Some(scope) = self.vector_scopes.pop() else {
+            return;
+        };
+        let Some((content_object, operator_span)) = &self.current_operator else {
+            return;
+        };
+        if scope.stroke_count != 1
+            || scope.points.len() != 2
+            || scope.content_object != *content_object
+        {
+            return;
+        }
+        let start = scope.points[0];
+        let end = scope.points[1];
+        if (start.y - end.y).abs() > 0.01 || (start.x - end.x).abs() <= 0.01 {
+            return;
+        }
+        self.vector_paths.push(WalkedVectorPath {
+            content_object: scope.content_object,
+            byte_start: scope.byte_start,
+            byte_end: operator_span.end,
+            start,
+            end,
+            content_transform: scope.content_transform,
+            safe_to_replay: scope.safe,
+        });
     }
 
     fn show_text_with_spacing(&mut self, operands: &[Token]) -> Result<()> {

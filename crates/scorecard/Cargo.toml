@@ -16,6 +16,7 @@ path = "src/main.rs"
 anyhow = "1"
 clap = { workspace = true }
 mimus-quality-contract.workspace = true
+quick-xml.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

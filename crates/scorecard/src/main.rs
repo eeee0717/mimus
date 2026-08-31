@@ -138,7 +138,7 @@ struct TextTransform {
     kind: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 struct Point {
     #[serde(default)]
     x: f64,
@@ -265,10 +265,13 @@ fn measure(args: MeasureArgs) -> Result<()> {
         risk(
             &styled,
             &translated,
+            &typeset,
             &events,
             args.evaluation_profile,
             glossary.as_ref(),
             &direct_content_objects,
+            &args.input_pdf,
+            &args.output_pdf,
             denominator,
         ),
     );
@@ -498,13 +501,17 @@ struct GlossaryTerm {
     target: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn risk(
     styled: &Il,
-    after: &Il,
+    translated: &Il,
+    published: &Il,
     events: &[Value],
     profile: EvaluationProfile,
     glossary: Option<&Glossary>,
     direct_content_objects: &BTreeMap<usize, BTreeSet<u32>>,
+    input_pdf: &Path,
+    output_pdf: &Path,
     denominator: f64,
 ) -> Dimension {
     let weak = styled
@@ -515,10 +522,14 @@ fn risk(
         .count();
     let placeholders = count_diagnostic(events, "placeholder_violation");
     let echoes = count_summary_array(events, "suspicious_echoes");
-    let conservation = conservation_measurement(styled, after, Some(direct_content_objects));
-    let formula = formula_completeness(styled, after);
-    let terminology =
-        glossary.map(|g| terminology_measurement(styled, after, g, Some(direct_content_objects)));
+    let conservation = conservation_measurement(styled, translated, Some(direct_content_objects));
+    let formula = formula_completeness(styled, translated);
+    let orphan_ink = orphan_source_ink(styled, published, input_pdf, output_pdf);
+    let orphan_ink_violations = orphan_ink.as_ref().map_or(0, |value| value.violations);
+    let rigid_body = formula_rigid_body_integrity(styled, published, input_pdf, output_pdf);
+    let rigid_body_violations = rigid_body.as_ref().map_or(0, |value| value.violations);
+    let terminology = glossary
+        .map(|g| terminology_measurement(styled, translated, g, Some(direct_content_objects)));
     let conservation_applicable = !matches!(profile, EvaluationProfile::LegacyFake);
     let missing_conserved = if conservation_applicable {
         conservation.missing_occurrences
@@ -533,7 +544,9 @@ fn risk(
     let weighted = (weak * 5 + placeholders * 10 + echoes * 5) as f64
         + missing_conserved as f64 * 10.0
         + terminology_violations as f64 * 5.0
-        + formula.violations as f64 * 10.0;
+        + formula.violations as f64 * 10.0
+        + orphan_ink_violations as f64 * 10.0
+        + rigid_body_violations as f64 * 10.0;
     let mut measurements = values(&[
         ("weak_reliability_paragraphs", weak),
         ("placeholder_violations", placeholders),
@@ -561,8 +574,22 @@ fn risk(
         "formula_unit_completeness_proxy".into(),
         serde_json::to_value(formula).unwrap(),
     );
+    measurements.insert(
+        "orphan_source_ink".into(),
+        orphan_ink
+            .map(|value| serde_json::to_value(value).unwrap())
+            .unwrap_or_else(|| not_applicable("mutool trace evidence unavailable")),
+    );
+    measurements.insert(
+        "formula_rigid_body_integrity".into(),
+        rigid_body
+            .map(|value| serde_json::to_value(value).unwrap())
+            .unwrap_or_else(|| not_applicable("mutool trace evidence unavailable")),
+    );
     dimension(
-        &["RSK-01", "RSK-02", "RSK-03", "CON-01", "CON-02", "FOR-01"],
+        &[
+            "RSK-01", "RSK-02", "RSK-03", "CON-01", "CON-02", "FOR-01", "FOR-04", "FOR-05",
+        ],
         weighted,
         denominator,
         measurements,
@@ -1115,6 +1142,489 @@ struct FormulaUnit<'a> {
     font_size: f64,
     expects_left_neighbor: bool,
     expects_right_neighbor: bool,
+    source_bounds: Option<Rect>,
+    source_glyphs: Vec<(char, Point)>,
+    has_attached_source_radical: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct FormulaRigidBodyIntegrity {
+    status: &'static str,
+    checked_formula_units: usize,
+    violations: usize,
+    evidence: Vec<FormulaRigidBodyEvidence>,
+}
+
+#[derive(Debug, Serialize)]
+struct FormulaRigidBodyEvidence {
+    page_index: usize,
+    reading_order: usize,
+    formula: String,
+    source_glyph_count: usize,
+    source_ink_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct OrphanSourceInk {
+    status: &'static str,
+    checked_formula_units: usize,
+    violations: usize,
+    evidence: Vec<OrphanInkEvidence>,
+}
+
+#[derive(Debug, Serialize)]
+struct OrphanInkEvidence {
+    page_index: usize,
+    reading_order: usize,
+    formula: String,
+    ink_kind: &'static str,
+    source_bounds: Rect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TraceInkKind {
+    VectorPath,
+    InlineImage,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TraceInk {
+    kind: TraceInkKind,
+    bounds: Rect,
+}
+
+#[derive(Clone, Debug)]
+struct TraceGlyph {
+    unicode: char,
+    origin: Point,
+}
+
+#[derive(Default)]
+struct TracePage {
+    height: f64,
+    glyphs: Vec<TraceGlyph>,
+    ink: Vec<TraceInk>,
+}
+
+fn orphan_source_ink(
+    styled: &Il,
+    published: &Il,
+    input_pdf: &Path,
+    output_pdf: &Path,
+) -> Option<OrphanSourceInk> {
+    let source = mutool_trace(input_pdf)?;
+    let output = mutool_trace(output_pdf)?;
+    orphan_source_ink_from_traces(styled, published, &source, &output).ok()
+}
+
+fn formula_rigid_body_integrity(
+    styled: &Il,
+    published: &Il,
+    input_pdf: &Path,
+    output_pdf: &Path,
+) -> Option<FormulaRigidBodyIntegrity> {
+    let source = mutool_trace(input_pdf)?;
+    let output = mutool_trace(output_pdf)?;
+    formula_rigid_body_integrity_from_traces(styled, published, &source, &output).ok()
+}
+
+fn formula_rigid_body_integrity_from_traces(
+    styled: &Il,
+    published: &Il,
+    source_trace: &str,
+    output_trace: &str,
+) -> Result<FormulaRigidBodyIntegrity> {
+    let source_pages = parse_trace(source_trace)?;
+    let output_pages = parse_trace(output_trace)?;
+    let mut checked = 0;
+    let mut evidence = Vec::new();
+    for unit in formula_units(styled) {
+        let Some(published_paragraph) =
+            find_paragraph(published, unit.page_index, unit.reading_order)
+        else {
+            continue;
+        };
+        if published_paragraph.translated_text.is_none() || published_paragraph.preserved.is_some()
+        {
+            continue;
+        }
+        let (Some(bounds), Some(source_page), Some(output_page)) = (
+            unit.source_bounds,
+            source_pages.get(unit.page_index),
+            output_pages.get(unit.page_index),
+        ) else {
+            continue;
+        };
+        let source_ink = formula_neighborhood_ink(source_page, bounds, unit.font_size);
+        if !unit.has_attached_source_radical && source_ink.is_empty() {
+            continue;
+        }
+        if unit.source_glyphs.len() < 2
+            || !unit.source_glyphs.iter().all(|(unicode, origin)| {
+                source_page.glyphs.iter().any(|glyph| {
+                    glyph.unicode == *unicode
+                        && point_distance(glyph.origin, *origin) <= unit.font_size.max(1.0) * 0.08
+                })
+            })
+        {
+            continue;
+        }
+        checked += 1;
+        let tolerance = unit.font_size.max(1.0) * 0.08;
+        let (anchor_unicode, anchor_origin) = unit.source_glyphs[0];
+        let output_owner = expand_rect(unit.paragraph.bounds, unit.font_size * 0.25);
+        let preserves_one_delta = output_page
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                glyph.unicode == anchor_unicode
+                    && glyph.origin.x >= output_owner.left
+                    && glyph.origin.x <= output_owner.right
+                    && glyph.origin.y >= output_owner.bottom
+                    && glyph.origin.y <= output_owner.top
+            })
+            .any(|anchor| {
+                let delta = Point {
+                    x: anchor.origin.x - anchor_origin.x,
+                    y: anchor.origin.y - anchor_origin.y,
+                };
+                let glyphs_match = unit.source_glyphs.iter().all(|(unicode, origin)| {
+                    let expected = Point {
+                        x: origin.x + delta.x,
+                        y: origin.y + delta.y,
+                    };
+                    output_page.glyphs.iter().any(|glyph| {
+                        glyph.unicode == *unicode
+                            && point_distance(glyph.origin, expected) <= tolerance
+                    })
+                });
+                glyphs_match
+                    && source_ink.iter().all(|ink| {
+                        let expected = translated_rect(ink.bounds, delta.x, delta.y);
+                        output_page.ink.iter().any(|candidate| {
+                            candidate.kind == ink.kind
+                                && rect_close(candidate.bounds, expected, 0.05)
+                        })
+                    })
+            });
+        if !preserves_one_delta {
+            evidence.push(FormulaRigidBodyEvidence {
+                page_index: unit.page_index,
+                reading_order: unit.reading_order,
+                formula: unit.text.clone(),
+                source_glyph_count: unit.source_glyphs.len(),
+                source_ink_count: source_ink.len(),
+            });
+        }
+    }
+    Ok(FormulaRigidBodyIntegrity {
+        status: "applicable",
+        checked_formula_units: checked,
+        violations: evidence.len(),
+        evidence,
+    })
+}
+
+fn formula_neighborhood_ink(page: &TracePage, bounds: Rect, font_size: f64) -> Vec<TraceInk> {
+    let neighborhood = expand_rect(bounds, font_size * 0.75);
+    page.ink
+        .iter()
+        .copied()
+        .filter(|ink| {
+            let width = ink.bounds.right - ink.bounds.left;
+            let height = ink.bounds.top - ink.bounds.bottom;
+            rects_overlap(ink.bounds, neighborhood)
+                && width <= bounds.right - bounds.left + font_size
+                && height <= bounds.top - bounds.bottom + font_size
+        })
+        .collect()
+}
+
+fn mutool_trace(path: &Path) -> Option<String> {
+    let temp = tempfile::NamedTempFile::new().ok()?;
+    let output = Command::new("mutool")
+        .args(["draw", "-q", "-F", "trace", "-o"])
+        .arg(temp.path())
+        .arg(path)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| fs::read_to_string(temp.path()).ok())
+        .flatten()
+}
+
+fn orphan_source_ink_from_traces(
+    styled: &Il,
+    published: &Il,
+    source_trace: &str,
+    output_trace: &str,
+) -> Result<OrphanSourceInk> {
+    let source_pages = parse_trace(source_trace)?;
+    let output_pages = parse_trace(output_trace)?;
+    let units = formula_units(styled);
+    let mut checked = 0;
+    let mut evidence = Vec::new();
+    for unit in units {
+        let Some(published_paragraph) =
+            find_paragraph(published, unit.page_index, unit.reading_order)
+        else {
+            continue;
+        };
+        if published_paragraph.translated_text.is_none() || published_paragraph.preserved.is_some()
+        {
+            continue;
+        }
+        checked += 1;
+        let (Some(formula_bounds), Some(source_page), Some(output_page)) = (
+            unit.source_bounds,
+            source_pages.get(unit.page_index),
+            output_pages.get(unit.page_index),
+        ) else {
+            continue;
+        };
+        let source_formula_still_present = unit.source_glyphs.iter().all(|(unicode, origin)| {
+            output_page.glyphs.iter().any(|glyph| {
+                glyph.unicode == *unicode
+                    && point_distance(glyph.origin, *origin) <= unit.font_size.max(1.0) * 0.08
+            })
+        });
+        if source_formula_still_present {
+            continue;
+        }
+        let neighborhood = expand_rect(formula_bounds, unit.font_size * 0.75);
+        for ink in &source_page.ink {
+            let width = ink.bounds.right - ink.bounds.left;
+            let height = ink.bounds.top - ink.bounds.bottom;
+            if !rects_overlap(ink.bounds, neighborhood)
+                || width > formula_bounds.right - formula_bounds.left + unit.font_size
+                || height > formula_bounds.top - formula_bounds.bottom + unit.font_size
+                || !output_page.ink.iter().any(|candidate| {
+                    candidate.kind == ink.kind && rect_close(candidate.bounds, ink.bounds, 0.05)
+                })
+            {
+                continue;
+            }
+            evidence.push(OrphanInkEvidence {
+                page_index: unit.page_index,
+                reading_order: unit.reading_order,
+                formula: unit.text.clone(),
+                ink_kind: match ink.kind {
+                    TraceInkKind::VectorPath => "vector_path",
+                    TraceInkKind::InlineImage => "inline_image",
+                },
+                source_bounds: ink.bounds,
+            });
+        }
+    }
+    evidence.sort_by(|left, right| {
+        (left.page_index, left.reading_order, left.ink_kind).cmp(&(
+            right.page_index,
+            right.reading_order,
+            right.ink_kind,
+        ))
+    });
+    evidence.dedup_by(|left, right| {
+        left.page_index == right.page_index
+            && left.reading_order == right.reading_order
+            && left.ink_kind == right.ink_kind
+            && rect_close(left.source_bounds, right.source_bounds, 0.05)
+    });
+    Ok(OrphanSourceInk {
+        status: "applicable",
+        checked_formula_units: checked,
+        violations: evidence.len(),
+        evidence,
+    })
+}
+
+fn parse_trace(xml: &str) -> Result<Vec<TracePage>> {
+    use quick_xml::events::Event;
+
+    let mut reader = quick_xml::Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut pages = Vec::<TracePage>::new();
+    let mut current_page = None::<TracePage>;
+    let mut text_transform = None::<[f64; 6]>;
+    let mut path_transform = None::<([f64; 6], f64)>;
+    let mut path_points = Vec::<Point>::new();
+    loop {
+        match reader.read_event()? {
+            Event::Eof => break,
+            Event::Start(tag) if tag.name().as_ref() == b"page" => {
+                let media = trace_numbers(&tag, b"mediabox")?;
+                current_page = Some(TracePage {
+                    height: media.get(3).copied().unwrap_or(0.0)
+                        - media.get(1).copied().unwrap_or(0.0),
+                    ..TracePage::default()
+                });
+            }
+            Event::End(tag) if tag.name().as_ref() == b"page" => {
+                pages.push(
+                    current_page
+                        .take()
+                        .context("trace page end without page start")?,
+                );
+            }
+            Event::Start(tag) if tag.name().as_ref() == b"fill_text" => {
+                text_transform = Some(trace_matrix(&tag)?);
+            }
+            Event::End(tag) if tag.name().as_ref() == b"fill_text" => text_transform = None,
+            Event::Start(tag) if tag.name().as_ref() == b"stroke_path" => {
+                path_transform = Some((trace_matrix(&tag)?, trace_f64(&tag, b"linewidth")?));
+                path_points.clear();
+            }
+            Event::End(tag) if tag.name().as_ref() == b"stroke_path" => {
+                if let (Some(page), Some((_, linewidth)), Some(bounds)) = (
+                    current_page.as_mut(),
+                    path_transform.take(),
+                    points_bounds(&path_points),
+                ) {
+                    page.ink.push(TraceInk {
+                        kind: TraceInkKind::VectorPath,
+                        bounds: expand_rect(bounds, linewidth / 2.0),
+                    });
+                }
+            }
+            Event::Empty(tag) if tag.name().as_ref() == b"g" => {
+                if let (Some(page), Some(transform), Some(unicode)) = (
+                    current_page.as_mut(),
+                    text_transform,
+                    trace_attr(&tag, b"unicode")?.chars().next(),
+                ) {
+                    let device =
+                        matrix_point(transform, trace_f64(&tag, b"x")?, trace_f64(&tag, b"y")?);
+                    page.glyphs.push(TraceGlyph {
+                        unicode,
+                        origin: Point {
+                            x: device.x,
+                            y: page.height - device.y,
+                        },
+                    });
+                }
+            }
+            Event::Empty(tag)
+                if tag.name().as_ref() == b"moveto" || tag.name().as_ref() == b"lineto" =>
+            {
+                if let (Some(page), Some((transform, _))) = (current_page.as_ref(), path_transform)
+                {
+                    let device =
+                        matrix_point(transform, trace_f64(&tag, b"x")?, trace_f64(&tag, b"y")?);
+                    path_points.push(Point {
+                        x: device.x,
+                        y: page.height - device.y,
+                    });
+                }
+            }
+            Event::Empty(tag) if tag.name().as_ref() == b"fill_image" => {
+                if let Some(page) = current_page.as_mut() {
+                    let transform = trace_matrix(&tag)?;
+                    let corners = [
+                        matrix_point(transform, 0.0, 0.0),
+                        matrix_point(transform, 1.0, 0.0),
+                        matrix_point(transform, 0.0, 1.0),
+                        matrix_point(transform, 1.0, 1.0),
+                    ]
+                    .map(|point| Point {
+                        x: point.x,
+                        y: page.height - point.y,
+                    });
+                    if let Some(bounds) = points_bounds(&corners) {
+                        page.ink.push(TraceInk {
+                            kind: TraceInkKind::InlineImage,
+                            bounds,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(pages)
+}
+
+fn trace_attr(tag: &quick_xml::events::BytesStart<'_>, key: &[u8]) -> Result<String> {
+    let attribute = tag
+        .attributes()
+        .find(|attribute| {
+            attribute
+                .as_ref()
+                .is_ok_and(|value| value.key.as_ref() == key)
+        })
+        .context("trace attribute missing")??;
+    Ok(attribute
+        .normalized_value(quick_xml::XmlVersion::Implicit1_0)?
+        .into_owned())
+}
+
+fn trace_f64(tag: &quick_xml::events::BytesStart<'_>, key: &[u8]) -> Result<f64> {
+    Ok(trace_attr(tag, key)?.parse()?)
+}
+
+fn trace_numbers(tag: &quick_xml::events::BytesStart<'_>, key: &[u8]) -> Result<Vec<f64>> {
+    trace_attr(tag, key)?
+        .split_whitespace()
+        .map(|value| Ok(value.parse()?))
+        .collect()
+}
+
+fn trace_matrix(tag: &quick_xml::events::BytesStart<'_>) -> Result<[f64; 6]> {
+    trace_numbers(tag, b"transform")?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("trace transform is not a six-number matrix"))
+}
+
+fn matrix_point(matrix: [f64; 6], x: f64, y: f64) -> Point {
+    Point {
+        x: matrix[0] * x + matrix[2] * y + matrix[4],
+        y: matrix[1] * x + matrix[3] * y + matrix[5],
+    }
+}
+
+fn points_bounds(points: &[Point]) -> Option<Rect> {
+    Some(Rect {
+        left: points.iter().map(|point| point.x).reduce(f64::min)?,
+        bottom: points.iter().map(|point| point.y).reduce(f64::min)?,
+        right: points.iter().map(|point| point.x).reduce(f64::max)?,
+        top: points.iter().map(|point| point.y).reduce(f64::max)?,
+    })
+}
+
+fn expand_rect(rect: Rect, amount: f64) -> Rect {
+    Rect {
+        left: rect.left - amount,
+        bottom: rect.bottom - amount,
+        right: rect.right + amount,
+        top: rect.top + amount,
+    }
+}
+
+fn rects_overlap(left: Rect, right: Rect) -> bool {
+    left.right >= right.left
+        && right.right >= left.left
+        && left.top >= right.bottom
+        && right.top >= left.bottom
+}
+
+fn rect_close(left: Rect, right: Rect, tolerance: f64) -> bool {
+    (left.left - right.left).abs() <= tolerance
+        && (left.bottom - right.bottom).abs() <= tolerance
+        && (left.right - right.right).abs() <= tolerance
+        && (left.top - right.top).abs() <= tolerance
+}
+
+fn translated_rect(rect: Rect, delta_x: f64, delta_y: f64) -> Rect {
+    Rect {
+        left: rect.left + delta_x,
+        bottom: rect.bottom + delta_y,
+        right: rect.right + delta_x,
+        top: rect.top + delta_y,
+    }
+}
+
+fn point_distance(left: Point, right: Point) -> f64 {
+    ((left.x - right.x).powi(2) + (left.y - right.y).powi(2)).sqrt()
 }
 
 #[derive(Debug)]
@@ -1397,21 +1907,89 @@ fn formula_units(il: &Il) -> Vec<FormulaUnit<'_>> {
                     range.baseline_y,
                     range.font_size,
                 );
+                let attached_radical =
+                    uniquely_attached_scorecard_radical(paragraph, &ranges, range.bounds);
+                let mut text = range.text;
+                let mut source_bounds = range.bounds;
+                let mut source_glyphs = Vec::new();
+                if let Some(radical) = attached_radical {
+                    text.insert(0, '\u{221a}');
+                    source_bounds =
+                        match (source_bounds, char_bounds(std::slice::from_ref(radical))) {
+                            (Some(left), Some(right)) => Some(rect_union(left, right)),
+                            (None, bounds) | (bounds, None) => bounds,
+                        };
+                    source_glyphs.push(('\u{221a}', radical.baseline_origin));
+                }
+                source_glyphs.extend(
+                    paragraph.text.chars[range.start..=range.end]
+                        .iter()
+                        .filter(|character| is_inline_formula(character))
+                        .filter_map(|character| {
+                            character
+                                .unicode
+                                .as_deref()
+                                .and_then(|value| value.chars().next())
+                                .map(|value| (value, character.baseline_origin))
+                        }),
+                );
                 out.push(FormulaUnit {
                     page_index: page.index,
                     reading_order: paragraph.reading_order,
                     paragraph,
-                    text: range.text,
+                    text,
                     expected_stext_y: page.geometry.height - range.baseline_y,
                     font_size: range.font_size,
                     expects_left_neighbor: left,
                     expects_right_neighbor: right || right_neighbor_override,
+                    source_bounds,
+                    source_glyphs,
+                    has_attached_source_radical: attached_radical.is_some(),
                 });
                 range_index += 1;
             }
         }
     }
     out
+}
+
+fn uniquely_attached_scorecard_radical<'a>(
+    paragraph: &'a Paragraph,
+    ranges: &[FormulaRange],
+    formula_bounds: Option<Rect>,
+) -> Option<&'a Char> {
+    let formula_bounds = formula_bounds?;
+    let matching = paragraph
+        .text
+        .chars
+        .iter()
+        .filter(|character| {
+            !is_inline_formula(character)
+                && character.unicode.as_deref() == Some("\u{221a}")
+                && scorecard_radical_attaches_to_formula(character, formula_bounds)
+                && ranges
+                    .iter()
+                    .filter_map(|range| range.bounds)
+                    .filter(|bounds| scorecard_radical_attaches_to_formula(character, *bounds))
+                    .count()
+                    == 1
+        })
+        .collect::<Vec<_>>();
+    match matching.as_slice() {
+        [radical] => Some(*radical),
+        _ => None,
+    }
+}
+
+fn scorecard_radical_attaches_to_formula(radical: &Char, formula_bounds: Rect) -> bool {
+    let Some(bounds) = char_bounds(std::slice::from_ref(radical)) else {
+        return false;
+    };
+    let em = radical.font_size.max(0.01);
+    let gap = formula_bounds.left - bounds.right;
+    let overlaps_vertically =
+        bounds.top > formula_bounds.bottom + 0.01 && formula_bounds.top > bounds.bottom + 0.01;
+    overlaps_vertically && gap >= -0.05 * em && gap <= 0.25 * em
 }
 
 fn scorecard_interleaved_formula_segment(
@@ -1797,8 +2375,8 @@ fn process_metrics(
         .unwrap_or_default();
     let retry_diagnostics = count_diagnostic_matching(events, |id| id.contains("retry"));
     let suspicious_echoes = count_summary_array(events, "suspicious_echoes");
-    let cache_hits = count_diagnostic_matching(events, |id| id.contains("cache_hit"));
-    let cache_misses = count_diagnostic_matching(events, |id| id.contains("cache_miss"));
+    let cache_hits = count_cache_events(events, "hit");
+    let cache_misses = count_cache_events(events, "miss");
     Ok(ProcessMetrics {
         formula_ids: vec!["PRO-01", "PRO-02", "PRO-03", "PRO-04", "PRO-05"],
         terminal_result: events
@@ -1833,6 +2411,16 @@ fn process_metrics(
         peak_rss_bytes: parse_resource_u64(&resource, "maximum resident set size"),
         per_page_timing: None,
     })
+}
+
+fn count_cache_events(events: &[Value], status: &str) -> usize {
+    events
+        .iter()
+        .filter(|value| {
+            value.get("event").and_then(Value::as_str) == Some("translation_cache")
+                && value.get("status").and_then(Value::as_str) == Some(status)
+        })
+        .count()
 }
 
 fn optional_rate(numerator: usize, denominator: usize) -> Option<f64> {
@@ -2396,6 +2984,18 @@ mod tests {
     }
 
     #[test]
+    fn cache_metrics_count_protocol_events() {
+        let events = vec![
+            serde_json::json!({"event":"translation_cache", "status":"hit"}),
+            serde_json::json!({"event":"translation_cache", "status":"hit"}),
+            serde_json::json!({"event":"translation_cache", "status":"miss"}),
+            serde_json::json!({"event":"diagnostic", "id":"cache_hit"}),
+        ];
+        assert_eq!(count_cache_events(&events, "hit"), 2);
+        assert_eq!(count_cache_events(&events, "miss"), 1);
+    }
+
+    #[test]
     fn mixed_paragraph_is_eligible_when_any_unit_translates() {
         let value = serde_json::json!({
             "pages": [{"index": 0, "paragraphs": [{
@@ -2527,10 +3127,13 @@ mod tests {
         let result = risk(
             &before,
             &after,
+            &after,
             &[],
             EvaluationProfile::LegacyFake,
             None,
             &BTreeMap::new(),
+            Path::new("missing-input.pdf"),
+            Path::new("missing-output.pdf"),
             1.0,
         );
         assert_eq!(
@@ -2567,6 +3170,117 @@ mod tests {
         assert_eq!(result.unbalanced_delimiter_paragraphs, 1);
         assert_eq!(result.adjacent_fragment_count, 1);
         assert_eq!(result.evidence[1].text, "ls]");
+    }
+
+    #[test]
+    fn moved_formula_with_a_source_slot_stroke_is_an_orphan_ink_violation() {
+        let styled: Il = serde_json::from_value(serde_json::json!({
+            "pages": [{"index": 0, "geometry": {"height": 100.0}, "paragraphs": [{
+                "reading_order": 2,
+                "bounds": {"left": 0.0, "bottom": 30.0, "right": 90.0, "top": 60.0},
+                "text": {"chars": [
+                    {"unicode":"A", "font_size":10.0, "baseline_origin":{"x":5.0,"y":40.0}, "box":{"left":5.0,"bottom":35.0,"right":10.0,"top":45.0}, "layout":{"label":"text","policy":"translate"}},
+                    {"unicode":"√", "font_size":10.0, "baseline_origin":{"x":40.0,"y":40.0}, "box":{"left":40.0,"bottom":35.0,"right":48.0,"top":48.0}, "layout":{"label":"inline_formula","policy":"passthrough"}},
+                    {"unicode":"d", "font_size":10.0, "baseline_origin":{"x":48.0,"y":38.0}, "box":{"left":48.0,"bottom":34.0,"right":54.0,"top":44.0}, "layout":{"label":"inline_formula","policy":"passthrough"}}
+                ]}
+            }]}]
+        }))
+        .unwrap();
+        let published: Il = serde_json::from_value(serde_json::json!({
+            "pages": [{"index": 0, "geometry": {"height": 100.0}, "paragraphs": [{
+                "reading_order": 2,
+                "bounds": {"left": 0.0, "bottom": 30.0, "right": 90.0, "top": 60.0},
+                "text": {"chars": []},
+                "translated_text": "译文"
+            }]}]
+        }))
+        .unwrap();
+        let source = r#"<document><page number="1" mediabox="0 0 100 100">
+          <fill_text transform="1 0 0 -1 0 100"><span><g unicode="√" x="40" y="40"/><g unicode="d" x="48" y="38"/></span></fill_text>
+          <stroke_path linewidth="0.4" transform="1 0 0 -1 40 58"><moveto x="0" y="0"/><lineto x="14" y="0"/></stroke_path>
+        </page></document>"#;
+        let broken_trace = r#"<document><page number="1" mediabox="0 0 100 100">
+          <fill_text transform="1 0 0 -1 -25 100"><span><g unicode="√" x="40" y="40"/><g unicode="d" x="48" y="38"/></span></fill_text>
+          <stroke_path linewidth="0.4" transform="1 0 0 -1 40 58"><moveto x="0" y="0"/><lineto x="14" y="0"/></stroke_path>
+        </page></document>"#;
+        let fixed_trace = r#"<document><page number="1" mediabox="0 0 100 100">
+          <fill_text transform="1 0 0 -1 -25 100"><span><g unicode="√" x="40" y="40"/><g unicode="d" x="48" y="38"/></span></fill_text>
+          <stroke_path linewidth="0.4" transform="1 0 0 -1 15 58"><moveto x="0" y="0"/><lineto x="14" y="0"/></stroke_path>
+        </page></document>"#;
+
+        let broken =
+            orphan_source_ink_from_traces(&styled, &published, source, broken_trace).unwrap();
+        assert_eq!(broken.violations, 1);
+        assert_eq!(broken.evidence[0].ink_kind, "vector_path");
+        let fixed =
+            orphan_source_ink_from_traces(&styled, &published, source, fixed_trace).unwrap();
+        assert_eq!(fixed.violations, 0);
+
+        let typed: Il = serde_json::from_value(serde_json::json!({
+            "pages": [{"index": 0, "geometry": {"height": 100.0}, "paragraphs": [{
+                "reading_order": 2,
+                "bounds": {"left": 0.0, "bottom": 30.0, "right": 90.0, "top": 60.0},
+                "text": {"chars": []},
+                "translated_text": null,
+                "preserved": "typeset_protocol"
+            }]}]
+        }))
+        .unwrap();
+        let typed = orphan_source_ink_from_traces(&styled, &typed, source, broken_trace).unwrap();
+        assert_eq!(typed.checked_formula_units, 0);
+        assert_eq!(typed.violations, 0);
+    }
+
+    #[test]
+    fn detached_source_order_radical_breaks_formula_rigid_body_integrity() {
+        let styled: Il = serde_json::from_value(serde_json::json!({
+            "pages": [{"index": 0, "geometry": {"height": 100.0}, "paragraphs": [{
+                "reading_order": 4,
+                "bounds": {"left": 0.0, "bottom": 30.0, "right": 90.0, "top": 60.0},
+                "text": {"chars": [
+                    {"unicode":"A", "font_size":10.0, "baseline_origin":{"x":5.0,"y":40.0}, "box":{"left":5.0,"bottom":35.0,"right":10.0,"top":45.0}, "layout":{"label":"text","policy":"translate"}},
+                    {"unicode":"√", "font_size":10.0, "baseline_origin":{"x":40.0,"y":40.0}, "box":{"left":40.0,"bottom":35.0,"right":48.0,"top":48.0}, "visual_bbox":{"left":40.0,"bottom":35.0,"right":48.0,"top":48.0}, "layout":{"label":"text","policy":"translate"}},
+                    {"unicode":"d", "font_size":10.0, "baseline_origin":{"x":48.0,"y":38.0}, "box":{"left":48.0,"bottom":34.0,"right":54.0,"top":44.0}, "visual_bbox":{"left":48.0,"bottom":34.0,"right":54.0,"top":44.0}, "layout":{"label":"inline_formula","policy":"passthrough"}},
+                    {"unicode":"k", "font_size":7.0, "baseline_origin":{"x":54.0,"y":36.0}, "box":{"left":54.0,"bottom":33.0,"right":58.0,"top":40.0}, "visual_bbox":{"left":54.0,"bottom":33.0,"right":58.0,"top":40.0}, "layout":{"label":"inline_formula","policy":"passthrough"}}
+                ]}
+            }]}]
+        }))
+        .unwrap();
+        let published: Il = serde_json::from_value(serde_json::json!({
+            "pages": [{"index": 0, "geometry": {"height": 100.0}, "paragraphs": [{
+                "reading_order": 4,
+                "bounds": {"left": 0.0, "bottom": 30.0, "right": 90.0, "top": 60.0},
+                "text": {"chars": []},
+                "translated_text": "译文"
+            }]}]
+        }))
+        .unwrap();
+        let source = r#"<document><page number="1" mediabox="0 0 100 100">
+          <fill_text transform="1 0 0 -1 0 100"><span><g unicode="√" x="40" y="40"/><g unicode="d" x="48" y="38"/><g unicode="k" x="54" y="36"/></span></fill_text>
+          <stroke_path linewidth="0.4" transform="1 0 0 -1 48 56"><moveto x="0" y="0"/><lineto x="10" y="0"/></stroke_path>
+        </page></document>"#;
+        let broken = r#"<document><page number="1" mediabox="0 0 100 100">
+          <fill_text transform="1 0 0 -1 -25 100"><span><g unicode="d" x="48" y="38"/><g unicode="k" x="54" y="36"/></span></fill_text>
+          <stroke_path linewidth="0.4" transform="1 0 0 -1 23 56"><moveto x="0" y="0"/><lineto x="10" y="0"/></stroke_path>
+        </page></document>"#;
+        let fixed = r#"<document><page number="1" mediabox="0 0 100 100">
+          <fill_text transform="1 0 0 -1 -25 100"><span><g unicode="√" x="40" y="40"/><g unicode="d" x="48" y="38"/><g unicode="k" x="54" y="36"/></span></fill_text>
+          <stroke_path linewidth="0.4" transform="1 0 0 -1 23 56"><moveto x="0" y="0"/><lineto x="10" y="0"/></stroke_path>
+        </page></document>"#;
+
+        let units = formula_units(&styled);
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].text, "√dk");
+        assert!(units[0].has_attached_source_radical);
+
+        let broken =
+            formula_rigid_body_integrity_from_traces(&styled, &published, source, broken).unwrap();
+        assert_eq!(broken.checked_formula_units, 1);
+        assert_eq!(broken.violations, 1);
+        let fixed =
+            formula_rigid_body_integrity_from_traces(&styled, &published, source, fixed).unwrap();
+        assert_eq!(fixed.checked_formula_units, 1);
+        assert_eq!(fixed.violations, 0);
     }
 
     #[test]

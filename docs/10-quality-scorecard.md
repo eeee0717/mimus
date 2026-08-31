@@ -69,6 +69,8 @@ Fake translation cannot establish meaning. This dimension therefore reports risk
 | CON-01 | numeric/unit/reference conservation | exact target multiset contains every eligible source token occurrence | critical per missing occurrence | StylesAndFormulas + Translate IL |
 | CON-02 | glossary consistency | canonical target occurrences / source-term occurrences | major per missing canonical occurrence | versioned glossary + StylesAndFormulas + Translate IL |
 | FOR-01 | formula-unit completeness proxy | unbalanced translated delimiter paragraphs + suspicious translated fragments immediately adjacent to model-labelled formula spans | critical per occurrence | StylesAndFormulas + Translate IL |
+| FOR-04 | orphan source ink | formula glyphs leave their source slot while a neighboring vector path or inline image remains at the same input/output world coordinates | critical per occurrence | public StylesAndFormulas/Typeset IL + pinned MuPDF input/output `trace` |
+| FOR-05 | formula rigid-body integrity | every source formula glyph and associated vector/inline-image component must reappear under one identical page-space translation | critical per formula unit | public StylesAndFormulas/Typeset IL + pinned MuPDF input/output `trace` |
 
 CON-01 uses one conservative lexer on both sides. It recognizes signed integers, decimals,
 percentages and scientific notation; a fixed unit vocabulary only when a unit follows numeric
@@ -100,6 +102,24 @@ also `not-applicable` when no glossary is supplied. FOR-01 is a v2 mechanical pr
 delimiter balance and short numeric, closing-delimiter, underscore, or known `model` fragments
 touching a model-labelled formula span. Once the formula repair round emits typed unit diagnostics,
 the proxy must be upgraded to exact unit membership rather than tuned against this baseline.
+
+FOR-04 closes the audit over all visible ink classes. MuPDF trace transforms are resolved to page
+coordinates before comparison. A candidate must lie in the source formula neighborhood, fit the
+formula footprint plus one source em, remain at the same input/output coordinates, and have at least
+one source formula glyph leave that slot. Large figures and wider table/decorative rules are excluded;
+typed paragraphs are source-preserving terminal states and are not violations. The full-artifact
+audit records text, vector paths, and inline images separately; a text-only formula audit cannot
+release an artifact.
+
+FOR-05 independently checks the positive invariant that a published formula is one rigid body. It
+reconstructs each source unit from formula glyphs plus uniquely associated vector/image ink, then
+accepts the output only when every component is found after the same `(delta_x, delta_y)`. Candidate
+glyph anchors are restricted to the owning paragraph bounds, so an identical formula elsewhere on
+the page cannot satisfy the unit. FOR-04 catches ink abandoned at the source slot; FOR-05 catches a
+missing component or components translated by different deltas even when the old slot is clean.
+Both rules read the Typeset terminal state, so an ADR-0013 typed paragraph is excluded only after the
+production pass has actually recorded its source-preserving reason; Translate IL alone is not a
+publication-state oracle.
 
 No risk score may be described as translation accuracy. Real mistranslation still requires human
 bilingual review or a separately governed semantic evaluator.
@@ -152,6 +172,8 @@ pipeline handled the defect.
 | FOR-01 | `pass::complete_model_formula_boundaries`, placeholder restoration, formula byte/font identity replay, and output round-trip validation | ambiguous boundary or replay evidence becomes `typeset_protocol`; unplaceable complete units become `typeset_overflow`; the scorecard heuristic remains an independent proxy |
 | FOR-02 | `pass::plan_paragraph` runs `normalize_formula_interleaved_punctuation_order` and `formula_continuity_is_valid` for fixed-slot and relocated plans; bound arithmetic and visual-line membership come only from `mimus-quality-contract::{formula_continuity_limit, formula_items_share_line}` | repair by evidence-based segment normalization/relocation; otherwise `typeset_overflow` |
 | FOR-03 | same execution point and bound as FOR-02; it is the area projection of the same excessive gap, not a separate threshold | same repair/typed action as FOR-02 |
+| FOR-04 | `pass::source_formula_units` attaches uniquely owned path/image spans to the relocation unit; `paragraph_plans_leave_orphan_source_ink` rejects unclaimed source-slot ink before installation | exact source programs replay under the glyph delta; ambiguous ownership or residual ink becomes typed `typeset_protocol` |
+| FOR-05 | `pass::source_formula_units` uses whole-paragraph unique visual radical ownership and closes each unit over formula glyph/path/image components; `place_formula_flow` applies one delta to the resulting unit | missing/ambiguous ownership, unsafe replay, or a component that cannot share the unit delta becomes typed `typeset_protocol` |
 
 Test-level alignment checklist:
 
@@ -160,6 +182,8 @@ Test-level alignment checklist:
 | continuity bound | `mimus-quality-contract` worked examples plus production and scorecard source-sampling tests | report each paragraph bound and its source samples |
 | fixed + relocated formula order/adjacency | `formula_continuity_oracle_rejects_extraction_order_text_after_following_formula`, punctuation normalization, atomic-chain and fixed-to-relocation tests | audit every formula paragraph for unit order, neighbor gap and inline hole |
 | formula glyph/unit completeness | boundary fixtures plus formula byte/font replay and round-trip tests | dual-extractor glyph inventory, script baseline and unit membership |
+| formula ink closure | generated composite-formula and nearby-table-rule fixtures; unsafe graphics scope fails closed | every formula paragraph audits text, vector path and inline-image ownership; FOR-04 must be zero unexplained |
+| formula rigid-body delta | displaced-radical production regressions plus scorecard `detached_source_order_radical_breaks_formula_rigid_body_integrity` | every published formula component shares one delta; FOR-05 must be zero unexplained |
 | numeric/unit/reference conservation | shared lexer tests plus loopback retry/preserve tests in the stacked T2 PR | CON-01 must be 100%; every residual is typed or a blocking defect |
 
 Items that depend on visual or bilingual judgment remain explicit report rows; a named regression
@@ -246,7 +270,7 @@ This is a **proposal, pending user approval**, and is not a CI gate:
 - paragraph and Han-weighted coverage both at least 95%; every remainder has a typed reason;
 - zero OVR-01 policy changes and zero confirmed OVR-02/OVR-03 defects;
 - zero placeholder violations or residue; every suspicious echo human-reviewed;
-- 100% CON-01 conservation and zero FOR-01 formula proxy violations;
+- 100% CON-01 conservation and zero unexplained FOR-01/FOR-04/FOR-05 formula violations;
 - median replacement IoU at least 0.80 and median offset at most 1 pt, with all expansions reviewed;
 - zero FOR-02/FOR-03 continuity failures and all expected formula units matched;
 - all four STR-05 title/author invariants pass where the anchor contract applies;
@@ -352,3 +376,4 @@ gaps indiscriminately.
 | 2026-08-29 | Human-confirmed critical defects override automatic totals. | Reports retain the numeric score for diagnosis but cannot conclude release eligibility while `confirmed_criticals` is non-empty. |
 | 2026-08-30 | A real `Internal/6` is always a production bug. | Cluster rows remain failed/N/A; they may not be relabelled as typed degradation or assigned fabricated scores. |
 | 2026-08-30 | During the formula/title stack rebase, schema-v1 verdict and STR-06 were classified as duplicates of schema-v2 conclusion and STR-05. The old identifiers are not retained. | STR-05 absorbs only the unique dual-box identity and canonical source/write hash evidence, with its four existing weighted invariants unchanged. |
+| 2026-08-31 | Formula auditing is ink-closed. FOR-04 detects formula ink left at a vacated source slot; FOR-05 detects missing components or components that do not share one rigid-body delta, including when the old slot is clean. | Text-only formula audits cannot release an artifact. Every published formula must satisfy both rules or have an ADR-0013 typed terminal reason. |

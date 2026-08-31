@@ -3,6 +3,8 @@
 - 状态：已接受（2026-08-27）
 - 决策层级：难逆（公式保真边界、写回字节合同和几何验收建立其上）
 - 修订：2026-08-30 补充数字串尾、相邻公式原子链与源 radical 附着合同
+- 修订：2026-08-31 补充公式矢量/inline-image 墨迹所有权、源槽残留门禁，以及跨提取段
+  radical 的整段唯一视觉归属合同
 
 ## 背景
 
@@ -76,6 +78,22 @@ ADR-0013 的“公式 span 不替换”收窄为：display formula、段外公�
   允许整体平移，单元内部相对几何必须不变。
 
 IL schema 保持 v1；CLI schema 保持 v2。本决策不增加配置开关。
+
+### 4.1 公式刚体的墨迹闭合
+
+公式重定位单元不是 text-show operand 的同义词。一个完整刚体包含三类墨迹：公式文字、
+已证明唯一归属的矢量绘制程序，以及处于同一公式单元内的 inline image。三类组件必须
+使用同一个页空间平移，保留各自源字节、绘制参数及内部相对几何。路径只有在同一内容
+对象、完整 `q/Q` graphics-state scope、单一可见绘制程序、公式邻域和唯一单元归属都可
+证明时才可重放；inline image 同样要求完整 token span、唯一几何归属和源变换可逆。
+
+合法终态只有两种：完整刚体重定位，或整段 `typeset_protocol` typed 保留。任何文字已
+移动而路径/图像留在源槽的部分移动都禁止发布。零位移 fixed-slot 计划让已归属的路径和
+image 继续在原内容程序中绘制，不要求把完整 graphics-state scope 单独重放；只有非零
+relocation 才闭合该 scope、中和源程序并以同一 delta 重放。Typeset 在接受非零 relocation
+前还要执行通用源槽残留墨迹 oracle：已改写字符槽附近、未被同一计划认领且不属于保留
+内容的路径或 inline image 会使整段 typed 保留。更宽的表格线、下划线和装饰线不得仅因
+接近公式被吸入刚体；所有权证据不足时选择保留，而不是猜测。
 
 ### 5. 公式单元边界
 
@@ -158,14 +176,20 @@ source/translated segment 前置合并到后一 text segment，使两个公式�
 实际计划 bounds 执行严格的 `-0.01pt` 下界，不因源字形 ink 外伸而放宽最终发布门禁。
 这个归并不改变 layout label、翻译请求、cache key、公式源字节或字体身份。
 
-PDF 提取阅读序可能把一个源 `√` 放进前一 text segment，虽然其源几何紧贴后一个
-model-labelled operand。为避免改动翻译输入，Typeset 可以把这个源 radical 并入后续公式
-刚体，但必须同时证明：同一段中只有一个几何附着候选；radical 的 text-show span 只含该
-字符且由本段完整拥有；对应译文 segment 恰有一个 `√`。规划器从译文输出和文本替换集
-各移除该 radical，再以源编码字节、源字体和源相对几何把它前置到 operand relocation
-unit；fixed-slot 的连续性 bounds 同样包含它。这个操作不改变 model label、placeholder、
-翻译请求或 cache key，也不把 fallback 形状启发式提升为公式存在性权威。源候选、译文
-候选、span 所有权或几何附着任一不唯一时，整段 `typeset_protocol` fail closed。
+PDF 提取阅读序可能把一个源 `√` 放进段内任意 text segment，甚至越过与其无关的公式后
+才遇到视觉上紧贴的 model-labelled operand。提取段边界和先后关系因此不能作为 radical
+所有权证据。为避免改动翻译输入，Typeset 在整段全部 text segment 与全部既有公式单元间
+做视觉匹配：radical 与 operand 垂直墨迹相交，且 radical 右缘到 operand 左缘的间距落在
+`[-0.05em, 0.25em]`；只有 radical 恰好匹配一个公式、且该公式未被另一 radical 认领时，
+才可把它并入该公式刚体。radical 的 text-show span 还必须只含该字符并由本段完整拥有。
+
+对应译文 segment 可以含零个或一个 `√`：零个合法，因为输出由源 glyph 重放；一个时从
+译文输出移除以避免重复。多余译文 radical、源/公式匹配歧义、span 所有权不完整，或任何
+组件不能共享同一个页空间平移时，整段 `typeset_protocol` fail closed。规划器同时从文本
+替换集移除源 radical，再以源编码字节、源字体和源相对几何把它前置到 operand relocation
+unit；公式的 metric/visual bounds 必须包含 radical 的左侧 advance 与墨迹外伸，fixed-slot
+连续性和 relocation 装箱均使用这个完整 bounds。这个操作不改变 model label、placeholder、
+翻译请求或 cache key，也不把 fallback 形状启发式提升为公式存在性权威。
 
 门禁顺序固定为：fixed-slot 几何成功但连续性失败 → 在 ADR 本节之前已允许的范围内尝试
 relocation → relocation 仍失败或不具备重定位资格 → `typeset_overflow` typed 段级保留。
@@ -203,3 +227,6 @@ radical 的歧义匹配。
 - `unit-form-09-formula-boundary` 钉死 `h=6|4` 的连续数字尾，以及阅读序落入译文、但
   源几何紧贴 `d_model` 的 radical。后者保持翻译请求不变，并要求双提取器最终只看到
   源 `√d_model` 邻接序列；多 radical 候选必须 typed fail closed。
+- 2026-08-31 复核发现 `(3,9)` 的 `1/sqrt(d_k)` 由文字与两条 `stroke_path` 共同构成；
+  旧合同只移动文字，产生源槽孤立横线并丢失分子。此前 L5-5R2 PASS 因审计只覆盖文字
+  glyph 而撤回；新的全文公式审计必须同时覆盖文字、矢量路径和 inline image。

@@ -262,6 +262,7 @@ pub enum DiagnosticId {
 #[serde(rename_all = "snake_case")]
 pub enum FormulaBoundaryEvidence {
     ScriptBaseline,
+    FractionRuleNumerator,
     DelimiterCompletion,
     SameMathFontRun,
     TightlyAttachedSuffix,

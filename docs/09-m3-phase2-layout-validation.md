@@ -244,28 +244,25 @@ for this judgement.
 
 ## L5-5R2 formula-gated acceptance
 
-- Date: 2026-08-30 (Asia/Shanghai)
+- Date: 2026-08-30; replacement accepted 2026-08-31 (Asia/Shanghai)
 - Base stack: PR #138 plus the L5-5R2 conservation/formula-alignment layer
 - Input SHA-256: `bdfaa68d8984f0dc02beaca527b76f207d99b666d31d1da728ee0728182df697`
-- Output SHA-256: `569095268cd54cdff6bc680f47300ad7f17fb0c177d998cfdc7896f52a41b64a`
-- Cache SHA-256: `9e1642bf1b391589a525bd2b531274f3e6463d0a30a1a685a9186f2c1cb238f1`
-- Result: **PASS**
-- Evidence: `.context/real-pdf-test-2026-08-30-l5-5r2/final/`
+- Replacement output SHA-256: `b3de6f10522f64a7e8bedba292c01d51724fb616f298bd4917ed8e54a475c0ef`
+- Replacement cache SHA-256: `e5e825564ff2166c672db271c48745b1e467057ab8be09d51f4adca14f58e94c`
+- Result: **PASS (replacement)**; the original `569095...b64a` acceptance remains withdrawn
+- Evidence: `.context/vector-formula-fix/real6/`
 
-The acceptance method is now document-wide. A named paragraph remains a regression sample but can
-no longer release the artifact: every one of the 54 formula paragraphs must have a published or
-typed state and must pass unit completeness, unit order/adjacency, neighbor gap/inline-hole, glyph
-replay, and script-baseline checks. The archived audit covers 74 extraction-order formula units, 468
-formula characters, 307 exclusive operand spans, three shared operand spans, and seven formula
-glyphs from shared spans. It classifies all 18 noncontiguous extractor records and all six residual
-FOR-01 proxy candidates; none is unexplained.
+The 2026-08-30 text-only audit is retained as a negative control: it omitted vector and raster formula
+ink, so its `98.067441` score could not release the artifact. The replacement method is document-wide
+and ink-closed. Every one of the 54 formula paragraphs has a published or ADR-0013 typed state and is
+audited for unit completeness, order/adjacency, neighbor gap/inline hole, glyph replay, script
+baseline, vector paths, and inline images. The replacement score is `97.988578`, with no confirmed
+critical: FOR-04 is `0/71`, FOR-05 is `0/4`, FOR-02/FOR-03 are `0/0`, and CON-01 is `161/161`.
 
-The final scorecard is `98.067441` with conclusion `automatic_score_only`. FOR-02/FOR-03 have zero
-violations, the largest measured formula-neighbor gap is 9 pt, CON-01 is 162/162 (100%), title and
-complete author policy conservation has zero failures, and no confirmed critical remains. The two
-typed paragraphs are `(3,12)` `unreliable_unicode` and `(4,6)` `typeset_overflow`; neither is an
-unexplained content loss. Translate/Typeset/Poppler/MuPDF Han counts are 6,887/6,878/6,878/6,878;
-the nine-character difference is exactly the typed `(4,6)` paragraph.
+The screenshot regression at `(3,4)` now replays the detached radical and `d_k` under one page-space
+delta. `(3,9)` likewise moves the numerator, fraction/radical paths, and operand as one rigid body;
+`(4,21)` moves its radical overbar with the operand. Named rows remain regression samples, not a
+substitute for the 54-row audit.
 
 ### Eight-round comparison
 
@@ -274,26 +271,36 @@ scorecard-v2 formula/CON contracts; their automatic totals should not be compare
 
 | Metric | L5 | L5-2 | L5-3 | L5-4 | L5-4R | L5-5 | L5-5R | L5-5R2 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Result | FAIL | FAIL | PASS | FAIL | PASS | FAIL | FAIL | **PASS** |
+| Result | FAIL | FAIL | PASS | FAIL | PASS | FAIL | FAIL | **PASS (replacement)** |
 | Translate Han | 5,786 | 6,498 | 6,501 | 6,936 | 6,936 | 6,867 | 6,887 | **6,887** |
 | Published Han | 5,506 | 5,209 | 6,294 | 6,930 | 6,936 | 6,858 | 6,878 | **6,878** |
 | Preserved paragraphs | 9 | 17 | 4 | 2 | 1 | 2 | 2 | **2** |
 | CON-01 | N/A | N/A | N/A | N/A | N/A | 94.83% | 99.39% | **100%** |
 | FOR-01 proxy | N/A | N/A | N/A | N/A | N/A | 12 | 9 | **6 explained** |
 | FOR-02 / FOR-03 | N/A | N/A | N/A | N/A | N/A | 1 / 1 | 1 / 1 | **0 / 0** |
+| FOR-04 / FOR-05 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | **0/71 / 0/4** |
 | Title/author failures | N/A | N/A | N/A | N/A | N/A | 0 | 0 | **0** |
 | Scorecard conclusion | N/A | N/A | N/A | N/A | N/A | critical-blocked | critical-blocked | **non-blocking** |
 
 ### Detection/execution closure
 
-Two production gaps caused L5-5R to remain blocked. First, extraction-order superscript evidence did
-not attach the `2` in `(6,1)` to the existing model formula, so the translation request could omit
-it. The boundary rule now accepts only a uniquely matched ASCII numeric script proven by font size,
-baseline delta, and metric-box attachment. Second, MuPDF split `(6,10)` into visually overlapping
+Four production gaps caused the withdrawn artifacts to remain blocked. First, extraction-order
+superscript evidence did not attach the `2` in `(6,1)` to the existing model formula, so the
+translation request could omit it. The boundary rule now accepts only a uniquely matched ASCII
+numeric script proven by font size, baseline delta, and metric-box attachment. Second, MuPDF split
+`(6,10)` into visually overlapping
 lines; the scorecard's old top-edge heuristic excluded `epsilon` and `=`, then measured a false 23 pt
 gap from the preceding prose. Production and scorecard now share the vertical-overlap rule from
 `mimus-quality-contract`; the actual `=` to `10^-9` gap is 9 pt, below the source-derived 14.9439 pt
 limit.
+
+Third, formula relocation owned only text-show operands: fraction/radical paths could remain in the
+source slot while glyphs moved. The walker now exposes bounded path/image spans, ownership requires a
+unique complete graphics scope, and Typeset applies the glyph delta to the whole ink-closed unit or
+preserves the paragraph as typed `typeset_protocol`. Fourth, extraction order could place a detached
+radical in an earlier text segment. Whole-paragraph visual ownership now attaches it only when it
+uniquely matches one existing model formula; formula existence remains model-owned. FOR-04 detects
+source-slot residue, while FOR-05 independently detects missing or differently translated components.
 
 The translation layer independently enforces CON-01 with the same lexer used by the scorecard: a
 missing numeric/unit/reference token causes one corrective retry and a second failure preserves the
@@ -303,9 +310,10 @@ zero `content_conservation` degradation across pdfTeX 8/8, XeTeX 4/4, LuaTeX 4/4
 
 ### API and strict controls
 
-Seven real Responses calls were made across L5-5R2, all paragraph translation calls and no term
-extraction calls. The user subsequently relaxed the ten-call ceiling; no additional call was needed.
-The final primary replay had 136 cache hits and one miss. The accepted strict replay had 137/137
-hits, made zero calls through a closed loopback proxy, exited 4 with `strict_degradation`, listed only
-the two reviewed typed paragraphs, and produced no output PDF. An earlier strict attempt used the
-wrong glossary fingerprint and is excluded from acceptance evidence.
+The original L5-5R2 used seven real Responses calls. The vector/radical replacement used eight more
+successful paragraph calls through the counting proxy (two in the first repair pass and six in the
+conservation follow-up, including one corrective retry); term extraction remained zero. The user had
+relaxed the earlier ten-call ceiling before these calls. The accepted primary replay is 137/137 cache
+hits and zero provider calls. The accepted strict replay is also 137/137 hits, made zero calls through
+a closed loopback endpoint, exited 4 with `strict_degradation`, listed only the two reviewed typed
+paragraphs, and produced no output PDF.
