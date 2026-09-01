@@ -92,6 +92,11 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
         "unit-parse-indirect-filter" => indirect_filter(repo_root),
         "unit-parse-midtree-resources" => midtree_resources(repo_root),
         "unit-parse-m1-switchboard" => parse_m1_switchboard(repo_root),
+        "unit-stream-12-path-parent" => basic_text(
+            fixture_id,
+            repo_root,
+            b"q\n0 0 m\n180 0 l\nS\nQ\nBT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\n",
+        ),
         "unit-stream-00-malformed-parent" => malformed_stream_parent(repo_root),
         "unit-stream-01-bx-ex-unknown-op" => basic_text(
             fixture_id,
@@ -120,6 +125,7 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
         "unit-font-01-std14-custom-widths" => std14_custom_widths(repo_root),
         "unit-font-04-negative-descent-parent" => font_negative_descent_parent(repo_root),
         "unit-font-08-type1-header-encoding" => embedded_type1_header_encoding(repo_root),
+        "unit-font-10-estimated-bbox" => font_estimated_bbox(repo_root),
         "unit-font-escaped-name" => escaped_font_name(repo_root),
         "unit-cmap-01-identity-no-tounicode" => identity_cid_no_tounicode(repo_root),
         "unit-cmap-embedded-ok" => embedded_cmap_ok(repo_root),
@@ -167,6 +173,23 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
         "unit-xobj-m1-switchboard" => xobject_m1_switchboard(repo_root),
         "unit-xobj-09-stream-parent" => xobject_stream_parent(repo_root),
         "unit-layout-04-large-summation" => layout_large_summation(repo_root),
+        "unit-para-05-natural-split" => basic_text(
+            fixture_id,
+            repo_root,
+            b"BT\n/F1 12 Tf\n1 0 0 1 72 160 Tm\n(M) Tj\n1 0 0 1 72 146 Tm\n(M) Tj\n1 0 0 1 96 132 Tm\n(M) Tj\n1 0 0 1 72 118 Tm\n(M) Tj\nET\n",
+        ),
+        "unit-para-09-indent-preservation" => basic_text_with_page_size(
+            fixture_id,
+            repo_root,
+            300,
+            300,
+            b"BT\n/F1 12 Tf\n1 0 0 1 72 250 Tm\n(M) Tj\n1 0 0 1 72 236 Tm\n(M) Tj\n1 0 0 1 72 222 Tm\n(M) Tj\n1 0 0 1 84 190 Tm\n(M) Tj\n1 0 0 1 72 176 Tm\n(M) Tj\n1 0 0 1 72 162 Tm\n(M) Tj\n1 0 0 1 108 130 Tm\n(M) Tj\n1 0 0 1 72 116 Tm\n(M) Tj\n1 0 0 1 72 102 Tm\n(M) Tj\nET\n",
+        ),
+        "unit-form-14-font-size-mode" => basic_text(
+            fixture_id,
+            repo_root,
+            b"BT\n/F1 10 Tf\n1 0 0 1 72 120 Tm\n(M) Tj\n/F1 7 Tf\n1 0 0 1 80.63 123.4 Tm\n(I) Tj\n1 0 0 1 82.695 123.4 Tm\n(I) Tj\n/F1 10 Tf\n1 0 0 1 84.76 120 Tm\n(M) Tj\n/F1 7 Tf\n1 0 0 1 93.39 123.4 Tm\n(I) Tj\n1 0 0 1 95.455 123.4 Tm\n(I) Tj\n/F1 10 Tf\n1 0 0 1 97.52 120 Tm\n(M) Tj\n/F1 7 Tf\n1 0 0 1 106.15 123.4 Tm\n(I) Tj\n1 0 0 1 108.215 123.4 Tm\n(I) Tj\n/F1 10 Tf\n1 0 0 1 110.28 120 Tm\n(M) Tj\nET\n",
+        ),
         "unit-type-11-mixed-descents" => type_mixed_descents(repo_root),
         "unit-write-01-bookmarks-rich" => {
             structured_variant(repo_root, "unit-write-01-bookmarks-rich")
@@ -941,6 +964,29 @@ fn embedded_type1_header_encoding(repo_root: &Path) -> Result<Vec<u8>> {
     pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUST+CMMI10 /Flags 96 /FontBBox [-32 -250 1048 750] /ItalicAngle -14.04 /Ascent 750 /Descent -250 /CapHeight 683 /StemV 70 /MissingWidth 500 /FontFile 7 0 R >>")?;
     pdf.stream(b"/Length1 4348 /Length2 31411 /Length3 545", &font)?;
     pdf.stream(b"", b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (A) Tj ET\n")?;
+    pdf.finish(1)
+}
+
+fn font_estimated_bbox(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-font-10-estimated-bbox");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 10 0 R >>",
+    )?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    pdf.object(b"<< /Type /Font /Subtype /Type0 /BaseFont /MIMUSI+DejaVuSans /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 9 0 R >>")?;
+    pdf.object(b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /MIMUSI+DejaVuSans /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 7 0 R /DW 600 /W [65535 [600]] /CIDToGIDMap /Identity >>")?;
+    pdf.object(
+        b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 8 0 R >>",
+    )?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(
+        b"/Type /CMap",
+        b"/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /MimusFont10 def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n1 beginbfchar\n<FFFF> <004D>\nendbfchar\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n",
+    )?;
+    pdf.stream(b"", b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n<FFFF> Tj\nET\n")?;
     pdf.finish(1)
 }
 

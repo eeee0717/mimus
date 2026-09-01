@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use lopdf::{Dictionary, Document, Object, ObjectId};
 
 use super::{MAX_STREAM_BYTES, UnicodeProvenance, object_number};
-use crate::il::FontRef;
+use crate::il::{FontRef, Rect};
 use crate::pdf_stream;
 
 #[derive(Debug, Clone)]
@@ -13,6 +13,7 @@ pub(super) struct DecodedGlyph {
     pub code: u32,
     pub encoded: Vec<u8>,
     pub advance_em: f64,
+    pub estimated_bbox_em: Option<Rect>,
     pub font_supported: bool,
 }
 
@@ -52,6 +53,13 @@ struct CompositeFont {
     widths: CidWidths,
     cid_to_gid: CidToGid,
     gid_to_unicode: BTreeMap<u16, char>,
+    embedded_metrics: Option<EmbeddedFontMetrics>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EmbeddedFontMetrics {
+    glyph_count: u16,
+    conservative_bbox_em: Rect,
 }
 
 #[derive(Debug, Clone)]
@@ -317,6 +325,9 @@ impl ResolvedFont {
         let normalized_descriptor_descent = raw_descent.is_some_and(|value| value > 0.0);
         let descent = raw_descent.map(normalize_descriptor_descent);
         let embedded = descriptor.and_then(|value| embedded_true_type(document, value));
+        let embedded_metrics = embedded
+            .as_deref()
+            .and_then(|bytes| embedded_font_metrics(bytes, descriptor));
         let gid_to_unicode = embedded
             .as_deref()
             .and_then(|bytes| reverse_unicode_cmap(bytes).ok())
@@ -352,6 +363,7 @@ impl ResolvedFont {
                 widths,
                 cid_to_gid,
                 gid_to_unicode,
+                embedded_metrics,
             }),
         })
     }
@@ -462,6 +474,7 @@ impl ResolvedFont {
                         code: u32::from(*code),
                         encoded,
                         advance_em: width.or(font.missing_width).unwrap_or(0.0) / 1000.0,
+                        estimated_bbox_em: None,
                         font_supported: self.supported,
                     }
                 })
@@ -480,13 +493,22 @@ impl ResolvedFont {
                                 .map(|character| (character, UnicodeProvenance::EmbeddedFontCmap))
                         };
                         let (unicode, unicode_provenance) = self.unicode_for(&encoded, fallback);
+                        let advance_em = cid
+                            .map(|value| font.widths.width(value) / 1000.0)
+                            .unwrap_or(0.0);
                         DecodedGlyph {
                             unicode,
                             unicode_provenance,
                             code: cid.unwrap_or_else(|| bytes_to_u32(&encoded).unwrap_or(0)),
-                            advance_em: cid
-                                .map(|value| font.widths.width(value) / 1000.0)
-                                .unwrap_or(0.0),
+                            advance_em,
+                            estimated_bbox_em: cid.and_then(|cid| {
+                                font.estimated_bbox_em(
+                                    cid,
+                                    advance_em,
+                                    self.descent_em,
+                                    self.ascent_em,
+                                )
+                            }),
                             encoded,
                             font_supported: self.supported,
                         }
@@ -515,6 +537,7 @@ impl ResolvedFont {
                         code: u32::from(*code),
                         encoded,
                         advance_em: glyph.map_or(0.0, |glyph| glyph.advance_em),
+                        estimated_bbox_em: None,
                         font_supported: self.supported && glyph.is_some(),
                     }
                 })
@@ -527,6 +550,7 @@ impl ResolvedFont {
                     code: u32::from(*code),
                     encoded: vec![*code],
                     advance_em: 0.0,
+                    estimated_bbox_em: None,
                     font_supported: false,
                 })
                 .collect(),
@@ -583,6 +607,26 @@ fn dangling_font_reference(
 }
 
 impl CompositeFont {
+    fn estimated_bbox_em(
+        &self,
+        cid: u32,
+        advance_em: f64,
+        descent_em: f64,
+        ascent_em: f64,
+    ) -> Option<Rect> {
+        let metrics = self.embedded_metrics?;
+        let mapped_gid = self.cid_to_gid.gid(cid);
+        if mapped_gid.is_some_and(|gid| gid < metrics.glyph_count) {
+            return None;
+        }
+        Some(metrics.conservative_bbox_em.union(Rect {
+            left: 0.0,
+            bottom: descent_em,
+            right: advance_em,
+            top: ascent_em,
+        }))
+    }
+
     fn segments(&self, bytes: &[u8], unicode: &UnicodeSource) -> Vec<(Vec<u8>, Option<u32>)> {
         match &self.encoding {
             CompositeEncoding::Identity => bytes
@@ -863,6 +907,47 @@ fn embedded_true_type(document: &Document, descriptor: &Dictionary) -> Option<Ve
         .as_stream()
         .ok()?;
     pdf_stream::decode(document, stream, MAX_STREAM_BYTES).ok()
+}
+
+fn embedded_font_metrics(
+    bytes: &[u8],
+    descriptor: Option<&Dictionary>,
+) -> Option<EmbeddedFontMetrics> {
+    let face = ttf_parser::Face::parse(bytes, 0).ok()?;
+    let units_per_em = f64::from(face.units_per_em());
+    let global = face.global_bounding_box();
+    let mut conservative_bbox_em = Rect {
+        left: f64::from(global.x_min) / units_per_em,
+        bottom: f64::from(global.y_min) / units_per_em,
+        right: f64::from(global.x_max) / units_per_em,
+        top: f64::from(global.y_max) / units_per_em,
+    };
+    if let Some(descriptor_bbox) = descriptor.and_then(font_descriptor_bbox_em) {
+        conservative_bbox_em = conservative_bbox_em.union(descriptor_bbox);
+    }
+    Some(EmbeddedFontMetrics {
+        glyph_count: face.number_of_glyphs(),
+        conservative_bbox_em,
+    })
+}
+
+fn font_descriptor_bbox_em(descriptor: &Dictionary) -> Option<Rect> {
+    let values = descriptor
+        .get(b"FontBBox")
+        .and_then(Object::as_array)
+        .ok()?
+        .iter()
+        .map(object_number)
+        .collect::<Option<Vec<_>>>()?;
+    if values.len() != 4 || values.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    Some(Rect {
+        left: values[0] / 1000.0,
+        bottom: values[1] / 1000.0,
+        right: values[2] / 1000.0,
+        top: values[3] / 1000.0,
+    })
 }
 
 fn read_embedded_unicode(document: &Document, descriptor: &Dictionary) -> EmbeddedUnicode {

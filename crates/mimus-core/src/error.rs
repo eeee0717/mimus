@@ -101,6 +101,12 @@ pub enum RetryReason {
     ServerError,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InputErrorDetail {
+    ObjectSyntax { objid: [u32; 2], offset: u64 },
+}
+
 reason_enum!(IoReason {
     InputRead => "input_read",
     OutputWrite => "output_write",
@@ -170,6 +176,7 @@ pub enum MimusError {
         reason: InputReason,
         message: String,
         hint: Option<String>,
+        detail: Option<InputErrorDetail>,
         scanned_pages: Option<usize>,
         total_pages: Option<usize>,
     },
@@ -216,6 +223,7 @@ impl MimusError {
             reason,
             message: message.into(),
             hint: None,
+            detail: None,
             scanned_pages: None,
             total_pages: None,
         }
@@ -298,6 +306,22 @@ impl MimusError {
             *stored_total_pages = Some(total_pages);
         }
         self
+    }
+
+    #[must_use]
+    pub fn with_input_detail(mut self, value: InputErrorDetail) -> Self {
+        if let Self::Input { detail, .. } = &mut self {
+            *detail = Some(value);
+        }
+        self
+    }
+
+    #[must_use]
+    pub const fn input_detail(&self) -> Option<InputErrorDetail> {
+        match self {
+            Self::Input { detail, .. } => *detail,
+            _ => None,
+        }
     }
 
     #[must_use]

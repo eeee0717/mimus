@@ -36,6 +36,7 @@ pub struct WalkedChar {
     pub engine_mismatch_tolerated: bool,
     pub baseline_origin: Point,
     pub metric_box: Rect,
+    pub estimated_bbox: Option<Rect>,
     pub text_transform: TextTransform,
     pub content_transform: [f64; 6],
     pub text_matrix_before_glyph: [f64; 6],
@@ -343,6 +344,12 @@ pub(crate) fn walk_page_detailed_with_rotation(
         content_streams.push(WalkedContentStream { object_id, decoded });
     }
     walker.finish();
+    if let Some(reason) = walker.degradation.take() {
+        return Err(PageWalkError::Degraded {
+            reason,
+            source: walk_error("graphics operators could not be interpreted reliably"),
+        });
+    }
     Ok(PageWalk {
         characters: walker.characters,
         vector_paths: walker.vector_paths,
@@ -989,10 +996,21 @@ impl Walker<'_> {
     }
 
     fn record_vector_point(&mut self, operands: &[Token], starts_path: bool) {
-        let Some(values) = self.numeric_tail(operands, 2) else {
+        let values = (operands.len() == 2).then(|| {
+            operands
+                .iter()
+                .map(|token| match token.kind {
+                    TokenKind::Number(value) => value.is_finite().then_some(value),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+        });
+        let Some(Some(values)) = values else {
             if let Some(scope) = self.vector_scopes.last_mut() {
                 scope.safe = false;
             }
+            self.degradation
+                .get_or_insert(PageDegradeReason::GraphicsUnreliable);
             return;
         };
         let point = self.state.ctm.point(values[0], values[1]);
@@ -1140,6 +1158,15 @@ impl Walker<'_> {
                     part_width * self.state.horizontal_scale,
                     font.ascent_em * self.state.font_size + self.state.rise,
                 );
+                let estimated_bbox = glyph.estimated_bbox_em.map(|bbox| {
+                    transformed_box(
+                        transform,
+                        bbox.left * self.state.font_size * self.state.horizontal_scale,
+                        bbox.bottom * self.state.font_size + self.state.rise,
+                        bbox.right * self.state.font_size * self.state.horizontal_scale,
+                        bbox.top * self.state.font_size + self.state.rise,
+                    )
+                });
                 let clipped_out = self.clipped_by_form_bbox(metric_box);
                 if clipped_out {
                     self.recoveries.insert(RecoveryKind::ClippedFormContent);
@@ -1162,6 +1189,7 @@ impl Walker<'_> {
                     engine_mismatch_tolerated: font.engine_mismatch_tolerated,
                     baseline_origin: baseline,
                     metric_box,
+                    estimated_bbox,
                     text_transform: classify_transform(self.visual_rotation.then(transform)),
                     content_transform: self.state.ctm.0,
                     text_matrix_before_glyph,
@@ -1941,6 +1969,73 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn malformed_path_operands_degrade_the_page_after_an_otherwise_successful_walk() {
+        for path in ["0 0 m 20 l", "0 0 m 10 20 30 l", "0 0 m /Bad 20 l"] {
+            let mut document = Document::load(fixture()).unwrap();
+            document
+                .get_object_mut((9, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_plain_content(
+                    format!("{path} S BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET").into_bytes(),
+                );
+            let page_id = document.get_pages()[&1];
+
+            assert!(matches!(
+                walk_page_detailed(&document, page_id),
+                Err(PageWalkError::Degraded {
+                    reason: PageDegradeReason::GraphicsUnreliable,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn out_of_range_composite_gid_keeps_advance_and_estimates_a_conservative_bbox() {
+        let mut document = Document::load(fixture_path("unit-cmap-embedded-ok")).unwrap();
+        document
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Encoding", Object::Name(b"Identity-H".to_vec()));
+        document
+            .get_object_mut((10, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(
+                b"1 begincodespacerange <0000> <FFFF> endcodespacerange 1 beginbfchar <FFFF> <004D> endbfchar"
+                    .to_vec(),
+            );
+        document
+            .get_object_mut((11, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm <FFFF> Tj ET".to_vec());
+        let page_id = document.get_pages()[&1];
+
+        let walked = walk_page_detailed(&document, page_id).unwrap();
+        let [character] = walked.characters.as_slice() else {
+            panic!("expected one decoded CID")
+        };
+        let estimated = character
+            .estimated_bbox
+            .expect("the absent outline must use a font-level estimate");
+        assert_eq!(character.unicode, Some('M'));
+        assert_eq!(character.code, 0xffff);
+        assert!((character.advance - 7.2).abs() < 0.001);
+        assert!(character.font_supported);
+        assert!(estimated.left <= character.metric_box.left);
+        assert!(estimated.bottom <= character.metric_box.bottom);
+        assert!(estimated.right > character.metric_box.right);
+        assert!(estimated.top >= character.metric_box.top);
     }
 
     #[test]

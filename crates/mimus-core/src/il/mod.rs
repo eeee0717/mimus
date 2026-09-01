@@ -54,6 +54,10 @@ pub struct PageGeometry {
 pub struct Paragraph {
     pub reading_order: usize,
     pub bounds: Rect,
+    /// Positive source first-line indentation in page-space points. Typeset copies this
+    /// absolute geometry rather than normalizing it to a language-specific em count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_line_indent: Option<f64>,
     pub text: TextCarrier,
     pub translated_text: Option<String>,
     /// Runtime conservation evidence for an accepted remote translation.
@@ -157,6 +161,10 @@ pub struct Char {
     pub baseline_origin: Point,
     pub r#box: Rect,
     pub visual_bbox: Rect,
+    /// `visual_bbox` is a conservative font-level estimate because the embedded CID
+    /// maps outside the font's glyph range.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bbox_estimated: bool,
     pub text_transform: TextTransform,
     /// Geometry proves a word boundary even though the PDF encoded no space
     /// glyph (including a soft line wrap). The character remains tied to its
@@ -348,6 +356,7 @@ mod tests {
                 paragraphs: vec![Paragraph {
                     reading_order: 0,
                     bounds: Rect::default(),
+                    first_line_indent: None,
                     text: TextCarrier::Chars { chars: Vec::new() },
                     translated_text: None,
                     translation_conservation: None,
@@ -367,6 +376,7 @@ mod tests {
         let mut paragraph = Paragraph {
             reading_order: 0,
             bounds: Rect::default(),
+            first_line_indent: None,
             text: TextCarrier::Chars { chars: Vec::new() },
             translated_text: None,
             translation_conservation: None,
@@ -377,6 +387,7 @@ mod tests {
         let value = serde_json::to_value(&paragraph).unwrap();
         assert!(value.get("preserved").is_none());
         assert!(value.get("translation_conservation").is_none());
+        assert!(value.get("first_line_indent").is_none());
 
         paragraph.preserved = Some(PreservedReason::UnreliableUnicode);
         let value = serde_json::to_value(&paragraph).unwrap();
@@ -389,5 +400,6 @@ mod tests {
         .unwrap();
         assert_eq!(restored.preserved, None);
         assert_eq!(restored.translation_conservation, None);
+        assert_eq!(restored.first_line_indent, None);
     }
 }

@@ -1,0 +1,189 @@
+# PARA-09 / TYPE-12 exact contract. Each model region has one first line and
+# two continuation lines, making the source indent an absolute x difference.
+
+schema_version = 1
+
+[identity]
+id = "unit-para-09-indent-preservation"
+name = "Absolute first-line indentation preservation"
+class = "unit"
+legality = "legal"
+cases = ["PARA-09", "TYPE-12"]
+priority = "M3"
+variable = "Three otherwise identical paragraphs carry source first-line indents of 0pt, 12pt, and 36pt"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-para-09-indent-preservation.pdf"
+pdf_sha256 = "cf09b6440c7971ce0d9cac75b284e2d1cdb22920e9c47c15fc52d6038d35e0ab"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 300.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d706172612d30392d696e64"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 9
+columns = 1
+
+[[expected.block]]
+key = "P0_L1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "M"
+baseline_origin = [72.0, 250.0]
+metric_box = [72.0, 247.168, 82.356, 261.136]
+visual_bbox = [73.177734, 250.0, 81.181641, 258.748047]
+
+[[expected.block]]
+key = "P0_L2"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "M"
+baseline_origin = [72.0, 236.0]
+metric_box = [72.0, 233.168, 82.356, 247.136]
+visual_bbox = [73.177734, 236.0, 81.181641, 244.748047]
+
+[[expected.block]]
+key = "P0_L3"
+page = 0
+column = "full"
+draw_order = 3
+reading_order = 3
+text = "M"
+baseline_origin = [72.0, 222.0]
+metric_box = [72.0, 219.168, 82.356, 233.136]
+visual_bbox = [73.177734, 222.0, 81.181641, 230.748047]
+
+[[expected.block]]
+key = "P12_L1"
+page = 0
+column = "full"
+draw_order = 4
+reading_order = 4
+text = "M"
+baseline_origin = [84.0, 190.0]
+metric_box = [84.0, 187.168, 94.356, 201.136]
+visual_bbox = [85.177734, 190.0, 93.181641, 198.748047]
+
+[[expected.block]]
+key = "P12_L2"
+page = 0
+column = "full"
+draw_order = 5
+reading_order = 5
+text = "M"
+baseline_origin = [72.0, 176.0]
+metric_box = [72.0, 173.168, 82.356, 187.136]
+visual_bbox = [73.177734, 176.0, 81.181641, 184.748047]
+
+[[expected.block]]
+key = "P12_L3"
+page = 0
+column = "full"
+draw_order = 6
+reading_order = 6
+text = "M"
+baseline_origin = [72.0, 162.0]
+metric_box = [72.0, 159.168, 82.356, 173.136]
+visual_bbox = [73.177734, 162.0, 81.181641, 170.748047]
+
+[[expected.block]]
+key = "P36_L1"
+page = 0
+column = "full"
+draw_order = 7
+reading_order = 7
+text = "M"
+baseline_origin = [108.0, 130.0]
+metric_box = [108.0, 127.168, 118.356, 141.136]
+visual_bbox = [109.177734, 130.0, 117.181641, 138.748047]
+
+[[expected.block]]
+key = "P36_L2"
+page = 0
+column = "full"
+draw_order = 8
+reading_order = 8
+text = "M"
+baseline_origin = [72.0, 116.0]
+metric_box = [72.0, 113.168, 82.356, 127.136]
+visual_bbox = [73.177734, 116.0, 81.181641, 124.748047]
+
+[[expected.block]]
+key = "P36_L3"
+page = 0
+column = "full"
+draw_order = 9
+reading_order = 9
+text = "M"
+baseline_origin = [72.0, 102.0]
+metric_box = [72.0, 99.168, 82.356, 113.136]
+visual_bbox = [73.177734, 102.0, 81.181641, 110.748047]
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 250 Tm
+(M) Tj
+1 0 0 1 72 236 Tm
+(M) Tj
+1 0 0 1 72 222 Tm
+(M) Tj
+1 0 0 1 84 190 Tm
+(M) Tj
+1 0 0 1 72 176 Tm
+(M) Tj
+1 0 0 1 72 162 Tm
+(M) Tj
+1 0 0 1 108 130 Tm
+(M) Tj
+1 0 0 1 72 116 Tm
+(M) Tj
+1 0 0 1 72 102 Tm
+(M) Tj
+ET
+"""
+
+[[expected.behaviour]]
+id = "PARA-09-baseline-origin"
+assertion = "ParagraphFind infers no indent, 12pt, and 36pt from first and median continuation baseline origins; glyph side bearings and tight ink do not enter the calculation"
+observable_via = "recorded model regions and production paragraph IL"
+
+[[expected.behaviour]]
+id = "TYPE-12-absolute-copy"
+assertion = "Typeset starts translated first lines exactly 0pt, 12pt, and 36pt to the right of their continuation lines at every wrapping candidate, without normalizing to CJK character widths"
+observable_via = "captured translations and final-PDF output-font glyph origins"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "glyphs", "transformed-text-geometry", "pdf-bytes", "pdf-structure", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "The original TYPE-12 expectation normalized every indent to two target-language characters"
+resolution = "V1 copies the source indent as an absolute page-space point distance and does not classify quote paragraphs"

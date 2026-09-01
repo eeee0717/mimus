@@ -1,0 +1,203 @@
+# FORM-14 exact contract. Four 10pt body glyphs are interleaved with six 7pt
+# raised glyphs; every raised glyph is within 0.25em of a body anchor.
+
+schema_version = 1
+
+[identity]
+id = "unit-form-14-font-size-mode"
+name = "Character-weighted body font-size mode"
+class = "unit"
+legality = "legal"
+cases = ["FORM-14"]
+priority = "M3"
+variable = "Six raised 7pt script glyphs outnumber four 10pt body glyphs inside one translatable model paragraph"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-form-14-font-size-mode.pdf"
+pdf_sha256 = "bf877962b2f6657f352103bb214feacc9ed83cc1e9b35e984b87775d9aac67b2"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d666f726d2d31342d666f6e"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 10
+columns = 1
+
+[[expected.block]]
+key = "M1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "M"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.64, 80.63, 129.28]
+visual_bbox = [72.981445, 120.0, 79.651367, 127.290039]
+
+[[expected.block]]
+key = "I1"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "I"
+baseline_origin = [80.63, 123.4]
+metric_box = [80.63, 121.748, 82.695, 129.896]
+visual_bbox = [81.317012, 123.4, 82.007441, 128.502051]
+
+[[expected.block]]
+key = "I2"
+page = 0
+column = "full"
+draw_order = 3
+reading_order = 3
+text = "I"
+baseline_origin = [82.695, 123.4]
+metric_box = [82.695, 121.748, 84.76, 129.896]
+visual_bbox = [83.382012, 123.4, 84.072441, 128.502051]
+
+[[expected.block]]
+key = "M2"
+page = 0
+column = "full"
+draw_order = 4
+reading_order = 4
+text = "M"
+baseline_origin = [84.76, 120.0]
+metric_box = [84.76, 117.64, 93.39, 129.28]
+visual_bbox = [85.741445, 120.0, 92.411367, 127.290039]
+
+[[expected.block]]
+key = "I3"
+page = 0
+column = "full"
+draw_order = 5
+reading_order = 5
+text = "I"
+baseline_origin = [93.39, 123.4]
+metric_box = [93.39, 121.748, 95.455, 129.896]
+visual_bbox = [94.077012, 123.4, 94.767441, 128.502051]
+
+[[expected.block]]
+key = "I4"
+page = 0
+column = "full"
+draw_order = 6
+reading_order = 6
+text = "I"
+baseline_origin = [95.455, 123.4]
+metric_box = [95.455, 121.748, 97.52, 129.896]
+visual_bbox = [96.142012, 123.4, 96.832441, 128.502051]
+
+[[expected.block]]
+key = "M3"
+page = 0
+column = "full"
+draw_order = 7
+reading_order = 7
+text = "M"
+baseline_origin = [97.52, 120.0]
+metric_box = [97.52, 117.64, 106.15, 129.28]
+visual_bbox = [98.501445, 120.0, 105.171367, 127.290039]
+
+[[expected.block]]
+key = "I5"
+page = 0
+column = "full"
+draw_order = 8
+reading_order = 8
+text = "I"
+baseline_origin = [106.15, 123.4]
+metric_box = [106.15, 121.748, 108.215, 129.896]
+visual_bbox = [106.837012, 123.4, 107.527441, 128.502051]
+
+[[expected.block]]
+key = "I6"
+page = 0
+column = "full"
+draw_order = 9
+reading_order = 9
+text = "I"
+baseline_origin = [108.215, 123.4]
+metric_box = [108.215, 121.748, 110.28, 129.896]
+visual_bbox = [108.902012, 123.4, 109.592441, 128.502051]
+
+[[expected.block]]
+key = "M4"
+page = 0
+column = "full"
+draw_order = 10
+reading_order = 10
+text = "M"
+baseline_origin = [110.28, 120.0]
+metric_box = [110.28, 117.64, 118.91, 129.28]
+visual_bbox = [111.261445, 120.0, 117.931367, 127.290039]
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 10 Tf
+1 0 0 1 72 120 Tm
+(M) Tj
+/F1 7 Tf
+1 0 0 1 80.63 123.4 Tm
+(I) Tj
+1 0 0 1 82.695 123.4 Tm
+(I) Tj
+/F1 10 Tf
+1 0 0 1 84.76 120 Tm
+(M) Tj
+/F1 7 Tf
+1 0 0 1 93.39 123.4 Tm
+(I) Tj
+1 0 0 1 95.455 123.4 Tm
+(I) Tj
+/F1 10 Tf
+1 0 0 1 97.52 120 Tm
+(M) Tj
+/F1 7 Tf
+1 0 0 1 106.15 123.4 Tm
+(I) Tj
+1 0 0 1 108.215 123.4 Tm
+(I) Tj
+/F1 10 Tf
+1 0 0 1 110.28 120 Tm
+(M) Tj
+ET
+"""
+
+[[expected.behaviour]]
+id = "FORM-14-body-mode"
+assertion = "The 10pt body size wins after geometrically proven 7pt scripts are excluded; exact-size ties choose the larger value and all production planners use the same helper"
+observable_via = "hand-derived source geometry, recorded model ownership, unit mode/tie assertions, final output glyph size, and overflow attempts"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "glyphs", "transformed-text-geometry", "pdf-bytes", "pdf-structure", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "Raw character majority would select the six visibly raised 7pt glyphs"
+resolution = "Count only visible non-whitespace translatable body characters, exclude geometrically proven scripts, use exact size equality, and break ties upward"

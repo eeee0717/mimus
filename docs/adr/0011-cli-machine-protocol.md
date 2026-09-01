@@ -81,6 +81,12 @@ CLI 机器协议版本升为 2；IL 的 `schema_version` 独立保持 1。每行
 - 2026-08-31 #37：`configuration_resolved` 与 translate `result` 增加
   `bilingual`；开启时 terminal `pages` 报告交替输出的物理页数 `2N`，关闭时仍为 `N`。
   IL 继续只描述输入的 `N` 页且 schema 保持 v1，公开协议仍为 v2。
+- 2026-09-01 M3 #38：Input error 增加可选 tagged `detail`。经典 xref 的 normal entry
+  指向无法解析的对象时仍为 `category=input, reason=pdf_parse, exit=2`，并出线
+  `detail={kind:"object_syntax", objid:[object_number,generation], offset:xref_byte_offset}`；
+  不产生输出。省略 `detail` 的既有 error 形状不变。字体走查另增加普通预算内的 informational
+  `glyph_bbox_estimated { page_index, character_index, font_object, code }`，精确定位采用字体级
+  保守 bbox 的字符；两项均为 additive v2 扩展，不升 schema。
 
 ## 后果
 

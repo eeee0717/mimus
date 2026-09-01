@@ -154,6 +154,19 @@ fn handle_responses_request(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<Str
             "200 OK",
             serde_json::json!({ "output_text": "数据" }).to_string(),
         )
+    } else if input == "M M M" {
+        (
+            "200 OK",
+            serde_json::json!({
+                "output_text": "模型数据验证论文翻译结果保持结构流程稳定"
+            })
+            .to_string(),
+        )
+    } else if input == "MIIMIIMIIM" {
+        (
+            "200 OK",
+            serde_json::json!({ "output_text": "模型" }).to_string(),
+        )
     } else if input == "The result {v1} = 1, 2, 3 shows the distinction." {
         (
             "200 OK",
@@ -1609,8 +1622,8 @@ fn corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 192, "Corpus fixture inventory changed");
-    assert_eq!(cases.len(), 119, "Corpus case inventory changed");
+    assert_eq!(ids.len(), 199, "Corpus fixture inventory changed");
+    assert_eq!(cases.len(), 126, "Corpus case inventory changed");
 
     let mut snapshot_digests = BTreeMap::new();
     let mut snapshot_counts = BTreeMap::new();
@@ -2553,6 +2566,7 @@ fn page_zero_title_and_bounded_author_block_are_policy_passthrough() {
         .unwrap();
     assert_eq!(paragraphs.len(), 3, "{paragraphs:#?}");
     for paragraph in &paragraphs[..2] {
+        assert_eq!(paragraph.get("first_line_indent"), None, "{paragraph:#?}");
         assert!(
             paragraph["text"]["chars"]
                 .as_array()
@@ -3165,6 +3179,122 @@ fn pure_formula_model_paragraph_is_typed_passthrough_without_a_request() {
             .unwrap()
             .starts_with(&std::fs::read(input_path).unwrap())
     );
+}
+
+#[test]
+fn natural_paragraph_split_creates_exactly_two_requests_from_dual_evidence() {
+    let id = "unit-para-05-natural-split";
+    let inspected = run_inspect_with_layout(id);
+    assert!(
+        inspected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let events = parse_events(&inspected.stdout);
+    let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap();
+    assert_eq!(paragraphs.len(), 2, "{paragraphs:#?}");
+    assert_eq!(
+        paragraphs.iter().map(il_paragraph_text).collect::<Vec<_>>(),
+        ["M M", "M M"]
+    );
+    assert_eq!(paragraphs[0].get("first_line_indent"), None);
+    assert_eq!(paragraphs[1]["first_line_indent"], 24.0);
+
+    let directory = tempfile::tempdir().unwrap();
+    let server = FakeResponsesServer::start();
+    let output = run_openai_with_layout(
+        id,
+        &server,
+        &directory.path().join("translated.pdf"),
+        &directory.path().join("debug"),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(server.wait_for_requests(2), ["M M", "M M"]);
+}
+
+#[test]
+fn source_indents_are_inferred_and_preserved_as_absolute_output_deltas() {
+    let id = "unit-para-09-indent-preservation";
+    let inspected = run_inspect_with_layout(id);
+    assert!(
+        inspected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let events = parse_events(&inspected.stdout);
+    let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap();
+    assert_eq!(paragraphs.len(), 3, "{paragraphs:#?}");
+    assert_eq!(paragraphs[0].get("first_line_indent"), None);
+    assert_eq!(paragraphs[1]["first_line_indent"], 12.0);
+    assert_eq!(paragraphs[2]["first_line_indent"], 36.0);
+    assert!(paragraphs.iter().all(|paragraph| {
+        paragraph["text"]["chars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|character| character["layout"]["policy"] == "translate")
+    }));
+
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("translated.pdf");
+    let server = FakeResponsesServer::start();
+    let output = run_openai_with_layout(id, &server, &output_path, &directory.path().join("debug"));
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(server.wait_for_requests(3), ["M M M", "M M M", "M M M"]);
+
+    let mut line_starts = Vec::<(f64, f64)>::new();
+    for character in mupdf_character_attributes(&output_path) {
+        let x = number(&character, "x");
+        let y = number(&character, "y");
+        if let Some((_, start)) = line_starts
+            .iter_mut()
+            .find(|(baseline, _)| (*baseline - y).abs() <= 0.01)
+        {
+            *start = start.min(x);
+        } else {
+            line_starts.push((y, x));
+        }
+    }
+    line_starts.sort_by(|left, right| left.0.total_cmp(&right.0));
+    assert_eq!(line_starts.len(), 4, "{line_starts:?}");
+    for ((_, start), expected_indent) in line_starts[..3].iter().zip([0.0, 12.0, 36.0]) {
+        assert_close(*start - 60.0, expected_indent, 0.01);
+    }
+    assert_close(line_starts[3].1, 60.0, 0.01);
+}
+
+#[test]
+fn translated_body_font_size_uses_the_non_script_character_mode() {
+    let id = "unit-form-14-font-size-mode";
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("translated.pdf");
+    let server = FakeResponsesServer::start();
+    let output = run_openai_with_layout(id, &server, &output_path, &directory.path().join("debug"));
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(server.wait_for_requests(1), ["MIIMIIMIIM"]);
+
+    let fonts = mupdf_element_attributes(&output_path, b"font");
+    assert_eq!(fonts.len(), 1, "{fonts:#?}");
+    assert_close(number(&fonts[0], "size"), 10.0, 0.001);
 }
 
 #[test]
@@ -4018,6 +4148,7 @@ fn supported_font_and_cmap_fixtures_match_manifest_unicode_and_positive_advances
         "unit-font-04-negative-descent-parent",
         "mal-font-04-positive-descent",
         "unit-font-08-type1-header-encoding",
+        "unit-font-10-estimated-bbox",
         "unit-font-escaped-name",
         "unit-stream-02-type3-d1",
         "unit-stream-04-type3-d0",
@@ -4098,6 +4229,54 @@ fn supported_font_and_cmap_fixtures_match_manifest_unicode_and_positive_advances
                 .windows(b"(cid:".len())
                 .any(|window| window == b"(cid:"),
             "fixture {id} output contains a CID literal"
+        );
+    }
+}
+
+#[test]
+fn font_10_estimated_bbox_is_conservative_typed_and_translatable() {
+    let id = "unit-font-10-estimated-bbox";
+    let inspected = run_inspect(&fixture_path(id), true, None);
+    assert!(
+        inspected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let events = parse_events(&inspected.stdout);
+    assert_one_terminal_last(&events, "result");
+    let estimated = events
+        .iter()
+        .filter(|event| event["id"] == "glyph_bbox_estimated")
+        .collect::<Vec<_>>();
+    assert_eq!(estimated.len(), 1, "{events:#?}");
+    assert_eq!(estimated[0]["page_index"], 0);
+    assert_eq!(estimated[0]["character_index"], 0);
+    assert_eq!(estimated[0]["font_object"], serde_json::json!([5, 0]));
+    assert_eq!(estimated[0]["code"], 65_535);
+
+    let paragraph = &events.last().unwrap()["il"]["pages"][0]["paragraphs"][0];
+    assert!(paragraph.get("preserved").is_none(), "{paragraph:#?}");
+    let character = &paragraph["text"]["chars"][0];
+    assert_eq!(character["unicode"], "M");
+    assert_eq!(character["bbox_estimated"], true);
+    assert_close(
+        character["box"]["right"].as_f64().unwrap() - character["box"]["left"].as_f64().unwrap(),
+        7.2,
+        0.001,
+    );
+    for (estimated_edge, metric_edge, relation) in [
+        ("left", "left", std::cmp::Ordering::Less),
+        ("bottom", "bottom", std::cmp::Ordering::Less),
+        ("right", "right", std::cmp::Ordering::Greater),
+        ("top", "top", std::cmp::Ordering::Greater),
+    ] {
+        assert_eq!(
+            character["visual_bbox"][estimated_edge]
+                .as_f64()
+                .unwrap()
+                .total_cmp(&character["box"][metric_edge].as_f64().unwrap()),
+            relation,
+            "{estimated_edge}: {character:#?}"
         );
     }
 }
@@ -4427,6 +4606,68 @@ fn structured_and_inline_image_programs_round_trip_without_rebuilding_content() 
 }
 
 #[test]
+fn parse_06_reports_the_malformed_object_and_xref_offset_without_output() {
+    let id = "mal-parse-06-object-syntax";
+    let input = fixture_path(id);
+    let bytes = std::fs::read(&input).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let translated = directory.path().join("must-not-exist.pdf");
+    let output = run_none(&input, Some(&translated), true);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    let events = parse_events(&output.stdout);
+    assert_one_terminal_last(&events, "error");
+    let error = events.last().unwrap();
+    assert_eq!(error["category"], "input");
+    assert_eq!(error["reason"], "pdf_parse");
+    assert_eq!(error["detail"]["kind"], "object_syntax");
+    assert_eq!(error["detail"]["objid"], serde_json::json!([12, 0]));
+    let offset = error["detail"]["offset"].as_u64().unwrap() as usize;
+    assert_eq!(offset, 3533);
+    assert!(bytes[offset..].starts_with(b"12 0 obj"));
+    assert!(!translated.exists());
+}
+
+#[test]
+fn stream_03_path_arity_degrades_the_page_and_preserves_exact_bytes() {
+    let id = "mal-stream-12-path-arity";
+    let input = fixture_path(id);
+    let inspected = run_inspect(&input, true, None);
+    assert!(
+        inspected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let events = parse_events(&inspected.stdout);
+    assert_one_terminal_last(&events, "result");
+    assert_eq!(
+        events.last().unwrap()["il"]["pages"][0]["paragraphs"],
+        serde_json::json!([])
+    );
+    let degraded = events
+        .iter()
+        .filter(|event| event["id"] == "page_degraded")
+        .collect::<Vec<_>>();
+    assert_eq!(degraded.len(), 1, "{events:#?}");
+    assert_eq!(degraded[0]["page_index"], 0);
+    assert_eq!(degraded[0]["reason"], "graphics_unreliable");
+
+    let directory = tempfile::tempdir().unwrap();
+    let translated = directory.path().join("translated.pdf");
+    let output = run_none(&input, Some(&translated), true);
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        std::fs::read(&translated).unwrap(),
+        std::fs::read(input).unwrap()
+    );
+}
+
+#[test]
 fn parse_stream_and_xobject_fixture_matrix_stays_bounded_and_preserves_streams() {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum OutputExpectation {
@@ -4451,6 +4692,10 @@ fn parse_stream_and_xobject_fixture_matrix_stays_bounded_and_preserves_streams()
         (
             "mal-parse-05-contents-array-string-split",
             (0, OutputExpectation::Exact, Some("degradation_summary")),
+        ),
+        (
+            "mal-parse-06-object-syntax",
+            (2, OutputExpectation::Missing, None),
         ),
         (
             "mal-parse-06-deep-nesting",
@@ -4524,6 +4769,10 @@ fn parse_stream_and_xobject_fixture_matrix_stays_bounded_and_preserves_streams()
         (
             "mal-stream-11-tj-array-type",
             (0, OutputExpectation::Rewritten, Some("content_recovered")),
+        ),
+        (
+            "mal-stream-12-path-arity",
+            (0, OutputExpectation::Exact, Some("degradation_summary")),
         ),
         (
             "mal-xobj-01-self-recursive",
@@ -4652,6 +4901,10 @@ fn parse_stream_and_xobject_fixture_matrix_stays_bounded_and_preserves_streams()
         (
             "unit-stream-11-inline-image-filtered-fallback",
             (0, OutputExpectation::Rewritten, Some("content_recovered")),
+        ),
+        (
+            "unit-stream-12-path-parent",
+            (0, OutputExpectation::Rewritten, None),
         ),
         (
             "unit-stream-odd-hex",

@@ -74,6 +74,18 @@ noncharacter 包括 `U+FDD0`–`U+FDEF` 及每个平面末尾的 `U+FFFE/U+FFFF`
 - CID 字体：`W` 数组区间查找 → `DW` → 规范缺省 1000。
 - Type3：`d0`/`d1` 的前两个操作数 × `FontMatrix`。
 
+#### 5.1 超出嵌入字体字形范围的 CID（FONT-10）
+
+当 Type0 字体的 CID 经 `/CIDToGIDMap` 映射到不存在的 GID，但 ToUnicode 与 PDF `/W`/`DW`
+仍可靠时，不把「缺轮廓」误编码成零面积，也不因此保留整段。advance 继续取 PDF 宽度；
+`visual_bbox` 取嵌入 TrueType 全局 bbox、descriptor `/FontBBox`、descriptor ascent/descent 与
+`[0, advance]` 的并集，再经字号、水平缩放、文本矩阵与 CTM 变换到页空间。这个盒是用于
+碰撞检查的保守超集，不声称是实际墨迹。
+
+对应字符在 additive IL v1 字段标记 `bbox_estimated=true`，并逐字符发 informational
+`glyph_bbox_estimated`（页、字符索引、字体对象、CID）。映射到有效 GID 的字符不走该分支；
+Unicode 不可靠、advance 非正/非有限或嵌入字体本身不可解析时，仍按 §4 整段保留。
+
 ### 6. CJK 输入 fixture 的字体
 
 选定 **Noto Sans SC Regular 的确定性子集**（`corpus/fonts/` 下入库，OFL 许可证原文并排提交，README 记录 `pyftsubset` 复现命令并经两次生成 SHA-256 比对，哈希钉入引用它的每份 manifest）。

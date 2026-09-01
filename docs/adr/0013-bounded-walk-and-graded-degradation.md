@@ -45,7 +45,7 @@ Typeset 的恒等守卫从「全段单一 upright 字体 run」收窄为「**替
 | 粒度 | 触发 | 保留语义 | 载体 |
 |---|---|---|---|
 | **文档级** | 加密、页树环、ObjStm 损坏、关键位置 dangling ref | 分类退出、不产出输出文件 | 现有 `MimusError`（不新增 reason，复用 `pdf_parse`/`unsupported_pdf`） |
-| **页级** | tokenizer fatal（未闭合字符串/数组/hex、嵌套超限）、坏 BBox/Matrix、缺 XObject 资源、非法 `/Rotate`、坏 MediaBox | 该页不产生 `PageRewrite`，原 content stream 逐字节保留；其余页继续 | `ExtractedPage.degraded`（pub(crate)） |
+| **页级** | tokenizer fatal（未闭合字符串/数组/hex、嵌套超限）、`m`/`l` 路径操作数错长或非数值、坏 BBox/Matrix、缺 XObject 资源、非法 `/Rotate`、坏 MediaBox | 该页不产生 `PageRewrite`，原 content stream 逐字节保留；其余页继续 | `ExtractedPage.degraded`（pub(crate)） |
 | **段级** | 字体或 Unicode 不可信（见 ADR-0014）、退化文本矩阵导致不可定位、翻译响应连续两次违反占位符或内容守恒合同 | 该段全部区间不替换，`translated_text` 保持 `None` | `il::Paragraph.preserved`（可选字段） |
 
 「**单元**」不是新的 IL 层级。IL 保持 Document → Page → Paragraph → Char 四级，单元 = **段内连续的、同一隔离原因的字符区间**，由 Typeset 从 `Char.text_transform` 与可见性标记动态聚合。理由：M1 的隔离语义只需要回答「哪些区间不替换」，派生分组零 schema 成本；#20 若需要更强结构再升 IL 版本。
@@ -59,6 +59,11 @@ Typeset 的恒等守卫从「全段单一 upright 字体 run」收窄为「**替
 ### 3. 有界失败模型
 
 **tokenizer**：数字 parse 失败降级为 operator 词（粘连恢复的前提）；hex 串奇数 nibble 补 0（规范行为，不告警）；非 hex 字符、未闭合 string/array/hex → 该页 fatal → 页级降级。粘连 token（`12Tf`）仅对定位/状态类操作符白名单剥后缀并立即执行 + warning；双小数点（`10.5.3`）在第二个小数点处切成两个操作数 + warning。后两条沿用 M0 实验 2 已被 `mal-stream-06/07` 钉死的语义。
+
+**路径可靠性（STREAM-03）**：`m` 与 `l` 各自必须恰有两个有限数值操作数。少、多或
+非数值都使路径墨迹及其归属不可证明，整页进入 `graphics_unreliable` 页级档；即使同页
+文字可正常走查，也不建立 IL 段落、不产生 `PageRewrite`，输出保持原 PDF 字节。合法父本
+仍照常翻译。该档经既有 `page_degraded` / `degradation_summary` 出线，不新增退出类别。
 
 **操作数栈**：每个 operator 边界清空。多余操作数取尾部 arity + warning；操作数不足时该 operator **原子跳过**（CTM 不变）+ warning。这是 M0 实验 2 §6 STREAM-02 唯一给出完整理由的边界策略——错误不扩散到后续 operator。栈**没有数值上限**，有界性来自「每 operator 清空」这一结构性保证。
 

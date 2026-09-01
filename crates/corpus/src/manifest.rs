@@ -339,6 +339,7 @@ pub enum DegradationReason {
     BadFormBBox,
     BadFormMatrix,
     XObjectNotAStream,
+    GraphicsUnreliable,
     UnreliableUnicode,
     UnsupportedFont,
     NonPositiveAdvance,
@@ -359,6 +360,7 @@ impl DegradationReason {
                     | Self::BadFormBBox
                     | Self::BadFormMatrix
                     | Self::XObjectNotAStream
+                    | Self::GraphicsUnreliable
             ),
             DegradationScope::Paragraph => matches!(
                 self,

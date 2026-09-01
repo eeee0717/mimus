@@ -152,18 +152,20 @@ fn mutool_hashes(pdf: &Path) -> Result<Vec<String>> {
     parse_mutool_md5(&out.combined_text()?)
 }
 
-/// `mutool draw -s 5` 每页打印一行 `page <file> <n> <md5>`。
+/// `mutool draw -s 5` 每页打印一个 32 位 MD5。通常它位于
+/// `page <file> <n> <md5>` 行尾；渲染警告写入同一合并输出时，MuPDF 也可能把
+/// page 前缀、警告和 MD5 拆成多行，因此这里只认严格的小写十六进制 token。
 fn parse_mutool_md5(output: &str) -> Result<Vec<String>> {
-    output
-        .lines()
-        .filter(|l| l.starts_with("page "))
-        .map(|l| {
-            l.split_whitespace()
-                .next_back()
-                .map(str::to_string)
-                .with_context(|| format!("无法从 mutool 的输出行读出 md5：{l}"))
+    Ok(output
+        .split_whitespace()
+        .filter(|token| {
+            token.len() == 32
+                && token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
-        .collect()
+        .map(str::to_string)
+        .collect())
 }
 
 #[cfg(test)]
@@ -202,6 +204,17 @@ mod tests {
     #[test]
     fn ignores_lines_that_are_not_page_reports() {
         let out = "warning: something\npage a.pdf 1 abc\ntotal 12ms\n";
-        assert_eq!(parse_mutool_md5(out).unwrap(), vec!["abc".to_string()]);
+        assert!(parse_mutool_md5(out).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reads_a_hash_split_from_its_page_prefix_by_render_warnings() {
+        let out = "page a.pdf 1warning: FT_Load_Glyph(...): invalid argument\n\
+                   warning: cannot render glyph\n\
+                    e134ecde4ada98a91be5430373337e4e\n";
+        assert_eq!(
+            parse_mutool_md5(out).unwrap(),
+            vec!["e134ecde4ada98a91be5430373337e4e".to_string()]
+        );
     }
 }
