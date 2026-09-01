@@ -581,6 +581,12 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 page_index + 1
             );
         }
+        DiagnosticEvent::LinkBordersStripped { annotation_count } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "info[link_borders_stripped]: removed visible border styling from {annotation_count} Link annotations"
+            );
+        }
         DiagnosticEvent::TypesetOverflowDetail {
             page_index,
             paragraph_index,
@@ -765,6 +771,8 @@ mod tests {
         ResultPayload::Translate {
             output: "paper.zh.pdf".to_owned(),
             translate_table: false,
+            strip_link_borders: false,
+            bilingual: false,
         }
     }
 

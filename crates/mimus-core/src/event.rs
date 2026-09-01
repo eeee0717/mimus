@@ -117,6 +117,8 @@ pub struct ConfigurationResolved {
     pub concurrency: usize,
     pub strict: bool,
     pub translate_table: bool,
+    pub strip_link_borders: bool,
+    pub bilingual: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -156,6 +158,8 @@ pub enum ResultPayload {
     Translate {
         output: String,
         translate_table: bool,
+        strip_link_borders: bool,
+        bilingual: bool,
     },
     Inspect {
         il: il::Document,
@@ -255,6 +259,7 @@ pub enum DiagnosticId {
     UnsupportedOutputGlyph,
     SingleLineBoundsExpanded,
     MultiLineBoundsExpanded,
+    LinkBordersStripped,
     TypesetOverflowDetail,
     DroppedDiagnostics,
 }
@@ -535,6 +540,9 @@ pub enum Diagnostic {
         overflow_top_pt: f64,
         overflow_bottom_pt: f64,
     },
+    LinkBordersStripped {
+        annotation_count: usize,
+    },
     /// 段落因每个候选字号的墨迹都撞上障碍或页面边界而 `typeset_overflow` 保留时，
     /// 逐段公开容器盒、按重叠面积排序的有界障碍样本与实际尝试过的字号序列。
     TypesetOverflowDetail {
@@ -576,6 +584,7 @@ impl Diagnostic {
             Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
             Self::SingleLineBoundsExpanded { .. } => DiagnosticId::SingleLineBoundsExpanded,
             Self::MultiLineBoundsExpanded { .. } => DiagnosticId::MultiLineBoundsExpanded,
+            Self::LinkBordersStripped { .. } => DiagnosticId::LinkBordersStripped,
             Self::TypesetOverflowDetail { .. } => DiagnosticId::TypesetOverflowDetail,
         }
     }
@@ -591,6 +600,7 @@ impl Diagnostic {
                 | Self::FormulaBoundaryExpanded { .. }
                 | Self::SingleLineBoundsExpanded { .. }
                 | Self::MultiLineBoundsExpanded { .. }
+                | Self::LinkBordersStripped { .. }
         )
     }
 
@@ -764,6 +774,9 @@ pub enum DiagnosticEvent {
         overflow_top_pt: f64,
         overflow_bottom_pt: f64,
     },
+    LinkBordersStripped {
+        annotation_count: usize,
+    },
     TypesetOverflowDetail {
         page_index: usize,
         paragraph_index: usize,
@@ -807,6 +820,7 @@ impl DiagnosticEvent {
             Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
             Self::SingleLineBoundsExpanded { .. } => DiagnosticId::SingleLineBoundsExpanded,
             Self::MultiLineBoundsExpanded { .. } => DiagnosticId::MultiLineBoundsExpanded,
+            Self::LinkBordersStripped { .. } => DiagnosticId::LinkBordersStripped,
             Self::TypesetOverflowDetail { .. } => DiagnosticId::TypesetOverflowDetail,
             Self::DroppedDiagnostics { .. } => DiagnosticId::DroppedDiagnostics,
         }
@@ -1090,6 +1104,9 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 reading_order: *reading_order,
                 overflow_top_pt: *overflow_top_pt,
                 overflow_bottom_pt: *overflow_bottom_pt,
+            },
+            Diagnostic::LinkBordersStripped { annotation_count } => Self::LinkBordersStripped {
+                annotation_count: *annotation_count,
             },
             Diagnostic::TypesetOverflowDetail {
                 page_index,

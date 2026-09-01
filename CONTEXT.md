@@ -16,7 +16,7 @@
 | 7 | IR：单字符粒度 + 双盒 + Rust enum + serde JSON 快照（schema_version） | [ADR-0007](docs/adr/0007-ir-design.md) |
 | 8 | 目标用户：开源发布，面向"读外文 PDF 的中文研究者"；验收场景=作者本人日常翻译 arXiv 论文 | — |
 | 9 | 语种：输入语言解耦（取决于文本提取），验收只对英→中；排版仅调优简体中文输出 | — |
-| 10 | 输出模式：默认仅译文；`--bilingual` 原/译交替页（修书签/内链页目标映射）；并排不做 | — |
+| 10 | 输出模式：默认仅译文；`--bilingual` 原/译交替页，原页对象不改、译页不复制 `/Annots`，文档内书签/命名目标/Link GoTo 映射到译页，已有 `/PageLabels` 为每对复制同一逻辑页码；并排不做 | — |
 | 11 | 保真范围：书签不翻译、链接热区不调整、表单/OCG 原样透传；断言书签数/注释数不变 | — |
 | 12 | 流水线：固定顺序 pass 链（`fn(&mut Document, &PassContext)`——`Document` 只装数据：原始字节/lopdf 文档/IL/诊断；`PassContext` 装引擎实例/配置/事件钩子；无 pass 框架）；pass 内按页 rayon 并行；`--debug` 逐 pass 落盘 IL | — |
 | 13 | 阶段草案：Parse → ScanDetect(拒绝) → Layout → ParagraphFind → StylesAndFormulas → ExtractTerms → Translate → Typeset → FontEmbed → Write | — |
