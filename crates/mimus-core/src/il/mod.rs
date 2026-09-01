@@ -56,10 +56,31 @@ pub struct Paragraph {
     pub bounds: Rect,
     pub text: TextCarrier,
     pub translated_text: Option<String>,
+    /// Runtime conservation evidence for an accepted remote translation.
+    /// Additive debug metadata; hashes cover the raw protocol strings while
+    /// token counts cover formula-delimited semantic text segments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation_conservation: Option<TranslationConservationEvidence>,
     // ADR-0013 §2: 段级保留的载体。additive 可选字段，IL schema 仍为 1；
     // 未保留的段落序列化结果与加字段之前逐字节相同。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preserved: Option<PreservedReason>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TranslationConservationEvidence {
+    pub request_sha256: String,
+    pub response_sha256: String,
+    pub source_token_types: usize,
+    pub target_token_types: usize,
+    pub source_tokens: Vec<ConservedTokenCount>,
+    pub target_tokens: Vec<ConservedTokenCount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConservedTokenCount {
+    pub token: String,
+    pub occurrences: usize,
 }
 
 /// 段级保留的原因（ADR-0014 §4）。保留段的 `translated_text` 恒为 `None`。
@@ -329,6 +350,7 @@ mod tests {
                     bounds: Rect::default(),
                     text: TextCarrier::Chars { chars: Vec::new() },
                     translated_text: None,
+                    translation_conservation: None,
                     preserved: None,
                 }],
             }],
@@ -347,12 +369,14 @@ mod tests {
             bounds: Rect::default(),
             text: TextCarrier::Chars { chars: Vec::new() },
             translated_text: None,
+            translation_conservation: None,
             preserved: None,
         };
 
         // 未保留的段落不写出该键——既有 IL 消费者看到的字节不变。
         let value = serde_json::to_value(&paragraph).unwrap();
         assert!(value.get("preserved").is_none());
+        assert!(value.get("translation_conservation").is_none());
 
         paragraph.preserved = Some(PreservedReason::UnreliableUnicode);
         let value = serde_json::to_value(&paragraph).unwrap();
@@ -364,5 +388,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(restored.preserved, None);
+        assert_eq!(restored.translation_conservation, None);
     }
 }

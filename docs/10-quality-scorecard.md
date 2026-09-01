@@ -87,12 +87,16 @@ match production translation eligibility participate:
 visible, upright, `translate` policy, and owned by one of the page's direct `/Contents` objects.
 The direct object set comes from structured pinned `qpdf` page JSON; text reached through Form
 XObjects is not mistaken for request input. Tokens are lexed after StylesAndFormulas has finalized
-formula membership. Skipped formula/passthrough/Form characters do not manufacture whitespace:
-eligible characters on either side concatenate exactly as they do in the public formula-elided
-`translated_text` view. A real `implicit_space_before` on an eligible character is still honored,
-matching production `request_text()`. This distinction prevents a source shaped as
-`5 {formula} 1` from being compared as two invented tokens against the public `51` view. The
-evaluator never infers boundaries from geometry.
+formula membership. Accepted translations, including local and backend identities, carry additive
+`translation_conservation` evidence in the Translate IL snapshot. `request_sha256` and
+`response_sha256` bind the raw prepared request and validated response without duplicating either
+string. Source and target multisets are
+computed from the exact runtime semantic segments: bold spans remain continuous text, while each
+formula placeholder is a hard boundary on both sides. Each side records its total distinct-token
+count and at most 64 sorted `{token, occurrences}` entries. Scorecard consumes the evidence only
+when both hashes are valid and both bounded multisets are complete; old snapshots and deliberately
+truncated evidence retain the legacy reconstruction path. The evaluator never infers formula
+boundaries from geometry.
 
 CON-02 consumes the same version-1 TOML glossary used by the evaluator. Each source occurrence must
 have the glossary's canonical target in its aligned translated paragraph. This makes multiple
@@ -170,7 +174,7 @@ pipeline handled the defect.
 | Rule | Production execution point | Failure action / exemption |
 | --- | --- | --- |
 | COV-01 / RSK-01 Unicode reliability | `walk::font::read_simple_encoding` calls the single source `mimus-quality-contract::differences_agl_single_scalar` only for explicit `/Differences` names that the legacy decoder could not resolve; ParagraphFind writes additive IL `unicode_source=differences_agl` and emits typed `unicode_recovered` counts | unknown or multi-scalar names, implicit Standard/MacRoman entries, ToUnicode-unmapped codes, composite fallback, and any cross-engine weak conflict remain whole-paragraph typed `unreliable_unicode`; no retry or guessed scalar |
-| CON-01 | `mimus-quality-contract::conserved_tokens` is called by `translate::executor::execute`; the same function feeds `scorecard::conservation_measurement` | one corrective translation retry; a second violation preserves the whole paragraph with typed `content_conservation` (introduced by the stacked T2 PR) |
+| CON-01 | `mimus-quality-contract::conserved_tokens` is called per formula-delimited semantic segment by `translate::executor::execute`; complete runtime token evidence feeds `scorecard::conservation_measurement` | one corrective translation retry; a second violation preserves the whole paragraph with typed `content_conservation` (introduced by the stacked T2 PR) |
 | CON-02 | prompt construction injects the exact version-1 glossary; scorecard remains the independent aligned-output detector | documented exemption: glossary consistency is a semantic release proposal pending user approval, not a conservative runtime identity predicate; no production typed degradation is claimed |
 | FOR-01 | `pass::complete_model_formula_boundaries`, placeholder restoration, formula byte/font identity replay, and output round-trip validation | ambiguous boundary or replay evidence becomes `typeset_protocol`; unplaceable complete units become `typeset_overflow`; the scorecard heuristic remains an independent proxy |
 | FOR-02 | `pass::plan_paragraph` runs `normalize_formula_interleaved_punctuation_order` and `formula_continuity_is_valid` for fixed-slot and relocated plans; bound arithmetic and visual-line membership come only from `mimus-quality-contract::{formula_continuity_limit, formula_items_share_line}` | repair by evidence-based segment normalization/relocation; otherwise `typeset_overflow` |

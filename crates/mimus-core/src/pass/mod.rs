@@ -2274,6 +2274,7 @@ fn paragraph_from_lines(
         bounds,
         text: TextCarrier::Chars { chars },
         translated_text: None,
+        translation_conservation: None,
         preserved,
     }
 }
@@ -2365,6 +2366,7 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
     let mut prose_paragraph_count = 0;
     for (page_position, page) in document.il.pages.iter_mut().enumerate() {
         for (paragraph_index, paragraph) in page.paragraphs.iter_mut().enumerate() {
+            paragraph.translation_conservation = None;
             if paragraph.preserved.is_some() {
                 paragraph.translated_text = None;
                 continue;
@@ -2382,6 +2384,8 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                 })?;
             if prepared.is_local_identity() {
                 paragraph.translated_text = Some(paragraph.source_text());
+                paragraph.translation_conservation =
+                    Some(prepared.identity_conservation_evidence());
                 continue;
             }
             let prose_shaped = translation_request_is_prose_shaped(prepared.request_text());
@@ -2483,14 +2487,22 @@ pub fn translate(document: &mut Document, context: &PassContext<'_>) -> Result<(
                 )
             })?;
         match execution.outcome {
-            Ok(crate::translate::executor::TranslationOutcome::Translated(restored)) => {
+            Ok(crate::translate::executor::TranslationOutcome::Translated {
+                restored,
+                conservation,
+            }) => {
                 paragraph.translated_text = Some(restored.plain_text());
+                paragraph.translation_conservation = Some(conservation);
                 document
                     .restored_translations
                     .insert((job.page_index, paragraph.reading_order), restored);
             }
-            Ok(crate::translate::executor::TranslationOutcome::Identity { suspicious }) => {
+            Ok(crate::translate::executor::TranslationOutcome::Identity {
+                suspicious,
+                conservation,
+            }) => {
                 paragraph.translated_text = Some(paragraph.source_text());
+                paragraph.translation_conservation = Some(conservation);
                 prose_identity_count += usize::from(job.prose_shaped);
                 if suspicious {
                     document.diagnostics.push(Diagnostic::TranslationIdentity {
@@ -2583,6 +2595,7 @@ fn translate_none(document: &mut Document, context: &PassContext<'_>) -> Result<
             )
         })?;
         for paragraph in &mut page.paragraphs {
+            paragraph.translation_conservation = None;
             if paragraph.preserved.is_some() {
                 paragraph.translated_text = None;
                 continue;
@@ -11294,6 +11307,7 @@ mod tests {
                 }],
             },
             translated_text: None,
+            translation_conservation: None,
             preserved: None,
         };
 
@@ -12223,6 +12237,7 @@ mod tests {
                     chars: chars[..1].to_vec(),
                 },
                 translated_text: Some("M".to_owned()),
+                translation_conservation: None,
                 preserved: None,
             },
             Paragraph {
@@ -12232,6 +12247,7 @@ mod tests {
                     chars: chars[1..].to_vec(),
                 },
                 translated_text: Some("中文".to_owned()),
+                translation_conservation: None,
                 preserved: None,
             },
         ];
@@ -12479,6 +12495,7 @@ mod tests {
                     chars: chars[..1].to_vec(),
                 },
                 translated_text: Some("M".to_owned()),
+                translation_conservation: None,
                 preserved: None,
             },
             Paragraph {
@@ -12492,6 +12509,7 @@ mod tests {
                     chars: chars[1..].to_vec(),
                 },
                 translated_text: Some("中文".to_owned()),
+                translation_conservation: None,
                 preserved: None,
             },
         ];
@@ -12573,6 +12591,7 @@ mod tests {
             bounds: layout_bounds,
             text: TextCarrier::Chars { chars },
             translated_text: Some("中文".to_owned()),
+            translation_conservation: None,
             preserved: None,
         }];
 
@@ -12624,6 +12643,7 @@ mod tests {
             bounds: layout_bounds,
             text: TextCarrier::Chars { chars },
             translated_text: Some("中文".to_owned()),
+            translation_conservation: None,
             preserved: None,
         }];
 
@@ -12695,6 +12715,7 @@ mod tests {
                     chars: chars[..1].to_vec(),
                 },
                 translated_text: Some("M".to_owned()),
+                translation_conservation: None,
                 preserved: None,
             },
             Paragraph {
@@ -12704,6 +12725,7 @@ mod tests {
                     chars: chars[1..5].to_vec(),
                 },
                 translated_text: Some("中文".to_owned()),
+                translation_conservation: None,
                 preserved: None,
             },
             Paragraph {
@@ -12713,6 +12735,7 @@ mod tests {
                     chars: chars[5..].to_vec(),
                 },
                 translated_text: Some("测试".to_owned()),
+                translation_conservation: None,
                 preserved: None,
             },
         ];
@@ -12789,6 +12812,7 @@ mod tests {
                     chars: chars[..1].to_vec(),
                 },
                 translated_text: None,
+                translation_conservation: None,
                 preserved: Some(il::PreservedReason::UnreliableUnicode),
             },
             Paragraph {
@@ -12798,6 +12822,7 @@ mod tests {
                     chars: chars[1..5].to_vec(),
                 },
                 translated_text: Some("中文".to_owned()),
+                translation_conservation: None,
                 preserved: None,
             },
             Paragraph {
@@ -12807,6 +12832,7 @@ mod tests {
                     chars: chars[5..].to_vec(),
                 },
                 translated_text: Some("测试".to_owned()),
+                translation_conservation: None,
                 preserved: None,
             },
         ];
@@ -14288,6 +14314,7 @@ mod tests {
             bounds: owner,
             text: TextCarrier::Chars { chars },
             translated_text: None,
+            translation_conservation: None,
             preserved: None,
         }];
 
@@ -14401,6 +14428,7 @@ mod tests {
             bounds: owner,
             text: TextCarrier::Chars { chars },
             translated_text: None,
+            translation_conservation: None,
             preserved: None,
         }];
 
@@ -14586,6 +14614,7 @@ mod tests {
             bounds: owner,
             text: TextCarrier::Chars { chars },
             translated_text: None,
+            translation_conservation: None,
             preserved: None,
         }];
 
@@ -14759,6 +14788,7 @@ mod tests {
             bounds: owner,
             text: TextCarrier::Chars { chars },
             translated_text: None,
+            translation_conservation: None,
             preserved: None,
         }];
 

@@ -99,7 +99,34 @@ struct Paragraph {
     #[serde(default)]
     translated_text: Option<String>,
     #[serde(default)]
+    translation_conservation: Option<TranslationConservationEvidence>,
+    #[serde(default)]
     preserved: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TranslationConservationEvidence {
+    request_sha256: String,
+    response_sha256: String,
+    source_token_types: usize,
+    target_token_types: usize,
+    source_tokens: Vec<ConservedTokenCount>,
+    target_tokens: Vec<ConservedTokenCount>,
+}
+
+impl TranslationConservationEvidence {
+    fn is_complete(&self) -> bool {
+        valid_sha256(&self.request_sha256)
+            && valid_sha256(&self.response_sha256)
+            && self.source_token_types == self.source_tokens.len()
+            && self.target_token_types == self.target_tokens.len()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ConservedTokenCount {
+    token: String,
+    occurrences: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -805,25 +832,32 @@ fn conservation_measurement(
             if !is_translatable(source) {
                 continue;
             }
-            let Some(translation) = find_paragraph(after, page.index, source.reading_order)
-                .and_then(|paragraph| paragraph.translated_text.as_deref())
-            else {
+            let Some(translated) = find_paragraph(after, page.index, source.reading_order) else {
+                continue;
+            };
+            let Some(translation) = translated.translated_text.as_deref() else {
                 continue;
             };
             checked += 1;
-            let tokens = conserved_tokens(&translate_source_text_for_page(
-                source,
-                direct_content_objects.and_then(|objects| objects.get(&page.index)),
-            ));
-            let translated_tokens = conserved_tokens(translation);
-            let mut translated_counts = BTreeMap::<String, usize>::new();
-            for token in translated_tokens {
-                *translated_counts.entry(token).or_default() += 1;
-            }
-            let mut counts = BTreeMap::<String, usize>::new();
-            for token in tokens {
-                *counts.entry(token).or_default() += 1;
-            }
+            let (counts, translated_counts) = translated
+                .translation_conservation
+                .as_ref()
+                .filter(|evidence| evidence.is_complete())
+                .map(|evidence| {
+                    (
+                        evidence_token_counts(&evidence.source_tokens),
+                        evidence_token_counts(&evidence.target_tokens),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    (
+                        token_multiset(conserved_tokens(&translate_source_text_for_page(
+                            source,
+                            direct_content_objects.and_then(|objects| objects.get(&page.index)),
+                        ))),
+                        token_multiset(conserved_tokens(translation)),
+                    )
+                });
             for (token, expected) in counts {
                 source_occurrences += expected;
                 let found = translated_counts
@@ -856,6 +890,26 @@ fn conservation_measurement(
         ),
         violations,
     }
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn evidence_token_counts(tokens: &[ConservedTokenCount]) -> BTreeMap<String, usize> {
+    tokens.iter().fold(BTreeMap::new(), |mut counts, entry| {
+        *counts.entry(entry.token.clone()).or_default() += entry.occurrences;
+        counts
+    })
+}
+
+fn token_multiset(tokens: Vec<String>) -> BTreeMap<String, usize> {
+    tokens
+        .into_iter()
+        .fold(BTreeMap::new(), |mut counts, token| {
+            *counts.entry(token).or_default() += 1;
+            counts
+        })
 }
 
 #[derive(Debug, Serialize)]
@@ -3052,11 +3106,11 @@ mod tests {
     }
 
     #[test]
-    fn translation_source_matches_the_formula_elided_translation_view() {
+    fn runtime_evidence_preserves_formula_boundaries_without_manufacturing_units() {
         let characters = [
-            ("5", "text", "translate"),
-            ("˜", "inline_formula", "passthrough"),
-            ("1", "text", "translate"),
+            ("0", "text", "translate"),
+            ("=", "inline_formula", "passthrough"),
+            ("h", "text", "translate"),
         ]
         .into_iter()
         .map(|(character, label, policy)| {
@@ -3068,7 +3122,7 @@ mod tests {
             })
         })
         .collect::<Vec<_>>();
-        let document: Il = serde_json::from_value(serde_json::json!({
+        let before: Il = serde_json::from_value(serde_json::json!({
             "pages": [{"index": 0, "paragraphs": [{
                 "reading_order": 1,
                 "bounds": {"left": 0.0, "bottom": 0.0, "right": 1.0, "top": 1.0},
@@ -3076,11 +3130,43 @@ mod tests {
             }]}]
         }))
         .unwrap();
+        let without_evidence: Il = serde_json::from_value(serde_json::json!({
+            "pages": [{"index": 0, "paragraphs": [{
+                "reading_order": 1,
+                "bounds": {"left": 0.0, "bottom": 0.0, "right": 1.0, "top": 1.0},
+                "text": {"chars": []},
+                "translated_text": "0"
+            }]}]
+        }))
+        .unwrap();
+        let with_evidence: Il = serde_json::from_value(serde_json::json!({
+            "pages": [{"index": 0, "paragraphs": [{
+                "reading_order": 1,
+                "bounds": {"left": 0.0, "bottom": 0.0, "right": 1.0, "top": 1.0},
+                "text": {"chars": []},
+                "translated_text": "0",
+                "translation_conservation": {
+                    "request_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "response_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+                    "source_token_types": 1,
+                    "target_token_types": 1,
+                    "source_tokens": [{"token": "0", "occurrences": 1}],
+                    "target_tokens": [{"token": "0", "occurrences": 1}]
+                }
+            }]}]
+        }))
+        .unwrap();
 
-        let source = translate_source_text(&document.pages[0].paragraphs[0]);
+        let reconstructed = conservation_measurement(&before, &without_evidence, None);
+        assert_eq!(reconstructed.source_occurrences, 2);
+        assert_eq!(reconstructed.missing_occurrences, 1);
+        assert_eq!(reconstructed.violations[0].token, "h");
 
-        assert_eq!(source, "51");
-        assert_eq!(conserved_tokens(&source), ["51"]);
+        let exact = conservation_measurement(&before, &with_evidence, None);
+        assert_eq!(exact.source_occurrences, 1);
+        assert_eq!(exact.preserved_occurrences, 1);
+        assert_eq!(exact.missing_occurrences, 0);
+        assert!(exact.violations.is_empty());
     }
 
     #[test]

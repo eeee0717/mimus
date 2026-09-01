@@ -4,6 +4,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
+use mimus_quality_contract::conserved_tokens;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use secrecy::{ExposeSecret, SecretString};
@@ -17,6 +18,7 @@ pub(crate) mod executor;
 
 pub const PARAGRAPH_PROMPT_VERSION: &str = "mimus-paragraph-v1";
 pub const TERMS_PROMPT_VERSION: &str = "mimus-terms-v1";
+const MAX_CONSERVATION_EVIDENCE_TOKEN_TYPES: usize = 64;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Glossary {
@@ -195,6 +197,7 @@ pub(crate) enum PreparedPart {
 pub(crate) struct PreparedTranslation {
     request_text: String,
     tokens: Vec<ProtocolToken>,
+    source_segments: Vec<String>,
     echo_retry_eligible: bool,
     local_identity: bool,
 }
@@ -248,6 +251,7 @@ impl PreparedTranslation {
         let mut request_text = String::new();
         let mut tokens = Vec::new();
         let mut source_text = String::new();
+        let mut source_segments = vec![String::new()];
         let mut formula_index = 0;
         let mut bold_index = 0;
         let mut literal_index = 0;
@@ -255,10 +259,12 @@ impl PreparedTranslation {
             match part {
                 PreparedPart::Text { text, bold: false } => {
                     source_text.push_str(&text);
+                    source_segments.last_mut().unwrap().push_str(&text);
                     push_encoded_text(&mut request_text, &mut tokens, &mut literal_index, &text);
                 }
                 PreparedPart::Text { text, bold: true } => {
                     source_text.push_str(&text);
+                    source_segments.last_mut().unwrap().push_str(&text);
                     bold_index += 1;
                     let open = format!("<b{bold_index}>");
                     let close = format!("</b{bold_index}>");
@@ -282,12 +288,14 @@ impl PreparedTranslation {
                         index: formula_index,
                         literal,
                     });
+                    source_segments.push(String::new());
                 }
             }
         }
         Self {
             request_text,
             tokens,
+            source_segments,
             echo_retry_eligible: echo_retry_eligible(&source_text),
             local_identity: local_identity_eligible(&source_text),
         }
@@ -303,6 +311,77 @@ impl PreparedTranslation {
 
     pub(crate) const fn is_local_identity(&self) -> bool {
         self.local_identity
+    }
+
+    pub(crate) fn missing_conserved_tokens(&self, restored: &RestoredTranslation) -> Vec<String> {
+        let (_, _, missing) = self.conservation_token_counts(restored);
+        missing
+    }
+
+    pub(crate) fn conservation_evidence(
+        &self,
+        validated: &ValidatedTranslation,
+        restored: &RestoredTranslation,
+    ) -> crate::il::TranslationConservationEvidence {
+        let (source_tokens, target_tokens, _) = self.conservation_token_counts(restored);
+        crate::il::TranslationConservationEvidence {
+            request_sha256: sha256_hex(self.request_text.as_bytes()),
+            response_sha256: sha256_hex(validated.as_str().as_bytes()),
+            source_token_types: source_tokens.len(),
+            target_token_types: target_tokens.len(),
+            source_tokens: bounded_token_count_records(source_tokens),
+            target_tokens: bounded_token_count_records(target_tokens),
+        }
+    }
+
+    pub(crate) fn identity_conservation_evidence(
+        &self,
+    ) -> crate::il::TranslationConservationEvidence {
+        let tokens = token_count_records(token_counts(segment_conserved_tokens(
+            self.source_segments.iter().map(String::as_str),
+        )));
+        crate::il::TranslationConservationEvidence {
+            request_sha256: sha256_hex(self.request_text.as_bytes()),
+            response_sha256: sha256_hex(self.request_text.as_bytes()),
+            source_token_types: tokens.len(),
+            target_token_types: tokens.len(),
+            source_tokens: bounded_token_count_records(tokens.clone()),
+            target_tokens: bounded_token_count_records(tokens),
+        }
+    }
+
+    fn conservation_token_counts(
+        &self,
+        restored: &RestoredTranslation,
+    ) -> (
+        Vec<crate::il::ConservedTokenCount>,
+        Vec<crate::il::ConservedTokenCount>,
+        Vec<String>,
+    ) {
+        let source = segment_conserved_tokens(self.source_segments.iter().map(String::as_str));
+        let target_segments = restored.segments.iter().map(|segment| {
+            segment
+                .iter()
+                .map(|character| character.value)
+                .collect::<String>()
+        });
+        let target = segment_conserved_tokens(target_segments);
+        let source_counts = token_counts(source);
+        let target_counts = token_counts(target);
+        let missing = source_counts
+            .iter()
+            .flat_map(|(token, expected)| {
+                std::iter::repeat_n(
+                    token.clone(),
+                    expected.saturating_sub(target_counts.get(token).copied().unwrap_or(0)),
+                )
+            })
+            .collect();
+        (
+            token_count_records(source_counts),
+            token_count_records(target_counts),
+            missing,
+        )
     }
 
     pub(crate) fn placeholder_retry_correction(
@@ -525,6 +604,47 @@ impl PreparedTranslation {
         }
         Ok(RestoredTranslation { segments })
     }
+}
+
+fn segment_conserved_tokens(segments: impl IntoIterator<Item = impl AsRef<str>>) -> Vec<String> {
+    segments
+        .into_iter()
+        .flat_map(|segment| conserved_tokens(segment.as_ref()))
+        .collect()
+}
+
+fn token_counts(tokens: Vec<String>) -> BTreeMap<String, usize> {
+    tokens
+        .into_iter()
+        .fold(BTreeMap::new(), |mut counts, token| {
+            *counts.entry(token).or_default() += 1;
+            counts
+        })
+}
+
+fn token_count_records(counts: BTreeMap<String, usize>) -> Vec<crate::il::ConservedTokenCount> {
+    counts
+        .into_iter()
+        .map(|(token, occurrences)| crate::il::ConservedTokenCount { token, occurrences })
+        .collect()
+}
+
+fn bounded_token_count_records(
+    tokens: Vec<crate::il::ConservedTokenCount>,
+) -> Vec<crate::il::ConservedTokenCount> {
+    tokens
+        .into_iter()
+        .take(MAX_CONSERVATION_EVIDENCE_TOKEN_TYPES)
+        .collect()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(output, "{byte:02x}").expect("writing into a String cannot fail");
+    }
+    output
 }
 
 fn echo_retry_eligible(source: &str) -> bool {
