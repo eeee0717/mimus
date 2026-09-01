@@ -772,6 +772,7 @@ mod tests {
             output: "paper.zh.pdf".to_owned(),
             translate_table: false,
             strip_link_borders: false,
+            bilingual: false,
         }
     }
 

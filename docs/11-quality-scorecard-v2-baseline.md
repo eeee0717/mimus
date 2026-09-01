@@ -1,26 +1,32 @@
 # M3 scorecard v2 baseline
 
-Date: 2026-08-30. Schema: scorecard v2. Thresholds remain proposals pending user approval. Sections
-1-6 preserve the pre-fix baseline; section 7 is the superseding L5-5R2 acceptance baseline.
+Date: 2026-08-30, refreshed 2026-08-31. Schema: scorecard v2. Thresholds remain proposals pending
+user approval. The 20-paper cluster rows in Sections 1-3 preserve an `invalid-profile` historical
+run and are not comparable with a conserving baseline. Sections 4-7 retain separate real-anchor,
+process, and acceptance history. Section 8 is the current 20-paper conserving-fake and closed-cache
+anchor baseline.
 
-## 1. Evidence and conclusion
+## 1. Historical evidence and conclusion (cluster `invalid-profile`)
+
+> **Invalid profile:** the archived 20-paper outputs in Sections 1-3 were labelled conserving, but
+> their Translate IL is the compressed legacy fake profile. These numbers are retained for audit
+> history only and must not be used as a baseline or compared numerically with Section 8.
 
 The anchor is the archived real Chinese L5-4R output for `1706.03762v7`; its source, IL, NDJSON,
-and output SHA-256 were checked as one consistent artifact set. The other rows rerun the same 20
-archived papers against the loopback conserving fake. No paper was downloaded and no real
-translation API was called.
+and output SHA-256 were checked as one consistent artifact set. The other rows were archived under
+the loopback conserving-fake label, which Section 8.1 later disproves. No paper was downloaded and
+no real translation API was called.
 
-The 20-paper publication rate is 18/20 (90%); `Internal/6` is 2/20 (10%). These two failures are
-production bugs, not typed degradations, and receive no fabricated score. Among published papers,
-the typed-degradation median is 293 and the worst is 1,278. Every published conserving-fake row has
-100% numeric/unit/reference conservation.
+The historical 20-paper publication rate is 18/20 (90%); `Internal/6` is 2/20 (10%). These values
+and the historical typed-degradation median of 293 and worst value of 1,278 describe the
+`invalid-profile` run only. They do not establish conserving-fake behavior.
 
 The real anchor's automatic total is 93.142025, but its conclusion is
 `blocked_by_confirmed_critical`: formula-boundary leakage produced `value ls]`, and title plus the
 complete author block violate the adjudicated passthrough policy. Human-confirmed critical defects
 override the numeric total without rewriting it.
 
-## 2. Per-paper matrix
+## 2. Historical per-paper matrix (`invalid-profile`)
 
 `Con` is CON-01 conservation; `Formula`, `Gap`, and `Hole` are violation counts; `T/A` is failed
 STR-05 title/author invariants. Legacy v1 and v2 totals are not directly comparable because the
@@ -55,7 +61,7 @@ false positive: Form XObject characters labelled `translate` in IL were never el
 production request. Matching production's visible/upright/policy/direct-`/Contents` contract yields
 287/287 on the fresh run.
 
-## 3. Cluster and reproducibility
+## 3. Historical cluster and reproducibility (`invalid-profile`)
 
 | Producer | Papers | Published | Internal | Publication | Internal rate | Typed median | Typed worst |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -119,7 +125,7 @@ The final QE rerun used `HF_HUB_OFFLINE=1` against that verified cache. Cargo ra
 parsing; no new Cargo package or network fetch was needed. No key, paper byte, model, or Python
 environment is committed.
 
-## 6. Next round
+## 6. Historical next-round note
 
 First repair the two new #115 `Internal/6` regressions; real input must publish or end in an
 ADR-0013 typed degradation. After that, the data favors #118 before broad #38 fixture backfill:
@@ -195,3 +201,108 @@ rows, `(3,12)` `unreliable_unicode` and `(4,6)` `typeset_overflow`. The audit ex
 screenshot regression `(3,4)` as complete `sqrt(d_k)`, plus complete rigid bodies at `(3,9)` and
 `(4,21)`. The accepted ordinary and strict replays both hit 137/137 cache entries and make zero
 provider calls; strict exits 4 for exactly those two reviewed typed paragraphs and publishes no PDF.
+
+## 8. Corrected conserving baseline (accepted 2026-08-31)
+
+This section supersedes the cluster claims in Sections 1-6. It measures the Round A stack tip using
+the `conserving_translation` loopback profile with a fake key and no cache, then replays the real
+anchor from the immutable archived cache against a confirmed-closed endpoint. The run made zero real
+translation API calls, downloaded no papers or models, and wrote no paper-derived text to the
+repository.
+
+### 8.1 Why the archived baseline is invalid
+
+The #118 archive contains `t0-conserving-runs`, `t3-conserving-runs`, and `t3-final-runs`. Their
+NDJSON names the model `m3-118-conserving-fake-v1`, but the artifact bytes prove that the loopback
+served the compressed legacy profile:
+
+- t0 used loopback port 57929 while t3 used 58574, yet all three Word-17 Translate IL files are
+  byte-identical with SHA-256
+  `1150317812f85d77d858c1363f061b746a112c6985254fb2762aeb4e0040a0f1`;
+- the same representative paragraph has 103 source characters and only 33 translated characters in
+  all three directories;
+- `t3-conserving-runs` and `t3-final-runs` are therefore duplicate mislabeled output, not independent
+  conserving evidence.
+
+The archive and its scores remain read-only historical evidence. The exact server implementation
+that produced the bytes was not retained, so the bounded conclusion is a mislabeled loopback
+behavior or archival copy, not a production regression and not a reason to reconstruct the old run.
+
+### 8.2 Corrected 20-paper matrix
+
+`v2` is the automatic scorecard v2 total. `Typed` is the terminal typed preserved-paragraph count.
+`Con` is CON-01 conservation. `Formula`, `Gap`, and `Hole` are the FOR-01 proxy, FOR-02, and FOR-03
+violation counts; `T/A` is failed STR-05 title/author invariants. Fake output cannot establish
+semantic translation quality, so these totals are mechanical regression measurements only.
+
+| Paper | Producer | v2 | Typed | Con | Formula | Gap | Hole | T/A |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 01 Adam | pdfTeX | 93.333333 | 152 | 1.000000 | 88 | 0 | 0 | 0 |
+| 02 ResNet | pdfTeX | 96.663267 | 219 | 1.000000 | 8 | 0 | 0 | 0 |
+| 03 SqueezeNet | pdfTeX | 94.778369 | 130 | 1.000000 | 19 | 0 | 0 | 0 |
+| 04 MobileNets | pdfTeX | 96.050839 | 137 | 1.000000 | 3 | 0 | 0 | 0 |
+| 05 BERT | pdfTeX | 96.699401 | 104 | 1.000000 | 6 | 0 | 0 | 0 |
+| 06 DDPM | pdfTeX | 95.084077 | 273 | 1.000000 | 56 | 1 | 1 | 0 |
+| 07 ViT | pdfTeX | 97.629634 | 179 | 1.000000 | 7 | 2 | 2 | 0 |
+| 08 LoRA | pdfTeX | 95.950947 | 273 | 1.000000 | 54 | 0 | 0 | 0 |
+| 09 Repliable onion routing | XeTeX | 89.415467 | 1,280 | 1.000000 | 274 | 16 | 16 | 0 |
+| 10 Compact IBE | XeTeX | 92.927487 | 146 | 1.000000 | 89 | 1 | 1 | 0 |
+| 11 SDitH hardware | XeTeX | 96.301919 | 168 | 1.000000 | 63 | 0 | 0 | 0 |
+| 12 Hertz side channel | XeTeX | 94.401963 | 85 | 1.000000 | 84 | 1 | 1 | 0 |
+| 13 Information-theoretic MPC | LuaTeX | 95.476251 | 175 | 1.000000 | 38 | 19 | 19 | 0 |
+| 14 Masked comparisons | LuaTeX | 96.182339 | 253 | 0.997972 | 39 | 1 | 1 | 0 |
+| 15 LWE two-step | LuaTeX | 91.944698 | 305 | 1.000000 | 151 | 1 | 1 | 0 |
+| 16 Supersingular orientations | LuaTeX | 81.879565 | 496 | 1.000000 | 401 | 2 | 2 | 0 |
+| 17 Informational consciousness | Word | 97.785404 | 32 | 1.000000 | 0 | 0 | 0 | 0 |
+| 18 Consciousness model | Word | 94.842937 | 124 | 1.000000 | 16 | 5 | 5 | 0 |
+| 19 Multibeam IoT | Word | 93.435773 | 122 | 1.000000 | 2 | 0 | 0 | 0 |
+| 20 Tuberculosis biosensor | Word | 95.474718 | 32 | 1.000000 | 1 | 0 | 0 | 0 |
+
+All 20 papers publish and `Internal/6` is zero. The cluster typed median is 160 and the worst is
+1,280. Producer strata are:
+
+| Producer | Papers | Published | Internal/6 | Typed median | Typed worst |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| pdfTeX | 8 | 8/8 | 0 | 165.5 | 273 |
+| XeTeX | 4 | 4/4 | 0 | 157.0 | 1,280 |
+| LuaTeX | 4 | 4/4 | 0 | 279.0 | 496 |
+| Word | 4 | 4/4 | 0 | 77.0 | 124 |
+
+The loopback accepted 3,208 translation responses and zero term-extraction calls. Every fake output
+has the same Unicode character length as its input. All 20 published PDF hashes, typed counts,
+conservation rates, and continuity/hole counts match the corrected #142 replay. ResNet and Repliable
+onion routing reproducibility reruns are byte-identical with SHA-256
+`e35dda966ddebbd6fb76eb61fa4f258a49fd6217268fa3efd46d6fed487ab4a3` and
+`39f4ce503bb0e01feea39d1d8cd1d883691c78715ecc5f06d9ace6a2f1e995a3`, respectively.
+
+Aggregate CON-01 is 5,604/5,605. The sole scorecard miss is token `h` at `(15,35)` in paper 14;
+that paragraph is terminal typed `typeset_protocol`, so the published PDF preserves its source.
+Runtime emitted no conservation retry, leaving a detector/execution reconstruction discrepancy for
+#152. Round B records the measurement and does not change production behavior.
+
+### 8.3 Current closed-cache anchor
+
+The accepted input cache had SHA-256
+`e5e825564ff2166c672db271c48745b1e467057ab8be09d51f4adca14f58e94c` before replay. The endpoint
+`http://127.0.0.1:9/v1` was confirmed closed. All 108 paragraph requests were cache hits; there were
+zero misses and zero provider calls. The published PDF is byte-identical to the accepted artifact:
+
+`b3de6f10522f64a7e8bedba292c01d51724fb616f298bd4917ed8e54a475c0ef`
+
+| Measurement | Current anchor |
+| --- | ---: |
+| scorecard v2 total | 97.997210 |
+| conclusion | `automatic_score_only` |
+| typed rows | `(3,12) unreliable_unicode`; `(4,6) typeset_overflow` |
+| CON-01 | 161/161 |
+| FOR-01 proxy | 6 |
+| FOR-02 / FOR-03 | 0 / 0 |
+| FOR-04 orphan source ink | 0/71 |
+| FOR-05 rigid-body integrity | 0/4 |
+| STR-05 title/author failures | 0 |
+| page-0 extracted lines | 58 |
+| page-0 forbidden starts / ends / isolated CJK punctuation lines | 0 / 0 / 0 |
+
+`qpdf --check` passes. The anchor has 61 measured formula-neighbor gaps with maximum 9 pt and no
+unexplained inline hole. The score change from Section 7.1's `97.988578` is diagnostic-policy input,
+not a PDF change: the artifact SHA-256 is identical.

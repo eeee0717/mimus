@@ -34,6 +34,15 @@ jobs:
           mkdir pdfium
           tar -xzf pdfium.tgz -C pdfium
 
+      - name: Install pinned PP-DocLayoutV3
+        env:
+          LAYOUT_MODEL_COMMIT: 46bbdf188bb0a772c08aed74882ce7e51a8f1ea6
+          LAYOUT_MODEL_SHA256: 45bf71750b00739a41fc209f132eb104a4d6b5bb29483c9078164d8b87cf28ba
+        run: |
+          curl --fail --location --retry 3 --output pp-doclayoutv3.onnx \
+            "https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_onnx/resolve/$LAYOUT_MODEL_COMMIT/inference.onnx"
+          echo "$LAYOUT_MODEL_SHA256  pp-doclayoutv3.onnx" | sha256sum --check
+
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -43,6 +52,7 @@ jobs:
       - name: Test
         env:
           MIMUS_PDFIUM_LIBRARY: ${{ github.workspace }}/pdfium/lib/libpdfium.so
+          MIMUS_LAYOUT_MODEL: ${{ github.workspace }}/pp-doclayoutv3.onnx
         run: cargo test --workspace --all-targets --all-features
 
       - name: Audit committed Corpus v1 evidence

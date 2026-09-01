@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
@@ -59,6 +59,7 @@ pub struct WriteReport {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct WriteOptions {
     pub strip_link_borders: bool,
+    pub bilingual: bool,
 }
 
 #[cfg(test)]
@@ -76,7 +77,7 @@ pub(crate) fn build_incremental_with_options(
     rewrites: &[PageRewrite],
     options: WriteOptions,
 ) -> Result<(Vec<u8>, WriteReport)> {
-    if rewrites.is_empty() && !options.strip_link_borders {
+    if rewrites.is_empty() && !options.strip_link_borders && !options.bilingual {
         return Ok((
             original_bytes.to_vec(),
             WriteReport {
@@ -102,6 +103,18 @@ pub(crate) fn build_incremental_with_options(
     incremental.new_document.max_id = object_ceiling;
     let mut content_objects = Vec::new();
     let mut rewritten_pages = BTreeSet::new();
+    let translated_pages = if options.bilingual {
+        let translated_pages = append_translated_pages(
+            original,
+            &mut incremental.new_document,
+            &pages,
+            object_ceiling,
+        )?;
+        interleave_page_tree(original, &mut incremental, &translated_pages, pages.len())?;
+        Some(translated_pages)
+    } else {
+        None
+    };
     let stripped_link_border_count = if options.strip_link_borders {
         strip_link_annotation_borders(original, &mut incremental)?
     } else {
@@ -127,15 +140,23 @@ pub(crate) fn build_incremental_with_options(
                 ),
             )
         })?;
-        incremental
-            .opt_clone_object_to_new_document(page_id)
-            .map_err(output_build_error)?;
+        let output_page_id = translated_pages
+            .as_ref()
+            .and_then(|translated| translated.get(&page_id))
+            .copied()
+            .unwrap_or(page_id);
+        if !options.bilingual {
+            incremental
+                .opt_clone_object_to_new_document(output_page_id)
+                .map_err(output_build_error)?;
+        }
 
         if !rewrite.embedded_fonts.is_empty() {
             install_page_fonts(
                 original,
                 &mut incremental.new_document,
                 page_id,
+                output_page_id,
                 &rewrite.embedded_fonts,
                 object_ceiling,
             )?;
@@ -212,10 +233,15 @@ pub(crate) fn build_incremental_with_options(
         };
         incremental
             .new_document
-            .get_object_mut(page_id)
+            .get_object_mut(output_page_id)
             .and_then(Object::as_dict_mut)
             .map_err(output_build_error)?
             .set("Contents", contents);
+    }
+
+    if let Some(translated_pages) = translated_pages.as_ref() {
+        remap_bilingual_navigation(original, &mut incremental, translated_pages, pages.len())?;
+        duplicate_page_labels(original, &mut incremental, pages.len())?;
     }
 
     let mut output = Vec::new();
@@ -336,6 +362,884 @@ fn strip_link_annotation_borders(
     Ok(targets.len())
 }
 
+fn append_translated_pages(
+    original: &Document,
+    output: &mut Document,
+    pages: &[ObjectId],
+    object_ceiling: u32,
+) -> Result<BTreeMap<ObjectId, ObjectId>> {
+    let mut translated = BTreeMap::new();
+    for page_id in pages {
+        let mut page = original
+            .get_dictionary(*page_id)
+            .map_err(output_build_error)?
+            .clone();
+        page.remove(b"Annots");
+        let translated_id = output.add_object(page);
+        ensure_appended(translated_id, object_ceiling)?;
+        translated.insert(*page_id, translated_id);
+    }
+    Ok(translated)
+}
+
+fn interleave_page_tree(
+    original: &Document,
+    incremental: &mut IncrementalDocument,
+    translated_pages: &BTreeMap<ObjectId, ObjectId>,
+    source_page_count: usize,
+) -> Result<()> {
+    let root_pages_id = original
+        .catalog()
+        .and_then(|catalog| catalog.get(b"Pages"))
+        .and_then(Object::as_reference)
+        .map_err(output_build_error)?;
+    let mut active = BTreeSet::new();
+    let count = interleave_page_tree_node(
+        original,
+        incremental,
+        root_pages_id,
+        translated_pages,
+        &mut active,
+        0,
+    )?;
+    if count != source_page_count.saturating_mul(2) {
+        return Err(MimusError::internal(
+            InternalReason::OutputBuild,
+            format!(
+                "bilingual page tree contains {count} pages; expected {}",
+                source_page_count.saturating_mul(2)
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn interleave_page_tree_node(
+    original: &Document,
+    incremental: &mut IncrementalDocument,
+    pages_id: ObjectId,
+    translated_pages: &BTreeMap<ObjectId, ObjectId>,
+    active: &mut BTreeSet<ObjectId>,
+    depth: usize,
+) -> Result<usize> {
+    if depth >= 128 || !active.insert(pages_id) {
+        return Err(MimusError::internal(
+            InternalReason::OutputBuild,
+            "bilingual output encountered an invalid page-tree cycle or depth",
+        ));
+    }
+    let original_pages = original
+        .get_dictionary(pages_id)
+        .map_err(output_build_error)?;
+    let kids = original_pages
+        .get(b"Kids")
+        .and_then(Object::as_array)
+        .map_err(output_build_error)?;
+    let mut output_kids = Vec::with_capacity(kids.len().saturating_mul(2));
+    let mut count = 0usize;
+    for kid in kids {
+        let kid_id = kid.as_reference().map_err(output_build_error)?;
+        output_kids.push(Object::Reference(kid_id));
+        if let Some(translated_id) = translated_pages.get(&kid_id) {
+            output_kids.push(Object::Reference(*translated_id));
+            count += 2;
+        } else {
+            count += interleave_page_tree_node(
+                original,
+                incremental,
+                kid_id,
+                translated_pages,
+                active,
+                depth + 1,
+            )?;
+        }
+    }
+    active.remove(&pages_id);
+    incremental
+        .opt_clone_object_to_new_document(pages_id)
+        .map_err(output_build_error)?;
+    let pages = incremental
+        .new_document
+        .get_object_mut(pages_id)
+        .and_then(Object::as_dict_mut)
+        .map_err(output_build_error)?;
+    pages.set("Kids", Object::Array(output_kids));
+    pages.set("Count", i64::try_from(count).map_err(output_build_error)?);
+    Ok(count)
+}
+
+fn remap_bilingual_navigation(
+    original: &Document,
+    incremental: &mut IncrementalDocument,
+    translated_pages: &BTreeMap<ObjectId, ObjectId>,
+    source_page_count: usize,
+) -> Result<()> {
+    let catalog_id = original
+        .trailer
+        .get(b"Root")
+        .and_then(Object::as_reference)
+        .map_err(output_build_error)?;
+    let mut destination_refs = BTreeSet::new();
+    let catalog_object = effective_object(original, incremental, catalog_id)?;
+    let mut catalog = catalog_object
+        .as_dict()
+        .map_err(output_build_error)?
+        .clone();
+    let mut catalog_changed = false;
+
+    if let Ok(outlines_id) = catalog.get(b"Outlines").and_then(Object::as_reference) {
+        remap_outline_tree(
+            original,
+            incremental,
+            outlines_id,
+            translated_pages,
+            source_page_count,
+            &mut destination_refs,
+        )?;
+    }
+    if let Ok(destinations) = catalog.get_mut(b"Dests") {
+        catalog_changed |= remap_old_destinations(
+            original,
+            incremental,
+            destinations,
+            translated_pages,
+            source_page_count,
+            &mut destination_refs,
+        )?;
+    }
+    if let Ok(names) = catalog.get_mut(b"Names") {
+        catalog_changed |= remap_names_dictionary(
+            original,
+            incremental,
+            names,
+            translated_pages,
+            source_page_count,
+            &mut destination_refs,
+        )?;
+    }
+    if catalog_changed {
+        incremental
+            .new_document
+            .set_object(catalog_id, Object::Dictionary(catalog));
+    }
+
+    for page_id in original.get_pages().into_values() {
+        let page = original
+            .get_dictionary(page_id)
+            .map_err(output_build_error)?;
+        let Ok(annotations) = page.get(b"Annots") else {
+            continue;
+        };
+        remap_page_annotations(
+            original,
+            incremental,
+            page_id,
+            annotations,
+            translated_pages,
+            source_page_count,
+            &mut destination_refs,
+        )?;
+    }
+    Ok(())
+}
+
+fn effective_object(
+    original: &Document,
+    incremental: &IncrementalDocument,
+    object_id: ObjectId,
+) -> Result<Object> {
+    incremental
+        .new_document
+        .get_object(object_id)
+        .or_else(|_| original.get_object(object_id))
+        .cloned()
+        .map_err(output_build_error)
+}
+
+fn remap_outline_tree(
+    original: &Document,
+    incremental: &mut IncrementalDocument,
+    outlines_id: ObjectId,
+    translated_pages: &BTreeMap<ObjectId, ObjectId>,
+    source_page_count: usize,
+    destination_refs: &mut BTreeSet<ObjectId>,
+) -> Result<()> {
+    let outlines = original
+        .get_dictionary(outlines_id)
+        .map_err(output_build_error)?;
+    let Ok(first) = outlines.get(b"First").and_then(Object::as_reference) else {
+        return Ok(());
+    };
+    let mut visited = BTreeSet::new();
+    remap_outline_chain(
+        original,
+        incremental,
+        first,
+        translated_pages,
+        source_page_count,
+        destination_refs,
+        &mut visited,
+    )
+}
+
+fn remap_outline_chain(
+    original: &Document,
+    incremental: &mut IncrementalDocument,
+    first_id: ObjectId,
+    translated_pages: &BTreeMap<ObjectId, ObjectId>,
+    source_page_count: usize,
+    destination_refs: &mut BTreeSet<ObjectId>,
+    visited: &mut BTreeSet<ObjectId>,
+) -> Result<()> {
+    let mut current = Some(first_id);
+    while let Some(object_id) = current {
+        if !visited.insert(object_id) {
+            return Err(MimusError::internal(
+                InternalReason::OutputBuild,
+                "bilingual output encountered an outline cycle",
+            ));
+        }
+        let object = effective_object(original, incremental, object_id)?;
+        let mut outline = object.as_dict().map_err(output_build_error)?.clone();
+        let next = outline
+            .get(b"Next")
+            .ok()
+            .and_then(|value| value.as_reference().ok());
+        let first_child = outline
+            .get(b"First")
+            .ok()
+            .and_then(|value| value.as_reference().ok());
+        let mut changed = false;
+        if let Ok(destination) = outline.get_mut(b"Dest") {
+            changed |= remap_destination(
+                original,
+                incremental,
+                destination,
+                translated_pages,
+                source_page_count,
+                destination_refs,
+            )?;
+        }
+        if let Ok(action) = outline.get_mut(b"A") {
+            changed |= remap_local_action(
+                original,
+                incremental,
+                action,
+                translated_pages,
+                source_page_count,
+                destination_refs,
+            )?;
+        }
+        if changed {
+            incremental
+                .new_document
+                .set_object(object_id, Object::Dictionary(outline));
+        }
+        if let Some(child_id) = first_child {
+            remap_outline_chain(
+                original,
+                incremental,
+                child_id,
+                translated_pages,
+                source_page_count,
+                destination_refs,
+                visited,
+            )?;
+        }
+        current = next;
+    }
+    Ok(())
+}
+
+fn remap_page_annotations(
+    original: &Document,
+    incremental: &mut IncrementalDocument,
+    page_id: ObjectId,
+    annotations: &Object,
+    translated_pages: &BTreeMap<ObjectId, ObjectId>,
+    source_page_count: usize,
+    destination_refs: &mut BTreeSet<ObjectId>,
+) -> Result<()> {
+    match annotations {
+        Object::Reference(array_id) => remap_annotation_array_object(
+            original,
+            incremental,
+            *array_id,
+            translated_pages,
+            source_page_count,
+            destination_refs,
+        ),
+        Object::Array(values) => {
+            for value in values {
+                match value {
+                    Object::Reference(annotation_id) => remap_annotation_object(
+                        original,
+                        incremental,
+                        *annotation_id,
+                        translated_pages,
+                        source_page_count,
+                        destination_refs,
+                    )?,
+                    Object::Dictionary(dictionary) => {
+                        let mut probe = dictionary.clone();
+                        if remap_link_annotation(
+                            original,
+                            incremental,
+                            &mut probe,
+                            translated_pages,
+                            source_page_count,
+                            destination_refs,
+                        )? {
+                            return Err(MimusError::internal(
+                                InternalReason::OutputBuild,
+                                format!(
+                                    "bilingual page object {} contains a direct local Link annotation that cannot be remapped without changing the source page",
+                                    page_id.0
+                                ),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn remap_annotation_array_object(
+    original: &Document,
+    incremental: &mut IncrementalDocument,
+    array_id: ObjectId,
+    translated_pages: &BTreeMap<ObjectId, ObjectId>,
+    source_page_count: usize,
+    destination_refs: &mut BTreeSet<ObjectId>,
+) -> Result<()> {
+    let object = effective_object(original, incremental, array_id)?;
+    match object {
+        Object::Reference(next_id) => remap_annotation_array_object(
+            original,
+            incremental,
+            next_id,
+            translated_pages,
+            source_page_count,
+            destination_refs,
+        ),
+        Object::Array(mut values) => {
+            let mut changed = false;
+            for value in &mut values {
+                match value {
+                    Object::Reference(annotation_id) => remap_annotation_object(
+                        original,
+                        incremental,
+                        *annotation_id,
+                        translated_pages,
+                        source_page_count,
+                        destination_refs,
+                    )?,
+                    Object::Dictionary(dictionary) => {
+                        changed |= remap_link_annotation(
+                            original,
+                            incremental,
+                            dictionary,
+                            translated_pages,
+                            source_page_count,
+                            destination_refs,
+                        )?;
+                    }
+                    _ => {}
+                }
+            }
+            if changed {
+                incremental
+                    .new_document
+                    .set_object(array_id, Object::Array(values));
+            }
+            Ok(())
+        }
+        _ => Err(MimusError::internal(
+            InternalReason::OutputBuild,
+            "page Annots reference is not an annotation array",
+        )),
+    }
+}
+
+fn remap_annotation_object(
+    original: &Document,
+    incremental: &mut IncrementalDocument,
+    annotation_id: ObjectId,
+    translated_pages: &BTreeMap<ObjectId, ObjectId>,
+    source_page_count: usize,
+    destination_refs: &mut BTreeSet<ObjectId>,
+) -> Result<()> {
+    let object = effective_object(original, incremental, annotation_id)?;
+    let mut annotation = object.as_dict().map_err(output_build_error)?.clone();
+    if remap_link_annotation(
+        original,
+        incremental,
+        &mut annotation,
+        translated_pages,
+        source_page_count,
+        destination_refs,
+    )? {
+        incremental
+            .new_document
+            .set_object(annotation_id, Object::Dictionary(annotation));
+    }
+    Ok(())
+}
+
+fn remap_link_annotation(
+    original: &Document,
+    incremental: &mut IncrementalDocument,
+    annotation: &mut Dictionary,
+    translated_pages: &BTreeMap<ObjectId, ObjectId>,
+    source_page_count: usize,
+    destination_refs: &mut BTreeSet<ObjectId>,
+) -> Result<bool> {
+    if annotation
+        .get(b"Subtype")
+        .and_then(|value| original.dereference(value).map(|(_, value)| value))
+        .and_then(Object::as_name)
+        .ok()
+        != Some(b"Link".as_slice())
+    {
+        return Ok(false);
+    }
+    let mut changed = false;
+    if let Ok(destination) = annotation.get_mut(b"Dest") {
+        changed |= remap_destination(
+            original,
+            incremental,
+            destination,
+            translated_pages,
+            source_page_count,
+            destination_refs,
+        )?;
+    }
+    if let Ok(action) = annotation.get_mut(b"A") {
+        changed |= remap_local_action(
+            original,
+            incremental,
+            action,
+            translated_pages,
+            source_page_count,
+            destination_refs,
+        )?;
+    }
+    Ok(changed)
+}
+
+fn remap_local_action(
+    original: &Document,
+    incremental: &mut IncrementalDocument,
+    action: &mut Object,
+    translated_pages: &BTreeMap<ObjectId, ObjectId>,
+    source_page_count: usize,
+    destination_refs: &mut BTreeSet<ObjectId>,
+) -> Result<bool> {
+    match action {
+        Object::Reference(action_id) => {
+            let object = effective_object(original, incremental, *action_id)?;
+            let mut object = object;
+            let changed = remap_local_action(
+                original,
+                incremental,
+                &mut object,
+                translated_pages,
+                source_page_count,
+                destination_refs,
+            )?;
+            if changed {
+                incremental.new_document.set_object(*action_id, object);
+            }
+            Ok(false)
+        }
+        Object::Dictionary(dictionary) => {
+            let is_goto = dictionary
+                .get(b"S")
+                .and_then(|value| original.dereference(value).map(|(_, value)| value))
+                .and_then(Object::as_name)
+                .ok()
+                == Some(b"GoTo".as_slice());
+            if !is_goto {
+                return Ok(false);
+            }
+            let Ok(destination) = dictionary.get_mut(b"D") else {
+                return Ok(false);
+            };
+            remap_destination(
+                original,
+                incremental,
+                destination,
+                translated_pages,
+                source_page_count,
+                destination_refs,
+            )
+        }
+        _ => Ok(false),
+    }
+}
+
+fn remap_destination(
+    original: &Document,
+    incremental: &mut IncrementalDocument,
+    destination: &mut Object,
+    translated_pages: &BTreeMap<ObjectId, ObjectId>,
+    source_page_count: usize,
+    destination_refs: &mut BTreeSet<ObjectId>,
+) -> Result<bool> {
+    match destination {
+        Object::Array(values) => {
+            let Some(page) = values.first_mut() else {
+                return Ok(false);
+            };
+            remap_destination_page(page, translated_pages, source_page_count)
+        }
+        Object::Dictionary(dictionary) => {
+            let Ok(value) = dictionary.get_mut(b"D") else {
+                return Ok(false);
+            };
+            remap_destination(
+                original,
+                incremental,
+                value,
+                translated_pages,
+                source_page_count,
+                destination_refs,
+            )
+        }
+        Object::Reference(object_id) if translated_pages.contains_key(object_id) => {
+            *object_id = translated_pages[object_id];
+            Ok(true)
+        }
+        Object::Reference(object_id) => {
+            if !destination_refs.insert(*object_id) {
+                return Ok(false);
+            }
+            let object = effective_object(original, incremental, *object_id)?;
+            let mut object = object;
+            let changed = remap_destination(
+                original,
+                incremental,
+                &mut object,
+                translated_pages,
+                source_page_count,
+                destination_refs,
+            )?;
+            if changed {
+                incremental.new_document.set_object(*object_id, object);
+            }
+            Ok(false)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn remap_destination_page(
+    page: &mut Object,
+    translated_pages: &BTreeMap<ObjectId, ObjectId>,
+    source_page_count: usize,
+) -> Result<bool> {
+    match page {
+        Object::Reference(page_id) => {
+            let Some(translated_id) = translated_pages.get(page_id) else {
+                return Ok(false);
+            };
+            *page_id = *translated_id;
+            Ok(true)
+        }
+        Object::Integer(page_index) if *page_index >= 0 => {
+            let index = usize::try_from(*page_index).map_err(output_build_error)?;
+            if index >= source_page_count {
+                return Ok(false);
+            }
+            *page_index = i64::try_from(index.saturating_mul(2).saturating_add(1))
+                .map_err(output_build_error)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn remap_old_destinations(
+    original: &Document,
+    incremental: &mut IncrementalDocument,
+    destinations: &mut Object,
+    translated_pages: &BTreeMap<ObjectId, ObjectId>,
+    source_page_count: usize,
+    destination_refs: &mut BTreeSet<ObjectId>,
+) -> Result<bool> {
+    match destinations {
+        Object::Reference(object_id) => {
+            let object = effective_object(original, incremental, *object_id)?;
+            let mut object = object;
+            let changed = remap_old_destinations(
+                original,
+                incremental,
+                &mut object,
+                translated_pages,
+                source_page_count,
+                destination_refs,
+            )?;
+            if changed {
+                incremental.new_document.set_object(*object_id, object);
+            }
+            Ok(false)
+        }
+        Object::Dictionary(dictionary) => {
+            let mut changed = false;
+            for (_, destination) in dictionary.iter_mut() {
+                changed |= remap_destination(
+                    original,
+                    incremental,
+                    destination,
+                    translated_pages,
+                    source_page_count,
+                    destination_refs,
+                )?;
+            }
+            Ok(changed)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn remap_names_dictionary(
+    original: &Document,
+    incremental: &mut IncrementalDocument,
+    names: &mut Object,
+    translated_pages: &BTreeMap<ObjectId, ObjectId>,
+    source_page_count: usize,
+    destination_refs: &mut BTreeSet<ObjectId>,
+) -> Result<bool> {
+    match names {
+        Object::Reference(object_id) => {
+            let object = effective_object(original, incremental, *object_id)?;
+            let mut object = object;
+            let changed = remap_names_dictionary(
+                original,
+                incremental,
+                &mut object,
+                translated_pages,
+                source_page_count,
+                destination_refs,
+            )?;
+            if changed {
+                incremental.new_document.set_object(*object_id, object);
+            }
+            Ok(false)
+        }
+        Object::Dictionary(dictionary) => {
+            let Ok(destinations) = dictionary.get_mut(b"Dests") else {
+                return Ok(false);
+            };
+            remap_name_tree(
+                original,
+                incremental,
+                destinations,
+                translated_pages,
+                source_page_count,
+                destination_refs,
+                &mut BTreeSet::new(),
+            )
+        }
+        _ => Ok(false),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remap_name_tree(
+    original: &Document,
+    incremental: &mut IncrementalDocument,
+    node: &mut Object,
+    translated_pages: &BTreeMap<ObjectId, ObjectId>,
+    source_page_count: usize,
+    destination_refs: &mut BTreeSet<ObjectId>,
+    visited: &mut BTreeSet<ObjectId>,
+) -> Result<bool> {
+    match node {
+        Object::Reference(object_id) => {
+            if !visited.insert(*object_id) {
+                return Err(MimusError::internal(
+                    InternalReason::OutputBuild,
+                    "bilingual output encountered a named-destination tree cycle",
+                ));
+            }
+            let object = effective_object(original, incremental, *object_id)?;
+            let mut object = object;
+            let changed = remap_name_tree(
+                original,
+                incremental,
+                &mut object,
+                translated_pages,
+                source_page_count,
+                destination_refs,
+                visited,
+            )?;
+            if changed {
+                incremental.new_document.set_object(*object_id, object);
+            }
+            Ok(false)
+        }
+        Object::Dictionary(dictionary) => {
+            let mut changed = false;
+            if let Ok(names) = dictionary.get_mut(b"Names").and_then(Object::as_array_mut) {
+                for destination in names.iter_mut().skip(1).step_by(2) {
+                    changed |= remap_destination(
+                        original,
+                        incremental,
+                        destination,
+                        translated_pages,
+                        source_page_count,
+                        destination_refs,
+                    )?;
+                }
+            }
+            if let Ok(kids) = dictionary.get_mut(b"Kids").and_then(Object::as_array_mut) {
+                for kid in kids {
+                    changed |= remap_name_tree(
+                        original,
+                        incremental,
+                        kid,
+                        translated_pages,
+                        source_page_count,
+                        destination_refs,
+                        visited,
+                    )?;
+                }
+            }
+            Ok(changed)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn duplicate_page_labels(
+    original: &Document,
+    incremental: &mut IncrementalDocument,
+    source_page_count: usize,
+) -> Result<()> {
+    let catalog_id = original
+        .trailer
+        .get(b"Root")
+        .and_then(Object::as_reference)
+        .map_err(output_build_error)?;
+    let catalog_object = effective_object(original, incremental, catalog_id)?;
+    let mut catalog = catalog_object
+        .as_dict()
+        .map_err(output_build_error)?
+        .clone();
+    let Ok(page_labels) = original
+        .catalog()
+        .and_then(|value| value.get(b"PageLabels"))
+    else {
+        return Ok(());
+    };
+    let mut rules = BTreeMap::new();
+    collect_page_label_rules(original, page_labels, &mut rules, &mut BTreeSet::new())?;
+    if source_page_count > 0 && !rules.contains_key(&0) {
+        return Err(MimusError::internal(
+            InternalReason::OutputBuild,
+            "PageLabels number tree does not define page index 0",
+        ));
+    }
+    let mut nums = Vec::with_capacity(source_page_count.saturating_mul(4));
+    for page_index in 0..source_page_count {
+        let (range_start, source_rule) =
+            rules.range(..=page_index).next_back().ok_or_else(|| {
+                MimusError::internal(
+                    InternalReason::OutputBuild,
+                    "PageLabels number tree has no active rule",
+                )
+            })?;
+        let mut rule = source_rule.clone();
+        if rule.has(b"S") {
+            let start = rule
+                .get(b"St")
+                .ok()
+                .and_then(|value| value.as_i64().ok())
+                .unwrap_or(1);
+            rule.set(
+                "St",
+                start.saturating_add(
+                    i64::try_from(page_index - range_start).map_err(output_build_error)?,
+                ),
+            );
+        }
+        for output_index in [page_index * 2, page_index * 2 + 1] {
+            nums.push(Object::Integer(
+                i64::try_from(output_index).map_err(output_build_error)?,
+            ));
+            nums.push(Object::Dictionary(rule.clone()));
+        }
+    }
+    let duplicated = Object::Dictionary(dictionary! { "Nums" => Object::Array(nums) });
+    match page_labels {
+        Object::Reference(object_id) => {
+            incremental.new_document.set_object(*object_id, duplicated);
+        }
+        _ => {
+            catalog.set("PageLabels", duplicated);
+            incremental
+                .new_document
+                .set_object(catalog_id, Object::Dictionary(catalog));
+        }
+    }
+    Ok(())
+}
+
+fn collect_page_label_rules(
+    original: &Document,
+    node: &Object,
+    rules: &mut BTreeMap<usize, Dictionary>,
+    visited: &mut BTreeSet<ObjectId>,
+) -> Result<()> {
+    let dictionary = match node {
+        Object::Reference(object_id) => {
+            if !visited.insert(*object_id) {
+                return Err(MimusError::internal(
+                    InternalReason::OutputBuild,
+                    "PageLabels number tree contains a cycle",
+                ));
+            }
+            original
+                .get_object(*object_id)
+                .and_then(Object::as_dict)
+                .map_err(output_build_error)?
+        }
+        Object::Dictionary(dictionary) => dictionary,
+        _ => {
+            return Err(MimusError::internal(
+                InternalReason::OutputBuild,
+                "PageLabels value is not a number-tree dictionary",
+            ));
+        }
+    };
+    if let Ok(nums) = dictionary.get(b"Nums").and_then(Object::as_array) {
+        if nums.len() % 2 != 0 {
+            return Err(MimusError::internal(
+                InternalReason::OutputBuild,
+                "PageLabels Nums array has an odd number of entries",
+            ));
+        }
+        for pair in nums.chunks(2) {
+            let index = pair[0].as_i64().map_err(output_build_error)?;
+            let index = usize::try_from(index).map_err(output_build_error)?;
+            let (_, rule) = original.dereference(&pair[1]).map_err(output_build_error)?;
+            let rule = rule.as_dict().map_err(output_build_error)?.clone();
+            rules.insert(index, rule);
+        }
+    }
+    if let Ok(kids) = dictionary.get(b"Kids").and_then(Object::as_array) {
+        for kid in kids {
+            collect_page_label_rules(original, kid, rules, visited)?;
+        }
+    }
+    Ok(())
+}
+
 fn collect_annotation_targets(
     original: &Document,
     annotations: &[Object],
@@ -411,12 +1315,13 @@ fn strip_link_border_dictionary(annotation: &mut Dictionary) {
 fn install_page_fonts(
     original: &Document,
     output: &mut Document,
-    page_id: ObjectId,
+    source_page_id: ObjectId,
+    output_page_id: ObjectId,
     embedded_fonts: &[EmbeddedFont],
     object_ceiling: u32,
 ) -> Result<()> {
     let (inline, inherited_ids) = original
-        .get_page_resources(page_id)
+        .get_page_resources(source_page_id)
         .map_err(output_build_error)?;
     let mut resources = if let Some(resources) = inline {
         resources.clone()
@@ -457,7 +1362,7 @@ fn install_page_fonts(
     let resources_id = output.add_object(resources);
     ensure_appended(resources_id, object_ceiling)?;
     output
-        .get_object_mut(page_id)
+        .get_object_mut(output_page_id)
         .and_then(Object::as_dict_mut)
         .map_err(output_build_error)?
         .set("Resources", Object::Reference(resources_id));
@@ -772,6 +1677,33 @@ mod tests {
     }
 
     #[test]
+    fn bilingual_writer_does_not_synthesize_page_labels() {
+        let input = std::fs::read(fixture()).unwrap();
+        let original = Document::load_mem(&input).unwrap();
+
+        let (bytes, report) = build_incremental_with_options(
+            &input,
+            &original,
+            &[],
+            WriteOptions {
+                strip_link_borders: false,
+                bilingual: true,
+            },
+        )
+        .unwrap();
+
+        assert!(bytes.starts_with(&input));
+        assert!(report.appended_bytes > 0);
+        let output = Document::load_mem(&bytes).unwrap();
+        assert_eq!(output.get_pages().len(), 2);
+        assert!(!output.catalog().unwrap().has(b"PageLabels"));
+        assert_eq!(
+            output.get_object((3, 0)).unwrap(),
+            original.get_object((3, 0)).unwrap()
+        );
+    }
+
+    #[test]
     fn indirect_zero_width_link_styles_are_already_borderless() {
         let mut document = Document::new();
         let width = document.add_object(Object::Integer(0));
@@ -808,6 +1740,7 @@ mod tests {
             &[],
             WriteOptions {
                 strip_link_borders: true,
+                bilingual: false,
             },
         )
         .unwrap();
@@ -860,6 +1793,247 @@ mod tests {
                 .get(b"AP")
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn bilingual_writer_interleaves_pages_and_remaps_only_local_navigation() {
+        let input = std::fs::read(fixture_path("unit-write-08-bilingual-navigation")).unwrap();
+        let original = Document::load_mem(&input).unwrap();
+        let source_content = original
+            .get_object((10, 0))
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .decompressed_content()
+            .unwrap();
+        let byte_start = source_content
+            .windows(b"(MIMUS)".len())
+            .position(|window| window == b"(MIMUS)")
+            .unwrap();
+        let rewrite = PageRewrite {
+            page_index: 0,
+            replacements: vec![ContentSpanReplacement {
+                content_object: (10, 0),
+                byte_start,
+                byte_end: byte_start + b"(MIMUS)".len(),
+                replacement: b"(MIMUS MIMUS)".to_vec(),
+            }],
+            reused_fonts: Vec::new(),
+            embedded_fonts: Vec::new(),
+            typeset_characters: Vec::new(),
+            typeset_ink_bounds: Vec::new(),
+        };
+
+        let (bytes, _) = build_incremental_with_options(
+            &input,
+            &original,
+            &[rewrite],
+            WriteOptions {
+                strip_link_borders: false,
+                bilingual: true,
+            },
+        )
+        .unwrap();
+        assert!(bytes.starts_with(&input));
+        let output = Document::load_mem(&bytes).unwrap();
+        let pages = output.get_pages().into_values().collect::<Vec<_>>();
+        assert_eq!(pages.len(), 4);
+        assert_eq!(pages[0], (3, 0));
+        assert_eq!(pages[2], (4, 0));
+        assert!(pages[1].0 > original.max_id && pages[3].0 > original.max_id);
+        for source_page in [(3, 0), (4, 0)] {
+            assert_eq!(
+                output.get_object(source_page).unwrap(),
+                original.get_object(source_page).unwrap(),
+                "source page object {source_page:?} changed"
+            );
+        }
+        for translated_page in [pages[1], pages[3]] {
+            let translated = output.get_dictionary(translated_page).unwrap();
+            assert!(!translated.has(b"Annots"));
+            let source = original
+                .get_dictionary(if translated_page == pages[1] {
+                    (3, 0)
+                } else {
+                    (4, 0)
+                })
+                .unwrap();
+            for key in [b"MediaBox".as_slice(), b"CropBox", b"Rotate"] {
+                assert_eq!(translated.get(key).ok(), source.get(key).ok());
+            }
+        }
+        assert_eq!(
+            output
+                .get_object(output.get_page_contents(pages[0])[0])
+                .unwrap()
+                .as_stream()
+                .unwrap()
+                .decompressed_content()
+                .unwrap(),
+            source_content
+        );
+        assert!(
+            output
+                .get_object(output.get_page_contents(pages[1])[0])
+                .unwrap()
+                .as_stream()
+                .unwrap()
+                .decompressed_content()
+                .unwrap()
+                .windows(b"(MIMUS MIMUS)".len())
+                .any(|window| window == b"(MIMUS MIMUS)")
+        );
+
+        let root_pages = output.get_dictionary((2, 0)).unwrap();
+        assert_eq!(root_pages.get(b"Count").unwrap().as_i64().unwrap(), 4);
+        let leaf_pages = output.get_dictionary((20, 0)).unwrap();
+        assert_eq!(leaf_pages.get(b"Count").unwrap().as_i64().unwrap(), 4);
+        assert_eq!(
+            leaf_pages.get(b"Kids").unwrap().as_array().unwrap(),
+            &pages
+                .iter()
+                .copied()
+                .map(Object::Reference)
+                .collect::<Vec<_>>()
+        );
+
+        let outline_exact = output.get_dictionary((13, 0)).unwrap();
+        let exact_destination = outline_exact.get(b"Dest").unwrap().as_array().unwrap();
+        assert_eq!(exact_destination[0], Object::Reference(pages[3]));
+        assert_eq!(
+            &exact_destination[1..],
+            &[
+                Object::Name(b"XYZ".to_vec()),
+                Object::Integer(72),
+                Object::Integer(120),
+                Object::Real(1.25),
+            ]
+        );
+        assert_eq!(
+            output
+                .get_dictionary((14, 0))
+                .unwrap()
+                .get(b"Dest")
+                .unwrap(),
+            original
+                .get_dictionary((14, 0))
+                .unwrap()
+                .get(b"Dest")
+                .unwrap()
+        );
+        let goto = output
+            .get_dictionary((15, 0))
+            .unwrap()
+            .get(b"A")
+            .unwrap()
+            .as_dict()
+            .unwrap();
+        let goto_destination = goto.get(b"D").unwrap().as_array().unwrap();
+        assert_eq!(goto_destination[0], Object::Reference(pages[1]));
+        assert_eq!(
+            &goto_destination[1..],
+            &[
+                Object::Name(b"XYZ".to_vec()),
+                Object::Integer(72),
+                Object::Integer(144),
+                Object::Integer(0),
+            ]
+        );
+
+        let names = output
+            .get_dictionary((16, 0))
+            .unwrap()
+            .get(b"Names")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let named_destination = names[1].as_array().unwrap();
+        assert_eq!(named_destination[0], Object::Reference(pages[3]));
+        assert_eq!(
+            &named_destination[1..],
+            &[
+                Object::Name(b"XYZ".to_vec()),
+                Object::Integer(72),
+                Object::Integer(120),
+                Object::Real(1.25),
+            ]
+        );
+        let catalog = output.catalog().unwrap();
+        let legacy_destination = catalog
+            .get(b"Dests")
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"legacy")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(legacy_destination[0], Object::Reference(pages[1]));
+        assert_eq!(
+            &legacy_destination[1..],
+            &[
+                Object::Name(b"FitR".to_vec()),
+                Object::Integer(10),
+                Object::Integer(20),
+                Object::Integer(290),
+                Object::Integer(180),
+            ]
+        );
+
+        let link = output.get_dictionary((17, 0)).unwrap();
+        let link_destination = link
+            .get(b"A")
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"D")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(link_destination[0], Object::Reference(pages[3]));
+        assert_eq!(
+            link.get(b"Rect").unwrap(),
+            original
+                .get_dictionary((17, 0))
+                .unwrap()
+                .get(b"Rect")
+                .unwrap()
+        );
+        assert_eq!(
+            output.get_object((18, 0)).unwrap(),
+            original.get_object((18, 0)).unwrap(),
+            "URI annotation changed"
+        );
+        for key in [b"AcroForm".as_slice(), b"OCProperties"] {
+            assert_eq!(
+                catalog.get(key).unwrap(),
+                original.catalog().unwrap().get(key).unwrap()
+            );
+        }
+
+        let labels = output
+            .get_dictionary((23, 0))
+            .unwrap()
+            .get(b"Nums")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(labels.len(), 8);
+        let starts = labels
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .map(|value| {
+                value
+                    .as_dict()
+                    .unwrap()
+                    .get(b"St")
+                    .unwrap()
+                    .as_i64()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(starts, vec![3, 3, 7, 7]);
     }
 
     #[test]

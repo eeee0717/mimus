@@ -1,0 +1,252 @@
+# unit-write-08-bilingual-navigation -- expected manifest
+
+schema_version = 1
+
+[identity]
+id = "unit-write-08-bilingual-navigation"
+name = "Bilingual page and navigation graph"
+class = "unit"
+legality = "legal"
+cases = ["WRITE-06"]
+priority = "M3"
+variable = "Two source pages in a nested page tree with local navigation and logical page labels"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-write-08-bilingual-navigation.pdf"
+pdf_sha256 = "3bae32de71114f3e94baf83e6586d87a651c662f58ef3e585032d5126eb11a05"
+font_provenance = "vendored"
+fonts = [
+    { file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 6, descriptor_object = 7, subset_tag = "MIMUSI", base_name = "DejaVuSans" },
+]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+crop_box = [10.0, 10.0, 290.0, 190.0]
+rotate = 0
+
+[[page]]
+index = 1
+media_box = [0.0, 0.0, 300.0, 200.0]
+crop_box = [10.0, 10.0, 290.0, 190.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d77726974652d30382d6269"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 2
+blocks = 2
+columns = 1
+bookmarks = 3
+bookmark_depth = 2
+annotations = 4
+form_fields = 1
+optional_content_groups = 1
+named_destinations = 1
+uri_actions = 1
+
+[[expected.block]]
+key = "P1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.168, 112.656, 131.136]
+visual_bbox = [73.177734, 119.830078, 111.985229, 128.90625]
+
+[[expected.block]]
+key = "P2"
+page = 1
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "MIMUS MIMUS"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.168, 157.128, 131.136]
+visual_bbox = [73.177734, 119.830078, 156.457229, 128.90625]
+
+[[expected.content_stream]]
+object = 10
+compressed = false
+bytes = """/OC /Layer BDC
+BT
+/F1 12 Tf
+1 0 0 1 72 120 Tm
+(MIMUS) Tj
+ET
+EMC
+"""
+
+[[expected.content_stream]]
+object = 11
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 120 Tm
+(MIMUS MIMUS) Tj
+ET
+"""
+
+[[expected.bookmark]]
+object = 13
+parent_object = 12
+level = 1
+title = "Exact destination"
+count = -1
+color = [0.0, 0.4, 0.8]
+style_flags = 2
+target = "xyz"
+page_object = 4
+xyz = [72.0, 120.0, 1.25]
+
+[[expected.bookmark]]
+object = 14
+parent_object = 13
+level = 2
+title = "Named destination"
+style_flags = 0
+target = "named"
+name = "body"
+
+[[expected.bookmark]]
+object = 15
+parent_object = 12
+level = 1
+title = "GoTo action"
+style_flags = 0
+target = "goto-xyz"
+page_object = 3
+xyz = [72.0, 144.0, 0.0]
+
+[[expected.annotation]]
+object = 17
+subtype = "link"
+rect = [72.0, 90.0, 180.0, 106.0]
+
+[[expected.annotation]]
+object = 18
+subtype = "link"
+rect = [72.0, 90.0, 180.0, 106.0]
+uri = "https://example.com/mimus"
+
+[[expected.annotation]]
+object = 19
+subtype = "widget"
+rect = [72.0, 60.0, 190.0, 78.0]
+field_name = "sample"
+
+[[expected.annotation]]
+object = 22
+subtype = "text"
+rect = [205.0, 112.0, 225.0, 132.0]
+contents = "MIMUS note"
+
+[[expected.named_destination]]
+name = "body"
+page_object = 4
+xyz = [72.0, 120.0, 1.25]
+
+[[expected.optional_content_group]]
+object = 21
+name = "MIMUS Layer"
+resource_name = "Layer"
+initially_visible = true
+
+[[expected.reference]]
+from_object = 1
+path = ["/Pages"]
+to_object = 2
+
+[[expected.reference]]
+from_object = 1
+path = ["/Outlines"]
+to_object = 12
+
+[[expected.reference]]
+from_object = 1
+path = ["/Names", "/Dests"]
+to_object = 16
+
+[[expected.reference]]
+from_object = 2
+path = ["/Kids", "0"]
+to_object = 20
+
+[[expected.reference]]
+from_object = 20
+path = ["/Kids", "0"]
+to_object = 3
+
+[[expected.reference]]
+from_object = 20
+path = ["/Kids", "1"]
+to_object = 4
+
+[[expected.reference]]
+from_object = 3
+path = ["/Resources"]
+to_object = 5
+
+[[expected.reference]]
+from_object = 4
+path = ["/Resources"]
+to_object = 5
+
+[[expected.reference]]
+from_object = 5
+path = ["/Properties", "/Layer"]
+to_object = 21
+
+[[expected.reference]]
+from_object = 6
+path = ["/FontDescriptor"]
+to_object = 7
+
+[[expected.reference]]
+from_object = 6
+path = ["/ToUnicode"]
+to_object = 9
+
+[[expected.reference]]
+from_object = 7
+path = ["/FontFile2"]
+to_object = 8
+
+[[expected.behaviour]]
+id = "WRITE-06-bilingual-navigation"
+assertion = "Bilingual packaging keeps source page objects and external actions unchanged while local destinations select translated siblings and logical labels are duplicated per pair"
+observable_via = "Production writer object graph assertions plus qpdf structure and independent page render checks"
+
+[oracle]
+checks = [
+    "determinism",
+    "legality",
+    "structure",
+    "page-geometry",
+    "hand-written-geometry",
+    "pdf-bytes",
+    "pdf-structure",
+    "render",
+]
+
+[[adjudication]]
+date = "2026-08-31"
+issue = "Bilingual output changes physical page indices but must not change the two source-page geometry contracts."
+resolution = "Keep source geometry hand-derived from the pinned font and assert the packaging graph separately in the production writer test."
