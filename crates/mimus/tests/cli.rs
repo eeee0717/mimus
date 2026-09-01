@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 
 const BIN: &str = env!("CARGO_BIN_EXE_mimus");
 const PDFIUM_ENV: &str = "MIMUS_PDFIUM_LIBRARY";
+const WRITE_FAULT_ENV: &str = "MIMUS_TEST_WRITE_FAULT";
 
 struct FakeResponsesServer {
     endpoint: String,
@@ -690,6 +691,30 @@ fn pdfium_library() -> OsString {
 
 fn run_none(input: &Path, output: Option<&Path>, json: bool) -> Output {
     run_none_with_output_flag(input, output, json, "--output")
+}
+
+fn run_none_with_write_fault(input: &Path, output: &Path, fault: &str) -> Output {
+    let mut command = Command::new(BIN);
+    command.env(PDFIUM_ENV, pdfium_library());
+    configure_test_fonts(&mut command);
+    command
+        .env(WRITE_FAULT_ENV, fault)
+        .env("HTTP_PROXY", "http://127.0.0.1:9")
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env("OPENAI_API_KEY", "must-not-be-used")
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "none",
+            "--layout",
+            "single-line",
+            "--output",
+        ])
+        .arg(output)
+        .arg(input)
+        .output()
+        .unwrap()
 }
 
 fn run_none_with_output_flag(
@@ -5601,6 +5626,97 @@ fn strict_mode_turns_page_degradation_into_translation_exit_without_publishing()
     assert!(stderr.contains("warning[degradation_summary]"));
     assert!(stderr.contains("error[strict_degradation]"));
     assert_eq!(std::fs::read(human_path).unwrap(), b"human destination");
+}
+
+#[test]
+fn bounded_write_faults_never_publish_partial_output_and_allow_reentry() {
+    const EXISTING: &[u8] = b"existing destination";
+    const PRE_PERSIST_FAULTS: &[&str] = &[
+        "kill_after_temp_create",
+        "kill_after_partial_write",
+        "oom_after_partial_write",
+        "kill_before_persist",
+    ];
+
+    let input = fixture();
+    let baseline_directory = tempfile::tempdir().unwrap();
+    let baseline_path = baseline_directory.path().join("translated.pdf");
+    let baseline = run_none(&input, Some(&baseline_path), true);
+    assert!(
+        baseline.status.success(),
+        "could not establish publication baseline: {}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let expected = std::fs::read(&baseline_path).unwrap();
+    let input_bytes = std::fs::read(&input).unwrap();
+    assert!(expected.starts_with(&input_bytes));
+    for destination_exists in [false, true] {
+        for fault in PRE_PERSIST_FAULTS {
+            let directory = tempfile::tempdir().unwrap();
+            let output_path = directory.path().join("translated.pdf");
+            if destination_exists {
+                std::fs::write(&output_path, EXISTING).unwrap();
+            }
+
+            let failed = run_none_with_write_fault(&input, &output_path, fault);
+            assert!(!failed.status.success(), "fault {fault} did not terminate");
+            if destination_exists {
+                assert_eq!(std::fs::read(&output_path).unwrap(), EXISTING, "{fault}");
+            } else {
+                assert!(!output_path.exists(), "{fault} published a destination");
+            }
+
+            let temporary_files = std::fs::read_dir(directory.path())
+                .unwrap()
+                .filter_map(std::result::Result::ok)
+                .filter(|entry| {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with(".mimus-") && name.ends_with(".pdf.tmp")
+                })
+                .count();
+            if *fault == "oom_after_partial_write" {
+                assert_eq!(failed.status.code(), Some(6));
+                let events = parse_events(&failed.stdout);
+                assert_one_terminal_last(&events, "error");
+                assert_eq!(events.last().unwrap()["category"], "internal");
+                assert_eq!(events.last().unwrap()["reason"], "output_build");
+                assert_eq!(
+                    temporary_files, 0,
+                    "recoverable OOM must unwind and remove its temporary file"
+                );
+            } else {
+                assert_eq!(
+                    temporary_files, 1,
+                    "abrupt death must leave exactly one unpublished temporary file"
+                );
+            }
+
+            let retried = run_none(&input, Some(&output_path), true);
+            assert!(
+                retried.status.success(),
+                "re-entry after {fault} failed: {}",
+                String::from_utf8_lossy(&retried.stderr)
+            );
+            assert_eq!(std::fs::read(&output_path).unwrap(), expected, "{fault}");
+        }
+    }
+
+    for destination_exists in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let output_path = directory.path().join("translated.pdf");
+        if destination_exists {
+            std::fs::write(&output_path, EXISTING).unwrap();
+        }
+        let killed = run_none_with_write_fault(&input, &output_path, "kill_after_persist");
+        assert!(!killed.status.success());
+        let published = std::fs::read(&output_path).unwrap();
+        assert_eq!(published, expected, "post-persist death left partial bytes");
+
+        let retried = run_none(&input, Some(&output_path), true);
+        assert!(retried.status.success());
+        assert_eq!(std::fs::read(&output_path).unwrap(), published);
+    }
 }
 
 /// `mal-stream-09-orphan-text` 与 `mal-stream-11-tj-array-type` 的声明行为在生产

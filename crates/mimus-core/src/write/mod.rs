@@ -1511,9 +1511,22 @@ fn apply_span_replacements<'a>(
 }
 
 pub(crate) fn publish(output: &Path, bytes: &[u8]) -> Result<()> {
-    atomic_publish(output, |file| {
-        file.write_all(bytes).map_err(output_write_error)
-    })
+    atomic_publish(output, |file| write_publish_bytes(file, bytes))
+}
+
+#[cfg(debug_assertions)]
+fn write_publish_bytes(file: &mut File, bytes: &[u8]) -> Result<()> {
+    let midpoint = bytes.len().div_ceil(2);
+    file.write_all(&bytes[..midpoint])
+        .map_err(output_write_error)?;
+    inject_test_publish_fault(TestPublishStage::AfterPartialWrite)?;
+    file.write_all(&bytes[midpoint..])
+        .map_err(output_write_error)
+}
+
+#[cfg(not(debug_assertions))]
+fn write_publish_bytes(file: &mut File, bytes: &[u8]) -> Result<()> {
+    file.write_all(bytes).map_err(output_write_error)
 }
 
 fn atomic_publish(output: &Path, write_output: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
@@ -1537,12 +1550,14 @@ fn atomic_publish(output: &Path, write_output: impl FnOnce(&mut File) -> Result<
                 format!("could not create an output temporary file: {error}"),
             )
         })?;
+    inject_test_publish_fault(TestPublishStage::AfterTempCreate)?;
     write_output(temporary.as_file_mut())?;
     temporary
         .as_file_mut()
         .flush()
         .map_err(output_write_error)?;
     temporary.as_file().sync_all().map_err(output_write_error)?;
+    inject_test_publish_fault(TestPublishStage::BeforePersist)?;
     temporary.persist(output).map_err(|error| {
         MimusError::io(
             IoReason::AtomicPublish,
@@ -1553,6 +1568,64 @@ fn atomic_publish(output: &Path, write_output: impl FnOnce(&mut File) -> Result<
             ),
         )
     })?;
+    inject_test_publish_fault(TestPublishStage::AfterPersist)?;
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TestPublishStage {
+    AfterTempCreate,
+    #[cfg(debug_assertions)]
+    AfterPartialWrite,
+    BeforePersist,
+    AfterPersist,
+}
+
+#[cfg(debug_assertions)]
+fn inject_test_publish_fault(stage: TestPublishStage) -> Result<()> {
+    const ENVIRONMENT: &str = "MIMUS_TEST_WRITE_FAULT";
+
+    let Some(fault) = std::env::var_os(ENVIRONMENT) else {
+        return Ok(());
+    };
+    let fault = fault.to_string_lossy();
+    let abort = matches!(
+        (fault.as_ref(), stage),
+        ("kill_after_temp_create", TestPublishStage::AfterTempCreate)
+            | (
+                "kill_after_partial_write",
+                TestPublishStage::AfterPartialWrite
+            )
+            | ("kill_before_persist", TestPublishStage::BeforePersist)
+            | ("kill_after_persist", TestPublishStage::AfterPersist)
+    );
+    if abort {
+        std::process::abort();
+    }
+    if fault == "oom_after_partial_write" && stage == TestPublishStage::AfterPartialWrite {
+        return Err(MimusError::internal(
+            InternalReason::OutputBuild,
+            "injected bounded out-of-memory failure after partial temporary write",
+        ));
+    }
+    if !matches!(
+        fault.as_ref(),
+        "kill_after_temp_create"
+            | "kill_after_partial_write"
+            | "oom_after_partial_write"
+            | "kill_before_persist"
+            | "kill_after_persist"
+    ) {
+        return Err(MimusError::internal(
+            InternalReason::InvariantViolation,
+            format!("unknown {ENVIRONMENT} value {fault:?}"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn inject_test_publish_fault(_stage: TestPublishStage) -> Result<()> {
     Ok(())
 }
 
