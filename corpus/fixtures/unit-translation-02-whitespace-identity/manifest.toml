@@ -1,0 +1,149 @@
+# unit-translation-02-whitespace-identity -- expected manifest
+#
+# A standalone space has a metric advance but no visual glyph. The source
+# bytes and geometry are derived from the pinned MimusExact.ttf tables at 12pt.
+
+schema_version = 1
+
+[identity]
+id = "unit-translation-02-whitespace-identity"
+name = "Whitespace-only translation identity"
+class = "unit"
+legality = "legal"
+cases = ["TRANS-02"]
+priority = "M3"
+variable = "A model-owned translatable paragraph contains only one independently shown space"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-translation-02-whitespace-identity.pdf"
+pdf_sha256 = "c6ead4712478e26745652d1a6a819532bc2c25e14872ff9e08c8549f211749cb"
+font_provenance = "vendored"
+fonts = [
+    { file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" },
+]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+block = []
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d7472616e736c6174696f6e"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+bookmarks = 0
+bookmark_depth = 0
+annotations = 0
+form_fields = 0
+optional_content_groups = 0
+named_destinations = 0
+uri_actions = 0
+
+[[expected.alignment]]
+page = 0
+diagnostic = false
+walked_text = " "
+walked_character_count = 1
+engine_character_count = 0
+extraction_equivalent_count = 1
+explained_count = 0
+strong_unicode_conflict_count = 0
+weak_unicode_conflict_count = 0
+unresolved_unicode_count = 0
+walk_only_count = 0
+engine_only_count = 0
+residual_count = 0
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 120 Tm
+( ) Tj
+ET
+"""
+
+[[expected.reference]]
+from_object = 1
+path = ["/Pages"]
+to_object = 2
+
+[[expected.reference]]
+from_object = 2
+path = ["/Kids", "0"]
+to_object = 3
+
+[[expected.reference]]
+from_object = 3
+path = ["/Parent"]
+to_object = 2
+
+[[expected.reference]]
+from_object = 3
+path = ["/Resources"]
+to_object = 4
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 9
+
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 5
+
+[[expected.reference]]
+from_object = 5
+path = ["/FontDescriptor"]
+to_object = 6
+
+[[expected.reference]]
+from_object = 5
+path = ["/ToUnicode"]
+to_object = 8
+
+[[expected.reference]]
+from_object = 6
+path = ["/FontFile2"]
+to_object = 7
+
+[[expected.behaviour]]
+id = "TRANS-02-local-identity"
+assertion = "Whitespace-only source remains a local identity without term extraction, a translation backend request, cache access, or new Typeset ink"
+observable_via = "captured loopback requests, translate IL, output prefix identity, and final output ink"
+
+[oracle]
+checks = [
+    "determinism",
+    "legality",
+    "structure",
+    "page-geometry",
+    "pdf-bytes",
+    "pdf-structure",
+    "render",
+]
+
+[[adjudication]]
+date = "2026-08-31"
+issue = "A space has a font advance and source text-show identity but no independently extracted visual glyph."
+resolution = "Keep the hand-derived source stream and alignment expectation; independent renderers must agree that the page has no visible ink."

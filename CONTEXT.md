@@ -16,7 +16,7 @@
 | 7 | IR：单字符粒度 + 双盒 + Rust enum + serde JSON 快照（schema_version） | [ADR-0007](docs/adr/0007-ir-design.md) |
 | 8 | 目标用户：开源发布，面向"读外文 PDF 的中文研究者"；验收场景=作者本人日常翻译 arXiv 论文 | — |
 | 9 | 语种：输入语言解耦（取决于文本提取），验收只对英→中；排版仅调优简体中文输出 | — |
-| 10 | 输出模式：默认仅译文；`--bilingual` 原/译交替页（修书签/内链页目标映射）；并排不做 | — |
+| 10 | 输出模式：默认仅译文；`--bilingual` 原/译交替页，原页对象不改、译页不复制 `/Annots`，文档内书签/命名目标/Link GoTo 映射到译页，已有 `/PageLabels` 为每对复制同一逻辑页码；并排不做 | — |
 | 11 | 保真范围：书签不翻译、链接热区不调整、表单/OCG 原样透传；断言书签数/注释数不变 | — |
 | 12 | 流水线：固定顺序 pass 链（`fn(&mut Document, &PassContext)`——`Document` 只装数据：原始字节/lopdf 文档/IL/诊断；`PassContext` 装引擎实例/配置/事件钩子；无 pass 框架）；pass 内按页 rayon 并行；`--debug` 逐 pass 落盘 IL | — |
 | 13 | 阶段草案：Parse → ScanDetect(拒绝) → Layout → ParagraphFind → StylesAndFormulas → ExtractTerms → Translate → Typeset → FontEmbed → Write | — |
@@ -26,7 +26,7 @@
 | 17 | V1 单进程；PDFium 崩溃（abort）接受，子进程隔离推 V2 | — |
 | 18 | 输出字体按字符级走主字体 Noto Sans SC 2.004 → 回退字体 DejaVu Sans 2.35；两族各有 Regular/Bold 槽，均按 flag > env > config > SHA 缓存 > manifest 下载解析，经 `PassContext` 注入并按需子集化；主槽用 `--font`/`--font-bold`，回退槽用 `--font-fallback`/`--font-fallback-bold`。两族皆缺才整段 `unsupported_font`，诊断列出双方身份；italic 映射正常字重。Noto 主字体仍以同一份可变字体承载两个逻辑槽，静态双字重仍是 follow-up | [ADR-0018](docs/adr/0018-output-font-assets.md) |
 | 19 | 术语：**保留自动术语提取**（独立 pass，LLM）+ `--glossary` 用户术语表 | — |
-| 20 | 翻译层：`Translator` trait 可扩展；V1 实现 OpenAI-compatible Responses API + `none` 直通；可翻形状收到 echo 后单次语义重试，再次 echo 则缓存为 `Identity`、发段级 `suspicious_echo` 并进 summary，但不算硬降级、不触发 strict；数字/符号/邮箱形状保持一次 identity；六类占位符违规均单次语义重试，重试请求按子类附加缺失/重复/未知 token 或顺序纠错提示，仍违规才仅降级所属段；原请求、缓存键与 validator 不变，无效响应不入缓存 | [ADR-0016](docs/adr/0016-responses-api-and-translation-config.md)、[ADR-0017](docs/adr/0017-translation-degradation-and-strict.md) |
+| 20 | 翻译层：`Translator` trait 可扩展；V1 实现 OpenAI-compatible Responses API + `none` 直通；纯空白及不含字母的数字/符号源形状在本地直接判为 identity，不进术语或翻译后端、不产生新排版墨迹；其余可翻形状收到 echo 后单次语义重试，再次 echo 则缓存为 `Identity`、发段级 `suspicious_echo` 并进 summary，但不算硬降级、不触发 strict；邮箱形状保持一次后端 identity；六类占位符违规均单次语义重试，重试请求按子类附加缺失/重复/未知 token 或顺序纠错提示，仍违规才仅降级所属段；原请求、缓存键与 validator 不变，无效响应不入缓存 | [ADR-0016](docs/adr/0016-responses-api-and-translation-config.md)、[ADR-0017](docs/adr/0017-translation-degradation-and-strict.md) |
 | 21 | 翻译缓存：V1 即做，redb，键含(原文,模型,目标语,prompt 版本,术语指纹)；`--no-cache` | — |
 | 22 | 推理纯 CPU（ort CPU EP）；GPU/NPU EP 不进 V1 | — |
 | 23 | 质量回归四件套：全语料 IL 快照 + 占位符守恒 + 零 panic + 几何断言；**CI 绿才能合并**；渲染像素 diff 待渲染路径稳定后加 | — |
@@ -56,6 +56,7 @@
 | 47 | M3 质量以六个封顶维度度量：覆盖缺口、过度翻译、误译风险代理、版面漂移、排版 lint、结构保真；严重度加权错误按每千输出字符归一化，六维等权汇总。schema v2 增加内容守恒、公式完整性/连续性/空洞、title/author 守恒与过程指标；reference-free QE 是独立 sidecar，不混入六维总分。旧 fake 的内容守恒明确 N/A；人工确认的 critical 永远覆盖自动结论。离线 `scorecard` 只消费公开 NDJSON/IL/PDF，不依赖生产 crate；生产与检测共用的纯数值/词法合同只来自 `mimus-quality-contract`，每条 FOR/CON 规则必须在 docs/10 标出生产执行点或成文豁免。阈值是待用户裁定的提案，不进 CI。真实输入出现 `Internal/6` 永远是 bug，合法终态只有发布成功或 ADR-0013 分级 typed 降级 | [docs/10-quality-scorecard.md](docs/10-quality-scorecard.md)、[docs/11-quality-scorecard-v2-baseline.md](docs/11-quality-scorecard-v2-baseline.md) |
 | 48 | model `inline_formula` 仍是公式存在性的唯一权威；StylesAndFormulas 只可在同段、同行、视觉紧邻且有脚本基线、定界符配平、经 Mathematical Alphanumeric Symbols 锚证明的同数学字体连续 run 或紧连数学后缀证据时扩展既有公式边界，不得凭启发式新建或收缩 model 公式。跨提取顺序或带隐式空格的 ASCII 数字候选仅在字号、基线、metric box 同时证明且唯一匹配一个既有锚时扩展，并归到该锚 reading order；跨序字母仍须相邻 run 证据，歧义即不扩展。每类扩展发 `formula_boundary_expanded` typed info，扩入字符继续受 ADR-0020 的源字节、字体和相对几何合同保护 | [ADR-0020](docs/adr/0020-inline-formula-flow-relocation.md) |
 | 49 | inline formula 的 fixed-slot 与 relocation 成功路径共用一个阅读连续性 oracle：同行邻接与跨行前导空洞上界为 `max(2×源 text→text 词间距中位数, 1.5×源字号中位数)`，公式间距不得污染样本；公式邻接标点不拆行、单元阅读序不逆转。fixed 不连续先尝试既有边界内的 relocation，仍失败则 `typeset_overflow` typed 段级保留；不得靠缩字号或扩大碰撞容差满足 oracle | [ADR-0020](docs/adr/0020-inline-formula-flow-relocation.md) §6 |
+| 50 | IL `Char.font_size` 是 ParagraphFind 与 Typeset 使用的页面空间 em：`abs(Tf) × |CTM × Tm` 的竖直基向量 `|`；walker 继续保留原始 `Tf` 给精确源操作数/公式重放。无 inline formula 的段落还把 walker 保留的水平 vector path 与 inline image 当作排版障碍；公式段继续由 ADR-0020 的既有所有权和重放合同处理 | [ADR-0007](docs/adr/0007-ir-design.md)、[ADR-0020](docs/adr/0020-inline-formula-flow-relocation.md) |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
@@ -134,7 +135,7 @@ model `inline_formula` 的**存在性**保持绝对权威，但模型框边缘�
 ### 翻译层
 
 - **Translator trait**：翻译后端抽象。V1：`openai`（endpoint+key+model）与 `none`（原文直通，离线测试排版链路）。
-- **占位符协议**：公式→`{v1}`、富文本→`<b1>…</b1>`；缺失、重复、未知 token、标签嵌套、部分 token、公式乱序六类失败均携带稳定 subtype，首次违规单次语义重试，再次违规才只降级所属段落；无效响应不入缓存。可翻形状的 echo 同样单次语义重试，再次 echo 则保留原文、进入 identity cache、发段级 `suspicious_echo` 并进 summary，但不触发 strict；数字/符号/邮箱形状不重试。散文形状段的高 echo 率另发单条文档级 warning。
+- **占位符协议**：公式→`{v1}`、富文本→`<b1>…</b1>`；缺失、重复、未知 token、标签嵌套、部分 token、公式乱序六类失败均携带稳定 subtype，首次违规单次语义重试，再次违规才只降级所属段落；无效响应不入缓存。纯空白及不含字母的数字/符号源形状本地 identity，不进后端；其余可翻形状的 echo 单次语义重试，再次 echo 则保留原文、进入 identity cache、发段级 `suspicious_echo` 并进 summary，但不触发 strict；邮箱形状走一次后端 identity 且不重试。散文形状段的高 echo 率另发单条文档级 warning。
 - **自动术语提取（ExtractTerms）**：翻译前的独立 LLM pass，产出全文术语表注入翻译 prompt；用户 `--glossary` 优先覆盖；`--dump-glossary` 导出供人工校对后回传（`--no-auto-terms` 可关）。
 - **翻译缓存**：段落级，redb，键含 prompt 版本与术语指纹。
 

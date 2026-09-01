@@ -27,6 +27,8 @@ pub struct PipelineConfig {
     pub sleeper: Arc<dyn Sleeper>,
     pub strict: bool,
     pub translate_table: bool,
+    pub strip_link_borders: bool,
+    pub bilingual: bool,
 }
 
 impl Default for PipelineConfig {
@@ -43,6 +45,8 @@ impl Default for PipelineConfig {
             sleeper: Arc::new(ThreadSleeper),
             strict: false,
             translate_table: false,
+            strip_link_borders: false,
+            bilingual: false,
         }
     }
 }

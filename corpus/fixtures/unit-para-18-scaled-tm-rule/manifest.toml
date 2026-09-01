@@ -1,0 +1,372 @@
+# unit-para-18-scaled-tm-rule -- expected manifest
+#
+# This specification precedes the exact writer recipe. Geometry is derived
+# from MimusExact.ttf's pinned 2048-unit TrueType tables at an effective 12pt:
+# raw 1pt Tf multiplied by the 12x vertical basis of each text matrix.
+
+schema_version = 1
+
+[identity]
+id = "unit-para-18-scaled-tm-rule"
+name = "Scaled text-matrix paragraph beside a retained rule"
+class = "unit"
+legality = "legal"
+cases = ["PARA-18", "TYPE-16"]
+priority = "M3"
+variable = "Word-export line fragments use raw 1pt Tf with a 12x text matrix and sit immediately above one retained horizontal rule"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-para-18-scaled-tm-rule.pdf"
+pdf_sha256 = "ed75df649fae0dd2f14aba67d0f7f099770df80f475d2baaed95789aeac6575f"
+font_provenance = "vendored"
+fonts = [
+    { file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" },
+]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d706172612d31382d736361"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 20
+columns = 1
+bookmarks = 0
+bookmark_depth = 0
+annotations = 0
+form_fields = 0
+optional_content_groups = 0
+named_destinations = 0
+uri_actions = 0
+
+[[expected.block]]
+key = "L1W1_M1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "M"
+baseline_origin = [72.0, 150.0]
+metric_box = [72.0, 147.168, 82.356, 161.136]
+visual_bbox = [73.177734, 150.0, 81.181641, 158.748047]
+
+[[expected.block]]
+key = "L1W1_I"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "I"
+baseline_origin = [82.356, 150.0]
+metric_box = [82.356, 147.168, 85.896, 161.136]
+visual_bbox = [83.533734, 150.0, 84.717328, 158.748047]
+
+[[expected.block]]
+key = "L1W1_M2"
+page = 0
+column = "full"
+draw_order = 3
+reading_order = 3
+text = "M"
+baseline_origin = [85.896, 150.0]
+metric_box = [85.896, 147.168, 96.252, 161.136]
+visual_bbox = [87.073734, 150.0, 95.077641, 158.748047]
+
+[[expected.block]]
+key = "L1W1_U"
+page = 0
+column = "full"
+draw_order = 4
+reading_order = 4
+text = "U"
+baseline_origin = [96.252, 150.0]
+metric_box = [96.252, 147.168, 105.036, 161.136]
+visual_bbox = [97.294969, 149.830078, 103.992235, 158.748047]
+
+[[expected.block]]
+key = "L1W1_S"
+page = 0
+column = "full"
+draw_order = 5
+reading_order = 5
+text = "S"
+baseline_origin = [105.036, 150.0]
+metric_box = [105.036, 147.168, 112.656, 161.136]
+visual_bbox = [105.827016, 149.830078, 111.985219, 158.90625]
+
+[[expected.block]]
+key = "L1W2_M1"
+page = 0
+column = "full"
+draw_order = 6
+reading_order = 6
+text = "M"
+baseline_origin = [125.0, 150.0]
+metric_box = [125.0, 147.168, 135.356, 161.136]
+visual_bbox = [126.177734, 150.0, 134.181641, 158.748047]
+
+[[expected.block]]
+key = "L1W2_I"
+page = 0
+column = "full"
+draw_order = 7
+reading_order = 7
+text = "I"
+baseline_origin = [135.356, 150.0]
+metric_box = [135.356, 147.168, 138.896, 161.136]
+visual_bbox = [136.533734, 150.0, 137.717328, 158.748047]
+
+[[expected.block]]
+key = "L1W2_M2"
+page = 0
+column = "full"
+draw_order = 8
+reading_order = 8
+text = "M"
+baseline_origin = [138.896, 150.0]
+metric_box = [138.896, 147.168, 149.252, 161.136]
+visual_bbox = [140.073734, 150.0, 148.077641, 158.748047]
+
+[[expected.block]]
+key = "L1W2_U"
+page = 0
+column = "full"
+draw_order = 9
+reading_order = 9
+text = "U"
+baseline_origin = [149.252, 150.0]
+metric_box = [149.252, 147.168, 158.036, 161.136]
+visual_bbox = [150.294969, 149.830078, 156.992235, 158.748047]
+
+[[expected.block]]
+key = "L1W2_S"
+page = 0
+column = "full"
+draw_order = 10
+reading_order = 10
+text = "S"
+baseline_origin = [158.036, 150.0]
+metric_box = [158.036, 147.168, 165.656, 161.136]
+visual_bbox = [158.827016, 149.830078, 164.985219, 158.90625]
+
+[[expected.block]]
+key = "L2W1_M1"
+page = 0
+column = "full"
+draw_order = 11
+reading_order = 11
+text = "M"
+baseline_origin = [72.0, 136.0]
+metric_box = [72.0, 133.168, 82.356, 147.136]
+visual_bbox = [73.177734, 136.0, 81.181641, 144.748047]
+
+[[expected.block]]
+key = "L2W1_I"
+page = 0
+column = "full"
+draw_order = 12
+reading_order = 12
+text = "I"
+baseline_origin = [82.356, 136.0]
+metric_box = [82.356, 133.168, 85.896, 147.136]
+visual_bbox = [83.533734, 136.0, 84.717328, 144.748047]
+
+[[expected.block]]
+key = "L2W1_M2"
+page = 0
+column = "full"
+draw_order = 13
+reading_order = 13
+text = "M"
+baseline_origin = [85.896, 136.0]
+metric_box = [85.896, 133.168, 96.252, 147.136]
+visual_bbox = [87.073734, 136.0, 95.077641, 144.748047]
+
+[[expected.block]]
+key = "L2W1_U"
+page = 0
+column = "full"
+draw_order = 14
+reading_order = 14
+text = "U"
+baseline_origin = [96.252, 136.0]
+metric_box = [96.252, 133.168, 105.036, 147.136]
+visual_bbox = [97.294969, 135.830078, 103.992235, 144.748047]
+
+[[expected.block]]
+key = "L2W1_S"
+page = 0
+column = "full"
+draw_order = 15
+reading_order = 15
+text = "S"
+baseline_origin = [105.036, 136.0]
+metric_box = [105.036, 133.168, 112.656, 147.136]
+visual_bbox = [105.827016, 135.830078, 111.985219, 144.90625]
+
+[[expected.block]]
+key = "L2W2_M1"
+page = 0
+column = "full"
+draw_order = 16
+reading_order = 16
+text = "M"
+baseline_origin = [125.0, 136.0]
+metric_box = [125.0, 133.168, 135.356, 147.136]
+visual_bbox = [126.177734, 136.0, 134.181641, 144.748047]
+
+[[expected.block]]
+key = "L2W2_I"
+page = 0
+column = "full"
+draw_order = 17
+reading_order = 17
+text = "I"
+baseline_origin = [135.356, 136.0]
+metric_box = [135.356, 133.168, 138.896, 147.136]
+visual_bbox = [136.533734, 136.0, 137.717328, 144.748047]
+
+[[expected.block]]
+key = "L2W2_M2"
+page = 0
+column = "full"
+draw_order = 18
+reading_order = 18
+text = "M"
+baseline_origin = [138.896, 136.0]
+metric_box = [138.896, 133.168, 149.252, 147.136]
+visual_bbox = [140.073734, 136.0, 148.077641, 144.748047]
+
+[[expected.block]]
+key = "L2W2_U"
+page = 0
+column = "full"
+draw_order = 19
+reading_order = 19
+text = "U"
+baseline_origin = [149.252, 136.0]
+metric_box = [149.252, 133.168, 158.036, 147.136]
+visual_bbox = [150.294969, 135.830078, 156.992235, 144.748047]
+
+[[expected.block]]
+key = "L2W2_S"
+page = 0
+column = "full"
+draw_order = 20
+reading_order = 20
+text = "S"
+baseline_origin = [158.036, 136.0]
+metric_box = [158.036, 133.168, 165.656, 147.136]
+visual_bbox = [158.827016, 135.830078, 164.985219, 144.90625]
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """q
+0.5 w
+60 132.5 m
+270 132.5 l
+S
+Q
+BT
+/F1 1 Tf
+12 0 0 12 72 150 Tm
+(MIMUS) Tj
+12 0 0 12 125 150 Tm
+(MIMUS) Tj
+12 0 0 12 72 136 Tm
+(MIMUS) Tj
+12 0 0 12 125 136 Tm
+(MIMUS) Tj
+ET
+"""
+
+[[expected.reference]]
+from_object = 1
+path = ["/Pages"]
+to_object = 2
+
+[[expected.reference]]
+from_object = 2
+path = ["/Kids", "0"]
+to_object = 3
+
+[[expected.reference]]
+from_object = 3
+path = ["/Parent"]
+to_object = 2
+
+[[expected.reference]]
+from_object = 3
+path = ["/Resources"]
+to_object = 4
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 9
+
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 5
+
+[[expected.reference]]
+from_object = 5
+path = ["/FontDescriptor"]
+to_object = 6
+
+[[expected.reference]]
+from_object = 5
+path = ["/ToUnicode"]
+to_object = 8
+
+[[expected.reference]]
+from_object = 6
+path = ["/FontFile2"]
+to_object = 7
+
+[[expected.behaviour]]
+id = "PARA-18-page-space-em"
+assertion = "ParagraphFind uses the combined CTM/text-matrix vertical basis as the em, reconstructing four Word-export fragments as one two-line paragraph while preserving raw 1pt Tf for replay"
+observable_via = "exact source bytes, recorded layout, and paragraph-find IL"
+
+[[expected.behaviour]]
+id = "TYPE-16-retained-rule-collision"
+assertion = "A multiline translation may use blank rows below the source only until the next retained vector rule; output that would cross the rule remains one typed typeset_overflow paragraph"
+observable_via = "walker-owned vector path, typeset_overflow_detail, degradation_summary, and final output ink"
+
+[oracle]
+checks = [
+    "determinism",
+    "legality",
+    "page-geometry",
+    "glyphs",
+    "transformed-text-geometry",
+    "pdf-bytes",
+    "pdf-structure",
+    "render",
+]
+
+[[adjudication]]
+date = "2026-08-31"
+issue = "Independent text parsers may aggregate the four text-show fragments by visual line even though the source contract is intentionally operand-granular."
+resolution = "Keep four hand-derived exact text blocks; recorded layout and production ParagraphFind own the two-line paragraph reconstruction assertion."

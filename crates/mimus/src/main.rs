@@ -112,6 +112,12 @@ struct TranslateArgs {
     /// Experimental: translate text within recognized table-cell boundaries.
     #[arg(long)]
     translate_table: bool,
+    /// Remove visible borders from Link annotations while preserving their targets and rectangles.
+    #[arg(long)]
+    strip_link_borders: bool,
+    /// Publish each original page followed by its translated counterpart.
+    #[arg(long)]
+    bilingual: bool,
     /// New directory for per-pass IL snapshots and diagnostics.
     #[arg(long, value_name = "NEW_DIR")]
     debug: Option<PathBuf>,
@@ -287,6 +293,8 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
     let max_concurrency = resolved.max_concurrency;
     let strict = resolved.strict;
     let translate_table = resolved.translate_table;
+    let strip_link_borders = args.strip_link_borders;
+    let bilingual = args.bilingual;
     let translator = match resolved.take_translator() {
         Ok(value) => value,
         Err(error) => return session.finish_error(error),
@@ -315,6 +323,8 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
             concurrency: max_concurrency,
             strict,
             translate_table,
+            strip_link_borders,
+            bilingual,
         }),
     })) {
         return session.finish_error(error);
@@ -343,6 +353,8 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
             max_concurrency,
             strict,
             translate_table,
+            strip_link_borders,
+            bilingual,
             ..PipelineConfig::default()
         },
     };
@@ -351,6 +363,8 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         result: ResultPayload::Translate {
             output: result.output,
             translate_table,
+            strip_link_borders,
+            bilingual,
         },
         pages: result.pages,
         warnings: result.warnings,

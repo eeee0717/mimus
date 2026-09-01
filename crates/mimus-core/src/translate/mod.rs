@@ -196,6 +196,7 @@ pub(crate) struct PreparedTranslation {
     request_text: String,
     tokens: Vec<ProtocolToken>,
     echo_retry_eligible: bool,
+    local_identity: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,6 +289,7 @@ impl PreparedTranslation {
             request_text,
             tokens,
             echo_retry_eligible: echo_retry_eligible(&source_text),
+            local_identity: local_identity_eligible(&source_text),
         }
     }
 
@@ -297,6 +299,10 @@ impl PreparedTranslation {
 
     pub(crate) const fn echo_retry_eligible(&self) -> bool {
         self.echo_retry_eligible
+    }
+
+    pub(crate) const fn is_local_identity(&self) -> bool {
+        self.local_identity
     }
 
     pub(crate) fn placeholder_retry_correction(
@@ -527,6 +533,10 @@ fn echo_retry_eligible(source: &str) -> bool {
         return false;
     }
     trimmed.chars().any(char::is_alphabetic)
+}
+
+fn local_identity_eligible(source: &str) -> bool {
+    source.trim().is_empty() || !source.chars().any(char::is_alphabetic)
 }
 
 fn looks_like_email(source: &str) -> bool {

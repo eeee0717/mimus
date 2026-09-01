@@ -617,6 +617,27 @@ fn assert_valid_pdf(path: &Path, id: &str) {
     );
 }
 
+fn assert_no_placeholder_residue(text: &str, source: &str) {
+    for prefix in ["{v", "{l", "<b", "</b"] {
+        assert!(
+            !text.contains(prefix),
+            "placeholder prefix {prefix:?} leaked through {source}: {text:?}"
+        );
+    }
+}
+
+fn assert_snapshot_has_no_placeholder_residue(path: &Path, fixture_id: &str) {
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    for page in snapshot["pages"].as_array().unwrap() {
+        for paragraph in page["paragraphs"].as_array().unwrap() {
+            if let Some(text) = paragraph["translated_text"].as_str() {
+                assert_no_placeholder_residue(text, &format!("fixture {fixture_id} translated IL"));
+            }
+        }
+    }
+}
+
 fn extract_pdf_text(path: &Path, extractor: &str) -> String {
     let output = match extractor {
         "poppler" => Command::new("pdftotext")
@@ -2181,9 +2202,9 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
         "unit-scan-01-image-only".to_owned(),
         "unit-scan-02-invisible-ocr".to_owned(),
     ]);
-    assert_eq!(ids.len(), 160, "Corpus fixture inventory changed");
-    assert_eq!(unique_cases.len(), 95, "Corpus case inventory changed");
-    assert_eq!(legal.len(), 118, "legal fixture inventory changed");
+    assert_eq!(ids.len(), 164, "Corpus fixture inventory changed");
+    assert_eq!(unique_cases.len(), 98, "Corpus case inventory changed");
+    assert_eq!(legal.len(), 122, "legal fixture inventory changed");
     assert!(rejected.is_subset(&legal));
 
     let directory = tempfile::tempdir().unwrap();
@@ -2191,13 +2212,14 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
     let mut output_count = 0usize;
     for id in legal {
         let output_path = directory.path().join(format!("{id}.pdf"));
+        let debug = directory.path().join(format!("{id}-debug"));
         let calls_before = server.request_count();
         let output = run_openai(
             &id,
             &server,
             RunOptions {
                 output: &output_path,
-                debug: None,
+                debug: Some(&debug),
                 cache: None,
                 model: "m2-corpus-model",
                 target_language: "zh-CN",
@@ -2242,6 +2264,17 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
             assert_terminal(&events, "result");
             assert!(output_path.is_file(), "fixture {id} produced no output");
             assert_valid_pdf(&output_path, &id);
+            assert_snapshot_has_no_placeholder_residue(&debug.join("06-translate.il.json"), &id);
+            let mut extractors = vec!["poppler"];
+            if fixture_manifest(&id).expected.renderer_diagnostic.is_none() {
+                extractors.push("mupdf");
+            }
+            for extractor in extractors {
+                assert_no_placeholder_residue(
+                    &extract_pdf_text(&output_path, extractor),
+                    &format!("fixture {id} {extractor} extraction"),
+                );
+            }
             assert!(
                 !events.iter().any(|event| {
                     event["id"] == "degradation_summary"
@@ -2266,10 +2299,10 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
             output_count += 1;
         }
     }
-    assert_eq!(output_count, 111);
+    assert_eq!(output_count, 115);
     assert_eq!(
         server.request_count(),
-        147,
+        145,
         "eligible corpus request inventory changed"
     );
     assert!(server.requests().iter().all(|request| {

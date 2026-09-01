@@ -3,6 +3,8 @@
 - Status: Accepted (2026-08-25)
 - Decision level: Public because preservation, terminal reasons, and output publication are CLI
   contracts.
+- Revision: 2026-08-31 accepts whitespace-only and non-alphabetic numeric/symbol source shapes as
+  local identities before either translation backend.
 
 ## Context
 
@@ -35,13 +37,17 @@ existing destination.
    validator. Invalid responses remain absent from the cache; the retry emits paragraph-scoped
    `placeholder_retry` with the subtype and semantic response attempt. Alternating echo and
    placeholder failures can therefore produce at most three semantic responses for one paragraph.
-3. A response byte-for-byte equal to the prepared request is `TranslationOutcome::Identity`, not a
-   placeholder violation. A translation-worthy shape (any alphabetic content except an email
-   address) gets one semantic retry. If the second response is also an echo, the paragraph keeps
-   source text as its translated result, emits informational `translation_identity` plus the
-   paragraph-scoped `suspicious_echo` warning, enters the separate identity cache, and appears in
-   `degradation_summary.suspicious_echoes`. Numeric, symbol-only, and email-shaped requests keep the
-   original one-response identity behavior and do not emit `suspicious_echo`.
+3. Whitespace-only source and source with no alphabetic characters are local identity shapes. They
+   do not enter automatic term extraction, either translation backend, or the translation cache;
+   they retain the source operand and produce no Typeset ink. For remaining requests, a response
+   byte-for-byte equal to the prepared request is `TranslationOutcome::Identity`, not a placeholder
+   violation. A translation-worthy shape (any alphabetic content except an email address) gets one
+   semantic retry. If the second response is also an echo, the paragraph keeps source text as its
+   translated result, emits informational `translation_identity` plus the paragraph-scoped
+   `suspicious_echo` warning, enters the separate identity cache, and appears in
+   `degradation_summary.suspicious_echoes`. Email-shaped requests keep the original one-response
+   backend identity behavior and emit neither diagnostic; expected identity shapes do not consume
+   the diagnostic budget.
 4. `suspicious_echo` is visible quality evidence, not hard degradation. It does not set
    `Paragraph.preserved`, does not block output, and does not make `--strict` fail. Strict output
    still lists it through the ordinary diagnostic stream and degradation summary, so automation or
@@ -71,6 +77,8 @@ existing destination.
 
 - A long document can complete with isolated source paragraphs instead of losing all successful
   work because one request failed.
+- Empty and non-alphabetic source fragments cannot consume provider calls or Typeset capacity by
+  receiving synthetic prose from a backend.
 - Correct no-op translations no longer create false placeholder failures. Translation-worthy
   repeated echoes are visible per paragraph and document-wide without exposing response text.
 - A first malformed semantic response can recover without degrading the paragraph. A persistent
