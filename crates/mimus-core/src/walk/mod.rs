@@ -74,6 +74,7 @@ pub(crate) struct WalkedInlineImage {
 pub enum UnicodeProvenance {
     ToUnicode,
     EmbeddedFontCmap,
+    EmbeddedType1Encoding,
     SimpleEncoding,
     DifferencesAgl,
     Unresolved,
@@ -1105,6 +1106,9 @@ impl Walker<'_> {
                     ),
                 )
             })?;
+        if font.normalized_descriptor_descent {
+            self.recoveries.insert(RecoveryKind::NormalizedFontDescent);
+        }
         for glyph in font.decode(bytes) {
             let glyph_width = glyph.advance_em * self.state.font_size;
             let word_spacing = if glyph.encoded.as_slice() == b" " {

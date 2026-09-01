@@ -1435,8 +1435,8 @@ fn corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 164, "Corpus fixture inventory changed");
-    assert_eq!(cases.len(), 98, "Corpus case inventory changed");
+    assert_eq!(ids.len(), 167, "Corpus fixture inventory changed");
+    assert_eq!(cases.len(), 100, "Corpus case inventory changed");
 
     let mut snapshot_digests = BTreeMap::new();
     let mut snapshot_counts = BTreeMap::new();
@@ -2978,6 +2978,9 @@ fn supported_font_and_cmap_fixtures_match_manifest_unicode_and_positive_advances
     let directory = tempfile::tempdir().unwrap();
     for id in [
         "unit-font-01-std14-custom-widths",
+        "unit-font-04-negative-descent-parent",
+        "mal-font-04-positive-descent",
+        "unit-font-08-type1-header-encoding",
         "unit-font-escaped-name",
         "unit-stream-02-type3-d1",
         "unit-stream-04-type3-d0",
@@ -3059,6 +3062,35 @@ fn supported_font_and_cmap_fixtures_match_manifest_unicode_and_positive_advances
             "fixture {id} output contains a CID literal"
         );
     }
+}
+
+#[test]
+fn font_04_positive_descent_is_typed_and_normalized_in_production_il() {
+    let inspected = run_inspect(&fixture_path("mal-font-04-positive-descent"), true, None);
+    assert!(
+        inspected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let events = parse_events(&inspected.stdout);
+    assert_one_terminal_last(&events, "result");
+    assert!(events.iter().any(|event| {
+        event["event"] == "diagnostic"
+            && event["id"] == "content_recovered"
+            && event["recovery"] == "normalized_font_descent"
+    }));
+    let character = &events.last().unwrap()["il"]["pages"][0]["paragraphs"][0]["text"]["chars"][0];
+    assert!((character["box"]["bottom"].as_f64().unwrap() - 117.48).abs() <= 0.001);
+
+    let parent = run_inspect(
+        &fixture_path("unit-font-04-negative-descent-parent"),
+        true,
+        None,
+    );
+    let parent_events = parse_events(&parent.stdout);
+    assert!(parent_events.iter().all(|event| {
+        event["id"] != "content_recovered" || event["recovery"] != "normalized_font_descent"
+    }));
 }
 
 #[test]

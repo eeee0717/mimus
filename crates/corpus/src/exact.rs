@@ -118,6 +118,8 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
         "unit-stream-odd-hex" => odd_hex_identity(repo_root),
         "unit-stream-tr7-clip" => tr7_clip(repo_root),
         "unit-font-01-std14-custom-widths" => std14_custom_widths(repo_root),
+        "unit-font-04-negative-descent-parent" => font_negative_descent_parent(repo_root),
+        "unit-font-08-type1-header-encoding" => embedded_type1_header_encoding(repo_root),
         "unit-font-escaped-name" => escaped_font_name(repo_root),
         "unit-cmap-01-identity-no-tounicode" => identity_cid_no_tounicode(repo_root),
         "unit-cmap-embedded-ok" => embedded_cmap_ok(repo_root),
@@ -900,6 +902,39 @@ fn std14_custom_widths(repo_root: &Path) -> Result<Vec<u8>> {
     pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
     pdf.object(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding /FirstChar 65 /LastChar 90 /Widths [1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000 1000] >>")?;
     pdf.stream(b"", b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (AAAA) Tj ET\n")?;
+    pdf.finish(1)
+}
+
+fn font_negative_descent_parent(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-font-04-negative-descent-parent");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 9 0 R >>",
+    )?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    pdf.object(b"<< /Type /Font /Subtype /TrueType /BaseFont /MIMUSI+DejaVuSans /FirstChar 77 /LastChar 77 /Widths [863] /Encoding /WinAnsiEncoding /FontDescriptor 6 0 R /ToUnicode 8 0 R >>")?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 0 /Descent -210 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.stream(b"", b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (M) Tj ET\n")?;
+    pdf.finish(1)
+}
+
+fn embedded_type1_header_encoding(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_type1_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-font-08-type1-header-encoding");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 8 0 R >>",
+    )?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    pdf.object(b"<< /Type /Font /Subtype /Type1 /BaseFont /MIMUST+CMMI10 /FirstChar 65 /LastChar 65 /Widths [639] /FontDescriptor 6 0 R >>")?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUST+CMMI10 /Flags 96 /FontBBox [-32 -250 1048 750] /ItalicAngle -14.04 /Ascent 750 /Descent -250 /CapHeight 683 /StemV 70 /MissingWidth 500 /FontFile 7 0 R >>")?;
+    pdf.stream(b"/Length1 4348 /Length2 31411 /Length3 545", &font)?;
+    pdf.stream(b"", b"BT /F1 12 Tf 1 0 0 1 72 120 Tm (A) Tj ET\n")?;
     pdf.finish(1)
 }
 
@@ -2101,6 +2136,18 @@ fn pinned_font(repo_root: &Path) -> Result<Vec<u8>> {
         hash::of_bytes(&bytes) == FONT_SHA256,
         "pinned exact-fixture font SHA-256 changed: {}",
         path.display()
+    );
+    Ok(bytes)
+}
+
+fn pinned_type1_font(repo_root: &Path) -> Result<Vec<u8>> {
+    let path = repo_root.join("corpus/fonts/MimusType1.pfb");
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("read pinned fixture font {}", path.display()))?;
+    ensure!(
+        hash::of_bytes(&bytes)
+            == "ef2ecaff359f71078eb6611b9b4b2859d84666256340d5ee23a5657136773786",
+        "pinned MimusType1.pfb hash drift"
     );
     Ok(bytes)
 }

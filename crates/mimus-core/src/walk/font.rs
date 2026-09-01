@@ -21,6 +21,7 @@ pub(super) struct ResolvedFont {
     pub reference: FontRef,
     pub ascent_em: f64,
     pub descent_em: f64,
+    pub normalized_descriptor_descent: bool,
     pub engine_mismatch_tolerated: bool,
     supported: bool,
     unicode: UnicodeSource,
@@ -89,6 +90,7 @@ struct SimpleEncoding {
     unicode: Vec<Option<char>>,
     glyph_names: Vec<Option<Vec<u8>>>,
     differences_agl: Vec<bool>,
+    embedded_type1: Vec<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -154,6 +156,7 @@ impl ResolvedFont {
                 reference: fallback_reference,
                 ascent_em: 0.0,
                 descent_em: 0.0,
+                normalized_descriptor_descent: false,
                 engine_mismatch_tolerated: true,
                 supported: false,
                 unicode: UnicodeSource::Absent,
@@ -186,6 +189,7 @@ impl ResolvedFont {
                 reference,
                 ascent_em: 0.0,
                 descent_em: 0.0,
+                normalized_descriptor_descent: false,
                 engine_mismatch_tolerated: true,
                 supported: false,
                 unicode: read_to_unicode(document, font),
@@ -219,14 +223,23 @@ impl ResolvedFont {
             .and_then(|value| value.get(b"Ascent").ok())
             .and_then(object_number)
             .or_else(|| standard_14.then_some(718.0));
-        let descent = descriptor
+        let raw_descent = descriptor
             .and_then(|value| value.get(b"Descent").ok())
             .and_then(object_number)
             .or_else(|| standard_14.then_some(-207.0));
+        let normalized_descriptor_descent = raw_descent.is_some_and(|value| value > 0.0);
+        let descent = raw_descent.map(normalize_descriptor_descent);
         let missing_width = descriptor
             .and_then(|value| value.get(b"MissingWidth").ok())
             .and_then(object_number);
-        let encoding = read_simple_encoding(document, font, subtype == b"TrueType")?;
+        let encoding = if subtype == b"Type1" && !font.has(b"Encoding") {
+            match descriptor.and_then(|value| read_embedded_type1_encoding(document, value)) {
+                Some(result) => result?,
+                None => read_simple_encoding(document, font, false)?,
+            }
+        } else {
+            read_simple_encoding(document, font, subtype == b"TrueType")?
+        };
         let embedded_unicode = descriptor.map_or(EmbeddedUnicode::Absent, |value| {
             read_embedded_unicode(document, value)
         });
@@ -238,6 +251,7 @@ impl ResolvedFont {
             reference,
             ascent_em: ascent.unwrap_or(0.0) / 1000.0,
             descent_em: descent.unwrap_or(0.0) / 1000.0,
+            normalized_descriptor_descent,
             engine_mismatch_tolerated: false,
             supported,
             unicode: read_to_unicode(document, font),
@@ -290,9 +304,11 @@ impl ResolvedFont {
         let ascent = descriptor
             .and_then(|value| value.get(b"Ascent").ok())
             .and_then(object_number);
-        let descent = descriptor
+        let raw_descent = descriptor
             .and_then(|value| value.get(b"Descent").ok())
             .and_then(object_number);
+        let normalized_descriptor_descent = raw_descent.is_some_and(|value| value > 0.0);
+        let descent = raw_descent.map(normalize_descriptor_descent);
         let embedded = descriptor.and_then(|value| embedded_true_type(document, value));
         let gid_to_unicode = embedded
             .as_deref()
@@ -319,6 +335,7 @@ impl ResolvedFont {
             reference,
             ascent_em: ascent.unwrap_or(0.0) / 1000.0,
             descent_em: descent.unwrap_or(0.0) / 1000.0,
+            normalized_descriptor_descent,
             engine_mismatch_tolerated: embedded_unicode || identity_alias || !supported,
             supported,
             unicode,
@@ -392,6 +409,7 @@ impl ResolvedFont {
             reference,
             ascent_em,
             descent_em,
+            normalized_descriptor_descent: false,
             engine_mismatch_tolerated: !supported,
             supported,
             unicode: read_to_unicode(document, font),
@@ -407,7 +425,9 @@ impl ResolvedFont {
                     let encoded = vec![*code];
                     let (unicode, unicode_provenance) = self.unicode_for(&encoded, || {
                         let candidate = font.encoding.unicode[usize::from(*code)];
-                        let provenance = if font.encoding.differences_agl[usize::from(*code)] {
+                        let provenance = if font.encoding.embedded_type1[usize::from(*code)] {
+                            UnicodeProvenance::EmbeddedType1Encoding
+                        } else if font.encoding.differences_agl[usize::from(*code)] {
                             UnicodeProvenance::DifferencesAgl
                         } else {
                             UnicodeProvenance::SimpleEncoding
@@ -695,11 +715,71 @@ fn read_simple_encoding(
     }
 }
 
+fn normalize_descriptor_descent(value: f64) -> f64 {
+    if value > 0.0 { -value } else { value }
+}
+
+/// Parse only the bounded cleartext encoding declarations in a Type1 program.
+/// The encrypted CharStrings section starts at `eexec` and is never scanned.
+fn read_embedded_type1_encoding(
+    document: &Document,
+    descriptor: &Dictionary,
+) -> Option<FontResult<SimpleEncoding>> {
+    let object = descriptor.get_deref(b"FontFile", document).ok()?;
+    let stream = match object.as_stream() {
+        Ok(stream) => stream,
+        Err(_) => return Some(Err(FontFailure)),
+    };
+    let bytes = match pdf_stream::decode(document, stream, MAX_STREAM_BYTES) {
+        Ok(bytes) => bytes,
+        Err(_) => return Some(Err(FontFailure)),
+    };
+    Some(parse_type1_cleartext_encoding(&bytes))
+}
+
+fn parse_type1_cleartext_encoding(bytes: &[u8]) -> FontResult<SimpleEncoding> {
+    let cleartext_end = bytes
+        .windows(b"eexec".len())
+        .position(|window| window == b"eexec")
+        .ok_or(FontFailure)?;
+    let tokens = bytes[..cleartext_end]
+        .split(u8::is_ascii_whitespace)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let mut encoding = SimpleEncoding {
+        unicode: vec![None; 256],
+        glyph_names: vec![None; 256],
+        differences_agl: vec![false; 256],
+        embedded_type1: vec![false; 256],
+    };
+    let mut declarations = 0usize;
+    for declaration in tokens.windows(4) {
+        if declaration[0] != b"dup" || declaration[3] != b"put" {
+            continue;
+        }
+        let code = std::str::from_utf8(declaration[1])
+            .ok()
+            .and_then(|value| value.parse::<u8>().ok());
+        let name = declaration[2].strip_prefix(b"/");
+        let (Some(code), Some(name)) = (code, name) else {
+            continue;
+        };
+        let unicode = glyph_name_to_unicode(name)
+            .or_else(|| mimus_quality_contract::differences_agl_single_scalar(name));
+        encoding.unicode[usize::from(code)] = unicode;
+        encoding.glyph_names[usize::from(code)] = Some(name.to_vec());
+        encoding.embedded_type1[usize::from(code)] = true;
+        declarations += 1;
+    }
+    (declarations > 0).then_some(encoding).ok_or(FontFailure)
+}
+
 fn base_encoding(name: &[u8]) -> SimpleEncoding {
     let mut encoding = SimpleEncoding {
         unicode: vec![None; 256],
         glyph_names: vec![None; 256],
         differences_agl: vec![false; 256],
+        embedded_type1: vec![false; 256],
     };
     for code in 0_u8..=u8::MAX {
         let unicode = match name {
@@ -1495,6 +1575,7 @@ mod tests {
             },
             ascent_em: 0.8,
             descent_em: -0.2,
+            normalized_descriptor_descent: false,
             engine_mismatch_tolerated: false,
             supported: true,
             unicode: UnicodeSource::Valid(UnicodeMap {
@@ -1524,6 +1605,7 @@ mod tests {
             },
             ascent_em: 0.8,
             descent_em: -0.2,
+            normalized_descriptor_descent: false,
             engine_mismatch_tolerated: false,
             supported: true,
             unicode: UnicodeSource::Valid(UnicodeMap {
@@ -1549,5 +1631,30 @@ mod tests {
         assert_eq!(glyph_name_to_unicode(b"uni4E2D"), Some('\u{4e2d}'));
         assert_eq!(glyph_name_to_unicode(b"0"), None);
         assert_eq!(glyph_name_to_unicode(b"g123"), None);
+    }
+
+    #[test]
+    fn positive_descriptor_descent_is_normalized_below_the_baseline() {
+        assert_eq!(normalize_descriptor_descent(210.0), -210.0);
+        assert_eq!(normalize_descriptor_descent(-210.0), -210.0);
+        assert_eq!(normalize_descriptor_descent(0.0), 0.0);
+    }
+
+    #[test]
+    fn embedded_type1_encoding_is_read_only_before_eexec() {
+        let encoding = parse_type1_cleartext_encoding(
+            b"%!PS-AdobeFont-1.0\n/Encoding 256 array\n\
+              dup 65 /alpha put\ndup 66 /B put\nreadonly def\neexec\n\
+              dup 67 /C put",
+        )
+        .unwrap();
+
+        assert_eq!(encoding.unicode[65], Some('\u{03b1}'));
+        assert_eq!(encoding.unicode[66], Some('B'));
+        assert_eq!(encoding.unicode[67], None);
+        assert_eq!(
+            encoding.glyph_names[65].as_deref(),
+            Some(b"alpha".as_slice())
+        );
     }
 }

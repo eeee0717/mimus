@@ -22,6 +22,29 @@ SHA-256: `6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735`
 
 The upstream license is preserved in `LICENSE-DejaVu.txt`.
 
+## Type1 fixture font
+
+`MimusType1.pfb` is derived from the CMMI10 Type1 font shipped by TeX Live
+2026. It is renamed to `MIMUST+CMMI10`, and its cleartext built-in encoding
+maps code 65 to `/alpha`; the encrypted `/alpha` CharString and all other
+glyph data remain unchanged. This gives the
+FONT-08 fixture a real embedded Type1 program whose encoding is independent of
+the PDF font dictionary.
+
+Pinned source:
+
+- file: `fonts/type1/public/amsfonts/cm/cmmi10.pfb` from TeX Live 2026;
+- source SHA-256: `e3661061e8aa474d6de5ffa916edceb0e3d8b998862018c147f0357fce00bcd7`;
+- t1utils: `t1disasm 1.42` and `t1asm 1.42`.
+
+The source was disassembled, `/CMMI10` was renamed to `/MIMUST+CMMI10`, the
+single line `dup 65 /A put` was changed to `dup 65 /alpha put`, and the font
+was reassembled as binary PFB. The recipe was run twice and the outputs
+compared byte-for-byte. Both outputs had
+SHA-256 `ef2ecaff359f71078eb6611b9b4b2859d84666256340d5ee23a5657136773786`.
+The upstream SIL Open Font License 1.1 is preserved in
+`LICENSE-AMSFonts.txt`.
+
 ## CJK fixture font
 
 `MimusCJK.ttf` is a deterministic Regular-weight subset of Noto Sans SC from

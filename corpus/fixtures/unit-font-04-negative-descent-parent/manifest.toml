@@ -1,0 +1,88 @@
+schema_version = 1
+
+[identity]
+id = "unit-font-04-negative-descent-parent"
+name = "TrueType descriptor with canonical negative descent"
+class = "unit"
+legality = "legal"
+cases = ["FONT-04"]
+priority = "M3"
+variable = "The embedded TrueType descriptor uses Ascent 0 and the canonical negative Descent -210"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-font-04-negative-descent-parent.pdf"
+pdf_sha256 = "9bfa2ff537c0bb032280dd9a4658b8a76f1e362f0fac5a1b938b7571a2c5d95c"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d666f6e742d30342d6e6567"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "FONT04"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "M"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.48, 82.356, 131.4]
+visual_bbox = [73.177734, 120.0, 81.181641, 128.748047]
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT /F1 12 Tf 1 0 0 1 72 120 Tm (M) Tj ET
+"""
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 9
+
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 5
+
+[[expected.behaviour]]
+id = "FONT-04-negative-control"
+assertion = "The legal parent derives its metric bottom as baseline minus 210/1000 times 12pt and emits no descent-normalization recovery"
+observable_via = "hand arithmetic, font dictionary, production debug IL, PDFium and independent renderer geometry"
+
+[oracle]
+checks = ["determinism", "legality", "operator-walk", "page-geometry", "structure", "font-advance", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "FONT-04 requires a legal parent before the one-range positive-descent mutation"
+resolution = "Pin the descriptor and all three boxes independently; mutate only the sign byte in the child"
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "The hand-derived descent bottom is stable, while Poppler substitutes a 950-unit ascent for the malformed zero Ascent"
+resolution = "Keep the normative FONT-04 assertion on y0=117.48pt and record Poppler's independently observed 131.4pt metric top"

@@ -9239,7 +9239,9 @@ fn validate_character_alignment(
             continue;
         }
         match walk.unicode_provenance {
-            UnicodeProvenance::ToUnicode | UnicodeProvenance::EmbeddedFontCmap => {
+            UnicodeProvenance::ToUnicode
+            | UnicodeProvenance::EmbeddedFontCmap
+            | UnicodeProvenance::EmbeddedType1Encoding => {
                 counts.strong_unicode_conflict += 1;
             }
             UnicodeProvenance::SimpleEncoding | UnicodeProvenance::DifferencesAgl => {
