@@ -12,6 +12,7 @@ use std::time::Duration;
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 const BIN: &str = env!("CARGO_BIN_EXE_mimus");
 const PDFIUM_ENV: &str = "MIMUS_PDFIUM_LIBRARY";
@@ -350,6 +351,131 @@ fn snapshot_names(directory: &Path) -> Vec<String> {
         .into_iter()
         .filter(|name| name.ends_with(".il.json"))
         .collect()
+}
+
+#[derive(Debug, Deserialize)]
+struct SemanticDigestBaseline {
+    version: u32,
+    fixture_count: usize,
+    case_count: usize,
+    snapshot_counts: BTreeMap<String, usize>,
+    snapshots: BTreeMap<String, String>,
+}
+
+fn update_snapshot_digests(
+    digests: &mut BTreeMap<String, Sha256>,
+    counts: &mut BTreeMap<String, usize>,
+    lane: &str,
+    directory: &Path,
+    fixture_id: &str,
+) {
+    for name in snapshot_names(directory) {
+        let stage = name.strip_suffix(".il.json").unwrap();
+        let key = format!("{lane}/{stage}");
+        let mut snapshot: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.join(&name)).unwrap()).unwrap();
+        quantize_semantic_snapshot(&mut snapshot);
+        canonicalize_platform_substituted_font_ink(fixture_id, &mut snapshot);
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        let digest = digests.entry(key.clone()).or_default();
+        digest.update((fixture_id.len() as u64).to_be_bytes());
+        digest.update(fixture_id.as_bytes());
+        digest.update((bytes.len() as u64).to_be_bytes());
+        digest.update(bytes);
+        *counts.entry(key).or_default() += 1;
+    }
+}
+
+fn quantize_semantic_snapshot(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                quantize_semantic_snapshot(value);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                quantize_semantic_snapshot(value);
+            }
+        }
+        serde_json::Value::Number(number) if number.as_i64().is_none() => {
+            let original = number.as_f64().unwrap();
+            let quantized = (original * 1000.0).round() / 1000.0;
+            *number = serde_json::Number::from_f64(if quantized == -0.0 { 0.0 } else { quantized })
+                .unwrap();
+        }
+        _ => {}
+    }
+}
+
+fn canonicalize_platform_substituted_font_ink(fixture_id: &str, snapshot: &mut serde_json::Value) {
+    if !matches!(
+        fixture_id,
+        "unit-cmap-10-differences-agl-type1" | "unit-font-01-std14-custom-widths"
+    ) {
+        return;
+    }
+
+    for page in snapshot["pages"].as_array_mut().unwrap() {
+        for paragraph in page["paragraphs"].as_array_mut().unwrap() {
+            let paragraph_bounds = paragraph["bounds"].clone();
+            for character in paragraph["text"]["chars"].as_array_mut().unwrap() {
+                character["visual_bbox"] = character["box"].clone();
+                character["layout"]["bounds"] = paragraph_bounds.clone();
+            }
+        }
+    }
+}
+
+#[test]
+fn semantic_digest_canonicalizes_only_declared_platform_font_ink() {
+    let snapshot = || {
+        serde_json::json!({
+            "pages": [{
+                "paragraphs": [{
+                    "bounds": {"left": 1.0, "bottom": 2.0, "right": 3.0, "top": 4.0},
+                    "text": {"chars": [{
+                        "box": {"left": 5.0, "bottom": 6.0, "right": 7.0, "top": 8.0},
+                        "visual_bbox": {"left": 9.0, "bottom": 10.0, "right": 11.0, "top": 12.0},
+                        "layout": {"bounds": {"left": 13.0, "bottom": 14.0, "right": 15.0, "top": 16.0}}
+                    }]}
+                }]
+            }]
+        })
+    };
+    let mut canonical = snapshot();
+    let mut ordinary = snapshot();
+
+    canonicalize_platform_substituted_font_ink("unit-font-01-std14-custom-widths", &mut canonical);
+    canonicalize_platform_substituted_font_ink("unit-base-01-single-line", &mut ordinary);
+
+    let character = &canonical["pages"][0]["paragraphs"][0]["text"]["chars"][0];
+    assert_eq!(character["visual_bbox"], character["box"]);
+    assert_eq!(
+        character["layout"]["bounds"],
+        canonical["pages"][0]["paragraphs"][0]["bounds"]
+    );
+    assert_eq!(ordinary, snapshot());
+}
+
+fn assert_semantic_digest_baseline(
+    fixture_count: usize,
+    case_count: usize,
+    counts: BTreeMap<String, usize>,
+    digests: BTreeMap<String, Sha256>,
+) {
+    let expected: SemanticDigestBaseline =
+        toml::from_str(include_str!("fixtures/m3-semantic-digests-v1.toml")).unwrap();
+    let actual = digests
+        .into_iter()
+        .map(|(stage, digest)| (stage, format!("{:x}", digest.finalize())))
+        .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(expected.version, 1);
+    assert_eq!(expected.fixture_count, fixture_count);
+    assert_eq!(expected.case_count, case_count);
+    assert_eq!(expected.snapshot_counts, counts);
+    assert_eq!(expected.snapshots, actual);
 }
 
 fn assert_parseable_snapshots(directory: &Path, id: &str) {
@@ -1303,17 +1429,20 @@ fn failed_pass_keeps_debug_prefix_and_finishes_json_with_one_error() {
 }
 
 #[test]
-fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
+fn corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
     let ids = all_fixture_ids();
     let cases = ids
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 164, "M1 closure fixture inventory changed");
-    assert_eq!(cases.len(), 98, "M1 closure case inventory changed");
+    assert_eq!(ids.len(), 164, "Corpus fixture inventory changed");
+    assert_eq!(cases.len(), 98, "Corpus case inventory changed");
 
-    for id in ids {
-        let input = fixture_path(&id);
+    let mut snapshot_digests = BTreeMap::new();
+    let mut snapshot_counts = BTreeMap::new();
+
+    for id in &ids {
+        let input = fixture_path(id);
         let directory = tempfile::tempdir().unwrap();
 
         let inspect_debug = directory.path().join("inspect-debug");
@@ -1332,7 +1461,14 @@ fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
             matches!(inspect_code, 0 | 2),
             "fixture {id}: unexpected inspect exit code {inspect_code}"
         );
-        assert_parseable_snapshots(&inspect_debug, &id);
+        assert_parseable_snapshots(&inspect_debug, id);
+        update_snapshot_digests(
+            &mut snapshot_digests,
+            &mut snapshot_counts,
+            "inspect",
+            &inspect_debug,
+            id,
+        );
         if inspect_code == 0 {
             assert_eq!(
                 snapshot_names(&inspect_debug),
@@ -1348,7 +1484,7 @@ fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
             assert_eq!(terminal["il"]["schema_version"], 1, "fixture {id}");
             assert_eq!(
                 terminal["pages"].as_u64(),
-                Some(fixture_manifest(&id).page.len() as u64),
+                Some(fixture_manifest(id).page.len() as u64),
                 "fixture {id}"
             );
         } else {
@@ -1383,7 +1519,14 @@ fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
             matches!(translate_code, 0 | 2),
             "fixture {id}: unexpected translate exit code {translate_code}"
         );
-        assert_parseable_snapshots(&translate_debug, &id);
+        assert_parseable_snapshots(&translate_debug, id);
+        update_snapshot_digests(
+            &mut snapshot_digests,
+            &mut snapshot_counts,
+            "translate",
+            &translate_debug,
+            id,
+        );
 
         if translate_code == 0 {
             assert_eq!(
@@ -1406,7 +1549,7 @@ fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
                 &std::fs::read(translate_debug.join("06-translate.il.json")).unwrap(),
             )
             .unwrap();
-            assert_none_translation_identity(&translate_snapshot, &id);
+            assert_none_translation_identity(&translate_snapshot, id);
             assert!(translated.is_file(), "fixture {id}: no translated output");
             let input_bytes = std::fs::read(&input).unwrap();
             let output_bytes = std::fs::read(&translated).unwrap();
@@ -1416,7 +1559,7 @@ fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
                 .arg(&translated)
                 .output()
                 .unwrap();
-            let legality = fixture_manifest(&id).identity.legality;
+            let legality = fixture_manifest(id).identity.legality;
             if legality == "legal" {
                 assert!(
                     qpdf.status.success(),
@@ -1440,6 +1583,8 @@ fn m1_corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
             assert!(!translated.exists(), "fixture {id}: failure wrote output");
         }
     }
+
+    assert_semantic_digest_baseline(ids.len(), cases.len(), snapshot_counts, snapshot_digests);
 }
 
 #[test]
