@@ -25,4 +25,5 @@ baseline_origin = [30.000000, 83.420000]
 page = 0
 dpi = 150
 poppler_sha256 = "332a07788c4c90740436453eee3caa6ece13fec5824327b57965c183923b6095"
+poppler_linux_x86_64_sha256 = "31359d3ee8a8fe0d9c1e5c27ebf79ce393e54391eefd5e44e0ad3169d4c892e2"
 mutool_md5 = "51c7db642d835abeac6ac64ac49ea19d"

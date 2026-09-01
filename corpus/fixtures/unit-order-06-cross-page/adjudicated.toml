@@ -59,16 +59,19 @@ baseline_origin = [25.000000, 99.272994]
 page = 0
 dpi = 150
 poppler_sha256 = "72c5ea7e4f286a0b5d174c3b7365882704706c2e3f5b32561966f37b82e8366d"
+poppler_linux_x86_64_sha256 = "07beca9c21f64a24a7efde70516b4b8f771ce3f51d568f7f666ad1879ae9e12a"
 mutool_md5 = "87c5f7d25ef5e6c2dc0cf011377a6afe"
 
 [[render]]
 page = 1
 dpi = 150
 poppler_sha256 = "9ae3bfddded0b778afdb1f6ab95bca2f0d8133b691d586bbd2be2c3dbd1b335c"
+poppler_linux_x86_64_sha256 = "2ee7ce5b66a0f0cfcdd7ca9d990dd3c6957ce2b8f5054f35ddf139b812493488"
 mutool_md5 = "60bdcc97c2e0af68339165b801b0657d"
 
 [[render]]
 page = 2
 dpi = 150
 poppler_sha256 = "150e4eaf8c1ec8b1ec20accf9503a64aff1ca736727bba9f28b9f26c7625e34a"
+poppler_linux_x86_64_sha256 = "6ca7387da8e48a2e179682a97753904a8628183f9c79a53f298e94b5c7d8e1d7"
 mutool_md5 = "53fb97cbbc5178dc8c149b88a89cd0e4"

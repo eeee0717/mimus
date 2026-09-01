@@ -56,7 +56,9 @@ PDF writer。它不依赖 lopdf、PDFium、`pdfium-render` 或 `mimus-core`，�
 精确 fixture 的 `manifest.toml` 是先行手写规格。`corpus build` 只实现该规格，
 `corpus verify` 再通过固定输入字节前缀、对象图、原始 stream 字节、poppler 文本盒、
 MuPDF baseline、MuPDF SVG 字形轮廓和两个独立渲染器反向验收。精确几何不会由
-`adjudicate` 回填；其 `adjudicated.toml` 只保存渲染哈希。
+`adjudicate` 回填；其 `adjudicated.toml` 只保存渲染哈希。同版本 Poppler 的 PNG
+字节在 macOS arm64 与 Linux x86_64 间可能不同，因此保留原裁定哈希，并仅在实际
+不同的页面追加 `poppler_linux_x86_64_sha256`；每个平台仍执行逐字节精确门禁。
 
 后续畸形 fixture 使用 `method = "byte-mutation"`，并在 `[lineage]` 中记录合法父本
 fixture ID。唯一一条 `[[lineage.mutations]]` 必须同时记录 `byte_offset`、

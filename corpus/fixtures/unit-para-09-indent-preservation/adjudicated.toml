@@ -18,4 +18,5 @@ tolerance_pt = 0.001000
 page = 0
 dpi = 150
 poppler_sha256 = "50decf045d8bd671c36a632f2e70a1ccc05302d8e2ec309a30b1bcf6bb4f2a5f"
+poppler_linux_x86_64_sha256 = "6df4ffb04698cd3b647d06c080434dd116c03d53c5affac347d01051c17b9023"
 mutool_md5 = "c076fbb62f5c80c1b637aa2dd68156c9"
