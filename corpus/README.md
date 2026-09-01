@@ -32,9 +32,11 @@ qpdf 12.4.0 / poppler 26.08.0 / mutool 1.28.2 / Typst 0.15.1 / TeX Live 2026 这
 与 SHA-256。安装器在解包前核对长度与散列，Homebrew 在 pouring 前核对主工具和全部
 传递依赖的 bottle 散列；任一版本最终仍须通过 `corpus doctor` 的精确匹配。
 
-`.github/workflows/ci.yml` 的 required `corpus` job 在 `quality` job 保存 Cargo cache 后，
-以 `--locked --offline` 顺序运行 doctor、determinism 与独立 verify。XeTeX 仍是预期的
-不确定性负对照：若它意外变为确定性，determinism 同样失败并要求重新裁定。
+`.github/workflows/ci.yml` 的 `quality` job 在已经通过 workspace tests 的同一锁定依赖图中
+离线构建 `corpus` executable，连同 SHA-256 sidecar 交给 required `corpus` job。隔离 job
+先复核哈希，再以钉死工具链直接运行 doctor、determinism 与独立 verify，不建立第二份
+Cargo registry。XeTeX 仍是预期的不确定性负对照：若它意外变为确定性，determinism
+同样失败并要求重新裁定。
 
 ## 生成侧的硬约束
 

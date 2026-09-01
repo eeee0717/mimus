@@ -61,6 +61,22 @@ jobs:
       - name: Validate pinned Corpus CI manifest
         run: python3 scripts/ci/install_corpus_toolchain.py --manifest corpus/ci-toolchain.toml --check
 
+      - name: Build isolated Corpus gate executable
+        run: |
+          cargo build --locked --offline -p corpus --bin corpus
+          sha256sum target/debug/corpus | cut -d' ' -f1 > target/debug/corpus.sha256
+
+      - name: Upload isolated Corpus gate executable
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: corpus-gate-${{ github.sha }}
+          path: |
+            target/debug/corpus
+            target/debug/corpus.sha256
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
       - name: Incremental writeback PoC
         run: cargo test --manifest-path experiments/m0-experiment-3-poc/Cargo.toml
 
@@ -75,6 +91,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Download isolated Corpus gate executable
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: corpus-gate-${{ github.sha }}
+          path: ${{ runner.temp }}/corpus-gate
+
+      - name: Verify isolated Corpus gate executable
+        run: |
+          echo "$(cat "$RUNNER_TEMP/corpus-gate/corpus.sha256")  $RUNNER_TEMP/corpus-gate/corpus" \
+            | sha256sum --check
+          chmod +x "$RUNNER_TEMP/corpus-gate/corpus"
 
       - name: Isolate the runner Homebrew prefix
         run: |
@@ -102,13 +130,11 @@ jobs:
             echo "$directory" >> "$GITHUB_PATH"
           done < "$RUNNER_TEMP/corpus-toolchain-paths"
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-
       - name: Corpus doctor
-        run: cargo run --locked --offline -q -p corpus -- doctor
+        run: '"$RUNNER_TEMP/corpus-gate/corpus" doctor'
 
       - name: Corpus determinism
-        run: cargo run --locked --offline -q -p corpus -- determinism
+        run: '"$RUNNER_TEMP/corpus-gate/corpus" determinism'
 
       - name: Independent Corpus verification
-        run: cargo run --locked --offline -q -p corpus -- verify
+        run: '"$RUNNER_TEMP/corpus-gate/corpus" verify'
