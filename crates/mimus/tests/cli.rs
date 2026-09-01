@@ -126,6 +126,34 @@ fn handle_responses_request(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<Str
             "200 OK",
             serde_json::json!({ "output_text": "模型ϵM" }).to_string(),
         )
+    } else if input == "For all {v1} in {v2}, the model agrees." {
+        (
+            "200 OK",
+            serde_json::json!({ "output_text": "对于 {v1} 和 {v2}，模型成立。" }).to_string(),
+        )
+    } else if input == "Inter-script spacing stays explicit." {
+        (
+            "200 OK",
+            serde_json::json!({ "output_text": "模B模" }).to_string(),
+        )
+    } else if input == "First control paragraph." {
+        (
+            "200 OK",
+            serde_json::json!({ "output_text": "模型" }).to_string(),
+        )
+    } else if input == "Second conflict paragraph." {
+        (
+            "200 OK",
+            serde_json::json!({
+                "output_text": "模型数据验证论文翻译结果保持结构流程稳定缓存重试诊断排版字体安全边界模型数据验证论文翻译结果保持结构流程稳定缓存重试诊断排版字体安全边界模型数据验证论文翻译结果保持结构流程稳定缓存重试诊断排版字体安全边界"
+            })
+            .to_string(),
+        )
+    } else if input == "Third control paragraph." {
+        (
+            "200 OK",
+            serde_json::json!({ "output_text": "数据" }).to_string(),
+        )
     } else if input == "The result {v1} = 1, 2, 3 shows the distinction." {
         (
             "200 OK",
@@ -922,6 +950,26 @@ fn local_page_entry(path: &Path, page_number: u32, key: &[u8]) -> Option<lopdf::
         .cloned()
 }
 
+fn page_font_resource_names(path: &Path, page_number: u32) -> BTreeSet<String> {
+    let document = lopdf::Document::load(path).unwrap();
+    let page_id = document.get_pages()[&page_number];
+    let page = document.get_dictionary(page_id).unwrap();
+    let resources = page
+        .get_deref(b"Resources", &document)
+        .unwrap()
+        .as_dict()
+        .unwrap();
+    let fonts = resources
+        .get_deref(b"Font", &document)
+        .unwrap()
+        .as_dict()
+        .unwrap();
+    fonts
+        .iter()
+        .map(|(name, _)| String::from_utf8(name.clone()).unwrap())
+        .collect()
+}
+
 #[test]
 fn version_flag_reports_the_core_version() {
     let out = Command::new(BIN).arg("--version").output().unwrap();
@@ -1561,8 +1609,8 @@ fn corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 187, "Corpus fixture inventory changed");
-    assert_eq!(cases.len(), 114, "Corpus case inventory changed");
+    assert_eq!(ids.len(), 192, "Corpus fixture inventory changed");
+    assert_eq!(cases.len(), 119, "Corpus case inventory changed");
 
     let mut snapshot_digests = BTreeMap::new();
     let mut snapshot_counts = BTreeMap::new();
@@ -2882,6 +2930,240 @@ fn mixed_source_descents_emit_primary_and_fallback_runs_on_one_baseline() {
         maximum - minimum < 0.3,
         "output baseline spread is {}pt: {baselines:?}",
         maximum - minimum
+    );
+}
+
+#[test]
+fn model_formula_spans_keep_one_placeholder_per_recorded_region() {
+    let id = "unit-form-07-model-spans";
+    let directory = tempfile::tempdir().unwrap();
+    let debug = directory.path().join("debug");
+    let server = FakeResponsesServer::start();
+    let output = run_openai_with_layout(
+        id,
+        &server,
+        &directory.path().join("translated.pdf"),
+        &debug,
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        server.wait_for_requests(1),
+        ["For all {v1} in {v2}, the model agrees."]
+    );
+
+    let styles: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(debug.join("04-styles_and_formulas.il.json")).unwrap(),
+    )
+    .unwrap();
+    let paragraph = &styles["pages"][0]["paragraphs"][0];
+    let mut formulas = BTreeMap::<u64, String>::new();
+    for character in paragraph["text"]["chars"].as_array().unwrap() {
+        if character["layout"]["label"] != "inline_formula" {
+            continue;
+        }
+        formulas
+            .entry(character["layout"]["reading_order"].as_u64().unwrap())
+            .or_default()
+            .push_str(character["unicode"].as_str().unwrap());
+    }
+    assert_eq!(
+        formulas.into_values().collect::<Vec<_>>(),
+        ["x, y", "(a, b)"]
+    );
+}
+
+#[test]
+fn one_model_abstract_region_preserves_cross_column_reading_order() {
+    let id = "unit-order-04-model-cross-column";
+    let manifest = fixture_manifest(id);
+    let expected = manifest
+        .expected
+        .block
+        .iter()
+        .map(|block| block.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let inspected = run_inspect_with_layout(id);
+    assert!(
+        inspected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let events = parse_events(&inspected.stdout);
+    let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap();
+    assert_eq!(paragraphs.len(), 1, "{paragraphs:#?}");
+    assert_eq!(il_paragraph_text(&paragraphs[0]), expected);
+
+    let directory = tempfile::tempdir().unwrap();
+    let server = FakeResponsesServer::start();
+    let output = run_openai_with_layout(
+        id,
+        &server,
+        &directory.path().join("translated.pdf"),
+        &directory.path().join("debug"),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(server.wait_for_requests(1), [expected]);
+}
+
+#[test]
+fn adjacent_han_and_latin_runs_receive_zero_automatic_spacing() {
+    let id = "unit-type-06-zero-inter-script-spacing";
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("translated.pdf");
+    let server = FakeResponsesServer::start();
+    let output = run_openai_with_layout(id, &server, &output_path, &directory.path().join("debug"));
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        server.wait_for_requests(1),
+        ["Inter-script spacing stays explicit."]
+    );
+
+    let attributes = mupdf_character_attributes(&output_path);
+    assert_eq!(
+        attributes
+            .iter()
+            .map(|character| character["c"].as_str())
+            .collect::<String>(),
+        "模B模"
+    );
+    let font_attributes = mupdf_element_attributes(&output_path, b"font");
+    assert_eq!(font_attributes.len(), 1, "{font_attributes:#?}");
+    let font_size = number(&font_attributes[0], "size");
+    let font_bytes = std::fs::read(test_font_path("Regular")).unwrap();
+    let face = ttf_parser::Face::parse(&font_bytes, 0).unwrap();
+    let expected_advance = |character| {
+        let glyph = face.glyph_index(character).unwrap();
+        let advance = u64::from(face.glyph_hor_advance(glyph).unwrap());
+        let units = u64::from(face.units_per_em());
+        ((advance * 1000 + units / 2) / units) as f64 / 1000.0 * font_size
+    };
+    let origins = attributes
+        .iter()
+        .map(|character| number(character, "x"))
+        .collect::<Vec<_>>();
+    assert!((origins[1] - origins[0] - expected_advance('模')).abs() < 0.01);
+    assert!((origins[2] - origins[1] - expected_advance('B')).abs() < 0.01);
+}
+
+#[test]
+fn vertical_conflict_preserves_the_later_paragraph_without_moving_it() {
+    let id = "unit-type-07-vertical-conflict";
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("translated.pdf");
+    let debug = directory.path().join("debug");
+    let server = FakeResponsesServer::start();
+    let output = run_openai_with_layout(id, &server, &output_path, &debug);
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let mut requests = server.wait_for_requests(3);
+    requests.sort();
+    assert_eq!(
+        requests,
+        [
+            "First control paragraph.",
+            "Second conflict paragraph.",
+            "Third control paragraph."
+        ]
+    );
+    let events = parse_events(&output.stdout);
+    assert!(
+        events.iter().any(|event| {
+            event["id"] == "typeset_overflow_detail"
+                && event["page_index"] == 0
+                && event["paragraph_index"] == 1
+                && event["obstacle_count"]
+                    .as_u64()
+                    .is_some_and(|count| count >= 1)
+        }),
+        "{events:#?}"
+    );
+
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(debug.join("09-write.il.json")).unwrap()).unwrap();
+    let paragraphs = written["pages"][0]["paragraphs"].as_array().unwrap();
+    assert_eq!(paragraphs[0]["translated_text"], "模型");
+    assert!(paragraphs[0]["preserved"].is_null());
+    assert!(paragraphs[1]["translated_text"].is_null());
+    assert_eq!(paragraphs[1]["preserved"], "typeset_overflow");
+    assert_eq!(paragraphs[2]["translated_text"], "数据");
+    assert!(paragraphs[2]["preserved"].is_null());
+
+    let input_origins =
+        mupdf_character_origins_for_text(&fixture_path(id), "Second conflict paragraph.");
+    let output_origins =
+        mupdf_character_origins_for_text(&output_path, "Second conflict paragraph.");
+    assert_eq!(input_origins.len(), output_origins.len());
+    for (input, output) in input_origins.iter().zip(output_origins) {
+        assert!(
+            (input.0 - output.0).abs() < 0.001,
+            "{input:?} != {output:?}"
+        );
+        assert!(
+            (input.1 - output.1).abs() < 0.001,
+            "{input:?} != {output:?}"
+        );
+    }
+}
+
+#[test]
+fn pure_formula_model_paragraph_is_typed_passthrough_without_a_request() {
+    let id = "unit-type-09-model-formula-only";
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("translated.pdf");
+    let debug = directory.path().join("debug");
+    let server = FakeResponsesServer::start();
+    let output = run_openai_with_layout(id, &server, &output_path, &debug);
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(server.requests().is_empty());
+    let events = parse_events(&output.stdout);
+    let passthrough = events
+        .iter()
+        .filter(|event| event["id"] == "math_passthrough")
+        .collect::<Vec<_>>();
+    assert_eq!(passthrough.len(), 1, "{events:#?}");
+    assert_eq!(passthrough[0]["page_index"], 0);
+    assert_eq!(passthrough[0]["paragraph_index"], 0);
+    assert_eq!(passthrough[0]["source_characters"], 9);
+    let input_path = fixture_path(id);
+    assert_eq!(
+        decoded_page_streams(&output_path, 1),
+        decoded_page_streams(&input_path, 1)
+    );
+    assert_eq!(
+        page_font_resource_names(&output_path, 1),
+        page_font_resource_names(&input_path, 1)
+    );
+    assert!(
+        std::fs::read(&output_path)
+            .unwrap()
+            .starts_with(&std::fs::read(input_path).unwrap())
     );
 }
 
@@ -5548,6 +5830,51 @@ fn element_attributes(xml: &[u8], name: &[u8]) -> Vec<BTreeMap<String, String>> 
             _ => {}
         }
     }
+}
+
+fn mupdf_element_attributes(path: &Path, element: &[u8]) -> Vec<BTreeMap<String, String>> {
+    let output = Command::new("mutool")
+        .args(["draw", "-F", "stext", "-o", "-"])
+        .arg(path)
+        .arg("1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    element_attributes(&output.stdout, element)
+}
+
+fn mupdf_character_attributes(path: &Path) -> Vec<BTreeMap<String, String>> {
+    mupdf_element_attributes(path, b"char")
+}
+
+fn mupdf_character_origins_for_text(path: &Path, text: &str) -> Vec<(f64, f64)> {
+    let attributes = mupdf_character_attributes(path);
+    let expected = text
+        .chars()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    let start = attributes
+        .windows(expected.len())
+        .position(|window| {
+            window
+                .iter()
+                .zip(&expected)
+                .all(|(character, expected)| character.get("c") == Some(expected))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "could not find {text:?} in MuPDF output for {}",
+                path.display()
+            )
+        });
+    attributes[start..start + expected.len()]
+        .iter()
+        .map(|character| (number(character, "x"), number(character, "y")))
+        .collect()
 }
 
 fn qpdf_pages(pdf: &Path) -> Vec<serde_json::Value> {

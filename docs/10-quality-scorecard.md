@@ -182,6 +182,16 @@ pipeline handled the defect.
 | FOR-04 | `pass::source_formula_units` attaches uniquely owned path/image spans to the relocation unit; `paragraph_plans_leave_orphan_source_ink` rejects unclaimed source-slot ink before installation | exact source programs replay under the glyph delta; ambiguous ownership or residual ink becomes typed `typeset_protocol` |
 | FOR-05 | `pass::source_formula_units` uses whole-paragraph unique visual radical ownership and closes each unit over formula glyph/path/image components; `place_formula_flow` applies one delta to the resulting unit | missing/ambiguous ownership, unsafe replay, or a component that cannot share the unit delta becomes typed `typeset_protocol` |
 
+### 2.4.2 M3 adjudicated layout and typesetting policy ledger
+
+| Case | Detector and boundary | Production action / terminal state |
+| --- | --- | --- |
+| FORM-07 | `StylesAndFormulas` accepts each recorded model `inline_formula` assignment as one complete span; comma and bracket syntax inside that span do not create subspans | request preparation emits exactly one placeholder for each recorded span and restores that same unit |
+| ORDER-04 | `ParagraphFind` considers cross-column continuation only for one model `abstract` assignment whose lines form exactly two geometric columns with at least two lines each | flatten the left column top-to-bottom, then the right column top-to-bottom, into one paragraph; ordinary `text`, multiple model regions, fallback lines, and ambiguous column counts retain existing separation |
+| TYPE-06 | output text is consumed exactly as returned; no script-transition detector adds spacing | glyph advances contain only output-font advances and explicit response whitespace; there is no automatic CJK/Latin gap |
+| TYPE-07 | `paragraph_typeset_obstacles` includes visible ink from every other paragraph and `ink_bounds_are_safe` applies the unchanged collision threshold to each independently planned paragraph | a plan that cannot avoid later paragraph ink at the 8 pt floor becomes typed `typeset_overflow`; no paragraph is moved |
+| TYPE-09 | `StylesAndFormulas` requires every character in the natural paragraph to share model `text`, the complete source to match the conservative math shape, at least one strong operator, and at most two whitespace-delimited operand-like tokens | mark the whole source paragraph passthrough, emit informational `math_passthrough`, create no request or output-font resource, and do not count degradation; all other model prose remains translatable |
+
 Test-level alignment checklist:
 
 | Contract | Automated assertion | Full-artifact audit |

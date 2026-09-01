@@ -1381,11 +1381,23 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
             }
             let mut lines = build_text_lines(group.chars);
             merge_toc_page_numbers(&mut lines);
-            let columns = if group.assignment.label == LayoutLabel::Text {
-                split_parallel_model_columns(lines)
-            } else {
-                vec![lines]
+            let columns = match group.assignment.label {
+                LayoutLabel::Text => split_parallel_model_columns(lines),
+                LayoutLabel::Abstract => split_model_abstract_columns(lines),
+                _ => vec![lines],
             };
+            if group.assignment.label == LayoutLabel::Abstract && columns.len() > 1 {
+                let paragraph_lines = columns.into_iter().flatten().collect::<Vec<_>>();
+                let bounds = lines_bounds(&paragraph_lines);
+                drafts.push(ParagraphDraft {
+                    model_order: Some(group.assignment.reading_order),
+                    apparatus: false,
+                    column_left: bounds.left,
+                    top: bounds.top,
+                    lines: paragraph_lines,
+                });
+                continue;
+            }
             for column in columns {
                 for paragraph_lines in split_natural_paragraphs(column, group.assignment.label) {
                     let bounds = lines_bounds(&paragraph_lines);
@@ -2018,6 +2030,15 @@ fn group_lines_into_columns(mut lines: Vec<TextLine>) -> Vec<Vec<TextLine>> {
         });
     }
     columns
+}
+
+fn split_model_abstract_columns(lines: Vec<TextLine>) -> Vec<Vec<TextLine>> {
+    let columns = group_lines_into_columns(lines.clone());
+    if columns.len() == 2 && columns.iter().all(|column| column.len() >= 2) {
+        columns
+    } else {
+        vec![lines]
+    }
 }
 
 fn split_parallel_model_columns(lines: Vec<TextLine>) -> Vec<Vec<TextLine>> {
@@ -3852,30 +3873,52 @@ fn mark_math_passthrough_units(
 ) {
     let TextCarrier::Chars { chars } = &mut paragraph.text;
     let mut math_units = Vec::new();
-    let mut start = 0;
-    while start < chars.len() {
-        let layout = chars[start].layout;
-        let mut end = start + 1;
-        while end < chars.len() && chars[end].layout == layout {
-            end += 1;
-        }
-        let Some(layout) = layout else {
-            start = end;
-            continue;
-        };
-        if layout.source != LayoutSource::FallbackLine {
-            start = end;
-            continue;
-        }
-        let source = request_text(&chars[start..end]);
-        if math_shape_is_passthrough(&source)
-            && chars[start..end]
+    let model_math = chars
+        .first()
+        .and_then(|character| character.layout)
+        .filter(|layout| layout.source == LayoutSource::Model && layout.label == LayoutLabel::Text)
+        .filter(|_| {
+            chars.iter().all(|character| {
+                character.layout.is_some_and(|layout| {
+                    layout.source == LayoutSource::Model && layout.label == LayoutLabel::Text
+                })
+            })
+        })
+        .map(|layout| (layout, request_text(chars)))
+        .filter(|(_, source)| model_math_shape_is_passthrough(source))
+        .filter(|_| {
+            chars
                 .iter()
                 .any(|character| character_is_translatable(character, content_objects))
-        {
-            math_units.push((layout.reading_order, source.trim().chars().count()));
+        });
+    if let Some((layout, source)) = model_math {
+        math_units.push((layout.reading_order, source.trim().chars().count()));
+    } else {
+        let mut start = 0;
+        while start < chars.len() {
+            let layout = chars[start].layout;
+            let mut end = start + 1;
+            while end < chars.len() && chars[end].layout == layout {
+                end += 1;
+            }
+            let Some(layout) = layout else {
+                start = end;
+                continue;
+            };
+            if layout.source != LayoutSource::FallbackLine {
+                start = end;
+                continue;
+            }
+            let source = request_text(&chars[start..end]);
+            if math_shape_is_passthrough(&source)
+                && chars[start..end]
+                    .iter()
+                    .any(|character| character_is_translatable(character, content_objects))
+            {
+                math_units.push((layout.reading_order, source.trim().chars().count()));
+            }
+            start = end;
         }
-        start = end;
     }
     if math_units.is_empty() {
         return;
@@ -3942,30 +3985,9 @@ fn math_shape_is_passthrough(source: &str) -> bool {
     let has_operand = characters
         .iter()
         .any(|character| character.is_alphanumeric());
-    let has_strong_operator = characters.iter().any(|character| {
-        matches!(
-            character,
-            '=' | '×'
-                | '÷'
-                | '±'
-                | '∓'
-                | '∑'
-                | '∏'
-                | '∫'
-                | '√'
-                | '∈'
-                | '∉'
-                | '≤'
-                | '≥'
-                | '≠'
-                | '≈'
-                | '∞'
-                | '∂'
-                | '∇'
-                | '⊗'
-                | '⋅'
-        )
-    });
+    let has_strong_operator = characters
+        .iter()
+        .any(|character| math_shape_has_strong_operator(*character));
     if has_operand && has_strong_operator {
         return true;
     }
@@ -3987,6 +4009,41 @@ fn math_shape_is_passthrough(source: &str) -> bool {
         })
         .count();
     has_operand && syntax_characters >= 3 && syntax_characters.saturating_mul(5) >= characters.len()
+}
+
+fn model_math_shape_is_passthrough(source: &str) -> bool {
+    math_shape_is_passthrough(source)
+        && source.chars().any(math_shape_has_strong_operator)
+        && source
+            .split_whitespace()
+            .filter(|token| token.chars().any(char::is_alphanumeric))
+            .count()
+            <= 2
+}
+
+fn math_shape_has_strong_operator(character: char) -> bool {
+    matches!(
+        character,
+        '=' | '×'
+            | '÷'
+            | '±'
+            | '∓'
+            | '∑'
+            | '∏'
+            | '∫'
+            | '√'
+            | '∈'
+            | '∉'
+            | '≤'
+            | '≥'
+            | '≠'
+            | '≈'
+            | '∞'
+            | '∂'
+            | '∇'
+            | '⊗'
+            | '⋅'
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -13819,7 +13876,23 @@ mod tests {
     }
 
     #[test]
-    fn math_shape_heuristic_only_applies_to_fallback_layout() {
+    fn math_shape_heuristic_accepts_a_whole_model_math_paragraph_only() {
+        for math in ["dmodel×dk", "x = y"] {
+            assert!(
+                model_math_shape_is_passthrough(math),
+                "missed model formula {math:?}"
+            );
+        }
+        for prose in [
+            "Footnote marker appears inside word¹ without starting a new paragraph.",
+            "x = y describes the observed relation in prose.",
+        ] {
+            assert!(
+                !model_math_shape_is_passthrough(prose),
+                "matched model prose {prose:?}"
+            );
+        }
+
         let mut document = Document::for_inspection(fixture());
         let engine = FakeEngine::default();
         let translator = CountingTranslator::default();
@@ -13845,6 +13918,20 @@ mod tests {
         }
         let content_objects = BTreeSet::from([chars[0].passthrough.content_object]);
         let mut diagnostics = Vec::new();
+
+        mark_math_passthrough_units(paragraph, &content_objects, 0, 0, &mut diagnostics);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert!(paragraph.chars().iter().all(|character| {
+            character.layout.unwrap().policy == TranslationPolicy::Passthrough
+        }));
+
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        for (character, unicode) in chars.iter_mut().zip(['M', 'I', 'M']) {
+            character.unicode = Some(unicode);
+            character.layout.as_mut().unwrap().policy = TranslationPolicy::Translate;
+        }
+        diagnostics.clear();
 
         mark_math_passthrough_units(paragraph, &content_objects, 0, 0, &mut diagnostics);
 

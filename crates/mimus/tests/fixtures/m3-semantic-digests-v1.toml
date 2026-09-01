@@ -2,37 +2,37 @@
 # Every completed debug pass for every committed fixture contributes to one lane/stage digest.
 # Two non-embedded-font fixtures canonicalize platform-substituted PDFium ink to walk metric boxes.
 version = 1
-fixture_count = 187
-case_count = 114
+fixture_count = 192
+case_count = 119
 
 [snapshot_counts]
-"inspect/00-parse" = 182
-"inspect/01-scan_detect" = 176
-"inspect/02-layout" = 176
-"inspect/03-paragraph_find" = 176
-"translate/00-parse" = 182
-"translate/01-scan_detect" = 176
-"translate/02-layout" = 176
-"translate/03-paragraph_find" = 176
-"translate/04-styles_and_formulas" = 176
-"translate/05-extract_terms" = 176
-"translate/06-translate" = 176
-"translate/07-typeset" = 176
-"translate/08-font_embed" = 176
-"translate/09-write" = 176
+"inspect/00-parse" = 187
+"inspect/01-scan_detect" = 181
+"inspect/02-layout" = 181
+"inspect/03-paragraph_find" = 181
+"translate/00-parse" = 187
+"translate/01-scan_detect" = 181
+"translate/02-layout" = 181
+"translate/03-paragraph_find" = 181
+"translate/04-styles_and_formulas" = 181
+"translate/05-extract_terms" = 181
+"translate/06-translate" = 181
+"translate/07-typeset" = 181
+"translate/08-font_embed" = 181
+"translate/09-write" = 181
 
 [snapshots]
-"inspect/00-parse" = "432969d8ecd9f037c4dcb22686d85832474caa7e78238ba48964b879d1d241cc"
-"inspect/01-scan_detect" = "4d09d86137852705379c3e7ff4c01283414922029100ad0feaa30321959cde64"
-"inspect/02-layout" = "4d09d86137852705379c3e7ff4c01283414922029100ad0feaa30321959cde64"
-"inspect/03-paragraph_find" = "778561dbe4520dd6e89e916f17559eb7aec84be593ffbc57ac508bfe8f5e592d"
-"translate/00-parse" = "432969d8ecd9f037c4dcb22686d85832474caa7e78238ba48964b879d1d241cc"
-"translate/01-scan_detect" = "4d09d86137852705379c3e7ff4c01283414922029100ad0feaa30321959cde64"
-"translate/02-layout" = "4d09d86137852705379c3e7ff4c01283414922029100ad0feaa30321959cde64"
-"translate/03-paragraph_find" = "778561dbe4520dd6e89e916f17559eb7aec84be593ffbc57ac508bfe8f5e592d"
-"translate/04-styles_and_formulas" = "16f2860c070276f4f600b889b8d0ff9d50c711ca659fccb0d67b35c02cd54cbc"
-"translate/05-extract_terms" = "16f2860c070276f4f600b889b8d0ff9d50c711ca659fccb0d67b35c02cd54cbc"
-"translate/06-translate" = "e0112ddaed10c44992bb93e2072a4ad40353544bfbb2fcea7c6622502be26b8b"
-"translate/07-typeset" = "e0112ddaed10c44992bb93e2072a4ad40353544bfbb2fcea7c6622502be26b8b"
-"translate/08-font_embed" = "e0112ddaed10c44992bb93e2072a4ad40353544bfbb2fcea7c6622502be26b8b"
-"translate/09-write" = "e0112ddaed10c44992bb93e2072a4ad40353544bfbb2fcea7c6622502be26b8b"
+"inspect/00-parse" = "472f8491b64ee715f9a039e0e0fb73571a624395de10f86d460cb1bf0661f0a6"
+"inspect/01-scan_detect" = "c2fffac2f712c34919b6e0190db5eb2f53f290d4c5c9f01af530d10d06132dbb"
+"inspect/02-layout" = "c2fffac2f712c34919b6e0190db5eb2f53f290d4c5c9f01af530d10d06132dbb"
+"inspect/03-paragraph_find" = "da336b70d414fe8cd29764e12d4573334c164cf74af3e4eaa480460e6dc0982d"
+"translate/00-parse" = "472f8491b64ee715f9a039e0e0fb73571a624395de10f86d460cb1bf0661f0a6"
+"translate/01-scan_detect" = "c2fffac2f712c34919b6e0190db5eb2f53f290d4c5c9f01af530d10d06132dbb"
+"translate/02-layout" = "c2fffac2f712c34919b6e0190db5eb2f53f290d4c5c9f01af530d10d06132dbb"
+"translate/03-paragraph_find" = "da336b70d414fe8cd29764e12d4573334c164cf74af3e4eaa480460e6dc0982d"
+"translate/04-styles_and_formulas" = "f28af27e3dd87f6820df1ef7d13a01c11f403d5ae04564cdc0fb7338c03842f7"
+"translate/05-extract_terms" = "f28af27e3dd87f6820df1ef7d13a01c11f403d5ae04564cdc0fb7338c03842f7"
+"translate/06-translate" = "2cf486e5d948038abb5f15309689d37dc1dd2ea5bbcc399d4f077d3db5ba799b"
+"translate/07-typeset" = "2cf486e5d948038abb5f15309689d37dc1dd2ea5bbcc399d4f077d3db5ba799b"
+"translate/08-font_embed" = "2cf486e5d948038abb5f15309689d37dc1dd2ea5bbcc399d4f077d3db5ba799b"
+"translate/09-write" = "2cf486e5d948038abb5f15309689d37dc1dd2ea5bbcc399d4f077d3db5ba799b"

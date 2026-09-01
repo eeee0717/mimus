@@ -1,0 +1,63 @@
+# 本文件由 `corpus adjudicate` 生成，**不要手工编辑**。
+# 它只保存独立工具测得的结果，与先行手写的 manifest.toml 分开：
+# 现实排版 fixture 可按 §2.1 唯一例外记录双解析器裁定的 [[block]]；
+# 精确 fixture 的 baseline/metric/visual 三种几何仍以 manifest 为准，
+# 本文件只为它记录独立渲染器的 [[render]] 哈希。
+#
+#   metric_box      ← poppler pdftotext -bbox-layout（现实排版裁定）
+#   visual_bbox     ← mutool draw -F stext 字形 quad（现实排版近似值）
+#   baseline_origin ← mutool stext 首字符 origin（现实排版裁定）
+#
+# 坐标一律在 PDF 页面空间：单位 pt、原点左下、/Rotate 之前（§2.2）。
+
+schema_version = 1
+fixture = "unit-order-04-model-cross-column"
+tolerance_pt = 0.050000
+
+[[block]]
+key = "L1"
+page = 0
+metric_box = [30.000000, 152.098000, 195.000002, 192.124000]
+visual_bbox = [30.000000, 152.205990, 195.000030, 190.360002]
+baseline_origin = [30.000000, 184.078002]
+
+[[block]]
+key = "L2"
+page = 0
+metric_box = [30.000000, 108.020000, 195.000001, 138.124000]
+visual_bbox = [30.000000, 108.092000, 195.000030, 138.124000]
+baseline_origin = [30.000000, 130.078000]
+
+[[block]]
+key = "LEFT"
+page = 0
+metric_box = [30.000000, 63.942006, 194.999999, 84.124000]
+visual_bbox = [30.000000, 66.039000, 194.999970, 84.124010]
+baseline_origin = [30.000000, 76.078000]
+
+[[block]]
+key = "RIGHT"
+page = 0
+metric_box = [225.000000, 171.942000, 390.000001, 192.124000]
+visual_bbox = [225.000000, 174.039004, 390.000040, 190.360002]
+baseline_origin = [225.000000, 184.078002]
+
+[[block]]
+key = "R2"
+page = 0
+metric_box = [225.000000, 118.020000, 390.000001, 148.124000]
+visual_bbox = [225.000000, 118.128000, 390.000040, 146.360000]
+baseline_origin = [225.000000, 140.078000]
+
+[[block]]
+key = "R3"
+page = 0
+metric_box = [225.000000, 83.942006, 389.999999, 104.124000]
+visual_bbox = [225.000000, 84.014000, 390.000040, 104.124000]
+baseline_origin = [225.000000, 96.078000]
+
+[[render]]
+page = 0
+dpi = 150
+poppler_sha256 = "5e85cad88b85bbbcd9e165a02e241df6b7f9d3028ed0a02db28ddb25b1acfabb"
+mutool_md5 = "41a82fbd7629b3f307f11ede5577579c"

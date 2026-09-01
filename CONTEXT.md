@@ -57,6 +57,8 @@
 | 48 | model `inline_formula` 仍是公式存在性的唯一权威；StylesAndFormulas 只可在同段、同行、视觉紧邻且有脚本基线、定界符配平、经 Mathematical Alphanumeric Symbols 锚证明的同数学字体连续 run 或紧连数学后缀证据时扩展既有公式边界，不得凭启发式新建或收缩 model 公式。跨提取顺序或带隐式空格的 ASCII 数字候选仅在字号、基线、metric box 同时证明且唯一匹配一个既有锚时扩展，并归到该锚 reading order；跨序字母仍须相邻 run 证据，歧义即不扩展。每类扩展发 `formula_boundary_expanded` typed info，扩入字符继续受 ADR-0020 的源字节、字体和相对几何合同保护 | [ADR-0020](docs/adr/0020-inline-formula-flow-relocation.md) |
 | 49 | inline formula 的 fixed-slot 与 relocation 成功路径共用一个阅读连续性 oracle：同行邻接与跨行前导空洞上界为 `max(2×源 text→text 词间距中位数, 1.5×源字号中位数)`，公式间距不得污染样本；公式邻接标点不拆行、单元阅读序不逆转。fixed 不连续先尝试既有边界内的 relocation，仍失败则 `typeset_overflow` typed 段级保留；不得靠缩字号或扩大碰撞容差满足 oracle | [ADR-0020](docs/adr/0020-inline-formula-flow-relocation.md) §6 |
 | 50 | IL `Char.font_size` 是 ParagraphFind 与 Typeset 使用的页面空间 em：`abs(Tf) × |CTM × Tm` 的竖直基向量 `|`；walker 继续保留原始 `Tf` 给精确源操作数/公式重放。无 inline formula 的段落还把 walker 保留的水平 vector path 与 inline image 当作排版障碍；公式段继续由 ADR-0020 的既有所有权和重放合同处理 | [ADR-0007](docs/adr/0007-ir-design.md)、[ADR-0020](docs/adr/0020-inline-formula-flow-relocation.md) |
+| 51 | 跨栏合并只接受 model 证据：一个 `abstract` model assignment 同时覆盖两个经多行几何证明的平行栏时，ParagraphFind 按左栏自上而下、再右栏自上而下合成一个段；无 model 覆盖、多个 model region 或普通 `text` region 均维持分栏，不凭句法猜测续接 | — |
+| 52 | model 将纯公式误标为 `text` 时，只有整个自然段都属于 model `text`、完整 source 命中保守数学形状、含强数学运算符、按空白分隔的 operand-like token 不超过 2 个且无其它 model label，才整段 source passthrough 并发 `math_passthrough` typed info；不建立 `inline_formula`、不产生请求、不计 degradation。普通 model prose（包括只含上下标但无强运算符的句子）保持翻译 | — |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
@@ -66,8 +68,10 @@
 | 不翻·原样保留 | doc_title, header, footer, header_image, footer_image, image, chart, seal, algorithm, display_formula, formula_number, number, vertical_text, reference, reference_content, table（表体，`--translate-table` 可开） |
 | 占位符处理 | inline_formula（在所属段落内以 `{v1}` 占位送翻，返回后还原） |
 
-公式漏检兜底政策（#35）：生产 layout 模型接入（#84）后，偏保守的数学形状启发式仅对
-`fallback_line`（即无模型覆盖区域）生效；任何真实 model label 优先。命中单元所在的整个自然段改为
+公式漏检兜底政策（#35）：生产 layout 模型接入（#84）后，偏保守的数学形状启发式默认仅对
+`fallback_line`（即无模型覆盖区域）生效；任何真实 model label 优先。唯一例外是决策 #52
+的整段 model `text` 纯公式误标形状，该分支只做 typed passthrough，不把启发式结果提升为
+`inline_formula`。命中单元所在的整个自然段改为
 passthrough，不进入翻译请求，并按命中单元发出不计 degradation、不影响 strict 的
 `math_passthrough` info 诊断。自然段是当前远端翻译与 cache 的原子；整段保留避免把
 含公式段裁成未经验证的新请求，并在重组时误处理公式邻接文本。该政策宁可将少量散文
