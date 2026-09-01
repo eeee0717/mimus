@@ -1,0 +1,68 @@
+# Hosted Linux realization of corpus/toolchain.toml.
+#
+# Bootstrap archives are verified by scripts/ci/install_corpus_toolchain.py.
+# Homebrew verifies every formula bottle, including transitive dependencies,
+# against the hashes in the pinned homebrew-core archive before extraction.
+
+schema_version = 1
+
+[homebrew]
+prefix = "/home/linuxbrew/.linuxbrew"
+revision = "4b5198adf469fffe93fca55f4567c7acf5a9ec89"
+url = "https://codeload.github.com/Homebrew/brew/tar.gz/4b5198adf469fffe93fca55f4567c7acf5a9ec89"
+sha256 = "77253aba2be1c5b95393cbcfe19b18fce260fd581da9bc1429537c6346b77a95"
+bytes = 3776067
+
+[homebrew.core]
+revision = "2b54d1e3b59ce2ebe3ca041756fbbfe03d4b3c19"
+url = "https://codeload.github.com/Homebrew/homebrew-core/tar.gz/2b54d1e3b59ce2ebe3ca041756fbbfe03d4b3c19"
+sha256 = "67aa34fc21a492bd648c8404802eeff474319d28e2db7316581dfbb7d94e3fe8"
+bytes = 8810032
+portable_ruby_version = "4.0.6"
+portable_ruby_sha256 = "0980099dc2668dc47bd4c85b704beb76b9406b4a85f77fdda9820d8341b40f87"
+
+[[homebrew.formula]]
+id = "qpdf"
+version = "12.4.0"
+path = "Formula/q/qpdf.rb"
+x86_64_linux_sha256 = "ba5e4ea1115477bbac2e6a7a9b4517da891dbab34009b792a6d36a7dff7f87ca"
+x86_64_linux_bytes = 3918102
+
+[[homebrew.formula]]
+id = "poppler"
+version = "26.08.0"
+path = "Formula/p/poppler.rb"
+x86_64_linux_sha256 = "ae3d4331b7b79968e263542e427cff34092bd759f946620f9bd99704fb4ff23b"
+x86_64_linux_bytes = 10785878
+
+[[homebrew.formula]]
+id = "mupdf-tools"
+version = "1.28.2"
+path = "Formula/m/mupdf-tools.rb"
+x86_64_linux_sha256 = "3c92a26441c0b7bad81ccd6e7f62f2d9c1ccfeb00c7c38f5ff448228c6f8f6e0"
+x86_64_linux_bytes = 73243324
+
+[[homebrew.formula]]
+id = "ghostscript"
+version = "10.07.1"
+path = "Formula/g/ghostscript.rb"
+x86_64_linux_sha256 = "82acdc247c1252a412cb239f5de814e6bc4b8f6cfff4050b64716b0244d55bdb"
+x86_64_linux_bytes = 49793858
+
+[[archive]]
+id = "typst"
+url = "https://github.com/typst/typst/releases/download/v0.15.1/typst-x86_64-unknown-linux-musl.tar.xz"
+sha256 = "a6d077d0a95eed5a2eba715b2dae06be954f624ccbf85758a03f389ded33118c"
+bytes = 17462992
+destination = "typst"
+strip_components = 1
+bin_dir = "typst"
+
+[[archive]]
+id = "tinytex"
+url = "https://github.com/rstudio/tinytex-releases/releases/download/v2026.04/TinyTeX-linux-x86_64-v2026.04.tar.xz"
+sha256 = "3619e720516edcfdf20393f161e2854f1205053f716fa4e5422a995d0d2e43fd"
+bytes = 149893452
+destination = "tinytex"
+strip_components = 0
+bin_dir = "tinytex/.TinyTeX/bin/x86_64-linux"
