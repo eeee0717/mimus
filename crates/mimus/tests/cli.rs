@@ -1551,8 +1551,8 @@ fn corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 174, "Corpus fixture inventory changed");
-    assert_eq!(cases.len(), 105, "Corpus case inventory changed");
+    assert_eq!(ids.len(), 181, "Corpus fixture inventory changed");
+    assert_eq!(cases.len(), 110, "Corpus case inventory changed");
 
     let mut snapshot_digests = BTreeMap::new();
     let mut snapshot_counts = BTreeMap::new();
@@ -3003,6 +3003,269 @@ fn form_fraction_rule_and_glyphs_relocate_by_the_same_delta() {
     assert_eq!(output_stroke.len(), 6);
     assert!((output_stroke[4] - source_stroke[4] - delta_x).abs() <= 0.05);
     assert!((output_stroke[5] - source_stroke[5] - delta_y).abs() <= 0.05);
+}
+
+#[test]
+fn para_small_edge_character_keeps_unique_model_ownership() {
+    let id = "unit-para-02-edge-superscript";
+    let output = run_inspect_with_layout(id);
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let events = parse_events(&output.stdout);
+    assert_one_terminal_last(&events, "result");
+    let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap();
+    assert_eq!(paragraphs.len(), 1, "{paragraphs:#?}");
+    assert_eq!(il_paragraph_text(&paragraphs[0]), "Boundary marker word¹");
+
+    let chars = paragraphs[0]["text"]["chars"].as_array().unwrap();
+    let marker = chars
+        .iter()
+        .find(|character| character["unicode"] == "¹")
+        .unwrap();
+    assert_eq!(marker["font_size"], 5.0);
+    assert_eq!(marker["layout"]["source"], "model");
+    assert_eq!(marker["layout"]["label"], "text");
+    let edge_crossing = marker["box"]["right"].as_f64().unwrap()
+        - marker["layout"]["bounds"]["right"].as_f64().unwrap();
+    assert!((edge_crossing - 1.0).abs() <= 0.001, "{edge_crossing}");
+
+    let rect_area = |value: &serde_json::Value| {
+        (value["right"].as_f64().unwrap() - value["left"].as_f64().unwrap())
+            * (value["top"].as_f64().unwrap() - value["bottom"].as_f64().unwrap())
+    };
+    let mut body_metric_areas = chars
+        .iter()
+        .filter(|character| {
+            character["unicode"] != "¹"
+                && character["unicode"]
+                    .as_str()
+                    .is_some_and(|unicode| !unicode.trim().is_empty())
+        })
+        .map(|character| rect_area(&character["box"]))
+        .collect::<Vec<_>>();
+    body_metric_areas.sort_by(f64::total_cmp);
+    let median_metric_area = body_metric_areas[body_metric_areas.len() / 2];
+    let marker_visual_area = rect_area(&marker["visual_bbox"]);
+    assert!(
+        marker_visual_area < median_metric_area * 0.05,
+        "marker visual area {marker_visual_area} is not below 5% of median body metric area {median_metric_area}"
+    );
+}
+
+#[test]
+fn para_bullet_controls_keep_only_real_list_boundaries() {
+    let expected = [
+        (
+            "unit-para-06-real-bullet",
+            vec!["• First item.", "• Second item."],
+        ),
+        (
+            "unit-para-06-leading-middle-dot",
+            vec!["· Emphasis begins this ordinary sentence."],
+        ),
+        (
+            "unit-para-06-inline-superscript",
+            vec!["Footnote marker appears inside word¹ without starting a new paragraph."],
+        ),
+    ];
+    for (id, expected_paragraphs) in &expected {
+        let output = run_inspect_with_layout(id);
+        assert!(
+            output.status.success(),
+            "fixture {id}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let events = parse_events(&output.stdout);
+        let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            paragraphs.iter().map(il_paragraph_text).collect::<Vec<_>>(),
+            *expected_paragraphs,
+            "fixture {id}"
+        );
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let server = FakeResponsesServer::start();
+    let mut expected_requests = Vec::new();
+    for (id, paragraphs) in expected {
+        let output = run_openai_with_layout(
+            id,
+            &server,
+            &directory.path().join(format!("{id}.pdf")),
+            &directory.path().join(format!("{id}-debug")),
+        );
+        assert!(
+            output.status.success(),
+            "fixture {id}\nstderr: {}\nstdout: {}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        expected_requests.extend(paragraphs.into_iter().map(str::to_owned));
+        let mut actual_requests = server.wait_for_requests(expected_requests.len());
+        actual_requests.sort();
+        expected_requests.sort();
+        assert_eq!(actual_requests, expected_requests, "fixture {id}");
+    }
+}
+
+#[test]
+fn para_overlapping_model_boxes_produce_contained_nonoverlapping_paragraphs() {
+    let id = "unit-para-08-overlapping-model-boxes";
+    let output = run_inspect_with_layout(id);
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let events = parse_events(&output.stdout);
+    let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap();
+    assert_eq!(paragraphs.len(), 2, "{paragraphs:#?}");
+    assert_eq!(
+        il_paragraph_text(&paragraphs[0]),
+        "Upper paragraph ends beside ∑."
+    );
+    assert_eq!(
+        il_paragraph_text(&paragraphs[1]),
+        "Lower paragraph remains separate and fully contained."
+    );
+    assert!(
+        paragraphs[0]["bounds"]["bottom"].as_f64().unwrap()
+            >= paragraphs[1]["bounds"]["top"].as_f64().unwrap(),
+        "paragraph bounds overlap: {paragraphs:#?}"
+    );
+    for paragraph in paragraphs {
+        let bounds = &paragraph["bounds"];
+        for character in paragraph["text"]["chars"].as_array().unwrap() {
+            let visual = &character["visual_bbox"];
+            assert!(
+                visual["left"].as_f64().unwrap() >= bounds["left"].as_f64().unwrap() - 0.001
+                    && visual["bottom"].as_f64().unwrap()
+                        >= bounds["bottom"].as_f64().unwrap() - 0.001
+                    && visual["right"].as_f64().unwrap()
+                        <= bounds["right"].as_f64().unwrap() + 0.001
+                    && visual["top"].as_f64().unwrap() <= bounds["top"].as_f64().unwrap() + 0.001,
+                "visual box escaped paragraph bounds: {character:#?} in {bounds:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn para_narrow_columns_reconstruct_exact_requests_from_inferred_line_spaces() {
+    let id = "unit-para-11-narrow-columns";
+    let manifest = fixture_manifest(id);
+    let expected = manifest
+        .expected
+        .block
+        .iter()
+        .map(|block| block.text.clone())
+        .collect::<Vec<_>>();
+    let output = run_inspect_with_layout(id);
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let events = parse_events(&output.stdout);
+    let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap();
+    assert_eq!(paragraphs.len(), 3, "{paragraphs:#?}");
+    assert_eq!(
+        paragraphs.iter().map(il_paragraph_text).collect::<Vec<_>>(),
+        expected
+    );
+    for paragraph in paragraphs {
+        let chars = paragraph["text"]["chars"].as_array().unwrap();
+        let baselines = chars
+            .iter()
+            .map(|character| {
+                character["baseline_origin"]["y"]
+                    .as_f64()
+                    .unwrap()
+                    .to_bits()
+            })
+            .collect::<BTreeSet<_>>();
+        let inferred_spaces = chars
+            .iter()
+            .filter(|character| character["implicit_space_before"] == true)
+            .count();
+        assert_eq!(baselines.len(), 10);
+        assert_eq!(inferred_spaces, 9);
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let server = FakeResponsesServer::start();
+    let output = run_openai_with_layout(
+        id,
+        &server,
+        &directory.path().join("translated.pdf"),
+        &directory.path().join("debug"),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let mut actual_requests = server.wait_for_requests(3);
+    actual_requests.sort();
+    let mut expected_requests = expected;
+    expected_requests.sort();
+    assert_eq!(actual_requests, expected_requests);
+}
+
+#[test]
+fn para_algorithm_indentation_makes_no_request_and_publishes_source_streams_unchanged() {
+    let id = "unit-para-12-algorithm-indentation";
+    let input_path = fixture_path(id);
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("translated.pdf");
+    let debug = directory.path().join("debug");
+    let server = FakeResponsesServer::start();
+    let output = run_openai_with_layout(id, &server, &output_path, &debug);
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(server.requests().is_empty());
+
+    let paragraph_find: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(debug.join("03-paragraph_find.il.json")).unwrap())
+            .unwrap();
+    let paragraph = &paragraph_find["pages"][0]["paragraphs"][0];
+    assert_eq!(
+        il_paragraph_text(paragraph),
+        "root  child    grandchild      leaf"
+    );
+    assert!(
+        paragraph["text"]["chars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|character| {
+                character["layout"]["label"] == "algorithm"
+                    && character["layout"]["policy"] == "passthrough"
+            })
+    );
+    assert_eq!(
+        decoded_page_streams(&output_path, 1),
+        decoded_page_streams(&input_path, 1)
+    );
 }
 
 #[test]

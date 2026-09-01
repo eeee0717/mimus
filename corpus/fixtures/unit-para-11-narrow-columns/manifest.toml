@@ -1,0 +1,67 @@
+# unit-para-11-narrow-columns -- expected manifest
+# Written before the fixed-width three-column Typst source and layout replay.
+
+schema_version = 1
+
+[identity]
+id = "unit-para-11-narrow-columns"
+name = "Narrow columns preserve spaces across visual line breaks"
+class = "unit"
+legality = "legal"
+cases = ["PARA-11"]
+priority = "M3"
+variable = "Three 90pt columns contain ten 10pt English lines whose returns carry no explicit source space glyph"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-para-11-narrow-columns.typ"
+pdf = "unit-para-11-narrow-columns.pdf"
+pdf_sha256 = "4d7c8d8e2e50fe4ca5feed58b2b29445bb36d142992ae0147c1022d71fae87e1"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 340.0, 180.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 3
+columns = 3
+
+[[expected.block]]
+key = "COL1"
+page = 0
+column = "left"
+draw_order = 1
+reading_order = 1
+text = "Alpha words cross narrow lines and each return must preserve a separating space before the next ordinary word begins in compact English prose."
+
+[[expected.block]]
+key = "COL2"
+page = 0
+column = "middle"
+draw_order = 2
+reading_order = 2
+text = "Bravo words wrap through the same narrow measure so every visual line boundary remains an ordinary word boundary in compact English prose."
+
+[[expected.block]]
+key = "COL3"
+page = 0
+column = "right"
+draw_order = 3
+reading_order = 3
+text = "Charlie words finish the three column control and every wrapped return keeps the request readable without joining nearby words in the third column."
+
+[[expected.behaviour]]
+id = "PARA-11-line-break-spacing"
+assertion = "Each of the nine source returns in every narrow column contributes an inferred word separator, and no adjacent line-end and line-start words are concatenated"
+observable_via = "10pt source line geometry, ParagraphFind implicit-space flags, and captured translation requests"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "reading-order", "dual-parser-geometry", "render"]

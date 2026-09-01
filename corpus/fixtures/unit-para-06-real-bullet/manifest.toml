@@ -1,0 +1,59 @@
+# unit-para-06-real-bullet -- expected manifest
+# Written before the two-item Typst source and layout replay.
+
+schema_version = 1
+
+[identity]
+id = "unit-para-06-real-bullet"
+name = "Real bullets start independent list paragraphs"
+class = "unit"
+legality = "legal"
+cases = ["PARA-06"]
+priority = "M3"
+variable = "Two real U+2022 list bullets each begin their own model text region"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-para-06-real-bullet.typ"
+pdf = "unit-para-06-real-bullet.pdf"
+pdf_sha256 = "9bd086411e9279dd54471d18557301773b06a383e9bee81a858cd043a415ca50"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 140.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 2
+columns = 1
+
+[[expected.block]]
+key = "ITEM1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "• First item."
+
+[[expected.block]]
+key = "ITEM2"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "• Second item."
+
+[[expected.behaviour]]
+id = "PARA-06-real-bullet"
+assertion = "Each genuine bullet item is one paragraph and neither bullet is removed from its paragraph text"
+observable_via = "two recorded model regions and ParagraphFind IL"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "reading-order", "dual-parser-geometry", "render"]

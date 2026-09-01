@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "pages": [
+    {
+      "page_index": 0,
+      "geometry": { "width": 340.0, "height": 180.0, "rotate_degrees": 0 },
+      "regions": [
+        {
+          "bounds": { "left": 19.0, "bottom": 72.0, "right": 111.0, "top": 164.0 },
+          "reading_order": 0,
+          "label": "text",
+          "source": "model",
+          "confidence": 1.0
+        },
+        {
+          "bounds": { "left": 124.0, "bottom": 72.0, "right": 216.0, "top": 164.0 },
+          "reading_order": 1,
+          "label": "text",
+          "source": "model",
+          "confidence": 1.0
+        },
+        {
+          "bounds": { "left": 229.0, "bottom": 72.0, "right": 321.0, "top": 164.0 },
+          "reading_order": 2,
+          "label": "text",
+          "source": "model",
+          "confidence": 1.0
+        }
+      ]
+    }
+  ]
+}

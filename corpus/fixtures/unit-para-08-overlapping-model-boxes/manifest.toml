@@ -1,0 +1,64 @@
+# unit-para-08-overlapping-model-boxes -- expected manifest
+# Written before the large-summation Typst source and overlapping layout replay.
+
+schema_version = 1
+
+[identity]
+id = "unit-para-08-overlapping-model-boxes"
+name = "Overlapping model boxes retain separate contained paragraphs"
+class = "unit"
+legality = "legal"
+cases = ["PARA-08"]
+priority = "M3"
+variable = "Two model paragraph regions overlap vertically by 3pt beside a large summation glyph"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-para-08-overlapping-model-boxes.typ"
+pdf = "unit-para-08-overlapping-model-boxes.pdf"
+pdf_sha256 = "d393acd54d803280d60e99f4eb50e1f2953471d4ac115fcaa3d6576e2a34040e"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 380.0, 160.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 2
+columns = 1
+
+[[expected.block]]
+key = "UPPER"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "Upper paragraph ends beside ∑."
+
+[[expected.block]]
+key = "LOWER"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "Lower paragraph remains separate and fully contained."
+
+[[expected.behaviour]]
+id = "PARA-08-contained-nonoverlap"
+assertion = "The two resulting paragraph bounds do not overlap and each bound still contains every character visual box assigned to that paragraph"
+observable_via = "independent source glyph geometry, overlapping recorded model bounds, and ParagraphFind IL"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "glyphs", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "Poppler reports the deliberately oversized summation glyph as a separate block while MuPDF keeps it in the upper prose block"
+resolution = "Keep the large glyph that creates the PARA-08 stress shape. Use the independently agreed glyph multiset and render for source truth; recorded model overlap plus production per-character boxes assert non-overlap and full containment."

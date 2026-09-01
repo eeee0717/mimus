@@ -1018,15 +1018,37 @@ fn intersection_area(left: Rect, right: Rect) -> f64 {
         * (left.top.min(right.top) - left.bottom.max(right.bottom)).max(0.0)
 }
 
+const SMALL_EDGE_CHARACTER_AREA_RATIO: f64 = 0.05;
+
+fn median_metric_character_area(walked: &[crate::walk::WalkedChar]) -> Option<f64> {
+    let mut areas = walked
+        .iter()
+        .filter(|character| {
+            character.visible
+                && character.locatable
+                && character.text_transform == TextTransform::Upright
+                && character
+                    .unicode
+                    .is_some_and(|unicode| !unicode.is_whitespace())
+        })
+        .map(|character| rect_area(character.metric_box))
+        .filter(|area| area.is_finite() && *area > 0.0)
+        .collect::<Vec<_>>();
+    areas.sort_by(f64::total_cmp);
+    areas.get(areas.len() / 2).copied()
+}
+
 fn layout_assignment(
     regions: &[crate::engine::LayoutRegion],
     bounds: Rect,
+    small_edge_owner: Option<usize>,
     translate_table: bool,
 ) -> Option<LayoutAssignment> {
     let char_area = rect_area(bounds);
     regions
         .iter()
-        .filter_map(|region| {
+        .enumerate()
+        .filter_map(|(index, region)| {
             let overlap = intersection_area(bounds, region.bounds);
             let center = crate::il::Point {
                 x: (bounds.left + bounds.right) / 2.0,
@@ -1040,17 +1062,25 @@ fn layout_assignment(
             } else {
                 0.0
             };
-            Some((region, coverage))
+            Some((index, region, coverage))
         })
-        .max_by(|(left, left_coverage), (right, right_coverage)| {
-            layout_assignment_priority(left, regions, bounds)
-                .cmp(&layout_assignment_priority(right, regions, bounds))
-                .then_with(|| left_coverage.total_cmp(right_coverage))
-                .then_with(|| rect_area(right.bounds).total_cmp(&rect_area(left.bounds)))
-                .then_with(|| left.confidence.total_cmp(&right.confidence))
-                .then_with(|| right.reading_order.cmp(&left.reading_order))
-        })
-        .map(|(region, _)| {
+        .max_by(
+            |(left_index, left, left_coverage), (right_index, right, right_coverage)| {
+                layout_assignment_priority(*left_index, left, regions, bounds, small_edge_owner)
+                    .cmp(&layout_assignment_priority(
+                        *right_index,
+                        right,
+                        regions,
+                        bounds,
+                        small_edge_owner,
+                    ))
+                    .then_with(|| left_coverage.total_cmp(right_coverage))
+                    .then_with(|| rect_area(right.bounds).total_cmp(&rect_area(left.bounds)))
+                    .then_with(|| left.confidence.total_cmp(&right.confidence))
+                    .then_with(|| right.reading_order.cmp(&left.reading_order))
+            },
+        )
+        .map(|(_, region, _)| {
             let policy = if translate_table && region.label == LayoutLabel::Table {
                 TranslationPolicy::Translate
             } else {
@@ -1066,13 +1096,52 @@ fn layout_assignment(
         })
 }
 
+fn small_edge_model_owner(
+    regions: &[crate::engine::LayoutRegion],
+    bounds: Rect,
+    visual_bounds: Rect,
+    median_metric_area: Option<f64>,
+) -> Option<usize> {
+    let median_metric_area = median_metric_area?;
+    let visual_area = rect_area(visual_bounds);
+    if !visual_area.is_finite()
+        || visual_area <= 0.0
+        || visual_area >= median_metric_area * SMALL_EDGE_CHARACTER_AREA_RATIO
+        || !regions.iter().any(|region| {
+            region.source == LayoutSource::FallbackLine
+                && intersection_area(bounds, region.bounds) > 0.0
+        })
+    {
+        return None;
+    }
+    let model_owners = regions
+        .iter()
+        .enumerate()
+        .filter(|(_, region)| {
+            region.source == LayoutSource::Model && intersection_area(bounds, region.bounds) > 0.0
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let [owner] = model_owners.as_slice() else {
+        return None;
+    };
+    let center = crate::il::Point {
+        x: (bounds.left + bounds.right) / 2.0,
+        y: (bounds.bottom + bounds.top) / 2.0,
+    };
+    (!point_in_rect(center, regions[*owner].bounds)).then_some(*owner)
+}
+
 fn layout_assignment_priority(
+    region_index: usize,
     region: &crate::engine::LayoutRegion,
     regions: &[crate::engine::LayoutRegion],
     bounds: Rect,
+    small_edge_owner: Option<usize>,
 ) -> u8 {
     match region.source {
         LayoutSource::FallbackLine => 1,
+        LayoutSource::Model if small_edge_owner == Some(region_index) => 3,
         LayoutSource::Model
             if regions.iter().any(|fallback| {
                 fallback.source == LayoutSource::FallbackLine
@@ -1153,6 +1222,7 @@ struct PositionedChar {
     locatable: bool,
     character: Char,
     force_no_space_before: bool,
+    small_edge_character: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1199,47 +1269,67 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
             });
             continue;
         }
+        let median_metric_area = median_metric_character_area(&extracted.walked_characters);
         let positioned = extracted
             .walked_characters
             .iter()
             .enumerate()
-            .map(|(index, walked)| PositionedChar {
-                walked_index: index,
-                locatable: walked.locatable,
-                force_no_space_before: false,
-                character: Char {
-                    unicode: walked.unicode,
-                    unicode_source: (walked.unicode_provenance
-                        == UnicodeProvenance::DifferencesAgl)
-                        .then_some(il::UnicodeSource::DifferencesAgl),
-                    code: walked.code,
-                    visible: walked.visible,
-                    font: walked.font.clone(),
-                    font_size: page_space_font_size(walked),
-                    baseline_origin: walked.baseline_origin,
-                    r#box: walked.metric_box,
-                    visual_bbox: extracted
-                        .character_alignment
-                        .engine_indices_by_walk
-                        .get(index)
-                        .and_then(|engine_index| *engine_index)
-                        .and_then(|engine_index| extracted.engine_characters.get(engine_index))
-                        .filter(|_| walked.locatable)
-                        .map_or(walked.metric_box, |engine| engine.tight_box),
-                    text_transform: walked.text_transform,
-                    implicit_space_before: false,
-                    layout: layout_assignment(
+            .map(|(index, walked)| {
+                let visual_bbox = extracted
+                    .character_alignment
+                    .engine_indices_by_walk
+                    .get(index)
+                    .and_then(|engine_index| *engine_index)
+                    .and_then(|engine_index| extracted.engine_characters.get(engine_index))
+                    .filter(|_| walked.locatable)
+                    .map_or(walked.metric_box, |engine| engine.tight_box);
+                let small_edge_owner = (walked.visible
+                    && walked.locatable
+                    && walked
+                        .unicode
+                        .is_some_and(|unicode| !unicode.is_whitespace()))
+                .then(|| {
+                    small_edge_model_owner(
                         &extracted.layout_regions,
                         walked.metric_box,
-                        context.config.translate_table,
-                    ),
-                    passthrough: PassthroughRef {
-                        content_object: walked.content_object.0,
-                        byte_start: walked.byte_start,
-                        byte_end: walked.byte_end,
-                        encoded: walked.encoded.clone(),
+                        visual_bbox,
+                        median_metric_area,
+                    )
+                })
+                .flatten();
+                PositionedChar {
+                    walked_index: index,
+                    locatable: walked.locatable,
+                    force_no_space_before: false,
+                    small_edge_character: small_edge_owner.is_some(),
+                    character: Char {
+                        unicode: walked.unicode,
+                        unicode_source: (walked.unicode_provenance
+                            == UnicodeProvenance::DifferencesAgl)
+                            .then_some(il::UnicodeSource::DifferencesAgl),
+                        code: walked.code,
+                        visible: walked.visible,
+                        font: walked.font.clone(),
+                        font_size: page_space_font_size(walked),
+                        baseline_origin: walked.baseline_origin,
+                        r#box: walked.metric_box,
+                        visual_bbox,
+                        text_transform: walked.text_transform,
+                        implicit_space_before: false,
+                        layout: layout_assignment(
+                            &extracted.layout_regions,
+                            walked.metric_box,
+                            small_edge_owner,
+                            context.config.translate_table,
+                        ),
+                        passthrough: PassthroughRef {
+                            content_object: walked.content_object.0,
+                            byte_start: walked.byte_start,
+                            byte_end: walked.byte_end,
+                            encoded: walked.encoded.clone(),
+                        },
                     },
-                },
+                }
             })
             .collect::<Vec<_>>();
 
@@ -1601,7 +1691,10 @@ fn merge_nested_inline_formula_groups(groups: &mut Vec<ModelGroup>) {
     groups.retain(|group| !group.chars.is_empty());
 }
 
-fn build_text_lines(mut chars: Vec<PositionedChar>) -> Vec<TextLine> {
+fn build_text_lines(chars: Vec<PositionedChar>) -> Vec<TextLine> {
+    let (small_edge_characters, mut chars): (Vec<_>, Vec<_>) = chars
+        .into_iter()
+        .partition(|character| character.small_edge_character);
     chars.sort_by(|left, right| {
         right
             .character
@@ -1625,6 +1718,58 @@ fn build_text_lines(mut chars: Vec<PositionedChar>) -> Vec<TextLine> {
         });
         if belongs {
             rows.last_mut().unwrap().push(character);
+        } else {
+            rows.push(vec![character]);
+        }
+    }
+    // Raised edge-owned marks bypass baseline clustering, then rejoin only their adjacent source
+    // glyph so the paragraph keeps inline source order.
+    for mut character in small_edge_characters {
+        let owner = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row_index, row)| {
+                row.iter()
+                    .filter(|candidate| {
+                        candidate.character.passthrough.content_object
+                            == character.character.passthrough.content_object
+                            && candidate.walked_index.abs_diff(character.walked_index) == 1
+                            && rects_overlap_vertically(
+                                candidate.character.r#box,
+                                character.character.r#box,
+                            )
+                    })
+                    .map(|candidate| {
+                        let horizontal_gap = (character.character.r#box.left
+                            - candidate.character.r#box.right)
+                            .max(candidate.character.r#box.left - character.character.r#box.right)
+                            .max(0.0);
+                        (
+                            row_index,
+                            candidate.walked_index.abs_diff(character.walked_index),
+                            horizontal_gap,
+                            candidate
+                                .character
+                                .font_size
+                                .max(character.character.font_size),
+                        )
+                    })
+                    .filter(|(_, _, gap, font_size)| *gap <= *font_size * 0.25)
+                    .min_by(|left, right| {
+                        left.1
+                            .cmp(&right.1)
+                            .then_with(|| left.2.total_cmp(&right.2))
+                    })
+            })
+            .min_by(|left, right| {
+                left.1
+                    .cmp(&right.1)
+                    .then_with(|| left.2.total_cmp(&right.2))
+            })
+            .map(|(row_index, _, _, _)| row_index);
+        if let Some(owner) = owner {
+            character.force_no_space_before = true;
+            rows[owner].push(character);
         } else {
             rows.push(vec![character]);
         }
@@ -10619,6 +10764,7 @@ mod tests {
                     locatable: true,
                     character,
                     force_no_space_before: false,
+                    small_edge_character: false,
                 }
             })
             .collect::<Vec<_>>();
@@ -10693,20 +10839,100 @@ mod tests {
             confidence: 1.0,
         };
 
-        let assignment = layout_assignment(&[model, fallback], bounds, false).unwrap();
+        let assignment = layout_assignment(&[model, fallback], bounds, None, false).unwrap();
         assert_eq!(assignment.label, LayoutLabel::Text);
         assert_eq!(assignment.source, LayoutSource::FallbackLine);
 
         fallback.label = LayoutLabel::Table;
-        let assignment = layout_assignment(&[model, fallback], bounds, false).unwrap();
+        let assignment = layout_assignment(&[model, fallback], bounds, None, false).unwrap();
         assert_eq!(assignment.label, LayoutLabel::Table);
         assert_eq!(assignment.source, LayoutSource::Model);
         assert_eq!(assignment.reading_order, 3);
         assert_eq!(assignment.policy, TranslationPolicy::Passthrough);
 
-        let assignment = layout_assignment(&[model, fallback], bounds, true).unwrap();
+        let assignment = layout_assignment(&[model, fallback], bounds, None, true).unwrap();
         assert_eq!(assignment.label, LayoutLabel::Table);
         assert_eq!(assignment.policy, TranslationPolicy::Translate);
+    }
+
+    #[test]
+    fn small_edge_ownership_requires_one_overlapping_model_and_tiny_ink() {
+        let bounds = Rect {
+            left: 8.0,
+            bottom: 10.0,
+            right: 10.0,
+            top: 12.0,
+        };
+        let tiny_visual = Rect {
+            left: 9.0,
+            bottom: 10.5,
+            right: 9.1,
+            top: 10.6,
+        };
+        let ordinary_visual = Rect {
+            left: 8.0,
+            bottom: 10.0,
+            right: 10.0,
+            top: 12.0,
+        };
+        let model = crate::engine::LayoutRegion {
+            bounds: Rect {
+                left: 0.0,
+                bottom: 0.0,
+                right: 8.75,
+                top: 20.0,
+            },
+            reading_order: 3,
+            label: LayoutLabel::Table,
+            source: LayoutSource::Model,
+            confidence: 0.9,
+        };
+        let fallback = crate::engine::LayoutRegion {
+            bounds,
+            reading_order: 4,
+            label: LayoutLabel::Text,
+            source: LayoutSource::FallbackLine,
+            confidence: 1.0,
+        };
+
+        let small_owner =
+            small_edge_model_owner(&[model, fallback], bounds, tiny_visual, Some(50.0));
+        assert_eq!(small_owner, Some(0));
+        let assignment = layout_assignment(&[model, fallback], bounds, small_owner, false).unwrap();
+        assert_eq!(assignment.source, LayoutSource::Model);
+
+        let ordinary_owner =
+            small_edge_model_owner(&[model, fallback], bounds, ordinary_visual, Some(50.0));
+        assert_eq!(ordinary_owner, None);
+        let assignment =
+            layout_assignment(&[model, fallback], bounds, ordinary_owner, false).unwrap();
+        assert_eq!(assignment.source, LayoutSource::FallbackLine);
+
+        let second_model = crate::engine::LayoutRegion {
+            bounds: Rect {
+                left: 8.5,
+                bottom: 0.0,
+                right: 20.0,
+                top: 20.0,
+            },
+            reading_order: 5,
+            ..model
+        };
+        let ambiguous_owner = small_edge_model_owner(
+            &[model, second_model, fallback],
+            bounds,
+            tiny_visual,
+            Some(50.0),
+        );
+        assert_eq!(ambiguous_owner, None);
+        let assignment = layout_assignment(
+            &[model, second_model, fallback],
+            bounds,
+            ambiguous_owner,
+            false,
+        )
+        .unwrap();
+        assert_eq!(assignment.source, LayoutSource::FallbackLine);
     }
 
     #[test]
@@ -13988,6 +14214,7 @@ mod tests {
                 locatable: true,
                 character,
                 force_no_space_before: false,
+                small_edge_character: false,
             }
         };
         let mut groups = vec![
