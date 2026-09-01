@@ -118,6 +118,7 @@ pub struct ConfigurationResolved {
     pub strict: bool,
     pub translate_table: bool,
     pub strip_link_borders: bool,
+    pub bilingual: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -158,6 +159,7 @@ pub enum ResultPayload {
         output: String,
         translate_table: bool,
         strip_link_borders: bool,
+        bilingual: bool,
     },
     Inspect {
         il: il::Document,

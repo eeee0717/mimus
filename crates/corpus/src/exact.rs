@@ -174,6 +174,7 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
         "unit-parse-12-contents-array-tj-operand" => contents_array_tj_operand(repo_root),
         "unit-write-06-free-object-slot" => free_object_slot(repo_root),
         "unit-write-07-link-borders" => link_borders(repo_root),
+        "unit-write-08-bilingual-navigation" => bilingual_navigation(repo_root),
         "unit-doc-04-rotated-90" => geometry_text_page(
             repo_root,
             fixture_id,
@@ -1760,6 +1761,63 @@ fn link_borders(repo_root: &Path) -> Result<Vec<u8>> {
         b"/Type /XObject /Subtype /Form /BBox [0 0 20 20] /Resources << >>",
         b"q\n1 0 0 rg\n0 0 20 20 re\nf\nQ\n",
     )?;
+
+    pdf.finish(1)
+}
+
+fn bilingual_navigation(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-write-08-bilingual-navigation");
+
+    pdf.object(
+        b"<< /Type /Catalog /Pages 2 0 R /Outlines 12 0 R /PageMode /UseOutlines /Names << /Dests 16 0 R >> /Dests << /legacy [3 0 R /FitR 10 20 290 180] >> /AcroForm << /Fields [19 0 R] /DR 5 0 R /DA (/F1 10 Tf 0 g) >> /OCProperties << /OCGs [21 0 R] /D << /Order [21 0 R] /ON [21 0 R] >> >> /PageLabels 23 0 R >>",
+    )?;
+    pdf.object(b"<< /Type /Pages /Kids [20 0 R] /Count 2 >>")?;
+    pdf.object(
+        b"<< /Type /Page /Parent 20 0 R /MediaBox [0 0 300 200] /CropBox [10 10 290 190] /Resources 5 0 R /Contents 10 0 R /Annots [17 0 R 19 0 R] >>",
+    )?;
+    pdf.object(
+        b"<< /Type /Page /Parent 20 0 R /MediaBox [0 0 300 200] /CropBox [10 10 290 190] /Rotate 0 /Resources 5 0 R /Contents 11 0 R /Annots [18 0 R 22 0 R] >>",
+    )?;
+    pdf.object(b"<< /Font << /F1 6 0 R >> /Properties << /Layer 21 0 R >> >>")?;
+    pdf.object(font_dictionary_with_descriptor(9, 7).as_bytes())?;
+    pdf.object(
+        b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 8 0 R >>",
+    )?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", to_unicode())?;
+    pdf.stream(
+        b"",
+        b"/OC /Layer BDC\nBT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS) Tj\nET\nEMC\n",
+    )?;
+    pdf.stream(
+        b"",
+        b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS MIMUS) Tj\nET\n",
+    )?;
+    pdf.object(b"<< /Type /Outlines /First 13 0 R /Last 15 0 R /Count 2 >>")?;
+    pdf.object(
+        b"<< /Title (Exact destination) /Parent 12 0 R /First 14 0 R /Last 14 0 R /Count -1 /Next 15 0 R /Dest [4 0 R /XYZ 72 120 1.25] /C [0 0.4 0.8] /F 2 >>",
+    )?;
+    pdf.object(b"<< /Title (Named destination) /Parent 13 0 R /Dest (body) >>")?;
+    pdf.object(
+        b"<< /Title (GoTo action) /Parent 12 0 R /Prev 13 0 R /A << /S /GoTo /D [3 0 R /XYZ 72 144 0] >> >>",
+    )?;
+    pdf.object(b"<< /Names [(body) [4 0 R /XYZ 72 120 1.25]] >>")?;
+    pdf.object(
+        b"<< /Type /Annot /Subtype /Link /Rect [72 90 180 106] /Border [0 0 0] /A << /S /GoTo /D [4 0 R /XYZ 72 120 1.25] >> >>",
+    )?;
+    pdf.object(
+        b"<< /Type /Annot /Subtype /Link /Rect [72 90 180 106] /Border [0 0 0] /A << /S /URI /URI (https://example.com/mimus) >> >>",
+    )?;
+    pdf.object(
+        b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (sample) /V () /Rect [72 60 190 78] /P 3 0 R /F 4 /DA (/F1 10 Tf 0 g) >>",
+    )?;
+    pdf.object(b"<< /Type /Pages /Parent 2 0 R /Kids [3 0 R 4 0 R] /Count 2 >>")?;
+    pdf.object(b"<< /Type /OCG /Name (MIMUS Layer) >>")?;
+    pdf.object(
+        b"<< /Type /Annot /Subtype /Text /Rect [205 112 225 132] /Contents (MIMUS note) /Name /Comment >>",
+    )?;
+    pdf.object(b"<< /Nums [0 << /S /D /P (A-) /St 3 >> 1 << /S /r /St 7 >>] >>")?;
 
     pdf.finish(1)
 }

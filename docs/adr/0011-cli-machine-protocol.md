@@ -78,6 +78,9 @@ CLI 机器协议版本升为 2；IL 的 `schema_version` 独立保持 1。每行
 - 2026-08-31 清扫轮：`configuration_resolved` 与 translate `result` 增加
   `strip_link_borders`；开关实际修改时发
   `link_borders_stripped { annotation_count }` typed info。默认关闭且不产生事件，公开协议仍为 v2。
+- 2026-08-31 #37：`configuration_resolved` 与 translate `result` 增加
+  `bilingual`；开启时 terminal `pages` 报告交替输出的物理页数 `2N`，关闭时仍为 `N`。
+  IL 继续只描述输入的 `N` 页且 schema 保持 v1，公开协议仍为 v2。
 
 ## 后果
 

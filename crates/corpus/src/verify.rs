@@ -1483,6 +1483,25 @@ fn check_pdf_structure(manifest: &Manifest, document: &qpdf::Document) -> Result
                     problems.push(format!("bookmark {} XYZ destination 不符", bookmark.object));
                 }
             }
+            BookmarkTarget::GotoXyz => {
+                let action = dictionary
+                    .get("/A")
+                    .and_then(Value::as_object)
+                    .context("GoTo bookmark missing /A")?;
+                if action.get("/S").and_then(Value::as_str) != Some("/GoTo")
+                    || !destination_matches(
+                        action.get("/D").context("GoTo bookmark missing /D")?,
+                        bookmark.page_object.context("GoTo bookmark missing page")?,
+                        bookmark.xyz.context("GoTo bookmark missing coordinates")?,
+                        tolerance,
+                    )?
+                {
+                    problems.push(format!(
+                        "bookmark {} GoTo destination 不符",
+                        bookmark.object
+                    ));
+                }
+            }
             BookmarkTarget::Named => {
                 if dictionary.get("/Dest").and_then(pdf_text) != bookmark.name.as_deref() {
                     problems.push(format!(
