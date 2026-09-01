@@ -9,6 +9,10 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub struct Document {
     pub schema_version: u32,
     pub pages: Vec<Page>,
+    /// Bounded final-publication evidence for independently checking writer output.
+    /// Additive IL v1 metadata; identity and source-preserved output need no entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publication_ink: Vec<PublicationInk>,
 }
 
 impl Default for Document {
@@ -16,6 +20,7 @@ impl Default for Document {
         Self {
             schema_version: SCHEMA_VERSION,
             pages: Vec::new(),
+            publication_ink: Vec::new(),
         }
     }
 }
@@ -48,6 +53,61 @@ pub struct PageGeometry {
     pub width: f64,
     pub height: f64,
     pub rotate_degrees: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PublicationInk {
+    pub page_index: usize,
+    pub reading_order: usize,
+    /// The resolved page CropBox in page-space points.
+    pub crop_box: Rect,
+    /// The paragraph container plus only the vertical expansion used by final ink.
+    pub admissible_container: Rect,
+    pub components: Vec<PublicationInkComponent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PublicationInkComponent {
+    TranslatedText {
+        ownership_group: usize,
+        bounds: Rect,
+        glyphs: Vec<PublicationGlyph>,
+    },
+    SourceTextReplay {
+        ownership_group: usize,
+        bounds: Rect,
+        glyphs: Vec<PublicationGlyph>,
+    },
+    VectorPath {
+        ownership_group: usize,
+        bounds: Rect,
+    },
+    InlineImage {
+        ownership_group: usize,
+        bounds: Rect,
+    },
+}
+
+impl PublicationInkComponent {
+    #[must_use]
+    pub const fn bounds(&self) -> Rect {
+        match self {
+            Self::TranslatedText { bounds, .. }
+            | Self::SourceTextReplay { bounds, .. }
+            | Self::VectorPath { bounds, .. }
+            | Self::InlineImage { bounds, .. } => *bounds,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PublicationGlyph {
+    pub unicode: char,
+    pub baseline_origin: Point,
+    /// Final visual ink for this glyph. Glyphs without an outline use a zero-area
+    /// rectangle at the baseline origin.
+    pub ink_bounds: Rect,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -363,10 +423,12 @@ mod tests {
                     preserved: None,
                 }],
             }],
+            publication_ink: Vec::new(),
         };
         let value = serde_json::to_value(&document).unwrap();
         assert_eq!(value["schema_version"], SCHEMA_VERSION);
         assert_eq!(value["pages"][0]["paragraphs"][0]["text"]["kind"], "chars");
+        assert!(value.get("publication_ink").is_none());
         let canonical = canonical_json(&document).unwrap();
         assert!(canonical.ends_with(b"\n"));
     }

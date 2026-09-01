@@ -2211,6 +2211,7 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
     let server = GateResponsesServer::start([]);
     let mut output_count = 0usize;
     for id in legal {
+        let manifest = fixture_manifest(&id);
         let output_path = directory.path().join(format!("{id}.pdf"));
         let debug = directory.path().join(format!("{id}-debug"));
         let calls_before = server.request_count();
@@ -2264,9 +2265,27 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
             assert_terminal(&events, "result");
             assert!(output_path.is_file(), "fixture {id} produced no output");
             assert_valid_pdf(&output_path, &id);
+            let ink_audit = if id == "unit-xobj-depth-overflow"
+                && manifest.expected.renderer_diagnostic.as_deref()
+                    == Some("exception stack overflow!")
+            {
+                scorecard::audit_publication_ink_evidence_path(&debug.join("09-write.il.json"))
+            } else {
+                scorecard::audit_publication_ink_paths(
+                    &debug.join("09-write.il.json"),
+                    &output_path,
+                )
+            }
+            .unwrap_or_else(|error| panic!("fixture {id} ink audit failed: {error:#}"));
+            assert_eq!(
+                ink_audit.violation_count(),
+                0,
+                "fixture {id} final ink violations: {:#?}",
+                ink_audit.violations
+            );
             assert_snapshot_has_no_placeholder_residue(&debug.join("06-translate.il.json"), &id);
             let mut extractors = vec!["poppler"];
-            if fixture_manifest(&id).expected.renderer_diagnostic.is_none() {
+            if manifest.expected.renderer_diagnostic.is_none() {
                 extractors.push("mupdf");
             }
             for extractor in extractors {

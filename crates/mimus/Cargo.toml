@@ -29,5 +29,6 @@ insta.workspace = true
 lopdf.workspace = true
 mimus-quality-contract.workspace = true
 quick-xml.workspace = true
+scorecard.workspace = true
 serde.workspace = true
 toml = "0.9"

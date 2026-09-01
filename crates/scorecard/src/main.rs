@@ -266,7 +266,8 @@ fn measure(args: MeasureArgs) -> Result<()> {
     let styled: Il = read_json(args.debug_dir.join("04-styles_and_formulas.il.json"))?;
     let translated: Il = read_json(args.debug_dir.join("06-translate.il.json"))?;
     let typeset: Il = read_json(args.debug_dir.join("07-typeset.il.json"))?;
-    let write: Il = read_json(args.debug_dir.join("09-write.il.json"))?;
+    let write_path = args.debug_dir.join("09-write.il.json");
+    let write: Il = read_json(write_path.clone())?;
     let events = read_ndjson(&args.ndjson)?;
     let glossary = args.glossary.as_deref().map(read_glossary).transpose()?;
     let semantic_evaluation = args
@@ -277,6 +278,7 @@ fn measure(args: MeasureArgs) -> Result<()> {
     let output_chars = extracted_character_count(&args.output_pdf)?;
     let denominator = output_chars.max(1) as f64;
     let direct_content_objects = qpdf_direct_content_objects(&args.input_pdf)?;
+    let ink_audit = scorecard::audit_publication_ink_paths(&write_path, &args.output_pdf)?;
 
     let mut dimensions = BTreeMap::new();
     dimensions.insert(
@@ -311,6 +313,7 @@ fn measure(args: MeasureArgs) -> Result<()> {
             &typeset,
             &events,
             &args.output_pdf,
+            &ink_audit,
             denominator,
         ),
     );
@@ -623,6 +626,7 @@ fn risk(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layout(
     before: &Il,
     styled: &Il,
@@ -630,6 +634,7 @@ fn layout(
     after: &Il,
     events: &[Value],
     output_pdf: &Path,
+    ink_audit: &scorecard::InkAudit,
     denominator: f64,
 ) -> Dimension {
     let mut offsets = Vec::new();
@@ -659,12 +664,17 @@ fn layout(
     let hole_count = continuity.as_ref().map_or(0, |m| m.unexplained_hole_count);
     let weighted = (drifted * 3 + expansions) as f64
         + continuity_violations as f64 * 5.0
-        + hole_count as f64 * 5.0;
+        + hole_count as f64 * 5.0
+        + ink_audit.violation_count() as f64 * 10.0;
     let mut m = BTreeMap::new();
     m.insert("median_offset_pt".into(), median(&mut offsets).into());
     m.insert("median_iou".into(), median(&mut ious).into());
     m.insert("median_font_scale".into(), median(&mut font_ratios).into());
     m.insert("bounds_expansions".into(), expansions.into());
+    m.insert(
+        "final_ink_geometry".into(),
+        serde_json::to_value(ink_audit).unwrap(),
+    );
     m.insert(
         "formula_neighbor_continuity".into(),
         continuity
@@ -685,7 +695,9 @@ fn layout(
             .unwrap_or_else(|| not_applicable("mutool stext evidence unavailable")),
     );
     dimension(
-        &["LAY-01", "LAY-02", "LAY-03", "LAY-04", "FOR-02", "FOR-03"],
+        &[
+            "LAY-01", "LAY-02", "LAY-03", "LAY-04", "FOR-02", "FOR-03", "INK-01",
+        ],
         weighted,
         denominator,
         m,
