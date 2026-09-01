@@ -250,7 +250,7 @@ semantic translation quality, so these totals are mechanical regression measurem
 | 11 SDitH hardware | XeTeX | 96.301919 | 168 | 1.000000 | 63 | 0 | 0 | 0 |
 | 12 Hertz side channel | XeTeX | 94.401963 | 85 | 1.000000 | 84 | 1 | 1 | 0 |
 | 13 Information-theoretic MPC | LuaTeX | 95.476251 | 175 | 1.000000 | 38 | 19 | 19 | 0 |
-| 14 Masked comparisons | LuaTeX | 96.182339 | 253 | 0.997972 | 39 | 1 | 1 | 0 |
+| 14 Masked comparisons | LuaTeX | 96.204460 | 253 | 1.000000 | 39 | 1 | 1 | 0 |
 | 15 LWE two-step | LuaTeX | 91.944698 | 305 | 1.000000 | 151 | 1 | 1 | 0 |
 | 16 Supersingular orientations | LuaTeX | 81.879565 | 496 | 1.000000 | 401 | 2 | 2 | 0 |
 | 17 Informational consciousness | Word | 97.785404 | 32 | 1.000000 | 0 | 0 | 0 | 0 |
