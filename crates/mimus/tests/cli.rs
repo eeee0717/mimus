@@ -116,6 +116,16 @@ fn handle_responses_request(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<Str
             })
             .to_string(),
         )
+    } else if input == "MIMUS {v1} MIMUS" {
+        (
+            "200 OK",
+            serde_json::json!({ "output_text": "模型 {v1} 模型" }).to_string(),
+        )
+    } else if input == "MIMUS CIMUS" {
+        (
+            "200 OK",
+            serde_json::json!({ "output_text": "模型ϵM" }).to_string(),
+        )
     } else if input == "The result {v1} = 1, 2, 3 shows the distinction." {
         (
             "200 OK",
@@ -1551,8 +1561,8 @@ fn corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 181, "Corpus fixture inventory changed");
-    assert_eq!(cases.len(), 110, "Corpus case inventory changed");
+    assert_eq!(ids.len(), 187, "Corpus fixture inventory changed");
+    assert_eq!(cases.len(), 114, "Corpus case inventory changed");
 
     let mut snapshot_digests = BTreeMap::new();
     let mut snapshot_counts = BTreeMap::new();
@@ -2758,6 +2768,124 @@ fn partial_model_formula_regions_are_completed_before_translation() {
 }
 
 #[test]
+fn tall_summation_ink_has_one_model_formula_owner_and_one_placeholder() {
+    let id = "unit-layout-04-large-summation";
+    let inspected = run_inspect_with_layout(id);
+    assert!(
+        inspected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let events = parse_events(&inspected.stdout);
+    assert_one_terminal_last(&events, "result");
+    let paragraph = &events.last().unwrap()["il"]["pages"][0]["paragraphs"][0];
+    let formulas = paragraph["text"]["chars"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|character| character["layout"]["label"] == "inline_formula")
+        .collect::<Vec<_>>();
+    assert_eq!(formulas.len(), 1, "{paragraph:#?}");
+    let summation = formulas[0];
+    assert_eq!(summation["unicode"], "∑");
+    assert_eq!(summation["layout"]["source"], "model");
+    assert_eq!(summation["layout"]["policy"], "passthrough");
+    let metric_height =
+        summation["box"]["top"].as_f64().unwrap() - summation["box"]["bottom"].as_f64().unwrap();
+    let visual_height = summation["visual_bbox"]["top"].as_f64().unwrap()
+        - summation["visual_bbox"]["bottom"].as_f64().unwrap();
+    assert!(
+        visual_height > metric_height * 2.0,
+        "summation visual height {visual_height} is not over twice metric height {metric_height}"
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let server = FakeResponsesServer::start();
+    let output = run_openai_with_layout(
+        id,
+        &server,
+        &directory.path().join("translated.pdf"),
+        &directory.path().join("debug"),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(server.wait_for_requests(1), ["MIMUS {v1} MIMUS"]);
+    assert_eq!(server.requests()[0].matches("{v1}").count(), 1);
+}
+
+#[test]
+fn mixed_source_descents_emit_primary_and_fallback_runs_on_one_baseline() {
+    let id = "unit-type-11-mixed-descents";
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("translated.pdf");
+    let debug = directory.path().join("debug");
+    let server = FakeResponsesServer::start();
+    let output = run_openai_with_layout(id, &server, &output_path, &debug);
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(server.wait_for_requests(1), ["MIMUS CIMUS"]);
+
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(debug.join("09-write.il.json")).unwrap()).unwrap();
+    let paragraph = &written["pages"][0]["paragraphs"][0];
+    assert!(paragraph["preserved"].is_null(), "{paragraph:#?}");
+    assert_eq!(paragraph["translated_text"], "模型ϵM");
+    let content = decoded_page_streams(&output_path, 1).concat();
+    assert!(
+        content
+            .windows(b"/MimusR".len())
+            .any(|part| part == b"/MimusR"),
+        "{}",
+        String::from_utf8_lossy(&content)
+    );
+    assert!(
+        content
+            .windows(b"/MimusFR".len())
+            .any(|part| part == b"/MimusFR"),
+        "{}",
+        String::from_utf8_lossy(&content)
+    );
+
+    let extracted = Command::new("mutool")
+        .args(["draw", "-F", "stext", "-o", "-"])
+        .arg(&output_path)
+        .arg("1")
+        .output()
+        .unwrap();
+    assert!(
+        extracted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&extracted.stderr)
+    );
+    let attributes = element_attributes(&extracted.stdout, b"char");
+    let text = attributes
+        .iter()
+        .filter_map(|attributes| attributes.get("c"))
+        .map(String::as_str)
+        .collect::<String>();
+    assert_eq!(text, "模型ϵM");
+    let baselines = attributes
+        .iter()
+        .map(|attributes| number(attributes, "y"))
+        .collect::<Vec<_>>();
+    let minimum = baselines.iter().copied().reduce(f64::min).unwrap();
+    let maximum = baselines.iter().copied().reduce(f64::max).unwrap();
+    assert!(
+        maximum - minimum < 0.3,
+        "output baseline spread is {}pt: {baselines:?}",
+        maximum - minimum
+    );
+}
+
+#[test]
 fn form_comma_and_numeric_prose_requests_keep_literal_punctuation() {
     let directory = tempfile::tempdir().unwrap();
     let server = FakeResponsesServer::start();
@@ -3615,6 +3743,7 @@ fn supported_font_and_cmap_fixtures_match_manifest_unicode_and_positive_advances
         "unit-cmap-02-mixed-codespace",
         "unit-cmap-embedded-ok",
         "unit-cmap-identity-alias",
+        "unit-cmap-09-valid-scalar-parent",
     ] {
         let manifest = fixture_manifest(id);
         let input = fixture_path(id);
@@ -3789,6 +3918,7 @@ fn unreliable_font_and_cmap_fixtures_preserve_exact_bytes_with_declared_reasons(
         "mal-cmap-missing-encoding",
         "mal-cmap-bfrange-arity",
         "mal-cmap-bad-differences",
+        "mal-cmap-09-isolated-surrogate",
         "mal-parse-tounicode-not-stream",
     ] {
         let manifest = fixture_manifest(id);
@@ -3847,6 +3977,48 @@ fn unreliable_font_and_cmap_fixtures_preserve_exact_bytes_with_declared_reasons(
             "fixture {id} output contains a CID literal"
         );
     }
+}
+
+#[test]
+fn isolated_tounicode_surrogate_stays_null_and_preserves_the_paragraph() {
+    let id = "mal-cmap-09-isolated-surrogate";
+    let input = fixture_path(id);
+    let inspected = run_inspect(&input, true, None);
+    assert!(
+        inspected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let events = parse_events(&inspected.stdout);
+    assert_one_terminal_last(&events, "result");
+    let paragraph = &events.last().unwrap()["il"]["pages"][0]["paragraphs"][0];
+    let characters = paragraph["text"]["chars"].as_array().unwrap();
+    assert_eq!(characters.len(), 1);
+    assert!(characters[0]["unicode"].is_null());
+    assert_eq!(paragraph["preserved"], "unreliable_unicode");
+    assert!(!String::from_utf8_lossy(&inspected.stdout).contains('\u{fffd}'));
+    let summary = events
+        .iter()
+        .find(|event| event["event"] == "diagnostic" && event["id"] == "degradation_summary")
+        .unwrap();
+    assert_eq!(summary["degraded_page_indices"], serde_json::json!([]));
+    assert_eq!(
+        summary["preserved_paragraphs"],
+        serde_json::json!([{
+            "page_index": 0,
+            "paragraph_index": 0,
+            "reason": "unreliable_unicode",
+        }])
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let translated = directory.path().join("translated.pdf");
+    let output = run_none(&input, Some(&translated), true);
+    assert!(output.status.success());
+    assert_eq!(
+        std::fs::read(translated).unwrap(),
+        std::fs::read(input).unwrap()
+    );
 }
 
 #[test]
@@ -4092,6 +4264,10 @@ fn parse_stream_and_xobject_fixture_matrix_stays_bounded_and_preserves_streams()
             (0, OutputExpectation::Rewritten, Some("content_recovered")),
         ),
         (
+            "mal-xobj-09-not-a-stream",
+            (0, OutputExpectation::Exact, Some("degradation_summary")),
+        ),
+        (
             "mal-xobj-11-reversed-bbox-form-text",
             (0, OutputExpectation::Rewritten, Some("content_recovered")),
         ),
@@ -4220,6 +4396,10 @@ fn parse_stream_and_xobject_fixture_matrix_stays_bounded_and_preserves_streams()
             (0, OutputExpectation::Rewritten, None),
         ),
         (
+            "unit-xobj-09-stream-parent",
+            (0, OutputExpectation::Exact, None),
+        ),
+        (
             "unit-xobj-11-bbox-order-parent",
             (0, OutputExpectation::Rewritten, None),
         ),
@@ -4328,6 +4508,44 @@ fn parse_stream_and_xobject_fixture_matrix_stays_bounded_and_preserves_streams()
             }
         }
     }
+}
+
+#[test]
+fn non_stream_xobject_degrades_the_page_and_republishes_exact_bytes() {
+    let id = "mal-xobj-09-not-a-stream";
+    let input = fixture_path(id);
+    let inspected = run_inspect(&input, true, None);
+    assert!(
+        inspected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let events = parse_events(&inspected.stdout);
+    assert_one_terminal_last(&events, "result");
+    let degraded = events
+        .iter()
+        .find(|event| event["event"] == "diagnostic" && event["id"] == "page_degraded")
+        .unwrap();
+    assert_eq!(degraded["page_index"], 0);
+    assert_eq!(degraded["reason"], "x_object_not_a_stream");
+    assert_eq!(
+        events.last().unwrap()["il"]["pages"][0]["paragraphs"],
+        serde_json::json!([])
+    );
+    let summary = events
+        .iter()
+        .find(|event| event["event"] == "diagnostic" && event["id"] == "degradation_summary")
+        .unwrap();
+    assert_eq!(summary["degraded_page_indices"], serde_json::json!([0]));
+
+    let directory = tempfile::tempdir().unwrap();
+    let translated = directory.path().join("translated.pdf");
+    let output = run_none(&input, Some(&translated), true);
+    assert!(output.status.success());
+    assert_eq!(
+        std::fs::read(translated).unwrap(),
+        std::fs::read(input).unwrap()
+    );
 }
 
 #[test]
@@ -5295,28 +5513,38 @@ fn strip_link_borders_is_opt_in_typed_and_annotation_scoped() {
 }
 
 fn first_element_attributes(xml: &[u8], name: &[u8]) -> BTreeMap<String, String> {
+    element_attributes(xml, name)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("element {} not found", String::from_utf8_lossy(name)))
+}
+
+fn element_attributes(xml: &[u8], name: &[u8]) -> Vec<BTreeMap<String, String>> {
     let mut reader = Reader::from_reader(xml);
+    let mut result = Vec::new();
     loop {
         match reader.read_event().unwrap() {
             Event::Start(element) | Event::Empty(element)
                 if element.local_name().as_ref() == name =>
             {
-                return element
-                    .attributes()
-                    .map(|attribute| {
-                        let attribute = attribute.unwrap();
-                        (
-                            String::from_utf8(attribute.key.local_name().as_ref().to_vec())
-                                .unwrap(),
-                            attribute
-                                .normalized_value(XmlVersion::Implicit1_0)
-                                .unwrap()
-                                .into_owned(),
-                        )
-                    })
-                    .collect();
+                result.push(
+                    element
+                        .attributes()
+                        .map(|attribute| {
+                            let attribute = attribute.unwrap();
+                            (
+                                String::from_utf8(attribute.key.local_name().as_ref().to_vec())
+                                    .unwrap(),
+                                attribute
+                                    .normalized_value(XmlVersion::Implicit1_0)
+                                    .unwrap()
+                                    .into_owned(),
+                            )
+                        })
+                        .collect(),
+                );
             }
-            Event::Eof => panic!("element {} not found", String::from_utf8_lossy(name)),
+            Event::Eof => return result,
             _ => {}
         }
     }

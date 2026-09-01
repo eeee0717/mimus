@@ -125,6 +125,9 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
         "unit-cmap-embedded-ok" => embedded_cmap_ok(repo_root),
         "unit-cmap-identity-alias" => identity_cmap_alias(repo_root),
         "unit-cmap-predefined-gb" => predefined_gb_cmap(repo_root),
+        "unit-cmap-09-valid-scalar-parent" => {
+            alignment_composite_fixture(fixture_id, repo_root, "0041")
+        }
         "unit-cmap-10-differences-agl-type1" => differences_agl_type1(repo_root),
         "unit-cmap-11-differences-agl-type3" => differences_agl_type3(repo_root),
         "intg-cmap-mixed-degrade" => mixed_cmap_degradation(repo_root),
@@ -162,6 +165,9 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
         "unit-xobj-12-form-bbox-clip" => xobject_bbox_clip(repo_root),
         "unit-xobj-depth-overflow" => xobject_depth_overflow(repo_root),
         "unit-xobj-m1-switchboard" => xobject_m1_switchboard(repo_root),
+        "unit-xobj-09-stream-parent" => xobject_stream_parent(repo_root),
+        "unit-layout-04-large-summation" => layout_large_summation(repo_root),
+        "unit-type-11-mixed-descents" => type_mixed_descents(repo_root),
         "unit-write-01-bookmarks-rich" => {
             structured_variant(repo_root, "unit-write-01-bookmarks-rich")
         }
@@ -1501,6 +1507,97 @@ fn xobject_scope_parent(repo_root: &Path) -> Result<Vec<u8>> {
     pdf.finish(1)
 }
 
+fn xobject_stream_parent(repo_root: &Path) -> Result<Vec<u8>> {
+    let font = pinned_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-xobj-09-stream-parent");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources 4 0 R /Contents 12 0 R >>")?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> /XObject << /X1 10 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.object(b"<< /MimusFixturePadding true >>")?;
+    pdf.stream(
+        b"/Type /XObject /Subtype /Form /BBox [0 0 300 200]",
+        STANDARD_CONTENT,
+    )?;
+    pdf.object(b"<< /Type /XObject /Subtype /Form /BBox [0 0 300 200] >>")?;
+    pdf.stream(b"", b"/X1 Do\n")?;
+    pdf.finish(1)
+}
+
+fn layout_large_summation(repo_root: &Path) -> Result<Vec<u8>> {
+    let body = pinned_font(repo_root)?;
+    let math = pinned_math_font(repo_root)?;
+    let mut pdf = RawPdf::new("unit-layout-04-large-summation");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 180] /Resources 4 0 R /Contents 13 0 R >>")?;
+    pdf.object(b"<< /Font << /F1 5 0 R /FS 9 0 R >> >>")?;
+    pdf.object(font_dictionary(8).as_bytes())?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSI+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", body.len()).as_bytes(), &body)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.object(b"<< /Type /Font /Subtype /TrueType /BaseFont /MIMUSM+MimusTallSummation /FirstChar 83 /LastChar 83 /Widths [674] /FontDescriptor 10 0 R /Encoding << /Type /Encoding /Differences [83 /summation] >> /ToUnicode 12 0 R >>")?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSM+MimusTallSummation /Flags 32 /FontBBox [12 -576 654 2158] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 674 /FontFile2 11 0 R >>")?;
+    pdf.stream(format!("/Length1 {}", math.len()).as_bytes(), &math)?;
+    pdf.stream(b"/Type /CMap", summation_to_unicode())?;
+    pdf.stream(
+        b"",
+        b"BT\n/F1 12 Tf\n1 0 0 1 72 100 Tm\n(MIMUS ) Tj\n/FS 12 Tf\n1 0 0 1 116.472 100 Tm\n(S) Tj\n/F1 12 Tf\n1 0 0 1 124.56 100 Tm\n( MIMUS) Tj\nET\n",
+    )?;
+    pdf.finish(1)
+}
+
+fn type_mixed_descents(repo_root: &Path) -> Result<Vec<u8>> {
+    let termes = pinned_metric_font(
+        repo_root,
+        "MimusTermes.otf",
+        "efe5361d55b776d098ce7bdfbc9ec04e75b38e0339fed8efbb4502c2aeb133f7",
+    )?;
+    let cursor = pinned_metric_font(
+        repo_root,
+        "MimusCursor.otf",
+        "10db5aa979b0145e2417cd24c8e181b2c62c6e18a3680cd63859479ce6327420",
+    )?;
+    let mut pdf = RawPdf::new("unit-type-11-mixed-descents");
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 180] /Resources 4 0 R /Contents 13 0 R >>")?;
+    pdf.object(b"<< /Font << /FT 5 0 R /FC 9 0 R >> >>")?;
+    pdf.object(
+        metric_font_dictionary(
+            "MIMUST+MimusMetricTermes",
+            6,
+            8,
+            [250, 667, 333, 889, 556, 722],
+        )
+        .as_bytes(),
+    )?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUST+MimusMetricTermes /Flags 32 /FontBBox [-526 -281 1306 1055] /ItalicAngle 0 /Ascent 783 /Descent -216 /CapHeight 662 /StemV 80 /MissingWidth 500 /FontFile3 7 0 R >>")?;
+    pdf.stream(b"/Subtype /OpenType", &termes)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.object(
+        metric_font_dictionary(
+            "MIMUSQ+MimusMetricCursor",
+            10,
+            12,
+            [600, 600, 600, 600, 600, 600],
+        )
+        .as_bytes(),
+    )?;
+    pdf.object(b"<< /Type /FontDescriptor /FontName /MIMUSQ+MimusMetricCursor /Flags 33 /FontBBox [-525 -300 1094 951] /ItalicAngle 0 /Ascent 814 /Descent -300 /CapHeight 563 /StemV 80 /MissingWidth 600 /FontFile3 11 0 R >>")?;
+    pdf.stream(b"/Subtype /OpenType", &cursor)?;
+    pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.stream(
+        b"",
+        b"BT\n/FT 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS ) Tj\n/FC 12 Tf\n1 0 0 1 115.668 120 Tm\n(CIMUS) Tj\nET\n",
+    )?;
+    pdf.finish(1)
+}
+
 fn ascii85(bytes: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
     for chunk in bytes.chunks(4) {
@@ -2152,6 +2249,29 @@ fn pinned_type1_font(repo_root: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn pinned_math_font(repo_root: &Path) -> Result<Vec<u8>> {
+    let path = repo_root.join("corpus/fonts/MimusMath.ttf");
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("read pinned math fixture font {}", path.display()))?;
+    ensure!(
+        hash::of_bytes(&bytes)
+            == "d6dd910115e530ed76ca032c13bafde8d52e0725181bcb1fc59be6496a91b926",
+        "pinned MimusMath.ttf hash drift"
+    );
+    Ok(bytes)
+}
+
+fn pinned_metric_font(repo_root: &Path, name: &str, expected_hash: &str) -> Result<Vec<u8>> {
+    let path = repo_root.join("corpus/fonts").join(name);
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("read pinned metric fixture font {}", path.display()))?;
+    ensure!(
+        hash::of_bytes(&bytes) == expected_hash,
+        "pinned metric fixture font hash drift: {name}"
+    );
+    Ok(bytes)
+}
+
 fn pinned_cjk_font(repo_root: &Path) -> Result<Vec<u8>> {
     let path = repo_root.join("corpus/fonts/MimusCJK.ttf");
     let bytes = std::fs::read(&path)
@@ -2196,6 +2316,28 @@ fn font_dictionary_without_widths(to_unicode_object: u32) -> String {
     )
 }
 
+fn metric_font_dictionary(
+    base_font: &str,
+    descriptor_object: u32,
+    to_unicode_object: u32,
+    selected_widths: [u16; 6],
+) -> String {
+    let mut widths = vec![0_u16; usize::from(85_u8 - 32_u8 + 1)];
+    for (code, width) in [32_u8, 67, 73, 77, 83, 85].into_iter().zip(selected_widths) {
+        widths[usize::from(code - 32)] = width;
+    }
+    let widths = widths
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "<< /Type /Font /Subtype /Type1 /BaseFont /{base_font} \
+         /FirstChar 32 /LastChar 85 /Widths [{widths}] /FontDescriptor {descriptor_object} 0 R \
+         /Encoding /WinAnsiEncoding /ToUnicode {to_unicode_object} 0 R >>"
+    )
+}
+
 // Experiment 2's admitted byte contracts include the extra characters used by
 // its Form and tokenizer fixtures. Keep that CMap separate from experiment 3's
 // intentionally minimal MIMUS-only writeback baseline.
@@ -2219,6 +2361,25 @@ endcodespacerange\n\
 <53> <0053>\n\
 <54> <0054>\n\
 <55> <0055>\n\
+endbfchar\n\
+endcmap\n\
+CMapName currentdict /CMap defineresource pop\n\
+end\n\
+end\n"
+}
+
+fn summation_to_unicode() -> &'static [u8] {
+    b"/CIDInit /ProcSet findresource begin\n\
+12 dict begin\n\
+begincmap\n\
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+/CMapName /MimusSummation-UCS def\n\
+/CMapType 2 def\n\
+1 begincodespacerange\n\
+<00> <FF>\n\
+endcodespacerange\n\
+1 beginbfchar\n\
+<53> <2211>\n\
 endbfchar\n\
 endcmap\n\
 CMapName currentdict /CMap defineresource pop\n\

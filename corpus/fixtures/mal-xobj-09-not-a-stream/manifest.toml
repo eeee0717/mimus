@@ -1,0 +1,60 @@
+schema_version = 1
+
+[identity]
+id = "mal-xobj-09-not-a-stream"
+name = "Form XObject reference resolves to a plain dictionary"
+class = "mal"
+legality = "malformed"
+cases = ["XOBJ-09"]
+priority = "M3"
+variable = "The X1 resource reference changes from Form stream object 10 to plain dictionary object 11"
+
+[source]
+method = "byte-mutation"
+pdf = "mal-xobj-09-not-a-stream.pdf"
+pdf_sha256 = "7a7feafc407ae579e5088b954e49673ba0b24e5242912fa7180adf49009d6c44"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+
+[lineage]
+parent = "unit-xobj-09-stream-parent"
+
+[[lineage.mutations]]
+byte_offset = 275
+original_bytes = [49, 48]
+replacement_bytes = [49, 49]
+description = "change /X1 10 0 R from the Form stream to plain dictionary object 11"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "content-semantics:XOBJ-09"
+
+[[expected.degradation]]
+scope = "page"
+page = 0
+reason = "x_object_not_a_stream"
+
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+
+[[expected.behaviour]]
+id = "XOBJ-09-not-a-stream"
+assertion = "The walker emits x_object_not_a_stream for X1, degrades page 0, and republishes the malformed input byte-for-byte"
+observable_via = "one-range lineage, page_degraded and degradation_summary events, empty production IL, and exact output bytes"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "A non-stream XObject entry must not disappear from the resource table silently"
+resolution = "Classify the named resource as x_object_not_a_stream and use the existing ADR-0013 page-preservation path"
