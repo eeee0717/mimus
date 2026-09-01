@@ -1,7 +1,7 @@
 # 里程碑设计（V1）
 
 > 切法：walking skeleton——先打通极窄端到端，逐里程碑加宽。每个里程碑以**语料上可验证的断言**收口，不以"模块写完"收口。
-> 决策依据见 `CONTEXT.md` 与 `docs/adr/`；制定于 2026-08-21，状态更新于 2026-08-23。
+> 决策依据见 `CONTEXT.md` 与 `docs/adr/`；制定于 2026-08-21，状态更新于 2026-09-01。
 >
 > 资产说明：M0–M3 开发期模型/字体经"自备路径"逃生门手动放置；自动下载机制到 M4 才建。
 >
@@ -85,6 +85,14 @@ Responses fake server、142 份 Corpus v1 inventory 和 production CLI 路径满
 - `--bilingual` 交替页（含书签/内链页目标重映射）；几何断言进 CI（译文框不越界、不压图/公式）。
 
 **收口断言**：综合版面 integration fixture 与双栏、公式类 fixture 全部通过几何断言；真实语料 20 份零崩溃、人工 checklist 通过；矩阵中标为 M3 的失效模式全部有对应 fixture 且 CI 全绿。
+
+**状态（2026-09-01，closing stack 待合入）**：收口断言全部满足。Primary M3
+覆盖为 46/46：45 个 case 由通过生成合同和独立验收的静态 fixture 覆盖，`WRITE-05`
+由真实 CLI 的有界 kill/OOM 子进程矩阵覆盖。Corpus v1 共 201 份 fixture，精确工具链的
+doctor、determinism 与独立 verify 已进入 required CI。20 份分层真实论文以守恒 fake
+全部发布、零 `Internal/6`，最终产物 INK-01 为零；封闭缓存的默认与双语锚定均为 108 hit、
+0 miss、0 provider call。#38 closing PR 合入后按 `#39 → #40 → #41 → #42` 解锁 M4；
+逐 case、锚定 SHA、集群归因与 CI 时长以 #38 的 closing evidence 为持久记录。
 
 ## M4 · 发布
 

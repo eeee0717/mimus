@@ -32,7 +32,7 @@
 | 23 | 质量回归四件套：全语料 IL 快照 + 占位符守恒 + 零 panic + 几何断言；**CI 绿才能合并**；渲染像素 diff 待渲染路径稳定后加 | — |
 | 24 | 语料：**Corpus v1 已从零建立，M1 以 133 份 fixture / 72 个去重 case 收口**；每份均由独立门禁验收，普通 CI 全量执行 production path 与 `corpus verify`。旧 23 份合成语料永久作废、不得参考；真实语料不进 repo、发布前人工 checklist | — |
 | 25 | CLI：子命令结构（`translate` / `assets pull` / `inspect`）；配置三层 flags > env > `~/.config/mimus/config.toml`；API key 不走明文 flag；两级人类可读进度；V1 `--json` 输出版本化 NDJSON，当前公开协议为 v2；细粒度 flags 随功能里程碑落地 | [ADR-0008](docs/adr/0008-agent-skill.md)、[ADR-0011](docs/adr/0011-cli-machine-protocol.md) |
-| 26 | 里程碑：M-1、M0 与 M1 已收口；M1 以 `none` 后端 walking skeleton 和 133 份全语料门禁完成，仍以语料断言而非模块完成度收口 | [docs/02-milestones.md](docs/02-milestones.md) |
+| 26 | 里程碑：M-1 至 M3 已收口；M1 以 `none` 后端 walking skeleton 和 133 份全语料门禁完成，M2 以离线 loopback 翻译合同完成，M3 以 46/46 primary case、201 份 fixture、20/20 分层真实论文守恒回放及封闭 INK-01/原子发布门禁完成；仍以语料与最终产物断言而非模块完成度收口，M4 自 #38 closing stack 合入后解锁 | [docs/02-milestones.md](docs/02-milestones.md) |
 | 27 | 术语细节：用户 `--glossary` 覆盖自动表；`--dump-glossary` 导出复用；`--no-auto-terms` 开关；自动表指纹进缓存键 | — |
 | 28 | 性能：V1 无硬指标；方向值=20 页论文除 LLM 外 <5 分钟（arm64 笔记本）；LLM 段落级并发默认 4、指数退避重试 3 次、重试尽降级保原文 | — |
 | 29 | crate 结构：**生产侧**两分——`mimus-core`（lib：IL/pass/引擎 trait/翻译层）+ `mimus`（bin：CLI/进度/配置）。`mimus-quality-contract` 是无 PDF/引擎/IL 依赖的纯规则 leaf crate，供生产门禁与独立 scorecard 共用数值/词法合同，不成为第三条流水线；workspace 另含非生产成员 `corpus`（语料门禁工具），它不依赖 `mimus-core`，也不进 release archive | — |
