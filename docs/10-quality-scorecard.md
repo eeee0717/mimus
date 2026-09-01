@@ -165,6 +165,13 @@ units remain visible in `formula_units` versus `matched_units`; v2 does not inve
 FOR-03 intentionally shares FOR-02's derived bound, matching the adjudicated single continuity
 contract for fixed-slot and relocation paths.
 
+FOR-04/FOR-05 attribute public MuPDF trace ink only when it satisfies the production-aligned
+formula-cap or row-separator geometry and has exactly one geometric owner among the formula units in
+the same paragraph. Broad neighborhood overlap is not ownership evidence: a rule below an adjacent
+formula or an accent above a different visual line is excluded. The output anchor search includes a
+`0.5em` paragraph-edge ink extent for source glyph side bearings; a candidate still passes only when
+every source formula glyph and every uniquely owned path/image is present under one identical delta.
+
 ### 2.4.1 Detection/execution alignment ledger
 
 Every FOR/CON detector must name the production action that enforces the same conservative contract,
@@ -193,6 +200,7 @@ pipeline handled the defect.
 | TYPE-07 | `paragraph_typeset_obstacles` includes visible ink from every other paragraph and `ink_bounds_are_safe` applies the unchanged collision threshold to each independently planned paragraph | a plan that cannot avoid later paragraph ink at the 8 pt floor becomes typed `typeset_overflow`; no paragraph is moved |
 | TYPE-09 | `StylesAndFormulas` requires every character in the natural paragraph to share model `text`, the complete source to match the conservative math shape, at least one strong operator, and at most two whitespace-delimited operand-like tokens | mark the whole source paragraph passthrough, emit informational `math_passthrough`, create no request or output-font resource, and do not count degradation; all other model prose remains translatable |
 | FONT-10 | the Type0 walk proves reliable Unicode and PDF advance but `/CIDToGIDMap` resolves outside the embedded TrueType glyph count | retain the PDF advance; collision-check the transformed conservative font-level bbox union; set additive IL v1 `bbox_estimated`; emit informational `glyph_bbox_estimated`; all ordinary unreliable-font branches remain typed paragraph preservation |
+| output-font variation | `OutputFontFaces::parse` and `build_embedded_font` share the ADR-0018 slot resolver: Regular keeps the legacy default location; Bold prefers exact named `Bold`, then clamped `wght=700`, then an empty location; every `ttf-parser` metric and `subsetter` outline uses that user-coordinate list | the planner's rounded 1/1000-em advance must equal the embedded CID `/W`; configured ink drives wrapping, collision, 8 pt, and CropBox gates; Regular subset bytes remain compatible; a font that cannot be parsed or instantiated retains the existing typed `unsupported_font`/startup asset failure boundary; font identity remains absent from translation cache keys |
 | PARSE-06 | Parse checks every classic-xref normal entry against the objects lopdf actually parsed and retains the entry's object number, generation, and byte offset | reject as Input/2 `pdf_parse` with additive `detail.object_syntax`; publish no output; unrelated parse failures continue to omit detail |
 | STREAM-03 | the operator walk requires exactly two finite numeric operands for each `m` and `l`; any short, excess, or nonnumeric path makes vector ink ownership unknowable | mark the page `graphics_unreliable`, emit typed page degradation and summary, keep page IL empty, and publish the original page bytes |
 | PARA-05 | `ParagraphFind` considers an in-region natural boundary only when the whole region is uniformly model-backed, translatable `text`, on a real downward line step, the candidate first-line baseline origin is more than `1.2em` right of the lower-median line start, and the preceding line occupies no more than 80% of the model container width; every other label and mixed-policy region retains the established splitter | split at that line and create separate translation requests; indent alone, an underfilled predecessor alone, same-baseline prose fragments, sparse-column left outliers, formulas, charts, images, and passthrough categories retain their established composition |

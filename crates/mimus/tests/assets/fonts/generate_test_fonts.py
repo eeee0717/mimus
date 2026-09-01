@@ -5,6 +5,7 @@ from argparse import ArgumentParser
 from copy import deepcopy
 from pathlib import Path
 
+from fontTools import subset
 from fontTools.ttLib import TTFont
 
 
@@ -65,14 +66,50 @@ def build(source: Path, output: Path, family: str, characters: str | None) -> No
     font.save(output, reorderTables=True)
 
 
+def build_variable_subset(source: Path, output: Path, characters: str) -> None:
+    unicodes = ",".join(f"U+{ord(value):04X}" for value in dict.fromkeys(characters))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    result = subset.main(
+        [
+            str(source),
+            f"--output-file={output}",
+            f"--unicodes={unicodes}",
+            "--layout-features=",
+            "--no-hinting",
+            "--glyph-names",
+            "--legacy-cmap",
+            "--no-symbol-cmap",
+            "--notdef-glyph",
+            "--notdef-outline",
+            "--recommended-glyphs",
+            "--name-IDs=*",
+            "--name-legacy",
+            "--name-languages=*",
+            "--no-harfbuzz-repacker",
+            "--no-recalc-timestamp",
+            "--canonical-order",
+        ]
+    )
+    if result not in (None, 0):
+        raise RuntimeError(f"fontTools subset failed with exit status {result}")
+
+
 def main() -> None:
     parser = ArgumentParser()
     parser.add_argument("source", type=Path)
     parser.add_argument("output", type=Path)
-    parser.add_argument("family")
+    parser.add_argument("family", nargs="?")
     parser.add_argument("--characters")
+    parser.add_argument("--variable-subset", action="store_true")
     arguments = parser.parse_args()
-    build(arguments.source, arguments.output, arguments.family, arguments.characters)
+    if arguments.variable_subset:
+        if arguments.characters is None:
+            parser.error("--variable-subset requires --characters")
+        build_variable_subset(arguments.source, arguments.output, arguments.characters)
+    else:
+        if arguments.family is None:
+            parser.error("family is required unless --variable-subset is used")
+        build(arguments.source, arguments.output, arguments.family, arguments.characters)
 
 
 if __name__ == "__main__":

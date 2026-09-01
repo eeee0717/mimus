@@ -5378,6 +5378,13 @@ struct MultiLineBoundsExpansion {
     bottom_pt: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SingleLineInkFit {
+    baseline_y: f64,
+    ink_bounds: Rect,
+    expansion: Option<SingleLineBoundsExpansion>,
+}
+
 struct BuiltOutputFont {
     font: EmbeddedFont,
     cids: BTreeMap<char, u16>,
@@ -5422,6 +5429,80 @@ impl OutputFontKey {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct OutputFontVariation {
+    tag: [u8; 4],
+    value: f32,
+}
+
+fn output_font_variations(
+    bytes: &[u8],
+    key: OutputFontKey,
+) -> std::result::Result<Vec<OutputFontVariation>, ()> {
+    use skrifa::MetadataProvider;
+
+    let font = skrifa::FontRef::from_index(bytes, 0).map_err(|_| ())?;
+    let axes = font.axes().iter().collect::<Vec<_>>();
+    if axes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // The Regular slot is the established default-location output contract. Keep it on the
+    // legacy subset path so adding Bold instantiation cannot change ordinary body text bytes.
+    if !key.is_bold() {
+        return Ok(Vec::new());
+    }
+
+    let instances = font.named_instances();
+    for index in 0..instances.len() {
+        let Some(instance) = instances.get(index) else {
+            continue;
+        };
+        let name = font
+            .localized_strings(instance.subfamily_name_id())
+            .english_or_first()
+            .map(|value| value.to_string());
+        if name.as_deref() != Some("Bold") {
+            continue;
+        }
+        let values = instance.user_coords().collect::<Vec<_>>();
+        if values.len() != axes.len() {
+            return Err(());
+        }
+        return Ok(axes
+            .iter()
+            .zip(values)
+            .map(|(axis, value)| OutputFontVariation {
+                tag: axis.tag().to_be_bytes(),
+                value,
+            })
+            .collect());
+    }
+
+    let weight_tag = skrifa::Tag::new(b"wght");
+    Ok(axes
+        .iter()
+        .find(|axis| axis.tag() == weight_tag)
+        .map(|axis| OutputFontVariation {
+            tag: axis.tag().to_be_bytes(),
+            value: 700.0_f32.clamp(axis.min_value(), axis.max_value()),
+        })
+        .into_iter()
+        .collect())
+}
+
+fn configured_output_font_face(
+    bytes: &[u8],
+    key: OutputFontKey,
+) -> std::result::Result<ttf_parser::Face<'_>, ()> {
+    let mut face = ttf_parser::Face::parse(bytes, 0).map_err(|_| ())?;
+    for variation in output_font_variations(bytes, key)? {
+        face.set_variation(ttf_parser::Tag::from_bytes(&variation.tag), variation.value)
+            .ok_or(())?;
+    }
+    Ok(face)
+}
+
 struct OutputFontFaces<'a> {
     primary_regular: ttf_parser::Face<'a>,
     primary_bold: ttf_parser::Face<'a>,
@@ -5432,12 +5513,22 @@ struct OutputFontFaces<'a> {
 impl<'a> OutputFontFaces<'a> {
     fn parse(fonts: &'a crate::context::OutputFonts) -> std::result::Result<Self, ()> {
         Ok(Self {
-            primary_regular: ttf_parser::Face::parse(&fonts.regular.bytes, 0).map_err(|_| ())?,
-            primary_bold: ttf_parser::Face::parse(&fonts.bold.bytes, 0).map_err(|_| ())?,
-            fallback_regular: ttf_parser::Face::parse(&fonts.fallback_regular.bytes, 0)
-                .map_err(|_| ())?,
-            fallback_bold: ttf_parser::Face::parse(&fonts.fallback_bold.bytes, 0)
-                .map_err(|_| ())?,
+            primary_regular: configured_output_font_face(
+                &fonts.regular.bytes,
+                OutputFontKey::PrimaryRegular,
+            )?,
+            primary_bold: configured_output_font_face(
+                &fonts.bold.bytes,
+                OutputFontKey::PrimaryBold,
+            )?,
+            fallback_regular: configured_output_font_face(
+                &fonts.fallback_regular.bytes,
+                OutputFontKey::FallbackRegular,
+            )?,
+            fallback_bold: configured_output_font_face(
+                &fonts.fallback_bold.bytes,
+                OutputFontKey::FallbackBold,
+            )?,
         })
     }
 
@@ -7794,7 +7885,7 @@ fn plan_text_segment<'a>(
         {
             if source_is_single_line
                 && lines.len() == 1
-                && let Some(expansion) = single_line_ink_fit(
+                && let Some(fit) = single_line_ink_fit(
                     &lines[0],
                     &faces,
                     size,
@@ -7805,22 +7896,15 @@ fn plan_text_segment<'a>(
                     obstacles,
                 )
             {
-                let ink_bounds = planned_line_ink_bounds(
-                    &lines,
-                    &[(single_line_start_x, first.baseline_origin.y)],
-                    &faces,
-                    size,
-                )
-                .expect("single-line ink fit already resolved every output glyph");
                 return Ok(TypesetPlan {
                     spans,
                     lines,
-                    baselines: vec![(single_line_start_x, first.baseline_origin.y)],
+                    baselines: vec![(single_line_start_x, fit.baseline_y)],
                     formula_relocations: Vec::new(),
                     text_vector_relocations: Vec::new(),
-                    ink_bounds,
+                    ink_bounds: vec![fit.ink_bounds],
                     font_size: size,
-                    single_line_expansion: expansion,
+                    single_line_expansion: fit.expansion,
                     multi_line_expansion: None,
                 });
             }
@@ -8053,13 +8137,36 @@ fn single_line_ink_fit(
     container: Rect,
     page_bounds: Rect,
     obstacles: &[Rect],
-) -> Option<Option<SingleLineBoundsExpansion>> {
+) -> Option<SingleLineInkFit> {
     let ink = styled_line_ink_bounds(line, faces, size, start_x, baseline_y)?;
     if ink.left < container.left - 0.01 || ink.right > container.right + 0.01 {
         return None;
     }
     let top_pt = (ink.top - container.top).max(0.0);
     let bottom_pt = (container.bottom - ink.bottom).max(0.0);
+    if line.iter().any(|character| character.bold) && (top_pt > 0.01 || bottom_pt > 0.01) {
+        let delta_y = if top_pt > 0.01 && bottom_pt <= 0.01 {
+            -top_pt
+        } else if bottom_pt > 0.01 && top_pt <= 0.01 {
+            bottom_pt
+        } else {
+            0.0
+        };
+        let shifted = translated_rect(ink, 0.0, delta_y);
+        if delta_y != 0.0
+            && rect_contains(container, shifted, 0.01)
+            && rect_contains(page_bounds, shifted, 0.01)
+            && obstacles
+                .iter()
+                .all(|obstacle| intersection_area(shifted, *obstacle) <= 0.0001)
+        {
+            return Some(SingleLineInkFit {
+                baseline_y: baseline_y + delta_y,
+                ink_bounds: shifted,
+                expansion: None,
+            });
+        }
+    }
     let allowance =
         (size * SINGLE_LINE_MAX_VERTICAL_OVERFLOW_EM).min(SINGLE_LINE_MAX_VERTICAL_OVERFLOW_PT);
     if top_pt > allowance + 0.01 || bottom_pt > allowance + 0.01 {
@@ -8072,10 +8179,12 @@ fn single_line_ink_fit(
     {
         return None;
     }
-    Some(
-        (top_pt > 0.01 || bottom_pt > 0.01)
+    Some(SingleLineInkFit {
+        baseline_y,
+        ink_bounds: ink,
+        expansion: (top_pt > 0.01 || bottom_pt > 0.01)
             .then_some(SingleLineBoundsExpansion { top_pt, bottom_pt }),
-    )
+    })
 }
 
 fn styled_line_ink_bounds(
@@ -8358,7 +8467,8 @@ fn build_embedded_font(
     key: OutputFontKey,
 ) -> std::result::Result<(EmbeddedFont, BTreeMap<char, u16>), ()> {
     let bytes = &source_font.bytes;
-    let face = ttf_parser::Face::parse(bytes, 0).map_err(|_| ())?;
+    let face = configured_output_font_face(bytes, key)?;
+    let variations = output_font_variations(bytes, key)?;
     let mut remapper = subsetter::GlyphRemapper::new();
     let mut original = Vec::new();
     for character in used {
@@ -8366,7 +8476,15 @@ fn build_embedded_font(
         remapper.remap(glyph.0);
         original.push((*character, glyph));
     }
-    let font_bytes = subsetter::subset(bytes, 0, &remapper).map_err(|_| ())?;
+    let font_bytes = if variations.is_empty() {
+        subsetter::subset(bytes, 0, &remapper).map_err(|_| ())?
+    } else {
+        let variations = variations
+            .iter()
+            .map(|variation| (subsetter::Tag::new(&variation.tag), variation.value))
+            .collect::<Vec<_>>();
+        subsetter::subset_with_variations(bytes, 0, &variations, &remapper).map_err(|_| ())?
+    };
     let mut cids = BTreeMap::new();
     let mut glyphs = original
         .into_iter()
@@ -9421,10 +9539,13 @@ fn retained_input_characters(
         &mut engine_owners,
         baseline_tolerance_pt,
     );
-    let owner_states = engine_owners
-        .iter()
-        .map(|owner| owner.map(|walk_index| modified_walk[walk_index]))
-        .collect::<Vec<_>>();
+    let (owner_states, has_walk_candidates) = engine_modification_states(
+        &page.walked_characters,
+        &page.engine_characters,
+        &engine_owners,
+        &modified_walk,
+        baseline_tolerance_pt,
+    );
     let mut next_state = vec![None; owner_states.len()];
     let mut next = None;
     for index in (0..owner_states.len()).rev() {
@@ -9442,7 +9563,10 @@ fn retained_input_characters(
                 previous = *state;
             }
             let removed = state.unwrap_or(false)
-                || (state.is_none() && previous == Some(true) && next_state[index] == Some(true));
+                || (state.is_none()
+                    && !has_walk_candidates[index]
+                    && previous == Some(true)
+                    && next_state[index] == Some(true));
             removed.then_some(index)
         })
         .collect::<BTreeSet<_>>();
@@ -9457,6 +9581,78 @@ fn retained_input_characters(
             baseline_origin: character.baseline_origin,
         })
         .collect())
+}
+
+fn engine_modification_states(
+    walked: &[crate::walk::WalkedChar],
+    engine: &[PageCharSnapshot],
+    owners: &[Option<usize>],
+    modified_walk: &[bool],
+    tolerance: f64,
+) -> (Vec<Option<bool>>, Vec<bool>) {
+    let mut states = owners
+        .iter()
+        .map(|owner| owner.and_then(|walk_index| modified_walk.get(walk_index).copied()))
+        .collect::<Vec<_>>();
+    let mut has_walk_candidates = owners.iter().map(Option::is_some).collect::<Vec<_>>();
+    if states.len() != engine.len()
+        || walked.len() != modified_walk.len()
+        || !tolerance.is_finite()
+        || tolerance < 0.0
+    {
+        return (states, has_walk_candidates);
+    }
+
+    let cell_size = tolerance.max(f64::EPSILON);
+    let mut buckets = HashMap::<(i64, i64), Vec<usize>>::new();
+    for (walk_index, character) in walked.iter().enumerate() {
+        if character.locatable
+            && character.baseline_origin.x.is_finite()
+            && character.baseline_origin.y.is_finite()
+        {
+            buckets
+                .entry(baseline_grid_key(character.baseline_origin, cell_size))
+                .or_default()
+                .push(walk_index);
+        }
+    }
+
+    for (engine_index, character) in engine.iter().enumerate() {
+        if states[engine_index].is_some() || !valid_engine_alignment_anchor(character) {
+            continue;
+        }
+        let (grid_x, grid_y) = baseline_grid_key(character.baseline_origin, cell_size);
+        let mut consensus = None;
+        let mut conflicting = false;
+        for offset_x in -1..=1 {
+            for offset_y in -1..=1 {
+                let Some(walk_indices) = buckets.get(&(grid_x + offset_x, grid_y + offset_y))
+                else {
+                    continue;
+                };
+                for &walk_index in walk_indices {
+                    if !point_close(
+                        walked[walk_index].baseline_origin,
+                        character.baseline_origin,
+                        tolerance,
+                    ) {
+                        continue;
+                    }
+                    has_walk_candidates[engine_index] = true;
+                    let modified = modified_walk[walk_index];
+                    if consensus.is_some_and(|state| state != modified) {
+                        conflicting = true;
+                    } else {
+                        consensus = Some(modified);
+                    }
+                }
+            }
+        }
+        if !conflicting {
+            states[engine_index] = consensus;
+        }
+    }
+    (states, has_walk_candidates)
 }
 
 fn exact_unicode_sequence(walked: &[crate::walk::WalkedChar], engine: &[PageCharSnapshot]) -> bool {
@@ -10701,6 +10897,14 @@ mod tests {
         }
     }
 
+    struct VariableFontTranslator;
+
+    impl Translator for VariableFontTranslator {
+        fn translate(&self, _request: &crate::translate::TranslationRequest<'_>) -> Result<String> {
+            Ok("M中文测试".to_owned())
+        }
+    }
+
     struct StaticTranslator {
         output: &'static str,
         calls: AtomicUsize,
@@ -10951,6 +11155,25 @@ mod tests {
                     .to_owned(),
             },
         }
+    }
+
+    fn test_variable_output_fonts() -> crate::context::OutputFonts {
+        let variable = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../mimus/tests/assets/fonts/MimusTestVariable.ttf"
+        ));
+        let mut fonts = test_output_fonts();
+        for (font, source) in [
+            (&mut fonts.regular, "test:variable-regular"),
+            (&mut fonts.bold, "test:variable-bold"),
+        ] {
+            font.bytes = variable.to_vec();
+            font.postscript_name = "NotoSansSC".to_owned();
+            font.source = source.to_owned();
+            font.sha256 =
+                "a1105d5892eaad20ed1ad692827b06a7adc392f214a835740fa4d94bf5029ac5".to_owned();
+        }
+        fonts
     }
 
     fn assert_typeset_ink_is_disjoint(typeset_ink: &[Rect], retained_ink: &[Rect]) {
@@ -12145,6 +12368,217 @@ mod tests {
     }
 
     #[test]
+    fn variable_output_font_bold_instance_configures_metrics_and_subsets() {
+        let output_fonts = test_variable_output_fonts();
+        let regular_variations =
+            output_font_variations(&output_fonts.regular.bytes, OutputFontKey::PrimaryRegular)
+                .unwrap();
+        let bold_variations =
+            output_font_variations(&output_fonts.bold.bytes, OutputFontKey::PrimaryBold).unwrap();
+        assert!(regular_variations.is_empty());
+        assert_eq!(
+            bold_variations,
+            [OutputFontVariation {
+                tag: *b"wght",
+                value: 700.0,
+            }]
+        );
+
+        let faces = OutputFontFaces::parse(&output_fonts).unwrap();
+        let regular_face = faces.face(OutputFontKey::PrimaryRegular);
+        let bold_face = faces.face(OutputFontKey::PrimaryBold);
+        let regular_glyph = regular_face.glyph_index('M').unwrap();
+        let bold_glyph = bold_face.glyph_index('M').unwrap();
+        let default_face = ttf_parser::Face::parse(&output_fonts.regular.bytes, 0).unwrap();
+        assert_eq!(
+            regular_face.glyph_hor_advance(regular_glyph),
+            default_face.glyph_hor_advance(default_face.glyph_index('M').unwrap())
+        );
+        assert_eq!(bold_face.glyph_hor_advance(bold_glyph), Some(853));
+        assert_ne!(
+            regular_face.glyph_bounding_box(regular_glyph),
+            bold_face.glyph_bounding_box(bold_glyph)
+        );
+
+        let used = BTreeSet::from(['M', '中', '文', '测', '试']);
+        let (regular, regular_cids) =
+            build_embedded_font(&used, &output_fonts.regular, OutputFontKey::PrimaryRegular)
+                .unwrap();
+        let (bold, bold_cids) =
+            build_embedded_font(&used, &output_fonts.bold, OutputFontKey::PrimaryBold).unwrap();
+        assert_ne!(regular.font_bytes, bold.font_bytes);
+
+        let mut legacy_regular_remapper = subsetter::GlyphRemapper::new();
+        for value in &used {
+            legacy_regular_remapper.remap(default_face.glyph_index(*value).unwrap().0);
+        }
+        assert_eq!(
+            regular.font_bytes,
+            subsetter::subset(&output_fonts.regular.bytes, 0, &legacy_regular_remapper).unwrap()
+        );
+
+        for (embedded, cids, source) in [
+            (&regular, &regular_cids, regular_face),
+            (&bold, &bold_cids, bold_face),
+        ] {
+            let subset_face = ttf_parser::Face::parse(&embedded.font_bytes, 0).unwrap();
+            for (cid, value, embedded_advance) in &embedded.glyphs {
+                assert_eq!(cids[value], *cid);
+                let source_glyph = source.glyph_index(*value).unwrap();
+                assert_eq!(
+                    source.glyph_hor_advance(source_glyph),
+                    Some(*embedded_advance)
+                );
+                assert_eq!(
+                    subset_face.glyph_hor_advance(ttf_parser::GlyphId(*cid)),
+                    Some(*embedded_advance)
+                );
+                assert_eq!(
+                    glyph_width_1000(*embedded_advance, embedded.units_per_em),
+                    (glyph_advance_em(source, source_glyph).unwrap() * 1000.0) as u32
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn static_output_font_subsets_remain_byte_compatible() {
+        let output_fonts = test_output_fonts();
+        assert!(
+            output_font_variations(&output_fonts.regular.bytes, OutputFontKey::PrimaryRegular)
+                .unwrap()
+                .is_empty()
+        );
+        let used = BTreeSet::from(['M', '中']);
+        let (embedded, _) =
+            build_embedded_font(&used, &output_fonts.regular, OutputFontKey::PrimaryRegular)
+                .unwrap();
+        let face = ttf_parser::Face::parse(&output_fonts.regular.bytes, 0).unwrap();
+        let mut remapper = subsetter::GlyphRemapper::new();
+        for value in &used {
+            remapper.remap(face.glyph_index(*value).unwrap().0);
+        }
+        let legacy = subsetter::subset(&output_fonts.regular.bytes, 0, &remapper).unwrap();
+        assert_eq!(embedded.font_bytes, legacy);
+    }
+
+    #[test]
+    fn variable_font_geometry_checks_use_configured_8pt_ink() {
+        let output_fonts = test_variable_output_fonts();
+        let faces = OutputFontFaces::parse(&output_fonts).unwrap();
+        let line = |bold| [crate::translate::StyledCharacter { value: 'M', bold }];
+        let regular =
+            styled_line_ink_bounds(&line(false), &faces, MIN_FONT_SIZE_PT, 0.0, 0.0).unwrap();
+        let bold = styled_line_ink_bounds(&line(true), &faces, MIN_FONT_SIZE_PT, 0.0, 0.0).unwrap();
+        assert!(bold.right > regular.right);
+
+        let boundary = (regular.right + bold.right) / 2.0;
+        let crop_box = Rect {
+            left: -1.0,
+            bottom: regular.bottom.min(bold.bottom) - 1.0,
+            right: boundary,
+            top: regular.top.max(bold.top) + 1.0,
+        };
+        assert!(ink_bounds_are_safe(&[regular], crop_box, &[]));
+        assert!(!ink_bounds_are_safe(&[bold], crop_box, &[]));
+
+        let page = Rect {
+            right: bold.right + 1.0,
+            ..crop_box
+        };
+        let obstacle = Rect {
+            left: boundary,
+            bottom: bold.bottom,
+            right: bold.right + 0.1,
+            top: bold.top,
+        };
+        assert!(ink_bounds_are_safe(&[regular], page, &[obstacle]));
+        assert!(!ink_bounds_are_safe(&[bold], page, &[obstacle]));
+    }
+
+    #[test]
+    fn variable_font_pdf_widths_and_extractor_positions_match_planning() {
+        let output_fonts = test_variable_output_fonts();
+        let config = crate::context::PipelineConfig {
+            output_fonts: Some(output_fonts),
+            ..crate::context::PipelineConfig::default()
+        };
+        let translator = VariableFontTranslator;
+        let events = RecordingEventSink::default();
+        let mut document = translate_fixture_once(&translator, &events, config.clone()).unwrap();
+        for character in match &mut document.il.pages[0].paragraphs[0].text {
+            TextCarrier::Chars { chars } => chars,
+        } {
+            character.layout.as_mut().unwrap().bounds = Rect {
+                left: 72.0,
+                bottom: 80.0,
+                right: 150.0,
+                top: 140.0,
+            };
+        }
+        document.extracted_pages[0].layout_regions[0].bounds = Rect {
+            left: 72.0,
+            bottom: 80.0,
+            right: 150.0,
+            top: 140.0,
+        };
+        let engine = FakeEngine::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config,
+        };
+
+        typeset(&mut document, &context).unwrap();
+        font_embed(&mut document, &context).unwrap();
+        let rewrite = &document.rewrites[0];
+        let embedded = rewrite
+            .embedded_fonts
+            .iter()
+            .find(|font| font.resource_name == OutputFontKey::PrimaryRegular.resource_name())
+            .unwrap();
+        let original = document.pdf.as_ref().unwrap();
+        let (bytes, _) =
+            build_incremental(&document.original_bytes, original, &document.rewrites).unwrap();
+        let output = LopdfDocument::load_mem(&bytes).unwrap();
+        let page_id = output.get_pages()[&1];
+        let fonts = output.get_page_fonts(page_id).unwrap();
+        let type0 = fonts.get(b"MimusR".as_slice()).unwrap();
+        let descendant_id = type0.get(b"DescendantFonts").unwrap().as_array().unwrap()[0]
+            .as_reference()
+            .unwrap();
+        let widths = output
+            .get_dictionary(descendant_id)
+            .unwrap()
+            .get(b"W")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let published_widths = widths
+            .chunks_exact(2)
+            .map(|pair| {
+                (
+                    u16::try_from(pair[0].as_i64().unwrap()).unwrap(),
+                    u32::try_from(pair[1].as_array().unwrap()[0].as_i64().unwrap()).unwrap(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        for (cid, _, advance) in &embedded.glyphs {
+            assert_eq!(
+                published_widths[cid],
+                glyph_width_1000(*advance, embedded.units_per_em)
+            );
+        }
+
+        let pdfium = crate::engine::pdfium::PdfiumEngine::from_environment().unwrap();
+        let extracted = pdfium.page_characters(&bytes, 0).unwrap();
+        validate_typeset_characters(0, &rewrite.typeset_characters, &extracted, 0.01).unwrap();
+    }
+
+    #[test]
     fn translated_text_requires_output_fonts_from_the_pass_context() {
         let mut document = Document::new(fixture(), "unused.pdf");
         let engine = FakeEngine::default();
@@ -12303,7 +12737,7 @@ mod tests {
         let faces = OutputFontFaces::parse(&output_fonts).unwrap();
         let line = "中文"
             .chars()
-            .map(|value| crate::translate::StyledCharacter { value, bold: true })
+            .map(|value| crate::translate::StyledCharacter { value, bold: false })
             .collect::<Vec<_>>();
         let container = Rect {
             left: 72.0,
@@ -12328,6 +12762,7 @@ mod tests {
             &[],
         )
         .unwrap()
+        .expansion
         .unwrap();
         assert!(expansion.top_pt <= SINGLE_LINE_MAX_VERTICAL_OVERFLOW_PT);
         assert!(expansion.bottom_pt <= SINGLE_LINE_MAX_VERTICAL_OVERFLOW_PT);
@@ -12394,6 +12829,36 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn bold_single_line_ink_rebases_inside_container_before_expanding() {
+        let output_fonts = test_variable_output_fonts();
+        let faces = OutputFontFaces::parse(&output_fonts).unwrap();
+        let line = [crate::translate::StyledCharacter {
+            value: 'M',
+            bold: true,
+        }];
+        let baseline_y = 120.0;
+        let ink = styled_line_ink_bounds(&line, &faces, 12.0, 72.0, baseline_y).unwrap();
+        let container = Rect {
+            left: 71.0,
+            bottom: ink.bottom - 1.0,
+            right: ink.right + 1.0,
+            top: ink.top - 0.25,
+        };
+        let page = Rect {
+            left: 0.0,
+            bottom: 0.0,
+            right: 300.0,
+            top: 200.0,
+        };
+
+        let fit = single_line_ink_fit(&line, &faces, 12.0, 72.0, baseline_y, container, page, &[])
+            .unwrap();
+        assert!(fit.baseline_y < baseline_y);
+        assert!(fit.expansion.is_none());
+        assert!(rect_contains(container, fit.ink_bounds, 0.01));
     }
 
     /// 真实论文 `1706.03762v7.pdf` 页 12（0 基）段 69 `Attention Visualizations` 的
@@ -13343,6 +13808,45 @@ mod tests {
         inherit_unique_explanation_owners(&walked, &engine, &mut owners, 0.001);
 
         assert_eq!(owners, [Some(0), Some(1), Some(2)]);
+    }
+
+    #[test]
+    fn ambiguous_unresolved_output_owners_share_their_span_modification_state() {
+        let pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        let mut character = walk_page(&pdf, page_id).unwrap().characters[0].clone();
+        character.unicode = None;
+        character.unicode_provenance = UnicodeProvenance::Unresolved;
+        character.baseline_origin = Point {
+            x: 473.95,
+            y: 284.462,
+        };
+        let mut second_character = character.clone();
+        second_character.baseline_origin.x += 0.006_974;
+        let walked = [character, second_character];
+
+        let template = FakeEngine::default().page_characters(&[], 0).unwrap()[0].clone();
+        let engine = ['u', 't'].map(|unicode| PageCharSnapshot {
+            unicode: Some(unicode),
+            unicode_value: u32::from(unicode),
+            baseline_origin: Point {
+                x: 473.950_012,
+                y: 284.462_006,
+            },
+            ..template.clone()
+        });
+        let owners = [None, None];
+
+        for (modified, expected) in [
+            ([false, false], Some(false)),
+            ([true, true], Some(true)),
+            ([false, true], None),
+        ] {
+            let (states, has_walk_candidates) =
+                engine_modification_states(&walked, &engine, &owners, &modified, 0.01);
+            assert_eq!(states, [expected, expected]);
+            assert_eq!(has_walk_candidates, [true, true]);
+        }
     }
 
     #[test]
