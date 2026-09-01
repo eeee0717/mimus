@@ -55,6 +55,16 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
             repo_root,
             b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(M) Tj\n1 0 0 1 72 120 Tm\n(M) Tj\nET\n",
         ),
+        "unit-type-05-cjk-kinsoku" => basic_text(
+            fixture_id,
+            repo_root,
+            b"BT\n/F1 12 Tf\n1 0 0 1 72 120 Tm\n(MIMUS I) Tj\nET\n",
+        ),
+        "unit-form-12-text-underline" => basic_text(
+            fixture_id,
+            repo_root,
+            b"BT\n/F1 12 Tf\n1 0 0 1 90 140 Tm\n(MIMUS) Tj\nET\nq\n0.5 w\n90 138 m\n130.656 138 l\nS\nQ\nBT\n/F1 12 Tf\n1 0 0 1 72 122 Tm\n(MIMUS) Tj\nET\n",
+        ),
         "unit-para-17-author-columns" => basic_text(
             fixture_id,
             repo_root,

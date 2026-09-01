@@ -59,6 +59,8 @@
 | 50 | IL `Char.font_size` 是 ParagraphFind 与 Typeset 使用的页面空间 em：`abs(Tf) × |CTM × Tm` 的竖直基向量 `|`；walker 继续保留原始 `Tf` 给精确源操作数/公式重放。无 inline formula 的段落还把 walker 保留的水平 vector path 与 inline image 当作排版障碍；公式段继续由 ADR-0020 的既有所有权和重放合同处理 | [ADR-0007](docs/adr/0007-ir-design.md)、[ADR-0020](docs/adr/0020-inline-formula-flow-relocation.md) |
 | 51 | 跨栏合并只接受 model 证据：一个 `abstract` model assignment 同时覆盖两个经多行几何证明的平行栏时，ParagraphFind 按左栏自上而下、再右栏自上而下合成一个段；无 model 覆盖、多个 model region 或普通 `text` region 均维持分栏，不凭句法猜测续接 | — |
 | 52 | model 将纯公式误标为 `text` 时，只有整个自然段都属于 model `text`、完整 source 命中保守数学形状、含强数学运算符、按空白分隔的 operand-like token 不超过 2 个且无其它 model label，才整段 source passthrough 并发 `math_passthrough` typed info；不建立 `inline_formula`、不产生请求、不计 degradation。普通 model prose（包括只含上下标但无强运算符的句子）保持翻译 | — |
+| 53 | 中文译文采用 V1 最小禁则集：行首禁闭合标点、行尾禁开放标点，不做悬挂标点；普通、障碍槽与公式流共享同一字符集合和断行 token，段首闭合或段尾开放等无法满足的布局走既有 `typeset_overflow`，不放宽 8pt、碰撞或 CropBox | [docs/10-quality-scorecard.md](docs/10-quality-scorecard.md) §2.4.2 |
+| 54 | 非公式下划线只有在安全完整 `q/Q` 横线、同 content object、唯一完整 text-show owner、段外无共享字符、下方充分重叠且最终单行 replacement delta 唯一时才随 owner 刚体平移；原 path span 被 replacement 声明且新墨迹进入安全边界。任何可疑但不完备的所有权整段 `typeset_protocol` 保留，绝不删除或把下划线留在移动前槽位 | [docs/10-quality-scorecard.md](docs/10-quality-scorecard.md) §2.4.2 |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 

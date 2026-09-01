@@ -2,6 +2,55 @@
 
 mod agl;
 
+/// Returns whether a translated line may not begin with `character` under the
+/// V1 Chinese kinsoku policy.
+pub fn forbidden_line_start(character: char) -> bool {
+    matches!(
+        character,
+        '\u{3001}'
+            | '\u{3002}'
+            | '\u{3009}'
+            | '\u{300b}'
+            | '\u{300d}'
+            | '\u{300f}'
+            | '\u{3011}'
+            | '\u{3015}'
+            | '\u{3017}'
+            | '\u{3019}'
+            | '\u{301b}'
+            | '\u{301e}'
+            | '\u{301f}'
+            | '\u{2019}'
+            | '\u{201d}'
+            | '\u{ff01}'
+            | '\u{ff09}'
+            | '\u{ff0c}'
+            | '\u{ff1a}'
+            | '\u{ff1b}'
+            | '\u{ff1f}'
+    )
+}
+
+/// Returns whether a translated line may not end with `character` under the
+/// V1 Chinese kinsoku policy.
+pub fn forbidden_line_end(character: char) -> bool {
+    matches!(
+        character,
+        '\u{3008}'
+            | '\u{300a}'
+            | '\u{300c}'
+            | '\u{300e}'
+            | '\u{3010}'
+            | '\u{3014}'
+            | '\u{3016}'
+            | '\u{3018}'
+            | '\u{301a}'
+            | '\u{2018}'
+            | '\u{201c}'
+            | '\u{ff08}'
+    )
+}
+
 /// Resolves an explicit PDF `/Differences` glyph name only when Adobe's
 /// legacy Glyph List maps it to exactly one safe Unicode scalar.
 ///
@@ -447,6 +496,22 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v1_kinsoku_set_covers_cjk_closing_and_opening_punctuation_only() {
+        for character in "，。、；：！？）」』】》”’".chars() {
+            assert!(forbidden_line_start(character), "{character}");
+            assert!(!forbidden_line_end(character), "{character}");
+        }
+        for character in "（「『【《“‘".chars() {
+            assert!(forbidden_line_end(character), "{character}");
+            assert!(!forbidden_line_start(character), "{character}");
+        }
+        for character in "-/～—·".chars() {
+            assert!(!forbidden_line_start(character), "{character}");
+            assert!(!forbidden_line_end(character), "{character}");
+        }
+    }
 
     #[test]
     fn differences_agl_accepts_only_single_safe_legacy_scalars() {

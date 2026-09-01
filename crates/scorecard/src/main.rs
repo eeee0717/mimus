@@ -316,7 +316,7 @@ fn measure(args: MeasureArgs) -> Result<()> {
     );
     dimensions.insert(
         "typesetting_lint".into(),
-        lint(&translated, &events, denominator),
+        lint(&translated, &events, &args.output_pdf, denominator),
     );
 
     let input_bytes = fs::read(&args.input_pdf)?;
@@ -692,22 +692,21 @@ fn layout(
     )
 }
 
-fn lint(after: &Il, events: &[Value], denominator: f64) -> Dimension {
+fn lint(after: &Il, events: &[Value], output_pdf: &Path, denominator: f64) -> Dimension {
     let texts: Vec<&str> = after
         .pages
         .iter()
         .flat_map(|p| &p.paragraphs)
         .filter_map(|p| p.translated_text.as_deref())
         .collect();
-    let forbidden_start = "，。！？；：、）】》”’";
-    let forbidden_end = "（【《“‘";
-    let kinsoku = texts
+    let paragraph_kinsoku = texts
         .iter()
         .filter(|t| {
-            t.starts_with(|c| forbidden_start.contains(c))
-                || t.ends_with(|c| forbidden_end.contains(c))
+            t.starts_with(mimus_quality_contract::forbidden_line_start)
+                || t.ends_with(mimus_quality_contract::forbidden_line_end)
         })
         .count();
+    let kinsoku = output_line_kinsoku_violations(output_pdf).unwrap_or(paragraph_kinsoku);
     let isolated = texts
         .iter()
         .filter(|t| t.chars().count() == 1 && t.chars().all(is_punctuation))
@@ -742,6 +741,33 @@ fn lint(after: &Il, events: &[Value], denominator: f64) -> Dimension {
             ("abnormal_whitespace", whitespace),
             ("english_residual_proxy", echoes),
         ]),
+    )
+}
+
+fn output_line_kinsoku_violations(output_pdf: &Path) -> Option<usize> {
+    let temp = tempfile::NamedTempFile::new().ok()?;
+    let output = Command::new("mutool")
+        .args(["draw", "-q", "-F", "stext.json", "-o"])
+        .arg(temp.path())
+        .arg(output_pdf)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let document: StextDocument = serde_json::from_slice(&fs::read(temp.path()).ok()?).ok()?;
+    Some(
+        document
+            .pages
+            .iter()
+            .flat_map(|page| &page.blocks)
+            .flat_map(|block| &block.lines)
+            .filter(|line| {
+                let text = line.text.trim();
+                text.starts_with(mimus_quality_contract::forbidden_line_start)
+                    || text.ends_with(mimus_quality_contract::forbidden_line_end)
+            })
+            .count(),
     )
 }
 

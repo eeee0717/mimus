@@ -136,6 +136,11 @@ fn handle_responses_request(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<Str
             "200 OK",
             serde_json::json!({ "output_text": "模B模" }).to_string(),
         )
+    } else if input == "MIMUS I" {
+        (
+            "200 OK",
+            serde_json::json!({ "output_text": "甲乙丙丁戊（）己庚。" }).to_string(),
+        )
     } else if input == "First control paragraph." {
         (
             "200 OK",
@@ -1622,8 +1627,8 @@ fn corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 199, "Corpus fixture inventory changed");
-    assert_eq!(cases.len(), 126, "Corpus case inventory changed");
+    assert_eq!(ids.len(), 201, "Corpus fixture inventory changed");
+    assert_eq!(cases.len(), 128, "Corpus case inventory changed");
 
     let mut snapshot_digests = BTreeMap::new();
     let mut snapshot_counts = BTreeMap::new();
@@ -3078,6 +3083,58 @@ fn adjacent_han_and_latin_runs_receive_zero_automatic_spacing() {
 }
 
 #[test]
+fn chinese_kinsoku_rewraps_without_hanging_punctuation() {
+    let id = "unit-type-05-cjk-kinsoku";
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("translated.pdf");
+    let debug = directory.path().join("debug");
+    let server = FakeResponsesServer::start();
+    let output = run_openai_with_layout(id, &server, &output_path, &debug);
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(server.wait_for_requests(1), ["MIMUS I"]);
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(debug.join("09-write.il.json")).unwrap()).unwrap();
+    let paragraph = &written["pages"][0]["paragraphs"][0];
+    assert!(paragraph["preserved"].is_null(), "{paragraph:#?}");
+    assert_eq!(paragraph["translated_text"], "甲乙丙丁戊（）己庚。");
+
+    let attributes = mupdf_character_attributes(&output_path);
+    let mut lines = Vec::<Vec<&BTreeMap<String, String>>>::new();
+    for character in &attributes {
+        let y = number(character, "y");
+        if lines
+            .last()
+            .is_none_or(|line| (number(line[0], "y") - y).abs() > 0.01)
+        {
+            lines.push(Vec::new());
+        }
+        lines.last_mut().unwrap().push(character);
+    }
+    let texts = lines
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|character| character["c"].as_str())
+                .collect()
+        })
+        .collect::<Vec<String>>();
+    assert_eq!(texts, ["甲乙丙丁戊", "（）己庚。"]);
+    for line in lines {
+        let first = line.first().unwrap()["c"].chars().next().unwrap();
+        let last = line.last().unwrap()["c"].chars().next().unwrap();
+        assert!(!mimus_quality_contract::forbidden_line_start(first));
+        assert!(!mimus_quality_contract::forbidden_line_end(last));
+        assert!((number(line[0], "x") - 72.0).abs() <= 0.01);
+        assert!(number(line.last().unwrap(), "x") + 12.0 <= 120.01);
+    }
+}
+
+#[test]
 fn vertical_conflict_preserves_the_later_paragraph_without_moving_it() {
     let id = "unit-type-07-vertical-conflict";
     let directory = tempfile::tempdir().unwrap();
@@ -3543,6 +3600,58 @@ fn form_fraction_rule_and_glyphs_relocate_by_the_same_delta() {
     assert_eq!(output_stroke.len(), 6);
     assert!((output_stroke[4] - source_stroke[4] - delta_x).abs() <= 0.05);
     assert!((output_stroke[5] - source_stroke[5] - delta_y).abs() <= 0.05);
+}
+
+#[test]
+fn uniquely_owned_text_underline_replays_with_its_replacement_delta() {
+    let id = "unit-form-12-text-underline";
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("translated.pdf");
+    let debug = directory.path().join("debug");
+    let server = FakeResponsesServer::start();
+    let output = run_openai_with_layout(id, &server, &output_path, &debug);
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(server.wait_for_requests(1), ["MIMUS MIMUS"]);
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(debug.join("09-write.il.json")).unwrap()).unwrap();
+    let paragraph = &written["pages"][0]["paragraphs"][0];
+    assert!(paragraph["preserved"].is_null(), "{paragraph:#?}");
+    assert_eq!(paragraph["translated_text"], "M");
+
+    let content = decoded_page_streams(&output_path, 1).concat();
+    let content = String::from_utf8(content).unwrap();
+    assert!(content.contains("1 0 0 1 -18 0 cm\n"), "{content}");
+    assert_eq!(content.matches("90 138 m").count(), 1, "{content}");
+
+    let trace = Command::new("mutool")
+        .args(["draw", "-F", "trace"])
+        .arg(&output_path)
+        .output()
+        .unwrap();
+    assert!(
+        trace.status.success(),
+        "{}",
+        String::from_utf8_lossy(&trace.stderr)
+    );
+    let strokes = element_attributes(&trace.stdout, b"stroke_path");
+    assert_eq!(
+        strokes.len(),
+        1,
+        "{}",
+        String::from_utf8_lossy(&trace.stdout)
+    );
+    let transform = strokes[0]["transform"]
+        .split_ascii_whitespace()
+        .map(|value| value.parse::<f64>().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(transform.len(), 6);
+    assert!((transform[4] + 18.0).abs() <= 0.001, "{transform:?}");
+    assert!((transform[5] - 200.0).abs() <= 0.001, "{transform:?}");
 }
 
 #[test]

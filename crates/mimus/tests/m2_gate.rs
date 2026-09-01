@@ -2202,9 +2202,9 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
         "unit-scan-01-image-only".to_owned(),
         "unit-scan-02-invisible-ocr".to_owned(),
     ]);
-    assert_eq!(ids.len(), 199, "Corpus fixture inventory changed");
-    assert_eq!(unique_cases.len(), 126, "Corpus case inventory changed");
-    assert_eq!(legal.len(), 152, "legal fixture inventory changed");
+    assert_eq!(ids.len(), 201, "Corpus fixture inventory changed");
+    assert_eq!(unique_cases.len(), 128, "Corpus case inventory changed");
+    assert_eq!(legal.len(), 154, "legal fixture inventory changed");
     assert!(rejected.is_subset(&legal));
 
     let directory = tempfile::tempdir().unwrap();
@@ -2299,10 +2299,10 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
             output_count += 1;
         }
     }
-    assert_eq!(output_count, 145);
+    assert_eq!(output_count, 147);
     assert_eq!(
         server.request_count(),
-        180,
+        182,
         "eligible corpus request inventory changed"
     );
     assert!(server.requests().iter().all(|request| {

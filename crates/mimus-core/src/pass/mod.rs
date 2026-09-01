@@ -4395,9 +4395,24 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
             let restored = document
                 .restored_translations
                 .get(&(page.index, paragraph.reading_order));
-            let obstacles = paragraph_typeset_obstacles(page, extracted, paragraph, true);
+            let Some(owned_underlines) =
+                uniquely_owned_text_underlines(paragraph, extracted, &content_objects)
+            else {
+                preserved.push((
+                    page.index,
+                    paragraph.reading_order,
+                    il::PreservedReason::TypesetProtocol,
+                ));
+                continue;
+            };
+            let underline_spans = owned_underlines
+                .iter()
+                .map(|underline| underline.replay.span)
+                .collect::<BTreeSet<_>>();
+            let obstacles =
+                paragraph_typeset_obstacles(page, extracted, paragraph, true, &underline_spans);
             let relocation_obstacles =
-                paragraph_typeset_obstacles(page, extracted, paragraph, false);
+                paragraph_typeset_obstacles(page, extracted, paragraph, false, &underline_spans);
             let geometry = ParagraphPlanningGeometry {
                 extracted,
                 content_objects: &content_objects,
@@ -4406,7 +4421,22 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 relocation_obstacles: &relocation_obstacles,
             };
             match plan_paragraph(paragraph, translated, restored, output_fonts, &geometry) {
-                Ok(paragraph_plans) => {
+                Ok(mut paragraph_plans) => {
+                    if attach_text_underlines_to_plans(
+                        &mut paragraph_plans,
+                        &owned_underlines,
+                        page_bounds,
+                        &obstacles,
+                    )
+                    .is_none()
+                    {
+                        preserved.push((
+                            page.index,
+                            paragraph.reading_order,
+                            il::PreservedReason::TypesetProtocol,
+                        ));
+                        continue;
+                    }
                     if paragraph_plans_leave_orphan_source_ink(
                         paragraph,
                         extracted,
@@ -4516,9 +4546,15 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 let restored = document
                     .restored_translations
                     .get(&(page.index, paragraph.reading_order));
-                let obstacles = paragraph_typeset_obstacles(page, extracted, paragraph, true);
-                let relocation_obstacles =
-                    paragraph_typeset_obstacles(page, extracted, paragraph, false);
+                let obstacles =
+                    paragraph_typeset_obstacles(page, extracted, paragraph, true, &BTreeSet::new());
+                let relocation_obstacles = paragraph_typeset_obstacles(
+                    page,
+                    extracted,
+                    paragraph,
+                    false,
+                    &BTreeSet::new(),
+                );
                 let geometry = ParagraphPlanningGeometry {
                     extracted,
                     content_objects: &content_objects,
@@ -4905,6 +4941,7 @@ fn paragraph_typeset_obstacles(
     extracted: &ExtractedPage,
     paragraph: &Paragraph,
     include_owner_formula: bool,
+    excluded_vector_spans: &BTreeSet<SpanKey>,
 ) -> Vec<Rect> {
     let mut obstacles = page
         .paragraphs
@@ -4946,6 +4983,10 @@ fn paragraph_typeset_obstacles(
     });
     if !has_inline_formula {
         obstacles.extend(extracted.vector_paths.iter().filter_map(|path| {
+            let span = (path.content_object, path.byte_start, path.byte_end);
+            if excluded_vector_spans.contains(&span) {
+                return None;
+            }
             let left = path.start.x.min(path.end.x);
             let right = path.start.x.max(path.end.x);
             let y = (path.start.y + path.end.y) / 2.0;
@@ -4972,10 +5013,242 @@ fn paragraph_typeset_obstacles(
     obstacles
 }
 
+fn uniquely_owned_text_underlines(
+    paragraph: &Paragraph,
+    extracted: &ExtractedPage,
+    content_objects: &BTreeSet<lopdf::ObjectId>,
+) -> Option<Vec<OwnedTextUnderline>> {
+    if paragraph.chars().iter().any(|character| {
+        character.layout.is_some_and(|layout| {
+            layout.label == LayoutLabel::InlineFormula
+                && layout.policy == TranslationPolicy::Passthrough
+        })
+    }) {
+        return Some(Vec::new());
+    }
+    let mut owners = BTreeMap::<SpanKey, Vec<&Char>>::new();
+    for character in paragraph.chars().iter().filter(|character| {
+        character.visible
+            && character.text_transform == TextTransform::Upright
+            && character
+                .layout
+                .is_some_and(|layout| layout.policy == TranslationPolicy::Translate)
+    }) {
+        let object_id = unique_page_content(character, content_objects)
+            .ok()
+            .flatten()?;
+        owners
+            .entry(span_key(character, object_id))
+            .or_default()
+            .push(character);
+    }
+
+    let mut underlines = Vec::new();
+    for path in &extracted.vector_paths {
+        let possible = owners
+            .iter()
+            .filter(|(_, characters)| text_show_may_own_underline(characters, path))
+            .collect::<Vec<_>>();
+        if possible.is_empty() {
+            continue;
+        }
+        let proven = possible
+            .iter()
+            .filter(|(span, characters)| {
+                text_show_owns_underline(
+                    paragraph,
+                    extracted,
+                    content_objects,
+                    **span,
+                    characters,
+                    path,
+                )
+            })
+            .collect::<Vec<_>>();
+        let [(owner_span, owner_characters)] = proven.as_slice() else {
+            return None;
+        };
+        if possible.len() != 1 {
+            return None;
+        }
+        let owner_origin = owner_characters
+            .iter()
+            .map(|character| character.baseline_origin)
+            .min_by(|left, right| left.x.total_cmp(&right.x))?;
+        underlines.push(OwnedTextUnderline {
+            replay: FormulaVectorReplay {
+                span: (path.content_object, path.byte_start, path.byte_end),
+                content_transform: path.content_transform,
+            },
+            owner_span: **owner_span,
+            owner_origin,
+            bounds: horizontal_path_bounds(path)?,
+        });
+    }
+    Some(underlines)
+}
+
+fn horizontal_path_bounds(path: &crate::walk::WalkedVectorPath) -> Option<Rect> {
+    let left = path.start.x.min(path.end.x);
+    let right = path.start.x.max(path.end.x);
+    let y = (path.start.y + path.end.y) / 2.0;
+    let bounds = Rect {
+        left,
+        bottom: y - 0.01,
+        right,
+        top: y + 0.01,
+    };
+    (right > left + 0.01 && rect_is_finite(bounds)).then_some(bounds)
+}
+
+fn text_show_may_own_underline(characters: &[&Char], path: &crate::walk::WalkedVectorPath) -> bool {
+    let Some(owner_bounds) = characters
+        .iter()
+        .map(|character| character.r#box)
+        .reduce(Rect::union)
+    else {
+        return false;
+    };
+    let em = characters
+        .iter()
+        .map(|character| character.font_size)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .fold(0.0_f64, f64::max);
+    let baseline = characters
+        .iter()
+        .map(|character| character.baseline_origin.y)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let Some(path_bounds) = horizontal_path_bounds(path) else {
+        return false;
+    };
+    let owner_width = owner_bounds.right - owner_bounds.left;
+    let path_width = path_bounds.right - path_bounds.left;
+    let overlap = (owner_bounds.right.min(path_bounds.right)
+        - owner_bounds.left.max(path_bounds.left))
+    .max(0.0);
+    em > 0.0
+        && baseline.is_finite()
+        && owner_width > 0.01
+        && path_width >= owner_width * 0.75
+        && path_width <= owner_width * 1.25
+        && overlap >= owner_width.min(path_width) * 0.8
+        && path_bounds.top <= baseline - em * 0.02
+        && path_bounds.bottom >= baseline - em * 0.35
+}
+
+fn text_show_owns_underline(
+    paragraph: &Paragraph,
+    extracted: &ExtractedPage,
+    content_objects: &BTreeSet<lopdf::ObjectId>,
+    span: SpanKey,
+    characters: &[&Char],
+    path: &crate::walk::WalkedVectorPath,
+) -> bool {
+    if !path.safe_to_replay
+        || span.0 != path.content_object
+        || !paragraph_owns_walked_span(paragraph, extracted, span, content_objects)
+    {
+        return false;
+    }
+    let Some(owner_bounds) = characters
+        .iter()
+        .map(|character| character.r#box)
+        .reduce(Rect::union)
+    else {
+        return false;
+    };
+    let Some(path_bounds) = horizontal_path_bounds(path) else {
+        return false;
+    };
+    let em = characters
+        .iter()
+        .map(|character| character.font_size)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .fold(0.0_f64, f64::max);
+    let baseline = characters[0].baseline_origin.y;
+    if em <= 0.0
+        || characters
+            .iter()
+            .any(|character| (character.baseline_origin.y - baseline).abs() > em * 0.05)
+    {
+        return false;
+    }
+    let owner_width = owner_bounds.right - owner_bounds.left;
+    let path_width = path_bounds.right - path_bounds.left;
+    let overlap = (owner_bounds.right.min(path_bounds.right)
+        - owner_bounds.left.max(path_bounds.left))
+    .max(0.0);
+    let byte_distance = if path.byte_end <= span.1 {
+        span.1 - path.byte_end
+    } else {
+        path.byte_start.saturating_sub(span.2)
+    };
+    path_width >= owner_width * 0.75
+        && path_width <= owner_width * 1.25
+        && overlap >= owner_width.min(path_width) * 0.8
+        && path_bounds.top <= baseline - em * 0.02
+        && path_bounds.bottom >= baseline - em * 0.35
+        && byte_distance <= 256
+}
+
+fn attach_text_underlines_to_plans(
+    plans: &mut [TypesetPlan],
+    underlines: &[OwnedTextUnderline],
+    page_bounds: Rect,
+    obstacles: &[Rect],
+) -> Option<()> {
+    let mut relocated = Vec::new();
+    for underline in underlines {
+        let matching = plans
+            .iter()
+            .enumerate()
+            .filter(|(_, plan)| plan.spans.first() == Some(&underline.owner_span))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let [plan_index] = matching.as_slice() else {
+            return None;
+        };
+        let plan = &plans[*plan_index];
+        if plan.lines.len() != 1 || plan.baselines.len() != 1 {
+            return None;
+        }
+        let delta_x_pt = plan.baselines[0].0 - underline.owner_origin.x;
+        let delta_y_pt = plan.baselines[0].1 - underline.owner_origin.y;
+        if !delta_x_pt.is_finite() || !delta_y_pt.is_finite() {
+            return None;
+        }
+        let bounds = translated_rect(underline.bounds, delta_x_pt, delta_y_pt);
+        relocated.push((*plan_index, underline, delta_x_pt, delta_y_pt, bounds));
+    }
+    let relocated_bounds = relocated
+        .iter()
+        .map(|(_, _, _, _, bounds)| *bounds)
+        .collect::<Vec<_>>();
+    if !ink_bounds_are_safe(&relocated_bounds, page_bounds, obstacles) {
+        return None;
+    }
+    for (plan_index, underline, delta_x_pt, delta_y_pt, bounds) in relocated {
+        plans[plan_index]
+            .text_vector_relocations
+            .push(TextVectorRelocation {
+                replay: underline.replay,
+                delta_x_pt,
+                delta_y_pt,
+            });
+        plans[plan_index].ink_bounds.push(bounds);
+    }
+    Some(())
+}
+
 fn plan_modified_spans(plan: &TypesetPlan) -> impl Iterator<Item = SpanKey> + '_ {
     plan.spans
         .iter()
         .copied()
+        .chain(
+            plan.text_vector_relocations
+                .iter()
+                .map(|relocation| relocation.replay.span),
+        )
         .chain(plan.formula_relocations.iter().flat_map(|relocation| {
             relocation
                 .spans
@@ -5016,6 +5289,7 @@ struct TypesetPlan {
     lines: Vec<Vec<crate::translate::StyledCharacter>>,
     baselines: Vec<(f64, f64)>,
     formula_relocations: Vec<FormulaRelocation>,
+    text_vector_relocations: Vec<TextVectorRelocation>,
     ink_bounds: Vec<Rect>,
     font_size: f64,
     single_line_expansion: Option<SingleLineBoundsExpansion>,
@@ -5038,6 +5312,21 @@ struct FormulaRelocation {
 struct FormulaVectorReplay {
     span: SpanKey,
     content_transform: [f64; 6],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OwnedTextUnderline {
+    replay: FormulaVectorReplay,
+    owner_span: SpanKey,
+    owner_origin: il::Point,
+    bounds: Rect,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TextVectorRelocation {
+    replay: FormulaVectorReplay,
+    delta_x_pt: f64,
+    delta_y_pt: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -5573,6 +5862,7 @@ fn prepare_shared_formula_fixed_plans(
         lines,
         baselines,
         formula_relocations,
+        text_vector_relocations: Vec::new(),
         ink_bounds,
         font_size,
         single_line_expansion: None,
@@ -6129,6 +6419,11 @@ fn plan_relocated_formula_flow<'a>(
             atoms.push(FormulaFlowAtom::Formula(segment_index));
         }
     }
+    if formula_flow_kinsoku_is_unsatisfiable(&atoms) {
+        return Err(TypesetPlanError::Preserved(
+            il::PreservedReason::TypesetOverflow,
+        ));
+    }
     let preferred = preferred_typeset_font_size(&text_chars).unwrap_or(text_chars[0].font_size);
     let first = text_chars[0];
     let mut size = preferred.max(MIN_FONT_SIZE_PT);
@@ -6226,6 +6521,7 @@ fn plan_relocated_formula_flow<'a>(
                     lines: placement.lines,
                     baselines: placement.baselines,
                     formula_relocations: placement.formula_relocations,
+                    text_vector_relocations: Vec::new(),
                     ink_bounds: placement.ink_bounds,
                     font_size: size,
                     single_line_expansion: None,
@@ -6844,6 +7140,25 @@ fn formula_flow_atoms_must_stay_together(left: &FormulaFlowAtom, right: &Formula
     }
 }
 
+fn formula_flow_kinsoku_is_unsatisfiable(atoms: &[FormulaFlowAtom]) -> bool {
+    let starts_forbidden = match atoms.first() {
+        Some(FormulaFlowAtom::Text { characters, .. }) => characters
+            .iter()
+            .find(|character| !character.value.is_whitespace())
+            .is_some_and(|character| mimus_quality_contract::forbidden_line_start(character.value)),
+        _ => false,
+    };
+    let ends_forbidden = match atoms.last() {
+        Some(FormulaFlowAtom::Text { characters, .. }) => characters
+            .iter()
+            .rev()
+            .find(|character| !character.value.is_whitespace())
+            .is_some_and(|character| mimus_quality_contract::forbidden_line_end(character.value)),
+        _ => false,
+    };
+    starts_forbidden || ends_forbidden
+}
+
 fn planned_formula_continuity_text(
     plans: &[(usize, TypesetPlan)],
     output_fonts: &crate::context::OutputFonts,
@@ -7383,6 +7698,7 @@ fn plan_text_segment<'a>(
             lines: Vec::new(),
             baselines: Vec::new(),
             formula_relocations: Vec::new(),
+            text_vector_relocations: Vec::new(),
             ink_bounds: Vec::new(),
             font_size: chars[0].font_size.max(MIN_FONT_SIZE_PT),
             single_line_expansion: None,
@@ -7459,6 +7775,7 @@ fn plan_text_segment<'a>(
                     lines,
                     baselines,
                     formula_relocations: Vec::new(),
+                    text_vector_relocations: Vec::new(),
                     ink_bounds,
                     font_size: size,
                     single_line_expansion: None,
@@ -7500,6 +7817,7 @@ fn plan_text_segment<'a>(
                     lines,
                     baselines: vec![(single_line_start_x, first.baseline_origin.y)],
                     formula_relocations: Vec::new(),
+                    text_vector_relocations: Vec::new(),
                     ink_bounds,
                     font_size: size,
                     single_line_expansion: expansion,
@@ -7537,6 +7855,7 @@ fn plan_text_segment<'a>(
                         lines,
                         baselines,
                         formula_relocations: Vec::new(),
+                        text_vector_relocations: Vec::new(),
                         ink_bounds,
                         font_size: size,
                         single_line_expansion: None,
@@ -7588,6 +7907,7 @@ fn plan_text_segment<'a>(
                             lines,
                             baselines,
                             formula_relocations: Vec::new(),
+                            text_vector_relocations: Vec::new(),
                             ink_bounds,
                             font_size: size,
                             single_line_expansion: None,
@@ -7830,6 +8150,9 @@ fn wrap_styled_text(
     width: f64,
     first_line_indent: f64,
 ) -> Option<Vec<Vec<crate::translate::StyledCharacter>>> {
+    if !styled_text_kinsoku_is_satisfiable(text) {
+        return None;
+    }
     let first_line_width = width - first_line_indent.max(0.0);
     if !first_line_width.is_finite() || first_line_width <= 0.01 {
         return None;
@@ -7939,6 +8262,9 @@ fn wrap_styled_text_in_slots(
     size: f64,
     slots: &[TypesetLineSlot],
 ) -> Option<Vec<(usize, Vec<crate::translate::StyledCharacter>)>> {
+    if !styled_text_kinsoku_is_satisfiable(text) {
+        return None;
+    }
     let mut lines = Vec::<(usize, Vec<crate::translate::StyledCharacter>)>::new();
     let mut slot_index = 0_usize;
     let mut line_width = 0.0;
@@ -7980,19 +8306,45 @@ fn styled_text_tokens(
     text: &[crate::translate::StyledCharacter],
 ) -> Vec<Vec<crate::translate::StyledCharacter>> {
     let mut tokens = Vec::<Vec<crate::translate::StyledCharacter>>::new();
-    for &character in text {
+    for (index, &character) in text.iter().enumerate() {
         let joins_ascii_word = character.value.is_ascii_alphanumeric()
-            && tokens
-                .last()
-                .and_then(|token| token.last())
+            && index
+                .checked_sub(1)
+                .and_then(|previous| text.get(previous))
                 .is_some_and(|previous| previous.value.is_ascii_alphanumeric());
-        if joins_ascii_word {
+        let previous_nonspace = text[..index]
+            .iter()
+            .rev()
+            .find(|candidate| !candidate.value.is_whitespace());
+        let next_nonspace = text[index..]
+            .iter()
+            .find(|candidate| !candidate.value.is_whitespace());
+        let joins_kinsoku_group = !tokens.is_empty()
+            && (next_nonspace.is_some_and(|candidate| {
+                mimus_quality_contract::forbidden_line_start(candidate.value)
+            }) || previous_nonspace.is_some_and(|candidate| {
+                mimus_quality_contract::forbidden_line_end(candidate.value)
+            }));
+        if joins_ascii_word || joins_kinsoku_group {
             tokens.last_mut().unwrap().push(character);
         } else {
             tokens.push(vec![character]);
         }
     }
     tokens
+}
+
+fn styled_text_kinsoku_is_satisfiable(text: &[crate::translate::StyledCharacter]) -> bool {
+    let first = text
+        .iter()
+        .find(|character| !character.value.is_whitespace());
+    let last = text
+        .iter()
+        .rev()
+        .find(|character| !character.value.is_whitespace());
+    !first.is_some_and(|character| mimus_quality_contract::forbidden_line_start(character.value))
+        && !last
+            .is_some_and(|character| mimus_quality_contract::forbidden_line_end(character.value))
 }
 
 fn glyph_advance_em(face: &ttf_parser::Face<'_>, glyph: ttf_parser::GlyphId) -> Option<f64> {
@@ -8158,6 +8510,7 @@ fn is_typeset_replacement_collision(error: &MimusError) -> bool {
         message.as_str(),
         "typeset span has an incompatible existing replacement"
             | "formula relocation overlaps another typeset replacement"
+            | "vector relocation overlaps another typeset replacement"
             | "split formula span was not neutralized by its translated owner"
             | "split formula span has an incompatible translated replacement"
     )
@@ -8195,6 +8548,15 @@ fn install_typeset_replacements(
         text_show_states,
         replacements,
     )?;
+    for relocation in &plan.text_vector_relocations {
+        install_vector_relocation(
+            relocation.replay,
+            relocation.delta_x_pt,
+            relocation.delta_y_pt,
+            streams,
+            replacements,
+        )?;
+    }
     for relocation in &plan.formula_relocations {
         install_formula_relocation(
             relocation,
@@ -8203,6 +8565,43 @@ fn install_typeset_replacements(
             text_show_states,
             replacements,
         )?;
+    }
+    Ok(())
+}
+
+fn install_vector_relocation(
+    replay: FormulaVectorReplay,
+    delta_x_pt: f64,
+    delta_y_pt: f64,
+    streams: &BTreeMap<lopdf::ObjectId, &[u8]>,
+    replacements: &mut BTreeMap<SpanKey, Vec<u8>>,
+) -> Result<()> {
+    let source = streams
+        .get(&replay.span.0)
+        .and_then(|stream| stream.get(replay.span.1..replay.span.2))
+        .ok_or_else(|| span_out_of_bounds(replay.span.0, replay.span.1, replay.span.2, 0))?;
+    let (delta_x, delta_y) =
+        content_relative_delta(replay.content_transform, delta_x_pt, delta_y_pt).ok_or_else(
+            || {
+                MimusError::internal(
+                    InternalReason::InvariantViolation,
+                    "vector path has a singular content transform",
+                )
+            },
+        )?;
+    let mut replacement = format!(
+        "q\n1 0 0 1 {} {} cm\n",
+        pdf_number(delta_x),
+        pdf_number(delta_y)
+    )
+    .into_bytes();
+    replacement.extend_from_slice(source);
+    replacement.extend_from_slice(b"\nQ\n");
+    if replacements.insert(replay.span, replacement).is_some() {
+        return Err(MimusError::internal(
+            InternalReason::InvariantViolation,
+            "vector relocation overlaps another typeset replacement",
+        ));
     }
     Ok(())
 }
@@ -8429,35 +8828,13 @@ fn install_formula_relocation(
         .iter()
         .chain(&relocation.inline_images)
     {
-        let source = streams
-            .get(&path.span.0)
-            .and_then(|stream| stream.get(path.span.1..path.span.2))
-            .ok_or_else(|| span_out_of_bounds(path.span.0, path.span.1, path.span.2, 0))?;
-        let (delta_x, delta_y) = content_relative_delta(
-            path.content_transform,
+        install_vector_relocation(
+            *path,
             relocation.delta_x_pt,
             relocation.delta_y_pt,
-        )
-        .ok_or_else(|| {
-            MimusError::internal(
-                InternalReason::InvariantViolation,
-                "formula vector path has a singular content transform",
-            )
-        })?;
-        let mut replacement = format!(
-            "q\n1 0 0 1 {} {} cm\n",
-            pdf_number(delta_x),
-            pdf_number(delta_y)
-        )
-        .into_bytes();
-        replacement.extend_from_slice(source);
-        replacement.extend_from_slice(b"\nQ\n");
-        if replacements.insert(path.span, replacement).is_some() {
-            return Err(MimusError::internal(
-                InternalReason::InvariantViolation,
-                "formula vector relocation overlaps another typeset replacement",
-            ));
-        }
+            streams,
+            replacements,
+        )?;
     }
     Ok(())
 }
@@ -12274,6 +12651,7 @@ mod tests {
             &document.extracted_pages[0],
             &document.il.pages[0].paragraphs[0],
             true,
+            &BTreeSet::new(),
         );
 
         assert!(obstacles.contains(&image));
@@ -12283,6 +12661,138 @@ mod tests {
             right: 180.0,
             top: 110.01,
         }));
+    }
+
+    #[test]
+    fn text_underline_requires_safe_unique_ownership_and_one_output_delta() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let translator = CountingTranslator::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &document.il.pages[0].paragraphs[0];
+        let owner_bounds = paragraph
+            .chars()
+            .iter()
+            .map(|character| character.r#box)
+            .reduce(Rect::union)
+            .unwrap();
+        let owner_origin = paragraph.chars()[0].baseline_origin;
+        let owner_span = (
+            document.extracted_pages[0].content_streams[0].object_id,
+            paragraph.chars()[0].passthrough.byte_start,
+            paragraph.chars()[0].passthrough.byte_end,
+        );
+        let path = crate::walk::WalkedVectorPath {
+            content_object: owner_span.0,
+            byte_start: owner_span.1.saturating_sub(1),
+            byte_end: owner_span.1,
+            start: Point {
+                x: owner_bounds.left,
+                y: owner_origin.y - 2.0,
+            },
+            end: Point {
+                x: owner_bounds.right,
+                y: owner_origin.y - 2.0,
+            },
+            content_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            safe_to_replay: true,
+        };
+        document.extracted_pages[0].vector_paths = vec![path.clone()];
+        let content_objects = BTreeSet::from([owner_span.0]);
+        let underlines = uniquely_owned_text_underlines(
+            paragraph,
+            &document.extracted_pages[0],
+            &content_objects,
+        )
+        .expect("the complete safe show owns its exact underline");
+        assert_eq!(underlines.len(), 1);
+
+        let mut plans = vec![TypesetPlan {
+            spans: vec![owner_span],
+            lines: vec![vec![crate::translate::StyledCharacter {
+                value: '中',
+                bold: false,
+            }]],
+            baselines: vec![(owner_origin.x - 18.0, owner_origin.y)],
+            formula_relocations: Vec::new(),
+            text_vector_relocations: Vec::new(),
+            ink_bounds: Vec::new(),
+            font_size: 12.0,
+            single_line_expansion: None,
+            multi_line_expansion: None,
+        }];
+        attach_text_underlines_to_plans(
+            &mut plans,
+            &underlines,
+            Rect {
+                left: 0.0,
+                bottom: 0.0,
+                right: 300.0,
+                top: 200.0,
+            },
+            &[],
+        )
+        .expect("one output line gives the owner one determinate delta");
+        assert_eq!(plans[0].text_vector_relocations.len(), 1);
+        assert_eq!(plans[0].text_vector_relocations[0].delta_x_pt, -18.0);
+        assert_eq!(plans[0].text_vector_relocations[0].delta_y_pt, 0.0);
+        assert!((plans[0].ink_bounds[0].left - (owner_bounds.left - 18.0)).abs() < 0.001);
+
+        document.extracted_pages[0].vector_paths[0].safe_to_replay = false;
+        assert!(
+            uniquely_owned_text_underlines(
+                paragraph,
+                &document.extracted_pages[0],
+                &content_objects,
+            )
+            .is_none(),
+            "a suspicious underline that cannot be replayed independently must fail closed"
+        );
+
+        document.extracted_pages[0].vector_paths[0].safe_to_replay = true;
+        document.extracted_pages[0].vector_paths[0].end.x =
+            owner_bounds.left + (owner_bounds.right - owner_bounds.left) * 0.5;
+        assert!(
+            uniquely_owned_text_underlines(
+                paragraph,
+                &document.extracted_pages[0],
+                &content_objects,
+            )
+            .expect("a short neighboring rule is not suspicious ownership")
+            .is_empty(),
+            "a rule that is too short to be an underline must remain an ordinary obstacle"
+        );
+    }
+
+    #[test]
+    fn cjk_kinsoku_tokens_keep_opening_and_closing_punctuation_off_breaks() {
+        let styled = |text: &str| {
+            text.chars()
+                .map(|value| crate::translate::StyledCharacter { value, bold: false })
+                .collect::<Vec<_>>()
+        };
+        let tokens = styled_text_tokens(&styled("甲乙丙（）丁戊己。庚"))
+            .into_iter()
+            .map(|token| token.into_iter().map(|character| character.value).collect())
+            .collect::<Vec<String>>();
+        assert_eq!(tokens, ["甲", "乙", "丙", "（）", "丁", "戊", "己。", "庚"]);
+        let spaced = styled_text_tokens(&styled("甲 ，乙（ 丙"))
+            .into_iter()
+            .map(|token| token.into_iter().map(|character| character.value).collect())
+            .collect::<Vec<String>>();
+        assert_eq!(spaced, ["甲 ，", "乙", "（ 丙"]);
+        assert!(!styled_text_kinsoku_is_satisfiable(&styled("）甲")));
+        assert!(!styled_text_kinsoku_is_satisfiable(&styled("甲（")));
+        assert!(styled_text_kinsoku_is_satisfiable(&styled("甲（）乙")));
     }
 
     #[test]
@@ -12885,6 +13395,7 @@ mod tests {
             }]],
             baselines: vec![(25.0, 100.0)],
             formula_relocations: Vec::new(),
+            text_vector_relocations: Vec::new(),
             ink_bounds: Vec::new(),
             font_size: 8.0,
             single_line_expansion: None,
@@ -12966,6 +13477,7 @@ mod tests {
             }]],
             baselines: vec![(x, 100.0)],
             formula_relocations: Vec::new(),
+            text_vector_relocations: Vec::new(),
             ink_bounds: Vec::new(),
             font_size: 8.0,
             single_line_expansion: None,
@@ -13040,6 +13552,7 @@ mod tests {
             }]],
             baselines: vec![(x, 100.0)],
             formula_relocations: Vec::new(),
+            text_vector_relocations: Vec::new(),
             ink_bounds: Vec::new(),
             font_size: 8.0,
             single_line_expansion: None,
