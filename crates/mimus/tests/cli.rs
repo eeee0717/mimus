@@ -38,6 +38,7 @@ impl FakeResponsesServer {
             while !stopped.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
                         let requests = Arc::clone(&captured);
                         handlers.push(thread::spawn(move || {
                             handle_responses_request(&mut stream, &requests);
@@ -112,6 +113,58 @@ fn handle_responses_request(stream: &mut TcpStream, requests: &Arc<Mutex<Vec<Str
             "200 OK",
             serde_json::json!({
                 "output_text": "模型数据验证论文翻译结果保持结构流程稳定缓存重试诊断排版字体安全边界模型数据验证论文翻译结果保持结构流程稳定缓存重试诊断排版字体安全边界模型数据验证论文翻译结果保持结构流程稳定缓存重试诊断排版字体安全边界"
+            })
+            .to_string(),
+        )
+    } else if input == "The result {v1} = 1, 2, 3 shows the distinction." {
+        (
+            "200 OK",
+            serde_json::json!({
+                "output_text": "该结果 {v1} = 1, 2, 3 展示了区别。"
+            })
+            .to_string(),
+        )
+    } else if input == "Compare {v1} with the reference." {
+        (
+            "200 OK",
+            serde_json::json!({ "output_text": "比较 {v1} 与参考值。" }).to_string(),
+        )
+    } else if input == "• Compare {v1} with the reference." {
+        (
+            "200 OK",
+            serde_json::json!({ "output_text": "• 比较 {v1} 与参考值。" }).to_string(),
+        )
+    } else if input == "In 2024, we measured 3.14 and 1, 2, 3." {
+        (
+            "200 OK",
+            serde_json::json!({
+                "output_text": "在 2024 年，我们测得 3.14 以及 1, 2, 3。"
+            })
+            .to_string(),
+        )
+    } else if input == "Regular <b1>strong</b1> emphasis (small note) x2 end." {
+        (
+            "200 OK",
+            serde_json::json!({
+                "output_text": "常规 <b1>粗体</b1> 强调（小注）x2 结束。"
+            })
+            .to_string(),
+        )
+    } else if input.starts_with("r<b1>B</b1>") && input.matches("<b").count() == 45 {
+        let output_text = (1..=45)
+            .map(|index| format!("<b{index}>粗</b{index}>"))
+            .collect::<String>();
+        (
+            "200 OK",
+            serde_json::json!({ "output_text": output_text }).to_string(),
+        )
+    } else if input
+        == "The ratio{v1} remains attached while this narrow paragraph wraps onto a second line."
+    {
+        (
+            "200 OK",
+            serde_json::json!({
+                "output_text": "这个经过显著扩展并为了验证狭窄多行重排而刻意写长的译文比值 {v1} 始终保持分子分母和分数线完整连接。"
             })
             .to_string(),
         )
@@ -632,6 +685,69 @@ fn run_inspect_with_recording(fixture_id: &str, recording_id: &str) -> Output {
         .arg(fixture_path(fixture_id))
         .output()
         .unwrap()
+}
+
+fn run_openai_with_layout(
+    id: &str,
+    server: &FakeResponsesServer,
+    output: &Path,
+    debug: &Path,
+) -> Output {
+    let mut command = Command::new(BIN);
+    command.env(PDFIUM_ENV, pdfium_library());
+    configure_test_fonts(&mut command);
+    command
+        .env("API_KEY", "mimus-form-corpus-test-key")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "openai",
+            "--endpoint",
+            &server.endpoint,
+            "--model",
+            "form-corpus-test-model",
+            "--no-auto-terms",
+            "--no-cache",
+            "--layout-replay",
+        ])
+        .arg(layout_recording_path(id))
+        .arg("--debug")
+        .arg(debug)
+        .arg("--output")
+        .arg(output)
+        .arg(fixture_path(id))
+        .output()
+        .unwrap()
+}
+
+fn assert_request_count_after_fixture(
+    id: &str,
+    server: &FakeResponsesServer,
+    expected: usize,
+    output: &Output,
+    debug: &Path,
+) {
+    let requests = server.wait_for_requests(expected);
+    if requests.len() != expected {
+        let preserved = std::fs::read(debug.join("09-write.il.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|il| {
+                il["pages"]
+                    .as_array()?
+                    .iter()
+                    .flat_map(|page| page["paragraphs"].as_array().into_iter().flatten())
+                    .map(|paragraph| paragraph["preserved"].clone())
+                    .find(|reason| !reason.is_null())
+            });
+        panic!(
+            "fixture {id} expected {expected} cumulative request(s), captured {requests:?}, preserved={preserved:?}\nstderr: {}\nstdout: {}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout),
+        );
+    }
 }
 
 fn run_none_with_debug(input: &Path, output: &Path, debug: &Path, json: bool) -> Output {
@@ -1435,8 +1551,8 @@ fn corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 167, "Corpus fixture inventory changed");
-    assert_eq!(cases.len(), 100, "Corpus case inventory changed");
+    assert_eq!(ids.len(), 174, "Corpus fixture inventory changed");
+    assert_eq!(cases.len(), 105, "Corpus case inventory changed");
 
     let mut snapshot_digests = BTreeMap::new();
     let mut snapshot_counts = BTreeMap::new();
@@ -2639,6 +2755,254 @@ fn partial_model_formula_regions_are_completed_before_translation() {
         assert!(compact.contains("√𝑑model"), "{extractor}: {compact:?}");
         assert!(!compact.contains("A√B"), "{extractor}: {compact:?}");
     }
+}
+
+#[test]
+fn form_comma_and_numeric_prose_requests_keep_literal_punctuation() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = FakeResponsesServer::start();
+    for id in ["unit-form-03-comma-ownership", "unit-form-06-numeric-prose"] {
+        let request_count = server.requests().len();
+        let debug = directory.path().join(format!("{id}-debug"));
+        let output = run_openai_with_layout(
+            id,
+            &server,
+            &directory.path().join(format!("{id}.pdf")),
+            &debug,
+        );
+        assert!(
+            output.status.success(),
+            "fixture {id}\nstderr: {}\nstdout: {}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_request_count_after_fixture(id, &server, request_count + 1, &output, &debug);
+    }
+
+    assert_eq!(
+        server.wait_for_requests(2),
+        [
+            "The result {v1} = 1, 2, 3 shows the distinction.",
+            "In 2024, we measured 3.14 and 1, 2, 3.",
+        ]
+    );
+    assert_eq!(server.requests()[0].matches("{v").count(), 1);
+    assert_eq!(server.requests()[1].matches("{v").count(), 0);
+}
+
+#[test]
+fn form_script_placeholders_are_invariant_to_a_leading_bullet() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = FakeResponsesServer::start();
+    for id in [
+        "unit-form-05-scripts-control",
+        "unit-form-05-scripts-bullet",
+    ] {
+        let request_count = server.requests().len();
+        let debug = directory.path().join(format!("{id}-debug"));
+        let output = run_openai_with_layout(
+            id,
+            &server,
+            &directory.path().join(format!("{id}.pdf")),
+            &debug,
+        );
+        assert!(
+            output.status.success(),
+            "fixture {id}\nstderr: {}\nstdout: {}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_request_count_after_fixture(id, &server, request_count + 1, &output, &debug);
+    }
+
+    let requests = server.wait_for_requests(2);
+    assert_eq!(requests[0], "Compare {v1} with the reference.");
+    assert_eq!(requests[1], "• Compare {v1} with the reference.");
+    assert_eq!(requests[0].matches("{v").count(), 1);
+    assert_eq!(requests[1].matches("{v").count(), 1);
+    assert_eq!(requests[1].strip_prefix("• "), Some(requests[0].as_str()));
+}
+
+#[test]
+fn form_bold_protocol_has_no_historical_placeholder_cutoff() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = FakeResponsesServer::start();
+    for id in ["unit-form-10-mixed-styles", "unit-form-10-bold-stress"] {
+        let request_count = server.requests().len();
+        let output_path = directory.path().join(format!("{id}.pdf"));
+        let debug = directory.path().join(format!("{id}-debug"));
+        let output = run_openai_with_layout(id, &server, &output_path, &debug);
+        assert!(
+            output.status.success(),
+            "fixture {id}\nstderr: {}\nstdout: {}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_request_count_after_fixture(id, &server, request_count + 1, &output, &debug);
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(debug.join("09-write.il.json")).unwrap())
+                .unwrap();
+        let preserved = &written["pages"][0]["paragraphs"][0]["preserved"];
+        assert!(
+            preserved.is_null(),
+            "fixture {id} preserved as {preserved}; requests={:?}\nstderr: {}\nstdout: {}",
+            server.requests(),
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout),
+        );
+    }
+
+    let requests = server.wait_for_requests(2);
+    assert_eq!(
+        requests[0],
+        "Regular <b1>strong</b1> emphasis (small note) x2 end."
+    );
+    assert_eq!(requests[0].matches("<b").count(), 1);
+    assert_eq!(requests[0].matches("</b").count(), 1);
+    assert_eq!(requests[1].matches("<b").count(), 45);
+    assert_eq!(requests[1].matches("</b").count(), 45);
+
+    let extracted = Command::new("pdftotext")
+        .arg(directory.path().join("unit-form-10-bold-stress.pdf"))
+        .arg("-")
+        .output()
+        .unwrap();
+    assert!(extracted.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&extracted.stdout)
+            .matches('粗')
+            .count(),
+        45
+    );
+}
+
+#[test]
+fn form_fraction_rule_and_glyphs_relocate_by_the_same_delta() {
+    let id = "unit-form-11-fraction-rule";
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("translated.pdf");
+    let debug = directory.path().join("debug");
+    let server = FakeResponsesServer::start();
+    let output = run_openai_with_layout(id, &server, &output_path, &debug);
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_request_count_after_fixture(id, &server, 1, &output, &debug);
+    assert_eq!(
+        server.wait_for_requests(1),
+        ["The ratio{v1} remains attached while this narrow paragraph wraps onto a second line."]
+    );
+
+    let read_il = |stage: &str| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(debug.join(stage)).unwrap()).unwrap()
+    };
+    let before = read_il("04-styles_and_formulas.il.json");
+    let after = read_il("09-write.il.json");
+    assert!(
+        after["pages"][0]["paragraphs"][0]["preserved"].is_null(),
+        "fraction paragraph failed closed as {:?}",
+        after["pages"][0]["paragraphs"][0]["preserved"]
+    );
+    let source_formula = before["pages"][0]["paragraphs"][0]["text"]["chars"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|character| character["layout"]["label"] == "inline_formula")
+        .filter_map(|character| character["unicode"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(source_formula, ["a", "b"]);
+
+    let trace = |path: &Path| {
+        let output = Command::new("mutool")
+            .args(["draw", "-F", "trace"])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    };
+    let formula_transforms = |xml: &[u8]| {
+        let mut reader = Reader::from_reader(xml);
+        let mut current_transform = None;
+        let mut transforms = BTreeMap::new();
+        loop {
+            match reader.read_event().unwrap() {
+                Event::Start(element) if element.local_name().as_ref() == b"fill_text" => {
+                    current_transform = element.attributes().find_map(|attribute| {
+                        let attribute = attribute.unwrap();
+                        (attribute.key.local_name().as_ref() == b"transform").then(|| {
+                            attribute
+                                .normalized_value(XmlVersion::Implicit1_0)
+                                .unwrap()
+                                .split_ascii_whitespace()
+                                .map(|value| value.parse::<f64>().unwrap())
+                                .collect::<Vec<_>>()
+                        })
+                    });
+                }
+                Event::Empty(element)
+                    if element.local_name().as_ref() == b"g" && current_transform.is_some() =>
+                {
+                    let unicode = element.attributes().find_map(|attribute| {
+                        let attribute = attribute.unwrap();
+                        (attribute.key.local_name().as_ref() == b"unicode").then(|| {
+                            attribute
+                                .normalized_value(XmlVersion::Implicit1_0)
+                                .unwrap()
+                                .into_owned()
+                        })
+                    });
+                    if let Some(unicode @ ("a" | "b")) = unicode.as_deref() {
+                        transforms.insert(unicode.to_owned(), current_transform.clone().unwrap());
+                    }
+                }
+                Event::End(element) if element.local_name().as_ref() == b"fill_text" => {
+                    current_transform = None;
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+        transforms
+    };
+    let stroke_transform = |xml: &[u8]| {
+        first_element_attributes(xml, b"stroke_path")["transform"]
+            .split_ascii_whitespace()
+            .map(|value| value.parse::<f64>().unwrap())
+            .collect::<Vec<_>>()
+    };
+    let source_trace = trace(&fixture_path(id));
+    let output_trace = trace(&output_path);
+    let source_glyphs = formula_transforms(&source_trace);
+    let output_glyphs = formula_transforms(&output_trace);
+    assert_eq!(source_glyphs.keys().collect::<Vec<_>>(), ["a", "b"]);
+    assert_eq!(
+        source_glyphs.keys().collect::<Vec<_>>(),
+        output_glyphs.keys().collect::<Vec<_>>()
+    );
+    let delta_x = output_glyphs["a"][4] - source_glyphs["a"][4];
+    let delta_y = output_glyphs["a"][5] - source_glyphs["a"][5];
+    assert!(
+        delta_x.abs() > 0.01 || delta_y.abs() > 0.01,
+        "fraction stayed fixed: source={source_glyphs:?}, output={output_glyphs:?}"
+    );
+    for unicode in ["a", "b"] {
+        assert!((output_glyphs[unicode][4] - source_glyphs[unicode][4] - delta_x).abs() <= 0.01);
+        assert!((output_glyphs[unicode][5] - source_glyphs[unicode][5] - delta_y).abs() <= 0.01);
+    }
+    let source_stroke = stroke_transform(&source_trace);
+    let output_stroke = stroke_transform(&output_trace);
+    assert_eq!(source_stroke.len(), 6);
+    assert_eq!(output_stroke.len(), 6);
+    assert!((output_stroke[4] - source_stroke[4] - delta_x).abs() <= 0.05);
+    assert!((output_stroke[5] - source_stroke[5] - delta_y).abs() <= 0.05);
 }
 
 #[test]

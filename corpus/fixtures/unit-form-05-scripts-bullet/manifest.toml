@@ -1,0 +1,56 @@
+# unit-form-05-scripts-bullet -- expected manifest
+# Written before the bullet-list Typst source and layout replay.
+
+schema_version = 1
+
+[identity]
+id = "unit-form-05-scripts-bullet"
+name = "Superscript and subscript after a real bullet"
+class = "unit"
+legality = "legal"
+cases = ["FORM-05"]
+priority = "M3"
+variable = "A real leading bullet is the only semantic difference from the matched non-list scripted-formula control"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-form-05-scripts-bullet.typ"
+pdf = "unit-form-05-scripts-bullet.pdf"
+pdf_sha256 = "dcc464e9d5fdf7b63c4ce4836cba9063d90a3a1488b96f32b085793c77c79493"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 420.0, 120.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "FORM05_BULLET"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "• Compare 𝑥2 + 𝑦1 with the reference."
+
+[[expected.behaviour]]
+id = "FORM-05-bullet-invariance"
+assertion = "The real bullet remains request text and does not change the scripted expression's one-placeholder composition"
+observable_via = "matched control replay, StylesAndFormulas IL, and captured translation request"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "glyphs", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "The hand-written text used ASCII variable shapes, while Typst math mode emits Mathematical Alphanumeric italic scalars"
+resolution = "Use the intended U+1D465/U+1D466 scalars; both independent extractors agree and the U+2022 bullet remains the only matched-control difference"

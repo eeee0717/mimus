@@ -1,0 +1,56 @@
+# unit-form-11-fraction-rule -- expected manifest
+# Written before the narrow two-line pdfTeX fraction source and layout replay.
+
+schema_version = 1
+
+[identity]
+id = "unit-form-11-fraction-rule"
+name = "Inline fraction rule relocates with its formula"
+class = "unit"
+legality = "legal"
+cases = ["FORM-11"]
+priority = "M3"
+variable = "A real inline fraction contributes a horizontal vector rule that is uniquely owned by a model formula and must move under multiline translation flow"
+
+[source]
+method = "realistic-typesetting"
+engine = "pdftex"
+source_file = "unit-form-11-fraction-rule.tex"
+pdf = "unit-form-11-fraction-rule.pdf"
+pdf_sha256 = "b4c60674dbff02195891aa4fa28b5b15b10b0ffebda4242e490441a1fe7bd1f7"
+font_provenance = "texlive-bundled"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 260.0, 150.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "FORM11"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "The ratio ab remains attached while this narrow paragraph wraps onto a second line."
+
+[[expected.behaviour]]
+id = "FORM-11-rule-ownership"
+assertion = "The fraction's horizontal rule has exactly one formula owner and is replayed with the same translation as its numerator and denominator"
+observable_via = "walker vector paths, formula relocation replacements, final relative geometry, and rendered output"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "glyphs", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "The hand-written text used ASCII numerator and denominator shapes, while Typst math mode emits Mathematical Alphanumeric italic scalars"
+resolution = "Use pdfTeX's deterministic Computer Modern fraction glyphs; both independent extractors agree on ASCII a/b and the fraction rule remains a separate vector path"

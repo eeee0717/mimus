@@ -2697,6 +2697,23 @@ fn prepare_translations(document: &mut Document) -> Result<()> {
         .iter()
         .map(|page| page.vector_paths.clone())
         .collect::<Vec<_>>();
+    let page_bold_source_spans = document
+        .extracted_pages
+        .iter()
+        .map(|page| {
+            page.walked_characters
+                .iter()
+                .filter(|character| character.is_bold)
+                .map(|character| {
+                    (
+                        character.content_object.0,
+                        character.byte_start,
+                        character.byte_end,
+                    )
+                })
+                .collect::<BTreeSet<_>>()
+        })
+        .collect::<Vec<_>>();
     let mut prepared = BTreeMap::new();
     let mut math_diagnostics = Vec::new();
     for page in &mut document.il.pages {
@@ -2714,6 +2731,15 @@ fn prepare_translations(document: &mut Document) -> Result<()> {
                 InternalReason::InvariantViolation,
                 format!(
                     "StylesAndFormulas could not find vector paths for page {}",
+                    page.index
+                ),
+            )
+        })?;
+        let bold_source_spans = page_bold_source_spans.get(page.index).ok_or_else(|| {
+            MimusError::internal(
+                InternalReason::InvariantViolation,
+                format!(
+                    "StylesAndFormulas could not find source styles for page {}",
                     page.index
                 ),
             )
@@ -2741,10 +2767,18 @@ fn prepare_translations(document: &mut Document) -> Result<()> {
             let mut parts = Vec::new();
             let mut start = 0;
             while start < chars.len() {
-                let class = prepared_character_class(&chars[start], content_objects);
+                let class = prepared_character_class_with_source_styles(
+                    &chars[start],
+                    content_objects,
+                    bold_source_spans,
+                );
                 let mut end = start + 1;
                 while end < chars.len()
-                    && prepared_character_class(&chars[end], content_objects) == class
+                    && prepared_character_class_with_source_styles(
+                        &chars[end],
+                        content_objects,
+                        bold_source_spans,
+                    ) == class
                 {
                     end += 1;
                 }
@@ -3171,6 +3205,9 @@ fn normalize_fragmented_model_formula_order(
         reordered.extend_from_slice(&remaining[..*insertion]);
         reordered.extend(formula);
         reordered.extend_from_slice(&remaining[*insertion..]);
+        if let Some(first) = reordered.first_mut() {
+            first.implicit_space_before = false;
+        }
         *chars = reordered;
     }
 }
@@ -3818,6 +3855,14 @@ fn prepared_character_class(
     character: &Char,
     content_objects: &BTreeSet<u32>,
 ) -> PreparedCharacterClass {
+    prepared_character_class_with_source_styles(character, content_objects, &BTreeSet::new())
+}
+
+fn prepared_character_class_with_source_styles(
+    character: &Char,
+    content_objects: &BTreeSet<u32>,
+    bold_source_spans: &BTreeSet<(u32, usize, usize)>,
+) -> PreparedCharacterClass {
     if character.visible
         && character.text_transform == TextTransform::Upright
         && character
@@ -3837,7 +3882,12 @@ fn prepared_character_class(
             .font
             .resource_name
             .to_ascii_lowercase()
-            .contains("bold");
+            .contains("bold")
+            || bold_source_spans.contains(&(
+                character.passthrough.content_object,
+                character.passthrough.byte_start,
+                character.passthrough.byte_end,
+            ));
         PreparedCharacterClass::Text { bold }
     } else {
         PreparedCharacterClass::Passthrough

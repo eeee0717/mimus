@@ -1,0 +1,56 @@
+# unit-form-05-scripts-control -- expected manifest
+# Written before the matched non-list Typst source and layout replay.
+
+schema_version = 1
+
+[identity]
+id = "unit-form-05-scripts-control"
+name = "Superscript and subscript non-list control"
+class = "unit"
+legality = "legal"
+cases = ["FORM-05"]
+priority = "M3"
+variable = "The x-squared plus y-sub-one formula appears in ordinary prose without a leading bullet"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-form-05-scripts-control.typ"
+pdf = "unit-form-05-scripts-control.pdf"
+pdf_sha256 = "27bc23e611cc5fec8724ad24f974489dbd27a07eb9c077d1929c4e5f6262689b"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 420.0, 120.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "FORM05_CONTROL"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "Compare 𝑥2 + 𝑦1 with the reference."
+
+[[expected.behaviour]]
+id = "FORM-05-control"
+assertion = "The complete scripted expression is represented by one inline-formula placeholder in the non-list control"
+observable_via = "recorded model regions, StylesAndFormulas IL, and captured translation request"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "glyphs", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "The hand-written text used ASCII variable shapes, while Typst math mode emits Mathematical Alphanumeric italic scalars"
+resolution = "Use the intended U+1D465/U+1D466 scalars; both independent extractors agree and the script digits stay separate ASCII glyphs"
