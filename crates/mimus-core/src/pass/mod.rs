@@ -12558,7 +12558,9 @@ mod tests {
             .as_array()
             .unwrap();
         let published_widths = widths
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 (
                     u16::try_from(pair[0].as_i64().unwrap()).unwrap(),
