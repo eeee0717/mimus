@@ -1,0 +1,71 @@
+schema_version = 1
+
+[identity]
+id = "mal-font-04-positive-descent"
+name = "Positive FontDescriptor descent"
+class = "mal"
+legality = "malformed"
+cases = ["FONT-04"]
+priority = "M3"
+variable = "The FontDescriptor descent sign changes from canonical negative to malformed positive"
+
+[source]
+method = "byte-mutation"
+pdf = "mal-font-04-positive-descent.pdf"
+pdf_sha256 = "bafd83ca1de8eafef1f9eab3f9c52ced48fb34d49621c7b82d00b1f89a49d879"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+
+[lineage]
+parent = "unit-font-04-negative-descent-parent"
+
+[[lineage.mutations]]
+byte_offset = 589
+original_bytes = [45]
+replacement_bytes = [43]
+description = "change /Descent -210 to +210 without changing any other byte"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+declared_failure = "content-semantics:FONT-04"
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "FONT04"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "M"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.48, 82.356, 131.4]
+visual_bbox = [73.177734, 120.0, 81.181641, 128.748047]
+
+[[expected.behaviour]]
+id = "FONT-04-positive-descent-normalized"
+assertion = "The positive 210-unit descent is normalized below the baseline, producing y0=117.48pt and one typed normalized_font_descent recovery"
+observable_via = "one-byte lineage, hand arithmetic, production debug IL and content_recovered diagnostic"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "PDF number signs must mutate without shifting xref offsets"
+resolution = "Use the equally sized legal `-210` and malformed `+210` forms and record only the sign byte"
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "The malformed positive descent and zero ascent are independently normalized by Poppler"
+resolution = "Assert the specified normalized descent bottom and retain Poppler's 950-unit fallback ascent for the complete metric box"

@@ -287,6 +287,9 @@ pub struct DroppedDiagnosticCount {
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryKind {
+    /// A malformed FontDescriptor stored `/Descent` as a positive distance;
+    /// normalize it below the baseline before deriving metric boxes (FONT-04).
+    NormalizedFontDescent,
     /// 操作符前有多余操作数；仅消费尾部 arity，其余在该边界丢弃。
     ArityExcess,
     /// 操作符缺少所需操作数，原子跳过且不改变状态。

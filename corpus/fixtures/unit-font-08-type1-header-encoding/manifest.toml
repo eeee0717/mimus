@@ -1,0 +1,83 @@
+schema_version = 1
+
+[identity]
+id = "unit-font-08-type1-header-encoding"
+name = "Embedded Type1 cleartext header encoding"
+class = "unit"
+legality = "legal"
+cases = ["FONT-08"]
+priority = "M3"
+variable = "The PDF Type1 font dictionary omits Encoding while the embedded cleartext font program maps code 65 to alpha"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-font-08-type1-header-encoding.pdf"
+pdf_sha256 = "7b0ce2f0fc614c61b4a955123968a31729dcc5574a98a601e426387b5d52cafe"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusType1.pfb", sha256 = "ef2ecaff359f71078eb6611b9b4b2859d84666256340d5ee23a5657136773786", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUST", base_name = "CMMI10" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d666f6e742d30382d747970"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "FONT08"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "α"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.0, 79.668, 129.0]
+visual_bbox = [72.492, 119.868, 79.224, 125.304]
+
+[[expected.content_stream]]
+object = 8
+compressed = false
+bytes = """BT /F1 12 Tf 1 0 0 1 72 120 Tm (A) Tj ET
+"""
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 8
+
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 5
+
+[[expected.behaviour]]
+id = "FONT-08-embedded-header-encoding"
+assertion = "Code 65 resolves to U+03B1 from the embedded Type1 cleartext encoding; no PDF Encoding or ToUnicode entry supplies that mapping"
+observable_via = "raw FontFile header, AGL, production debug IL, PDFium extraction and independent extractors"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "font-advance", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "The requirement wrote /Alpha while expecting lowercase Greek alpha"
+resolution = "Use the AGL-correct glyph name /alpha so the fixture has one unambiguous scalar and a real matching CharString"

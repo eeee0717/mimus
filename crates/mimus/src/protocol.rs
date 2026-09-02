@@ -637,6 +637,7 @@ const fn human_retry_reason(reason: RetryReason) -> &'static str {
 
 const fn human_recovery_kind(recovery: RecoveryKind) -> &'static str {
     match recovery {
+        RecoveryKind::NormalizedFontDescent => "a positive font descent normalized below baseline",
         RecoveryKind::ArityExcess => "excess operator operands",
         RecoveryKind::ArityShort => "missing operator operands",
         RecoveryKind::InvalidOperands => "invalid operator operand types",
