@@ -155,6 +155,9 @@ pub enum PreservedReason {
     UnreliableUnicode,
     /// 字体对象不可解析，或超出 M1 支持面。
     UnsupportedFont,
+    /// 可翻译文字受 Form XObject 所有权阻断，V1 写回器无法改写。
+    #[serde(rename = "form_xobject_content")]
+    FormXObjectContent,
     /// 字符 advance 不为正或非有限。
     NonPositiveAdvance,
     /// 文本矩阵退化，字符不可定位。
@@ -454,6 +457,10 @@ mod tests {
         paragraph.preserved = Some(PreservedReason::UnreliableUnicode);
         let value = serde_json::to_value(&paragraph).unwrap();
         assert_eq!(value["preserved"], "unreliable_unicode");
+
+        paragraph.preserved = Some(PreservedReason::FormXObjectContent);
+        let value = serde_json::to_value(&paragraph).unwrap();
+        assert_eq!(value["preserved"], "form_xobject_content");
 
         // 缺该键的旧快照仍可读回，反序列化得到 None。
         let restored: Paragraph = serde_json::from_str(

@@ -3,6 +3,7 @@
 - 状态：已接受（2026-08-24）
 - 决策层级：混合——边界数值与恢复语义可逆（复议时更新本 ADR 与对应 fixture 预期即可）；§5 的降级报告形状一经发布即属公开合同，受 ADR-0011 §6 演进规则约束，难逆；§3 的写回模型是难逆（三个 Issue 的保真上限建立其上）
 - 2026-08-28 修订（#98）：允许有界规范化有限、非退化但轴端点倒序的 Form `/BBox`，并为恢复诊断增加有界对象定位。
+- 2026-09-02 修订（M3.6）：V1 span splice 的所有权明确限于页面顶层 `/Contents`；Form XObject 内的 `Translate` 文字以 `form_xobject_content` typed 段级保留，改写推迟到 V1 后。
 
 ## 背景
 
@@ -22,6 +23,10 @@
 ### 1. 写回模型：区间替换（span splice）取代整流重建
 
 Typeset 不再从 IL 重建整个 content stream。页面输出 = **原解码流字节，仅把被翻译单元的 text-show 操作数区间替换为新字节**，其余一切原样透传：未知操作符、图形状态、内联图像、Form 调用、非直立单元、降级段落。多 Contents 页逐流替换后逐流重建，**不合并为单流**（合并会放大 diff 且破坏 PARSE-04 的边界语义）。
+
+V1 的替换所有权只覆盖页面字典顶层 `/Contents` 引用的流。walker 虽会递归展开 Form XObject 并把字符归一到页面坐标，但 writer 不修改 Form stream。一个自然段存在 Form-owned `Translate` 字符且不存在 page-owned `Translate` 字符时，以 `form_xobject_content` 保留；若两类字符共存，页面级单元仍可改写，Form 单元继续 passthrough，不能因整段保留而丢掉本来可翻译的页面级内容。
+
+pdfpages/pdfjam 与带封面 reprint 还有更强的整页形态：页面全部可见直立文字均来自 Form，页面顶层流只负责 `Do` 与水印。文档只要至少一个这种 wrapper 页含 `Translate` 内容，就把所有 wrapper 页的段落统一归到 `form_xobject_content`，从而把整篇 source-preserving 的真实根因完整入账；只有 `Passthrough` 图表的 Form 文档仍不触发。该原因在可靠性优先级中位于 `unsupported_font` 之后、`unreliable_unicode` 之前。共享或嵌套 Form 的改写语义不在 V1 中猜测。
 
 推论（皆为该模型的必然后果，非独立决策）：
 
@@ -46,7 +51,7 @@ Typeset 的恒等守卫从「全段单一 upright 字体 run」收窄为「**替
 |---|---|---|---|
 | **文档级** | 加密、页树环、ObjStm 损坏、关键位置 dangling ref | 分类退出、不产出输出文件 | 现有 `MimusError`（不新增 reason，复用 `pdf_parse`/`unsupported_pdf`） |
 | **页级** | tokenizer fatal（未闭合字符串/数组/hex、嵌套超限）、`m`/`l` 路径操作数错长或非数值、坏 BBox/Matrix、缺 XObject 资源、非法 `/Rotate`、坏 MediaBox | 该页不产生 `PageRewrite`，原 content stream 逐字节保留；其余页继续 | `ExtractedPage.degraded`（pub(crate)） |
-| **段级** | 字体或 Unicode 不可信（见 ADR-0014）、退化文本矩阵导致不可定位、翻译响应连续两次违反占位符或内容守恒合同 | 该段全部区间不替换，`translated_text` 保持 `None` | `il::Paragraph.preserved`（可选字段） |
+| **段级** | 字体或 Unicode 不可信（见 ADR-0014）、`Translate` 文字属于 Form XObject、退化文本矩阵导致不可定位、翻译响应连续两次违反占位符或内容守恒合同 | 该段全部区间不替换，`translated_text` 保持 `None` | `il::Paragraph.preserved`（可选字段） |
 
 「**单元**」不是新的 IL 层级。IL 保持 Document → Page → Paragraph → Char 四级，单元 = **段内连续的、同一隔离原因的字符区间**，由 Typeset 从 `Char.text_transform` 与可见性标记动态聚合。理由：M1 的隔离语义只需要回答「哪些区间不替换」，派生分组零 schema 成本；#20 若需要更强结构再升 IL 版本。
 

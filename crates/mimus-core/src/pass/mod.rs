@@ -1210,6 +1210,7 @@ fn reliable_upright_snapshots(walked: &[crate::walk::WalkedChar]) -> Vec<PageCha
 fn paragraph_preserved_reason<'a>(
     walked: impl IntoIterator<Item = (usize, &'a crate::walk::WalkedChar)>,
     weak_unicode_conflicts: &BTreeSet<usize>,
+    has_only_form_owned_translatable_content: bool,
 ) -> Option<il::PreservedReason> {
     let translatable = walked
         .into_iter()
@@ -1222,6 +1223,8 @@ fn paragraph_preserved_reason<'a>(
         .any(|(_, character)| !character.font_supported)
     {
         Some(il::PreservedReason::UnsupportedFont)
+    } else if has_only_form_owned_translatable_content {
+        Some(il::PreservedReason::FormXObjectContent)
     } else if translatable.iter().any(|(index, character)| {
         character.unicode.is_none() || weak_unicode_conflicts.contains(index)
     }) {
@@ -1276,6 +1279,7 @@ struct ParagraphDraft {
 
 pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     let mut pages = Vec::with_capacity(document.extracted_pages.len());
+    let mut form_wrapper_pages = Vec::with_capacity(document.extracted_pages.len());
     let mut unicode_recoveries = Vec::new();
     let mut glyph_bbox_estimates = Vec::new();
     for extracted in &document.extracted_pages {
@@ -1285,6 +1289,7 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
                 geometry: extracted.geometry,
                 paragraphs: Vec::new(),
             });
+            form_wrapper_pages.push((false, false));
             continue;
         }
         if extracted.walked_characters.is_empty() && extracted.layout_regions.is_empty() {
@@ -1293,6 +1298,7 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
                 geometry: extracted.geometry,
                 paragraphs: Vec::new(),
             });
+            form_wrapper_pages.push((false, false));
             continue;
         }
         let median_metric_area = median_metric_character_area(&extracted.walked_characters);
@@ -1494,6 +1500,11 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
                 })
                 .then_with(|| right.top.total_cmp(&left.top)),
         });
+        let page_content_objects = extracted
+            .content_streams
+            .iter()
+            .map(|stream| stream.object_id.0)
+            .collect::<BTreeSet<_>>();
         let mut paragraphs = drafts
             .into_iter()
             .enumerate()
@@ -1503,6 +1514,7 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
                     draft.lines,
                     &extracted.walked_characters,
                     &extracted.character_alignment.weak_unicode_conflicts,
+                    &page_content_objects,
                 )
             })
             .collect::<Vec<_>>();
@@ -1535,11 +1547,43 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
                 });
             }
         }
+        let visible_upright = paragraphs
+            .iter()
+            .flat_map(Paragraph::chars)
+            .filter(|character| {
+                character.visible && character.text_transform == TextTransform::Upright
+            })
+            .collect::<Vec<_>>();
+        let is_form_wrapper_page = !visible_upright.is_empty()
+            && visible_upright.iter().all(|character| {
+                !page_content_objects.contains(&character.passthrough.content_object)
+            });
+        let has_translatable_content = visible_upright.iter().any(|character| {
+            character
+                .layout
+                .is_some_and(|layout| layout.policy == TranslationPolicy::Translate)
+        });
+        form_wrapper_pages.push((is_form_wrapper_page, has_translatable_content));
         pages.push(il::Page {
             index: extracted.index,
             geometry: extracted.geometry,
             paragraphs,
         });
+    }
+    let document_has_translatable_form_wrapper = form_wrapper_pages
+        .iter()
+        .any(|(is_wrapper, has_translatable)| *is_wrapper && *has_translatable);
+    if document_has_translatable_form_wrapper {
+        for (page, (is_wrapper, _)) in pages.iter_mut().zip(&form_wrapper_pages) {
+            if !is_wrapper {
+                continue;
+            }
+            for paragraph in &mut page.paragraphs {
+                if paragraph.preserved != Some(il::PreservedReason::UnsupportedFont) {
+                    paragraph.preserved = Some(il::PreservedReason::FormXObjectContent);
+                }
+            }
+        }
     }
     document.il = il::Document {
         schema_version: il::SCHEMA_VERSION,
@@ -2485,6 +2529,7 @@ fn paragraph_from_lines(
     lines: Vec<TextLine>,
     walked: &[crate::walk::WalkedChar],
     weak_unicode_conflicts: &BTreeSet<usize>,
+    page_content_objects: &BTreeSet<u32>,
 ) -> Paragraph {
     let bounds = lines_bounds(&lines);
     let first_line_indent = source_first_line_indent(&lines);
@@ -2499,11 +2544,32 @@ fn paragraph_from_lines(
             layout.bounds = bounds;
         }
     }
+    let has_translatable_form_xobject_content = positioned.iter().any(|positioned| {
+        let walked = &walked[positioned.walked_index];
+        walked.visible
+            && walked.text_transform == TextTransform::Upright
+            && positioned
+                .character
+                .layout
+                .is_some_and(|layout| layout.policy == TranslationPolicy::Translate)
+            && !page_content_objects.contains(&walked.content_object.0)
+    });
+    let has_translatable_page_content = positioned.iter().any(|positioned| {
+        let walked = &walked[positioned.walked_index];
+        walked.visible
+            && walked.text_transform == TextTransform::Upright
+            && positioned
+                .character
+                .layout
+                .is_some_and(|layout| layout.policy == TranslationPolicy::Translate)
+            && page_content_objects.contains(&walked.content_object.0)
+    });
     let preserved = paragraph_preserved_reason(
         positioned
             .iter()
             .map(|positioned| (positioned.walked_index, &walked[positioned.walked_index])),
         weak_unicode_conflicts,
+        has_translatable_form_xobject_content && !has_translatable_page_content,
     );
     let mut chars = Vec::with_capacity(positioned.len());
     let mut previous_locatable = None;
@@ -15951,7 +16017,7 @@ mod tests {
         assert_eq!(alignment.engine_indices_by_walk, [None, None, None]);
         assert!(alignment.weak_unicode_conflicts.is_empty());
         assert_eq!(
-            paragraph_preserved_reason(walked.iter().enumerate(), &BTreeSet::new()),
+            paragraph_preserved_reason(walked.iter().enumerate(), &BTreeSet::new(), false),
             Some(il::PreservedReason::UnreliableUnicode)
         );
         assert!(diagnostics.entries().is_empty());
@@ -16109,7 +16175,8 @@ mod tests {
             assert_eq!(
                 paragraph_preserved_reason(
                     walked.iter().enumerate(),
-                    &alignment.weak_unicode_conflicts
+                    &alignment.weak_unicode_conflicts,
+                    false,
                 ),
                 Some(il::PreservedReason::UnreliableUnicode)
             );
@@ -16294,7 +16361,7 @@ mod tests {
     }
 
     #[test]
-    fn form_origin_characters_remain_passthrough_in_the_full_pipeline() {
+    fn form_origin_characters_are_typed_and_remain_passthrough_in_the_full_pipeline() {
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("form-output.pdf");
         let mut document = Document::new(form_fixture(), &output);
@@ -16314,17 +16381,59 @@ mod tests {
 
         assert_eq!(document.il.pages[0].paragraphs[0].source_text(), "MIMUS");
         assert_eq!(
-            document.il.pages[0].paragraphs[0]
-                .translated_text
-                .as_deref(),
-            Some("MIMUS")
+            document.il.pages[0].paragraphs[0].preserved,
+            Some(il::PreservedReason::FormXObjectContent)
         );
+        assert!(document.il.pages[0].paragraphs[0].translated_text.is_none());
         assert_eq!(translator.calls.load(Ordering::SeqCst), 0);
         assert!(document.rewrites.is_empty());
         assert_eq!(
             std::fs::read(&output).unwrap(),
             std::fs::read(form_fixture()).unwrap()
         );
+    }
+
+    #[test]
+    fn mixed_page_and_form_translation_content_keeps_the_page_owned_unit_processable() {
+        let mut document = Document::for_inspection(form_fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        for pass in [parse as Pass, scan_detect, layout] {
+            pass(&mut document, &context).unwrap();
+        }
+
+        let page_content_object = document.extracted_pages[0].content_streams[0].object_id;
+        let mut page_owned = document.extracted_pages[0].walked_characters.clone();
+        for character in &mut page_owned {
+            character.content_object = page_content_object;
+        }
+        document.extracted_pages[0]
+            .walked_characters
+            .extend(page_owned);
+
+        paragraph_find(&mut document, &context).unwrap();
+
+        let mixed =
+            document.il.pages[0]
+                .paragraphs
+                .iter()
+                .find(|paragraph| {
+                    paragraph.chars().iter().any(|character| {
+                        character.passthrough.content_object == page_content_object.0
+                    }) && paragraph.chars().iter().any(|character| {
+                        character.passthrough.content_object != page_content_object.0
+                    })
+                })
+                .expect("the overlapping page and Form text should share a paragraph");
+        assert_eq!(mixed.preserved, None);
     }
 
     #[test]

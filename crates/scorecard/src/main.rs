@@ -3129,6 +3129,26 @@ mod tests {
     }
 
     #[test]
+    fn form_xobject_preservation_is_reported_in_the_coverage_reason_distribution() {
+        let before = il("translate", None, None);
+        let after = il(
+            "translate",
+            None,
+            Some(Value::String("form_xobject_content".into())),
+        );
+
+        let result = coverage(&before, &after, &after, 1000.0);
+
+        assert_eq!(result.measurements["eligible_paragraphs"], 1);
+        assert_eq!(result.measurements["translated_paragraphs"], 0);
+        assert_eq!(result.measurements["paragraph_coverage"], 0.0);
+        assert_eq!(
+            result.measurements["preserved_reasons"]["form_xobject_content"],
+            1
+        );
+    }
+
+    #[test]
     fn cache_metrics_count_protocol_events() {
         let events = vec![
             serde_json::json!({"event":"translation_cache", "status":"hit"}),

@@ -61,6 +61,7 @@
 | 52 | model 将纯公式误标为 `text` 时，只有整个自然段都属于 model `text`、完整 source 命中保守数学形状、含强数学运算符、按空白分隔的 operand-like token 不超过 2 个且无其它 model label，才整段 source passthrough 并发 `math_passthrough` typed info；不建立 `inline_formula`、不产生请求、不计 degradation。普通 model prose（包括只含上下标但无强运算符的句子）保持翻译 | — |
 | 53 | 中文译文采用 V1 最小禁则集：行首禁闭合标点、行尾禁开放标点，不做悬挂标点；普通、障碍槽与公式流共享同一字符集合和断行 token，段首闭合或段尾开放等无法满足的布局走既有 `typeset_overflow`，不放宽 8pt、碰撞或 CropBox | [docs/10-quality-scorecard.md](docs/10-quality-scorecard.md) §2.4.2 |
 | 54 | 非公式下划线只有在安全完整 `q/Q` 横线、同 content object、唯一完整 text-show owner、段外无共享字符、下方充分重叠且最终单行 replacement delta 唯一时才随 owner 刚体平移；原 path span 被 replacement 声明且新墨迹进入安全边界。任何可疑但不完备的所有权整段 `typeset_protocol` 保留，绝不删除或把下划线留在移动前槽位 | [docs/10-quality-scorecard.md](docs/10-quality-scorecard.md) §2.4.2 |
+| 55 | V1 写回器只改写页面顶层 `/Contents`，**不翻译 Form XObject 内文字**。仅含 Form-owned `Translate` 文字的段落以 additive IL v1 / CLI v2 原因 `form_xobject_content` typed 保留；同时含页面级 `Translate` 文字的混合段继续处理页面级单元，不因 Form 片段整段保留。若页面全部可见直立文字均在 Form 内，且文档至少有一个这类页面含 `Translate` 内容，则按整页包装根因将这些 wrapper 页的全部段落 typed 入账（覆盖 pdfpages/pdfjam 与带封面 reprint）。该原因优先于 `unreliable_unicode`，`--strict` 可阻断发布；纯 `Passthrough` 图表 Form 文档不触发。Form 内改写推迟到 V1 后候选 | [ADR-0013](docs/adr/0013-bounded-walk-and-graded-degradation.md)、[ADR-0017](docs/adr/0017-translation-degradation-and-strict.md) |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
@@ -135,6 +136,7 @@ model `inline_formula` 的**存在性**保持绝对权威，但模型框边缘�
 ### 写回
 
 - **增量改写（incremental rewrite）**：保留原 PDF 全部对象，只改 content stream、追加字体。**V1 写回模型**（lopdf）。
+- **Form XObject 文字边界**：walker 会递归读取 Form 内文字，但 V1 span splice 只拥有页面顶层 `/Contents`。Form-only `Translate` 段不进入请求，以 `form_xobject_content` typed 保留；混合段只处理页面级单元。pdfpages/pdfjam 合集和带封面 reprint 的整页 wrapper 以页面根因统一入账，因此可出现整篇 source-preserving 输出。Form 改写属于 V1 后候选。
 - **区间替换（span splice）**：页面输出 content = 原解码流字节，只把被翻译单元的 text-show 操作数区间换成新字节，其余（未知操作符、图形状态、内联图像、Form 调用、隔离单元、保留段）原样透传。取代「从 IL 重建整流」，是有界宽容走查能与 Write 像素等值验证共存的前提（ADR-0013 §1）。多 Contents 页逐流替换、不合并。
 - **从零重建（rebuild）**：全新构建文档，扫描件路径（V2，krilla/pdf-writer 一类）。两模型不可互换。
 
