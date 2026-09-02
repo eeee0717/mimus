@@ -87,6 +87,10 @@ CLI 机器协议版本升为 2；IL 的 `schema_version` 独立保持 1。每行
   不产生输出。省略 `detail` 的既有 error 形状不变。字体走查另增加普通预算内的 informational
   `glyph_bbox_estimated { page_index, character_index, font_object, code }`，精确定位采用字体级
   保守 bbox 的字符；两项均为 additive v2 扩展，不升 schema。
+- 2026-09-02 M3.6 #175：`configuration_resolved` 增加 `request_timeout_secs`；客户端
+  deadline 触发的 `translation_retry` 使用新 reason `client_timeout`，并增加
+  `upstream_request_abandoned=true`，明确客户端已放弃该请求但上游仍可能完成。HTTP 408
+  继续使用既有 `timeout`。均为 additive v2 扩展，不升 schema。
 
 ## 后果
 

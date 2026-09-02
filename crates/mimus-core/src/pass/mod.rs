@@ -19191,7 +19191,7 @@ mod tests {
     fn paragraph_translation_is_bounded_and_applied_in_reading_order() {
         let mut document = Document::for_inspection(fixture());
         let engine = FakeEngine::default();
-        let translator = BoundedTranslator::new(3);
+        let translator = BoundedTranslator::new(4);
         let events = RecordingEventSink::default();
         let context = PassContext {
             engine: &engine,
@@ -19201,7 +19201,7 @@ mod tests {
             snapshots: None,
             config: crate::context::PipelineConfig {
                 auto_terms: false,
-                max_concurrency: 3,
+                max_concurrency: 4,
                 ..crate::context::PipelineConfig::default()
             },
         };
@@ -19222,7 +19222,7 @@ mod tests {
         translate(&mut document, &context).unwrap();
 
         assert_eq!(translator.calls.load(Ordering::SeqCst), 8);
-        assert_eq!(translator.max_in_flight.load(Ordering::SeqCst), 3);
+        assert_eq!(translator.max_in_flight.load(Ordering::SeqCst), 4);
         assert_eq!(translator.in_flight.load(Ordering::SeqCst), 0);
         assert_eq!(crate::context::PipelineConfig::default().max_concurrency, 4);
         for (index, paragraph) in document.il.pages[0].paragraphs.iter().enumerate() {

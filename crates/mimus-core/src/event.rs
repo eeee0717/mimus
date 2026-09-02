@@ -23,6 +23,10 @@ fn f64_is_zero(value: &f64) -> bool {
     *value == 0.0
 }
 
+fn bool_is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Event {
     pub schema_version: u32,
@@ -119,6 +123,7 @@ pub struct ConfigurationResolved {
     pub cache_enabled: bool,
     pub cache_path: Option<String>,
     pub concurrency: usize,
+    pub request_timeout_secs: u64,
     pub strict: bool,
     pub translate_table: bool,
     pub strip_link_borders: bool,
@@ -703,6 +708,8 @@ pub enum DiagnosticEvent {
         attempt: usize,
         delay_ms: u64,
         reason: RetryReason,
+        #[serde(skip_serializing_if = "bool_is_false")]
+        upstream_request_abandoned: bool,
     },
     PlaceholderRetry {
         page_index: usize,
@@ -966,6 +973,7 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 attempt: *attempt,
                 delay_ms: *delay_ms,
                 reason: *reason,
+                upstream_request_abandoned: *reason == RetryReason::ClientTimeout,
             },
             Diagnostic::PlaceholderRetry {
                 page_index,
@@ -1441,7 +1449,24 @@ mod tests {
         assert_eq!(value["attempt"], 3);
         assert_eq!(value["delay_ms"], 1_000);
         assert_eq!(value["reason"], "rate_limited");
+        assert!(value.get("upstream_request_abandoned").is_none());
         assert!(value.get("source").is_none());
+    }
+
+    #[test]
+    fn client_timeout_retry_reports_the_abandoned_upstream_request() {
+        let event = DiagnosticEvent::from(&Diagnostic::TranslationRetry {
+            page_index: 0,
+            paragraph_index: 1,
+            attempt: 2,
+            delay_ms: 500,
+            reason: RetryReason::ClientTimeout,
+        });
+        let value =
+            serde_json::to_value(Event::new(EventKind::Diagnostic { diagnostic: event })).unwrap();
+        assert_eq!(value["reason"], "client_timeout");
+        assert_eq!(value["attempt"], 2);
+        assert_eq!(value["upstream_request_abandoned"], true);
     }
 
     #[test]

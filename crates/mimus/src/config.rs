@@ -10,6 +10,8 @@ use serde::Deserialize;
 const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 const DEFAULT_MODEL: &str = "gpt-4.1-mini";
 const DEFAULT_TARGET_LANGUAGE: &str = "zh-CN";
+const DEFAULT_REQUEST_TIMEOUT_SECS: i64 = 120;
+const MAX_REQUEST_TIMEOUT_SECS: i64 = 600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -44,6 +46,7 @@ pub(crate) struct ConfigOverrides {
     pub cache: Option<PathBuf>,
     pub no_cache: bool,
     pub concurrency: Option<usize>,
+    pub request_timeout_secs: Option<i64>,
     pub strict: bool,
     pub translate_table: bool,
 }
@@ -78,6 +81,7 @@ pub(crate) struct ResolvedConfig {
     pub auto_terms: bool,
     pub cache_path: Option<PathBuf>,
     pub max_concurrency: usize,
+    pub request_timeout_secs: u64,
     pub strict: bool,
     pub translate_table: bool,
     api_key: Option<SecretString>,
@@ -139,6 +143,15 @@ impl ResolvedConfig {
                 "translation concurrency must be at least 1",
             ));
         }
+        let request_timeout_secs =
+            validate_request_timeout_secs(match overrides.request_timeout_secs {
+                Some(value) => value,
+                None => environment
+                    .request_timeout_secs
+                    .transpose()?
+                    .or(file.request_timeout_secs)
+                    .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS),
+            })?;
         let api_key = environment
             .api_key
             .or_else(|| file.api_key.filter(|value| !value.trim().is_empty()))
@@ -236,6 +249,7 @@ impl ResolvedConfig {
             auto_terms: !overrides.no_auto_terms,
             cache_path,
             max_concurrency,
+            request_timeout_secs,
             strict: overrides.strict,
             translate_table: overrides.translate_table,
             api_key,
@@ -251,7 +265,7 @@ impl ResolvedConfig {
                 self.api_key
                     .take()
                     .expect("validated OpenAI configuration has a key"),
-                Duration::from_secs(30),
+                Duration::from_secs(self.request_timeout_secs),
             )?)),
         }
     }
@@ -314,6 +328,7 @@ struct FileConfig {
     cache_dir: Option<PathBuf>,
     cache: Option<PathBuf>,
     concurrency: Option<usize>,
+    request_timeout_secs: Option<i64>,
 }
 
 struct EnvironmentConfig {
@@ -331,6 +346,7 @@ struct EnvironmentConfig {
     cache_dir: Option<PathBuf>,
     cache_path: Option<PathBuf>,
     concurrency: Option<Result<usize>>,
+    request_timeout_secs: Option<Result<i64>>,
 }
 
 impl EnvironmentConfig {
@@ -366,8 +382,26 @@ impl EnvironmentConfig {
                     )
                 })
             }),
+            request_timeout_secs: first_env(&["MIMUS_REQUEST_TIMEOUT"]).map(|value| {
+                value.parse::<i64>().map_err(|_| {
+                    MimusError::usage(
+                        UsageReason::InvalidArguments,
+                        "MIMUS_REQUEST_TIMEOUT must be an integer from 1 through 600 seconds",
+                    )
+                })
+            }),
         }
     }
+}
+
+fn validate_request_timeout_secs(value: i64) -> Result<u64> {
+    if !(1..=MAX_REQUEST_TIMEOUT_SECS).contains(&value) {
+        return Err(MimusError::usage(
+            UsageReason::InvalidArguments,
+            "request timeout must be from 1 through 600 seconds",
+        ));
+    }
+    Ok(value as u64)
 }
 
 fn choose_optional(
@@ -581,6 +615,15 @@ mod tests {
     fn malformed_or_unknown_file_fields_are_rejected() {
         assert!(toml::from_str::<FileConfig>("model = [1]").is_err());
         assert!(toml::from_str::<FileConfig>("secret = 'value'").is_err());
+    }
+
+    #[test]
+    fn request_timeout_accepts_only_the_documented_bounds() {
+        assert_eq!(validate_request_timeout_secs(1).unwrap(), 1);
+        assert_eq!(validate_request_timeout_secs(600).unwrap(), 600);
+        for invalid in [-1, 0, 601] {
+            assert!(validate_request_timeout_secs(invalid).is_err());
+        }
     }
 
     #[test]

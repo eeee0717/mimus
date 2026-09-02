@@ -268,7 +268,7 @@ fn handle_request(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-    stream.write_all(response.as_bytes()).unwrap();
+    let _ = stream.write_all(response.as_bytes());
 }
 
 fn deterministic_translation(input: &str) -> String {
@@ -470,6 +470,16 @@ fn run_openai_path(
     server: &GateResponsesServer,
     options: RunOptions<'_>,
 ) -> Output {
+    run_openai_path_with_extra_args(input, layout_recording, server, options, &[])
+}
+
+fn run_openai_path_with_extra_args(
+    input: &Path,
+    layout_recording: Option<&Path>,
+    server: &GateResponsesServer,
+    options: RunOptions<'_>,
+    extra_args: &[&str],
+) -> Output {
     let config_file = options.output.parent().unwrap().join("absent-config.toml");
     let mut command = Command::new(BIN);
     command
@@ -524,6 +534,7 @@ fn run_openai_path(
     } else {
         command.args(["--layout", "single-line"]);
     }
+    command.args(extra_args);
     command.arg(input).output().unwrap()
 }
 
@@ -2614,6 +2625,89 @@ fn cache_retry_invalidation_degradation_events_and_secrets_close_the_m2_matrix()
         assert_secret_absent(output, name);
     }
     assert_tree_has_no_secret(directory.path());
+}
+
+#[test]
+fn configured_client_timeout_exhausts_three_retries_and_never_caches_late_success() {
+    let directory = tempfile::tempdir().unwrap();
+    let input =
+        repo_root().join("corpus/fixtures/unit-base-01-single-line/unit-base-01-single-line.pdf");
+    let cache = directory.path().join("timeout.redb");
+    let first_server = GateResponsesServer::start(
+        (0..4).map(|_| ScriptedReply::DelayedOutput(Duration::from_millis(1_100), "中")),
+    );
+    let first = run_openai_path_with_extra_args(
+        &input,
+        None,
+        &first_server,
+        RunOptions {
+            output: &directory.path().join("timed-out.pdf"),
+            debug: None,
+            cache: Some(&cache),
+            model: "m3-client-timeout-model",
+            target_language: "zh-CN",
+            glossary: None,
+            auto_terms: false,
+            strict: false,
+        },
+        &["--request-timeout", "1", "--concurrency", "4"],
+    );
+    assert_single_preserved_paragraph(&first, "translation_failure");
+    assert_eq!(first_server.request_count(), 4);
+    first_server.assert_clean();
+    let first_events = parse_events(&first.stdout);
+    let resolved = first_events
+        .iter()
+        .find(|event| event["event"] == "configuration_resolved")
+        .unwrap();
+    assert_eq!(resolved["request_timeout_secs"], 1);
+    assert_eq!(resolved["concurrency"], 4);
+    let retries = first_events
+        .iter()
+        .filter(|event| event["id"] == "translation_retry")
+        .collect::<Vec<_>>();
+    assert_eq!(retries.len(), 3);
+    for (index, retry) in retries.iter().enumerate() {
+        assert_eq!(retry["attempt"], index + 1);
+        assert_eq!(retry["reason"], "client_timeout");
+        assert_eq!(retry["upstream_request_abandoned"], true);
+    }
+
+    let recovery_server = GateResponsesServer::start([ScriptedReply::Output("中")]);
+    let recovered = run_openai_path_with_extra_args(
+        &input,
+        None,
+        &recovery_server,
+        RunOptions {
+            output: &directory.path().join("recovered.pdf"),
+            debug: None,
+            cache: Some(&cache),
+            model: "m3-client-timeout-model",
+            target_language: "zh-CN",
+            glossary: None,
+            auto_terms: false,
+            strict: false,
+        },
+        &["--request-timeout", "1", "--concurrency", "4"],
+    );
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stdout)
+    );
+    assert_eq!(recovery_server.request_count(), 1);
+    recovery_server.assert_clean();
+    let recovered_events = parse_events(&recovered.stdout);
+    assert!(
+        recovered_events
+            .iter()
+            .any(|event| { event["event"] == "translation_cache" && event["status"] == "miss" })
+    );
+    assert!(
+        recovered_events
+            .iter()
+            .all(|event| event["id"] != "translation_retry")
+    );
 }
 
 #[test]
