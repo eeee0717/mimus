@@ -1,0 +1,51 @@
+# unit-form-10-mixed-styles -- expected manifest
+# Written before the deterministic multi-style Typst source.
+
+schema_version = 1
+
+[identity]
+id = "unit-form-10-mixed-styles"
+name = "Mixed bold italic note and superscript styles"
+class = "unit"
+legality = "legal"
+cases = ["FORM-10"]
+priority = "M3"
+variable = "One prose line contains a bold run, an italic run, a 7.5pt note, and a raised script under the V1 style policy"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-form-10-mixed-styles.typ"
+pdf = "unit-form-10-mixed-styles.pdf"
+pdf_sha256 = "737bfa633752a7448a47a53c5e2edb7d95f39e657832d683bc44b7489b4fafbe"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 420.0, 120.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "FORM10_MIXED"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "Regular strong emphasis (small note) x2 end."
+
+[[expected.behaviour]]
+id = "FORM-10-style-policy"
+assertion = "Only the bold word is protected by a bold placeholder; italic, 7.5pt note, and raised script remain ordinary request text"
+observable_via = "input font identities, captured request, restored translation styles, and output font resources"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "glyphs", "render"]

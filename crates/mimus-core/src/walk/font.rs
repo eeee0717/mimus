@@ -19,6 +19,7 @@ pub(super) struct DecodedGlyph {
 #[derive(Debug, Clone)]
 pub(super) struct ResolvedFont {
     pub reference: FontRef,
+    pub is_bold: bool,
     pub ascent_em: f64,
     pub descent_em: f64,
     pub normalized_descriptor_descent: bool,
@@ -154,6 +155,7 @@ impl ResolvedFont {
         Ok(
             Self::try_resolve(document, resources, name).unwrap_or(Self {
                 reference: fallback_reference,
+                is_bold: font_name_is_bold(name),
                 ascent_em: 0.0,
                 descent_em: 0.0,
                 normalized_descriptor_descent: false,
@@ -187,6 +189,7 @@ impl ResolvedFont {
             b"Type3" => Self::type3(document, font, reference),
             _ => Ok(Self {
                 reference,
+                is_bold: font_dictionary_is_bold(font, None),
                 ascent_em: 0.0,
                 descent_em: 0.0,
                 normalized_descriptor_descent: false,
@@ -219,6 +222,7 @@ impl ResolvedFont {
             .and_then(Object::as_name)
             .unwrap_or_default();
         let standard_14 = is_standard_14_name(base_font);
+        let is_bold = font_dictionary_is_bold(font, descriptor);
         let ascent = descriptor
             .and_then(|value| value.get(b"Ascent").ok())
             .and_then(object_number)
@@ -249,6 +253,7 @@ impl ResolvedFont {
             && !matches!(embedded_unicode, EmbeddedUnicode::Invalid);
         Ok(Self {
             reference,
+            is_bold,
             ascent_em: ascent.unwrap_or(0.0) / 1000.0,
             descent_em: descent.unwrap_or(0.0) / 1000.0,
             normalized_descriptor_descent,
@@ -301,6 +306,8 @@ impl ResolvedFont {
             .get_deref(b"FontDescriptor", document)
             .and_then(Object::as_dict)
             .ok();
+        let is_bold =
+            font_dictionary_is_bold(font, None) || font_dictionary_is_bold(descendant, descriptor);
         let ascent = descriptor
             .and_then(|value| value.get(b"Ascent").ok())
             .and_then(object_number);
@@ -333,6 +340,7 @@ impl ResolvedFont {
         );
         Ok(Self {
             reference,
+            is_bold,
             ascent_em: ascent.unwrap_or(0.0) / 1000.0,
             descent_em: descent.unwrap_or(0.0) / 1000.0,
             normalized_descriptor_descent,
@@ -407,6 +415,7 @@ impl ResolvedFont {
         let supported = valid_matrix && !glyphs.is_empty();
         Ok(Self {
             reference,
+            is_bold: font_dictionary_is_bold(font, None),
             ascent_em,
             descent_em,
             normalized_descriptor_descent: false,
@@ -1433,6 +1442,23 @@ fn dereference_dictionary<'a>(
     }
 }
 
+fn font_dictionary_is_bold(font: &Dictionary, descriptor: Option<&Dictionary>) -> bool {
+    font.get(b"BaseFont")
+        .and_then(Object::as_name)
+        .is_ok_and(font_name_is_bold)
+        || descriptor.is_some_and(|descriptor| {
+            descriptor
+                .get(b"FontName")
+                .and_then(Object::as_name)
+                .is_ok_and(font_name_is_bold)
+        })
+}
+
+fn font_name_is_bold(name: &[u8]) -> bool {
+    name.windows(b"bold".len())
+        .any(|part| part.eq_ignore_ascii_case(b"bold"))
+}
+
 fn resource_name(name: &[u8]) -> String {
     let mut output = String::new();
     for byte in name {
@@ -1573,6 +1599,7 @@ mod tests {
                 object_number: 1,
                 generation: 0,
             },
+            is_bold: false,
             ascent_em: 0.8,
             descent_em: -0.2,
             normalized_descriptor_descent: false,
@@ -1603,6 +1630,7 @@ mod tests {
                 object_number: 1,
                 generation: 0,
             },
+            is_bold: false,
             ascent_em: 0.8,
             descent_em: -0.2,
             normalized_descriptor_descent: false,
@@ -1638,6 +1666,14 @@ mod tests {
         assert_eq!(normalize_descriptor_descent(210.0), -210.0);
         assert_eq!(normalize_descriptor_descent(-210.0), -210.0);
         assert_eq!(normalize_descriptor_descent(0.0), 0.0);
+    }
+
+    #[test]
+    fn font_weight_is_derived_from_pdf_font_names() {
+        assert!(font_name_is_bold(b"HAYRHJ+LibertinusSerif-Bold-Identity-H"));
+        assert!(font_name_is_bold(b"ABCDEE+SourceSans-SemiBold"));
+        assert!(!font_name_is_bold(b"DQSIMB+LibertinusSerif-Regular"));
+        assert!(!font_name_is_bold(b"DMFRRH+LibertinusSerif-Italic"));
     }
 
     #[test]

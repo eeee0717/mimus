@@ -1,0 +1,51 @@
+# unit-form-06-numeric-prose -- expected manifest
+# Written before the numeric-prose Typst source and text-only model replay.
+
+schema_version = 1
+
+[identity]
+id = "unit-form-06-numeric-prose"
+name = "Numeric prose remains ordinary translation text"
+class = "unit"
+legality = "legal"
+cases = ["FORM-06"]
+priority = "M3"
+variable = "An ordinary model text region contains year, decimal, and comma-separated prose numbers without any formula region"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-form-06-numeric-prose.typ"
+pdf = "unit-form-06-numeric-prose.pdf"
+pdf_sha256 = "c54ad4e1384949e30c7757d8c85eb55aa43f01d1c7f15b589353f00c02459a0d"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 420.0, 120.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "FORM06"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "In 2024, we measured 3.14 and 1, 2, 3."
+
+[[expected.behaviour]]
+id = "FORM-06-zero-placeholders"
+assertion = "Every number and comma remains literal request text and the prepared request contains zero formula placeholders"
+observable_via = "text-only model replay, StylesAndFormulas IL, and captured translation request"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "reading-order", "dual-parser-geometry", "render"]

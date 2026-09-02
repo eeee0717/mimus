@@ -1,0 +1,56 @@
+# unit-form-10-bold-stress -- expected manifest
+# Written before the 45-span deterministic Typst source.
+
+schema_version = 1
+
+[identity]
+id = "unit-form-10-bold-stress"
+name = "Forty-five alternating bold spans"
+class = "unit"
+legality = "legal"
+cases = ["FORM-10"]
+priority = "M3"
+variable = "A single paragraph contains 45 separately delimited bold spans, above BabelDOC's historical 40-placeholder cutoff"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-form-10-bold-stress.typ"
+pdf = "unit-form-10-bold-stress.pdf"
+pdf_sha256 = "cd1de5aa972ba4bfb01d8f866992bbada8bb0c8aa67fdc081b8bc18d62b588b0"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 800.0, 150.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "FORM10_STRESS"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "rBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrBrB"
+
+[[expected.behaviour]]
+id = "FORM-10-no-placeholder-cutoff"
+assertion = "All 45 bold spans are represented and restored without disabling style preservation or degrading the paragraph"
+observable_via = "captured request tag count, restored translation styles, output font resources, and published output"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "glyphs", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "The first 420pt page clipped seven no-break rB pairs, so the committed glyph multiset would not contain all 45 declared spans"
+resolution = "Widen the page to 800pt before acceptance; the text, span count, styles, and every other fixture variable remain unchanged"
