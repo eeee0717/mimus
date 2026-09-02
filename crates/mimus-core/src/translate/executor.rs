@@ -1,7 +1,5 @@
 use std::time::Duration;
 
-use mimus_quality_contract::missing_conserved_tokens;
-
 use super::cache::{CachedTranslation, TranslationCache, TranslationCacheKey};
 use super::{
     Glossary, PlaceholderViolation, PreparedTranslation, RedactedTranslationProfile,
@@ -23,9 +21,13 @@ pub(crate) struct RetryAttempt {
 
 #[derive(Debug)]
 pub(crate) enum TranslationOutcome {
-    Translated(RestoredTranslation),
+    Translated {
+        restored: RestoredTranslation,
+        conservation: crate::il::TranslationConservationEvidence,
+    },
     Identity {
         suspicious: bool,
+        conservation: crate::il::TranslationConservationEvidence,
     },
     PlaceholderViolation {
         violation: PlaceholderViolation,
@@ -81,20 +83,29 @@ pub(crate) fn execute(
                     content_conservation_retries: Vec::new(),
                     outcome: Ok(TranslationOutcome::Identity {
                         suspicious: request.prepared.echo_retry_eligible(),
+                        conservation: request.prepared.identity_conservation_evidence(),
                     }),
                 };
             }
             Ok(Some(CachedTranslation::Translated(validated))) => {
-                if missing_conserved_tokens(request.prepared.request_text(), validated.as_str())
-                    .is_empty()
-                    && let Ok(restored) = request.prepared.restore(&validated)
+                if let Ok(restored) = request.prepared.restore(&validated)
+                    && request
+                        .prepared
+                        .missing_conserved_tokens(&restored)
+                        .is_empty()
                 {
+                    let conservation = request
+                        .prepared
+                        .conservation_evidence(&validated, &restored);
                     return TranslationExecution {
                         cache_status: Some(CacheStatus::Hit),
                         retries: Vec::new(),
                         placeholder_retries: Vec::new(),
                         content_conservation_retries: Vec::new(),
-                        outcome: Ok(TranslationOutcome::Translated(restored)),
+                        outcome: Ok(TranslationOutcome::Translated {
+                            restored,
+                            conservation,
+                        }),
                     };
                 }
                 Some(CacheStatus::Miss)
@@ -151,6 +162,7 @@ pub(crate) fn execute(
                     .transpose()
                     .map(|_| TranslationOutcome::Identity {
                         suspicious: request.prepared.echo_retry_eligible(),
+                        conservation: request.prepared.identity_conservation_evidence(),
                     });
                 break result;
             }
@@ -158,8 +170,7 @@ pub(crate) fn execute(
                 validated,
                 restored,
             } => {
-                let missing =
-                    missing_conserved_tokens(request.prepared.request_text(), validated.as_str());
+                let missing = request.prepared.missing_conserved_tokens(&restored);
                 if !missing.is_empty() && !content_conservation_retried {
                     content_conservation_retried = true;
                     let missing_token_count = missing.len();
@@ -178,10 +189,16 @@ pub(crate) fn execute(
                         missing_tokens: bounded_conservation_tokens(&missing),
                     });
                 }
+                let conservation = request
+                    .prepared
+                    .conservation_evidence(&validated, &restored);
                 let result = cache
                     .map(|cache| cache.insert(request.cache_key, &validated))
                     .transpose()
-                    .map(|_| TranslationOutcome::Translated(restored));
+                    .map(|_| TranslationOutcome::Translated {
+                        restored,
+                        conservation,
+                    });
                 break result;
             }
             ClassifiedOutcome::PlaceholderViolation(violation) if !placeholder_retried => {
@@ -443,7 +460,7 @@ mod tests {
 
             assert!(matches!(
                 execution.outcome,
-                Ok(TranslationOutcome::Translated(_))
+                Ok(TranslationOutcome::Translated { .. })
             ));
             assert_eq!(translator.calls.load(Ordering::SeqCst), 4);
             assert_eq!(
@@ -531,7 +548,7 @@ mod tests {
 
         assert!(matches!(
             execution.outcome,
-            Ok(TranslationOutcome::Translated(_))
+            Ok(TranslationOutcome::Translated { .. })
         ));
         assert_eq!(translator.calls.load(Ordering::SeqCst), 2);
     }
@@ -544,7 +561,10 @@ mod tests {
 
         assert!(matches!(
             execution.outcome,
-            Ok(TranslationOutcome::Identity { suspicious: true })
+            Ok(TranslationOutcome::Identity {
+                suspicious: true,
+                ..
+            })
         ));
         assert_eq!(translator.calls.load(Ordering::SeqCst), 2);
     }
@@ -606,7 +626,7 @@ mod tests {
 
             assert!(matches!(
                 execution.outcome,
-                Ok(TranslationOutcome::Translated(_))
+                Ok(TranslationOutcome::Translated { .. })
             ));
             assert_eq!(translator.calls.load(Ordering::SeqCst), 2, "{invalid}");
             assert_eq!(
@@ -685,7 +705,7 @@ mod tests {
 
         assert!(matches!(
             execution.outcome,
-            Ok(TranslationOutcome::Translated(_))
+            Ok(TranslationOutcome::Translated { .. })
         ));
         assert_eq!(translator.calls.load(Ordering::SeqCst), 2);
         assert_eq!(
@@ -706,6 +726,44 @@ mod tests {
                 missing_tokens: vec!["3.5".to_owned()],
             }]
         );
+    }
+
+    #[test]
+    fn formula_boundaries_drive_runtime_conservation_evidence() {
+        let prepared = PreparedTranslation::new([
+            PreparedPart::Text {
+                text: "0".to_owned(),
+                bold: false,
+            },
+            PreparedPart::Formula,
+            PreparedPart::Text {
+                text: "h".to_owned(),
+                bold: false,
+            },
+        ]);
+        let translator = ScriptedTranslator::new(["值0{v1}h"]);
+
+        let execution =
+            execute_prepared_without_cache(&prepared, &translator, &RecordingSleeper::default());
+
+        let Ok(TranslationOutcome::Translated { conservation, .. }) = execution.outcome else {
+            panic!("formula-delimited quantity should conserve");
+        };
+        assert_eq!(
+            conservation.source_tokens,
+            [crate::il::ConservedTokenCount {
+                token: "0".to_owned(),
+                occurrences: 1,
+            }]
+        );
+        assert_eq!(conservation.target_tokens, conservation.source_tokens);
+        assert_eq!(conservation.source_token_types, 1);
+        assert_eq!(conservation.target_token_types, 1);
+        assert_eq!(conservation.request_sha256.len(), 64);
+        assert_eq!(conservation.response_sha256.len(), 64);
+        assert_ne!(conservation.request_sha256, conservation.response_sha256);
+        assert!(execution.content_conservation_retries.is_empty());
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -745,10 +803,51 @@ mod tests {
 
             assert!(matches!(
                 execution.outcome,
-                Ok(TranslationOutcome::Identity { suspicious: false })
+                Ok(TranslationOutcome::Identity {
+                    suspicious: false,
+                    ..
+                })
             ));
             assert_eq!(translator.calls.load(Ordering::SeqCst), 1, "{source}");
         }
+    }
+
+    #[test]
+    fn identity_evidence_keeps_formula_delimited_numeric_tokens_separate() {
+        let prepared = PreparedTranslation::new([
+            PreparedPart::Text {
+                text: "5".to_owned(),
+                bold: false,
+            },
+            PreparedPart::Formula,
+            PreparedPart::Text {
+                text: "1".to_owned(),
+                bold: false,
+            },
+        ]);
+        let translator = ScriptedTranslator::new(["5{v1}1"]);
+
+        let execution =
+            execute_prepared_without_cache(&prepared, &translator, &RecordingSleeper::default());
+
+        let Ok(TranslationOutcome::Identity { conservation, .. }) = execution.outcome else {
+            panic!("numeric formula shape should be an identity");
+        };
+        assert_eq!(
+            conservation.source_tokens,
+            [
+                crate::il::ConservedTokenCount {
+                    token: "1".to_owned(),
+                    occurrences: 1,
+                },
+                crate::il::ConservedTokenCount {
+                    token: "5".to_owned(),
+                    occurrences: 1,
+                },
+            ]
+        );
+        assert_eq!(conservation.target_tokens, conservation.source_tokens);
+        assert_eq!(translator.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -768,7 +867,7 @@ mod tests {
 
         assert!(matches!(
             execution.outcome,
-            Ok(TranslationOutcome::Translated(_))
+            Ok(TranslationOutcome::Translated { .. })
         ));
         assert_eq!(translator.calls.load(Ordering::SeqCst), 3);
         assert_eq!(

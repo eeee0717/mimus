@@ -250,7 +250,7 @@ semantic translation quality, so these totals are mechanical regression measurem
 | 11 SDitH hardware | XeTeX | 96.301919 | 168 | 1.000000 | 63 | 0 | 0 | 0 |
 | 12 Hertz side channel | XeTeX | 94.401963 | 85 | 1.000000 | 84 | 1 | 1 | 0 |
 | 13 Information-theoretic MPC | LuaTeX | 95.476251 | 175 | 1.000000 | 38 | 19 | 19 | 0 |
-| 14 Masked comparisons | LuaTeX | 96.182339 | 253 | 0.997972 | 39 | 1 | 1 | 0 |
+| 14 Masked comparisons | LuaTeX | 96.204460 | 253 | 1.000000 | 39 | 1 | 1 | 0 |
 | 15 LWE two-step | LuaTeX | 91.944698 | 305 | 1.000000 | 151 | 1 | 1 | 0 |
 | 16 Supersingular orientations | LuaTeX | 81.879565 | 496 | 1.000000 | 401 | 2 | 2 | 0 |
 | 17 Informational consciousness | Word | 97.785404 | 32 | 1.000000 | 0 | 0 | 0 | 0 |
@@ -275,10 +275,16 @@ onion routing reproducibility reruns are byte-identical with SHA-256
 `e35dda966ddebbd6fb76eb61fa4f258a49fd6217268fa3efd46d6fed487ab4a3` and
 `39f4ce503bb0e01feea39d1d8cd1d883691c78715ecc5f06d9ace6a2f1e995a3`, respectively.
 
-Aggregate CON-01 is 5,604/5,605. The sole scorecard miss is token `h` at `(15,35)` in paper 14;
-that paragraph is terminal typed `typeset_protocol`, so the published PDF preserves its source.
-Runtime emitted no conservation retry, leaving a detector/execution reconstruction discrepancy for
-#152. Round B records the measurement and does not change production behavior.
+Aggregate CON-01 is **5,605/5,605** after the #152 same-boundary reconciliation. The previous sole
+scorecard miss, token `h` at `(15,35)` in paper 14, was manufactured by concatenating two
+translatable runs across formula-owned content. Runtime now tokenizes both the prepared source and
+the restored validated target per formula-delimited semantic segment, and the Translate IL exposes
+the exact normalized multisets plus bounded raw-shape hashes. For that paragraph, request SHA-256 is
+`c73fdc1df3442f30ae646adcf9dbff91f72880d316481659a401137facdbf2fd` and response SHA-256 is
+`a82f3396877513b9ee4169343af87a0c6e74238f4589559d8de0136d2c9e6035`; source and target both
+contain exactly `0`, `2`, and `16` once. The 20-paper loopback rerun published 20/20 with zero
+conservation miss and no real provider call. Paper 14 is 493/493, and its output remains byte-identical
+at `a781d44d1261ded878462179891f545866c03034477edf062529092b9484d13b`.
 
 ### 8.3 Current closed-cache anchor
 
