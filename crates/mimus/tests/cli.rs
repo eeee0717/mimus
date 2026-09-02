@@ -5138,7 +5138,7 @@ fn parse_stream_and_xobject_fixture_matrix_stays_bounded_and_preserves_streams()
         ),
         (
             "unit-xobj-m1-switchboard",
-            (0, OutputExpectation::Exact, None),
+            (0, OutputExpectation::Exact, Some("degradation_summary")),
         ),
     ]);
     let discovered = fixture_ids_with_case_prefixes(&["PARSE-", "STREAM-", "XOBJ-"]);
@@ -5229,6 +5229,128 @@ fn parse_stream_and_xobject_fixture_matrix_stays_bounded_and_preserves_streams()
             }
         }
     }
+}
+
+#[test]
+fn pdfpages_shaped_form_text_is_typed_but_chart_text_is_not() {
+    let id = "unit-xobj-m1-switchboard";
+    let input = fixture_path(id);
+    let inspected = run_inspect_with_recording(id, id);
+    assert!(
+        inspected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let events = parse_events(&inspected.stdout);
+    assert_one_terminal_last(&events, "result");
+    let paragraph = &events.last().unwrap()["il"]["pages"][0]["paragraphs"][0];
+    assert_eq!(paragraph["preserved"], "form_xobject_content");
+    assert!(
+        paragraph["text"]["chars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|character| character["layout"]["policy"] == "translate"
+                && character["passthrough"]["content_object"] == 10)
+    );
+    let summary = events
+        .iter()
+        .find(|event| event["event"] == "diagnostic" && event["id"] == "degradation_summary")
+        .unwrap();
+    assert_eq!(
+        summary["preserved_paragraphs"],
+        serde_json::json!([{
+            "page_index": 0,
+            "paragraph_index": 0,
+            "reason": "form_xobject_content",
+        }])
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let translated = directory.path().join("form.pdf");
+    let mut command = Command::new(BIN);
+    configure_test_fonts(&mut command);
+    let output = command
+        .env(PDFIUM_ENV, pdfium_library())
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "none",
+            "--layout-replay",
+        ])
+        .arg(layout_recording_path(id))
+        .arg("--output")
+        .arg(&translated)
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&translated).unwrap(),
+        std::fs::read(&input).unwrap()
+    );
+    let events = parse_events(&output.stdout);
+    assert!(events.iter().any(|event| {
+        event["event"] == "diagnostic"
+            && event["id"] == "degradation_summary"
+            && event["preserved_paragraphs"][0]["reason"] == "form_xobject_content"
+    }));
+
+    let strict_path = directory.path().join("strict.pdf");
+    let mut command = Command::new(BIN);
+    configure_test_fonts(&mut command);
+    let strict = command
+        .env(PDFIUM_ENV, pdfium_library())
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "none",
+            "--strict",
+            "--layout-replay",
+        ])
+        .arg(layout_recording_path(id))
+        .arg("--output")
+        .arg(&strict_path)
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert_eq!(strict.status.code(), Some(4));
+    assert!(!strict_path.exists());
+    let strict_events = parse_events(&strict.stdout);
+    assert_one_terminal_last(&strict_events, "error");
+    assert_eq!(
+        strict_events.last().unwrap()["reason"],
+        "strict_degradation"
+    );
+
+    let chart = run_inspect_with_recording(id, "unit-xobj-m1-switchboard-chart");
+    assert!(
+        chart.status.success(),
+        "{}",
+        String::from_utf8_lossy(&chart.stderr)
+    );
+    let chart_events = parse_events(&chart.stdout);
+    assert_one_terminal_last(&chart_events, "result");
+    let chart_paragraph = &chart_events.last().unwrap()["il"]["pages"][0]["paragraphs"][0];
+    assert!(chart_paragraph.get("preserved").is_none());
+    assert!(
+        chart_paragraph["text"]["chars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|character| character["layout"]["policy"] == "passthrough")
+    );
+    assert!(
+        !chart_events.iter().any(|event| {
+            event["event"] == "diagnostic" && event["id"] == "degradation_summary"
+        })
+    );
 }
 
 #[test]

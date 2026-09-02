@@ -68,6 +68,7 @@ papers and must not be generalized across every producer.
 | Input class | Current evidence | mimus result | BabelDOC comparison | Status / schedule |
 | --- | --- | --- | --- | --- |
 | native pdfTeX | 9 offline including anchor; BERT/Adam selected for R | 21-paper prefix/structure and selected quality evidence | identity/skip/parse and selected R | PASS (O), PARTIAL (R adjudication). |
+| whole-page Form wrapper (PDF direct-upload arXiv, pdfpages/pdfjam collections, cover-wrapped reprints) | exact pdfpages-shaped Form fixture plus real Adam; mixed page/Form real-paper regression | V1 reports every wrapper-page paragraph as typed `form_xobject_content`; mixed paragraphs retain writable page units; bytes remain source-identical and strict blocks publication | BabelDOC can rewrite the Adam sample's Form content | ACCEPTED V1 LIMITATION: typed and scorecard-visible; Form rewriting is a post-V1 candidate. |
 | native XeTeX/xdvipdfmx | 4 offline; Hertz selected for R | Hertz published 24 qpdf-clean pages with 21 typed-preserved paragraphs | offline modes pass; BabelDOC R run exceeded its call ceiling without a PDF | PASS (O/R) for mimus publication; BLOCKED (R) for BabelDOC and PARTIAL pending human adjudication. |
 | native LuaTeX/LuaHBTeX | 4 offline | qpdf-clean publications with typed ledger | all offline modes | PASS (O); no R sample. |
 | Word/PDFMaker | 4 offline; Multibeam selected for R | qpdf-clean publications; weakest baseline stratum | all offline modes; selected R | PASS (O), PARTIAL (R adjudication). |

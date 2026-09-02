@@ -637,6 +637,7 @@ const fn human_preserved_reason(reason: PreservedReason) -> &'static str {
     match reason {
         PreservedReason::UnreliableUnicode => "unreliable_unicode",
         PreservedReason::UnsupportedFont => "unsupported_font",
+        PreservedReason::FormXObjectContent => "form_xobject_content",
         PreservedReason::NonPositiveAdvance => "non_positive_advance",
         PreservedReason::Unlocatable => "unlocatable",
         PreservedReason::TypesetOverflow => "typeset_overflow",

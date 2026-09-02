@@ -5,6 +5,8 @@
   contracts.
 - Revision: 2026-08-31 accepts whitespace-only and non-alphabetic numeric/symbol source shapes as
   local identities before either translation backend.
+- Revision: 2026-09-02 classifies V1-ineligible Form XObject translation content as typed paragraph
+  preservation; strict mode treats it like every other hard degradation.
 
 ## Context
 
@@ -67,6 +69,8 @@ existing destination.
    snapshot or any later pass executes. It first records the complete degradation summary, then
    returns Translation/4 with reason `strict_degradation`. It never reaches Typeset/Write after an
    earlier degradation and therefore cannot create a temporary output or replace a destination.
+   This includes ParagraphFind's `form_xobject_content`: normal mode publishes the source-preserving
+   bytes and strict mode exits before Typeset/Write.
 9. CLI v2 adds `strict` to `configuration_resolved`; `placeholder_violation` and each corresponding
    `degradation_summary.preserved_paragraphs` entry expose the exact subtype additively. Debug mode
    may emit `translation_failure_profile` containing only response byte/character counts and token
