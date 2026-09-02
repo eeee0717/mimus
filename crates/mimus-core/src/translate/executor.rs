@@ -446,6 +446,7 @@ mod tests {
     fn every_transient_class_uses_three_bounded_exponential_retries() {
         for reason in [
             RetryReason::RateLimited,
+            RetryReason::ClientTimeout,
             RetryReason::Timeout,
             RetryReason::ServerError,
         ] {

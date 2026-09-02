@@ -993,7 +993,7 @@ impl OpenAiTranslator {
                 if error.is_timeout() {
                     MimusError::retryable_translation(
                         TranslationReason::TransportFailure,
-                        RetryReason::Timeout,
+                        RetryReason::ClientTimeout,
                         "OpenAI Responses API request timed out",
                     )
                 } else {
@@ -1357,7 +1357,24 @@ mod tests {
     }
 
     #[test]
-    fn responses_timeout_is_marked_retryable_without_leaking_the_key() {
+    fn responses_just_below_the_configured_deadline_succeed() {
+        let server = FakeServer::delayed(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 28\r\nConnection: close\r\n\r\n{\"output_text\":\"Translated\"}",
+            Duration::from_millis(80),
+        );
+        let translator = OpenAiTranslator::new(
+            &server.url,
+            "test-model".to_owned(),
+            SecretString::from(CANARY.to_owned()),
+            Duration::from_millis(100),
+        )
+        .unwrap();
+
+        assert_eq!(translator.translate(&request()).unwrap(), "Translated");
+    }
+
+    #[test]
+    fn responses_just_above_the_configured_deadline_are_client_timeouts() {
         let server = FakeServer::delayed(
             b"HTTP/1.1 200 OK\r\nContent-Length: 28\r\nConnection: close\r\n\r\n{\"output_text\":\"Translated\"}",
             Duration::from_millis(100),
@@ -1372,7 +1389,7 @@ mod tests {
 
         let error = translator.translate(&request()).unwrap_err();
 
-        assert_eq!(error.retry_reason(), Some(RetryReason::Timeout));
+        assert_eq!(error.retry_reason(), Some(RetryReason::ClientTimeout));
         assert!(!format!("{error:?}\n{error}").contains(CANARY));
     }
 

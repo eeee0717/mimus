@@ -27,6 +27,10 @@ Tests must never read a real user key or contact a public endpoint.
    `MIMUS_OPENAI_MODEL` / `OPENAI_MODEL` / `MODEL_ID`, and
    `MIMUS_TARGET_LANGUAGE` / `TARGET_LANGUAGE`. The user config keys are `base_url` (alias
    `endpoint`), `model` (alias `model_id`), and `target_language`.
+   Provider request timeout follows the same field-wise precedence through CLI flag
+   `--request-timeout` (seconds), environment variable `MIMUS_REQUEST_TIMEOUT`, and config key
+   `request_timeout_secs`. Its default is 120 seconds; values below 1 or above 600 seconds are
+   rejected as usage errors before any provider request.
 4. API keys have no CLI flag. They resolve from
    `MIMUS_OPENAI_API_KEY` / `OPENAI_API_KEY` / `API_KEY`, then `api_key` in the user config. Empty
    values are absent. The default config path is `~/.config/mimus/config.toml`, with
@@ -35,7 +39,10 @@ Tests must never read a real user key or contact a public endpoint.
    It is gitignored. Errors, events, diagnostics, and debug output never include request headers,
    response bodies, request source text, or the key.
 6. Successful resolution emits the additive CLI v2 `configuration_resolved` event. It contains
-   endpoint, model, backend, and target language but never secret material.
+   endpoint, model, backend, target language, and `request_timeout_secs`, but never secret material.
+   A client-side timeout remains retryable under the existing three-retry bound and is distinct from
+   a provider HTTP timeout. Its retry diagnostic identifies the attempt and reports that the client
+   abandoned the upstream request while acknowledging that the remote request may still complete.
 
 ## Consequences
 

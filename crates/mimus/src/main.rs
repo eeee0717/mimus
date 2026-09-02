@@ -106,6 +106,9 @@ struct TranslateArgs {
     /// Maximum number of paragraph translation requests in flight.
     #[arg(long, value_name = "COUNT")]
     concurrency: Option<usize>,
+    /// Per-request provider timeout in seconds (1-600).
+    #[arg(long, value_name = "SECONDS")]
+    request_timeout: Option<i64>,
     /// Fail without publishing output when any page or paragraph is preserved.
     #[arg(long)]
     strict: bool,
@@ -242,6 +245,7 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         cache: args.cache,
         no_cache: args.no_cache,
         concurrency: args.concurrency,
+        request_timeout_secs: args.request_timeout,
         strict: args.strict,
         translate_table: args.translate_table,
     }) {
@@ -291,6 +295,7 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         .as_ref()
         .map(|path| path.to_string_lossy().into_owned());
     let max_concurrency = resolved.max_concurrency;
+    let request_timeout_secs = resolved.request_timeout_secs;
     let strict = resolved.strict;
     let translate_table = resolved.translate_table;
     let strip_link_borders = args.strip_link_borders;
@@ -321,6 +326,7 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
             cache_enabled,
             cache_path: cache_path_display,
             concurrency: max_concurrency,
+            request_timeout_secs,
             strict,
             translate_table,
             strip_link_borders,

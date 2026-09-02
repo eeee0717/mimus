@@ -1062,6 +1062,53 @@ fn usage_errors_use_exit_code_one() {
 }
 
 #[test]
+fn request_timeout_rejects_every_value_outside_one_through_six_hundred() {
+    for value in ["-1", "0", "601"] {
+        let output = Command::new(BIN)
+            .env_remove("MIMUS_REQUEST_TIMEOUT")
+            .env("BASE_URL", "http://timeout-endpoint-canary.invalid")
+            .env("API_KEY", "timeout-key-canary")
+            .args([
+                "--json",
+                "translate",
+                "--backend",
+                "none",
+                &format!("--request-timeout={value}"),
+            ])
+            .arg(fixture())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let events = parse_events(&output.stdout);
+        assert_one_terminal_last(&events, "error");
+        assert_eq!(events[0]["reason"], "invalid_arguments");
+        let rendered = String::from_utf8_lossy(&output.stdout);
+        assert!(!rendered.contains("timeout-endpoint-canary"));
+        assert!(!rendered.contains("timeout-key-canary"));
+    }
+
+    let output = Command::new(BIN)
+        .env("MIMUS_REQUEST_TIMEOUT", "not-an-integer")
+        .args(["--json", "translate", "--backend", "none"])
+        .arg(fixture())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("config.toml");
+    std::fs::write(&config, "request_timeout_secs = 601\n").unwrap();
+    let output = Command::new(BIN)
+        .env("MIMUS_CONFIG_FILE", config)
+        .env_remove("MIMUS_REQUEST_TIMEOUT")
+        .args(["--json", "translate", "--backend", "none"])
+        .arg(fixture())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
 fn json_usage_errors_are_one_terminal_event_and_metadata_stays_clap_text() {
     for arguments in [
         vec!["--json", "not-a-command"],
@@ -1152,7 +1199,7 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
     let config = directory.path().join("config.toml");
     std::fs::write(
         &config,
-        "backend = 'none'\nbase_url = 'https://file.invalid'\nmodel = 'file-model'\ntarget_language = 'file-language'\nfont_regular = 'file-regular.ttf'\nfont_bold = 'file-bold.ttf'\nfont_fallback_regular = 'file-fallback-regular.ttf'\nfont_fallback_bold = 'file-fallback-bold.ttf'\ncache = 'file-cache.redb'\nconcurrency = 2\n",
+        "backend = 'none'\nbase_url = 'https://file.invalid'\nmodel = 'file-model'\ntarget_language = 'file-language'\nfont_regular = 'file-regular.ttf'\nfont_bold = 'file-bold.ttf'\nfont_fallback_regular = 'file-fallback-regular.ttf'\nfont_fallback_bold = 'file-fallback-bold.ttf'\ncache = 'file-cache.redb'\nconcurrency = 2\nrequest_timeout_secs = 180\n",
     )
     .unwrap();
     let output_path = directory.path().join("translated.pdf");
@@ -1164,6 +1211,7 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
         .env("TARGET_LANGUAGE", "env-language")
         .env("MIMUS_CACHE", "env-cache.redb")
         .env("MIMUS_CONCURRENCY", "invalid-but-overridden")
+        .env("MIMUS_REQUEST_TIMEOUT", "invalid-but-overridden")
         .env("MIMUS_BACKEND", "invalid-but-overridden")
         .env("MIMUS_FONT_REGULAR", "env-regular.ttf")
         .env("MIMUS_FONT_BOLD", "env-bold.ttf")
@@ -1184,6 +1232,8 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
             "flag-cache.redb",
             "--concurrency",
             "5",
+            "--request-timeout",
+            "240",
             "--layout",
             "single-line",
         ])
@@ -1257,6 +1307,7 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
     assert_eq!(resolved["cache_enabled"], true);
     assert_eq!(resolved["cache_path"], "flag-cache.redb");
     assert_eq!(resolved["concurrency"], 5);
+    assert_eq!(resolved["request_timeout_secs"], 240);
     assert_eq!(resolved["layout_mode"], "single_line");
     assert!(resolved.get("layout_model_source").is_none());
     assert!(resolved.get("layout_model_sha256").is_none());
@@ -1389,6 +1440,7 @@ fn no_cache_resolves_as_a_complete_read_write_bypass() {
         .unwrap();
     assert_eq!(resolved["cache_enabled"], false);
     assert!(resolved["cache_path"].is_null());
+    assert_eq!(resolved["request_timeout_secs"], 120);
     assert!(
         events
             .iter()

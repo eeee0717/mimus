@@ -97,6 +97,7 @@ reason_enum!(TranslationReason {
 #[serde(rename_all = "snake_case")]
 pub enum RetryReason {
     RateLimited,
+    ClientTimeout,
     Timeout,
     ServerError,
 }

@@ -361,10 +361,16 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
             attempt,
             delay_ms,
             reason,
+            upstream_request_abandoned,
         } => {
+            let abandonment = if upstream_request_abandoned {
+                "; the client abandoned that upstream request (it may still complete remotely)"
+            } else {
+                ""
+            };
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "warning[translation_retry]: page {} paragraph {} attempt {attempt} failed ({}); retrying in {delay_ms}ms",
+                "warning[translation_retry]: page {} paragraph {} attempt {attempt} failed ({}{abandonment}); retrying in {delay_ms}ms",
                 page_index + 1,
                 paragraph_index + 1,
                 human_retry_reason(reason)
@@ -644,6 +650,7 @@ const fn human_preserved_reason(reason: PreservedReason) -> &'static str {
 const fn human_retry_reason(reason: RetryReason) -> &'static str {
     match reason {
         RetryReason::RateLimited => "rate limited",
+        RetryReason::ClientTimeout => "client timeout",
         RetryReason::Timeout => "timeout",
         RetryReason::ServerError => "temporary server error",
     }
