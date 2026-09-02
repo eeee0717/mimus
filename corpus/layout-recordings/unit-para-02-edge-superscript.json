@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "pages": [
+    {
+      "page_index": 0,
+      "geometry": { "width": 300.0, "height": 120.0, "rotate_degrees": 0 },
+      "regions": [
+        {
+          "bounds": { "left": 30.0, "bottom": 80.0, "right": 126.465, "top": 93.0 },
+          "reading_order": 0,
+          "label": "text",
+          "source": "model",
+          "confidence": 1.0
+        }
+      ]
+    }
+  ]
+}

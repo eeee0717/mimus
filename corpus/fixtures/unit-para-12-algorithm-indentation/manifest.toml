@@ -1,0 +1,51 @@
+# unit-para-12-algorithm-indentation -- expected manifest
+# Written before the four-level raw Typst source and algorithm layout replay.
+
+schema_version = 1
+
+[identity]
+id = "unit-para-12-algorithm-indentation"
+name = "Algorithm indentation remains byte-preserved passthrough"
+class = "unit"
+legality = "legal"
+cases = ["PARA-12"]
+priority = "M3"
+variable = "A model algorithm region contains four levels whose indentation is encoded by leading spaces"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-para-12-algorithm-indentation.typ"
+pdf = "unit-para-12-algorithm-indentation.pdf"
+pdf_sha256 = "4d4eb1d476e850cc8bcc2dcb6c75f786ac64f2882d89a83854f25df122740b91"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 160.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "ALGORITHM"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "root child grandchild leaf"
+
+[[expected.behaviour]]
+id = "PARA-12-algorithm-passthrough"
+assertion = "The algorithm region creates no translation request and its complete source content program is published byte-for-byte unchanged"
+observable_via = "algorithm model replay, captured request log, decoded input/output streams, and full-page render"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "reading-order", "dual-parser-geometry", "render"]

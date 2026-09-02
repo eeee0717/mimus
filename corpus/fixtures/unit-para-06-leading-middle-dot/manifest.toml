@@ -1,0 +1,51 @@
+# unit-para-06-leading-middle-dot -- expected manifest
+# Written before the leading-middle-dot Typst source and layout replay.
+
+schema_version = 1
+
+[identity]
+id = "unit-para-06-leading-middle-dot"
+name = "Leading middle dot remains ordinary prose"
+class = "unit"
+legality = "legal"
+cases = ["PARA-06"]
+priority = "M3"
+variable = "An ordinary prose paragraph begins with U+00B7 instead of a list bullet"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-para-06-leading-middle-dot.typ"
+pdf = "unit-para-06-leading-middle-dot.pdf"
+pdf_sha256 = "3aad3c974a14101f60e572ca057ad1e25e3a530e435dc07015dd45538a7d1ec9"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 340.0, 120.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "PARA06_DOT"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "· Emphasis begins this ordinary sentence."
+
+[[expected.behaviour]]
+id = "PARA-06-leading-middle-dot"
+assertion = "A leading middle dot does not acquire list semantics or split the ordinary prose paragraph"
+observable_via = "recorded model region, ParagraphFind IL, and captured translation request"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "reading-order", "dual-parser-geometry", "render"]

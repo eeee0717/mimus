@@ -1,0 +1,56 @@
+# unit-para-02-edge-superscript -- expected manifest
+# Written before the edge-superscript Typst source and layout replay.
+
+schema_version = 1
+
+[identity]
+id = "unit-para-02-edge-superscript"
+name = "Small superscript crosses the model paragraph edge"
+class = "unit"
+legality = "legal"
+cases = ["PARA-02"]
+priority = "M3"
+variable = "A 5pt raised footnote marker extends exactly 1pt beyond the right edge of its otherwise complete 10pt model paragraph region"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-para-02-edge-superscript.typ"
+pdf = "unit-para-02-edge-superscript.pdf"
+pdf_sha256 = "799c5a8db34e787c87a67588288179a6ea3f43804801316cb9b29d86b85184d9"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 120.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "PARA02"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "Boundary marker word¹"
+
+[[expected.behaviour]]
+id = "PARA-02-small-edge-character"
+assertion = "The raised 5pt marker remains in the same single paragraph even though its metric box extends 1pt beyond the model paragraph region"
+observable_via = "independent glyph geometry, recorded model bounds, and ParagraphFind IL"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "glyphs", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "MuPDF reports the intentionally raised 5pt marker as a separate text block while Poppler keeps it in the surrounding 10pt prose block"
+resolution = "Keep the superscript geometry because it is the PARA-02 variable. Use the independently agreed glyph multiset for the PDF and let the recorded model edge plus production ParagraphFind IL assert semantic ownership."
