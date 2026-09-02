@@ -18,58 +18,68 @@ tolerance_pt = 0.001000
 page = 0
 dpi = 150
 poppler_sha256 = "63d7de6c7aba19276f363497bf1e9b2b1e558eeab9048801e1de0d3f4cf46af5"
+poppler_linux_x86_64_sha256 = "5479e97ce8b9eaa08b4db662acbddf825f8c1072133c2cf0f3c52706d9430fd8"
 mutool_md5 = "a64e3cc51a69b0852ef9f8803d2f299c"
 
 [[render]]
 page = 1
 dpi = 150
 poppler_sha256 = "63d7de6c7aba19276f363497bf1e9b2b1e558eeab9048801e1de0d3f4cf46af5"
+poppler_linux_x86_64_sha256 = "5479e97ce8b9eaa08b4db662acbddf825f8c1072133c2cf0f3c52706d9430fd8"
 mutool_md5 = "a64e3cc51a69b0852ef9f8803d2f299c"
 
 [[render]]
 page = 2
 dpi = 150
 poppler_sha256 = "63d7de6c7aba19276f363497bf1e9b2b1e558eeab9048801e1de0d3f4cf46af5"
+poppler_linux_x86_64_sha256 = "5479e97ce8b9eaa08b4db662acbddf825f8c1072133c2cf0f3c52706d9430fd8"
 mutool_md5 = "a64e3cc51a69b0852ef9f8803d2f299c"
 
 [[render]]
 page = 3
 dpi = 150
 poppler_sha256 = "63d7de6c7aba19276f363497bf1e9b2b1e558eeab9048801e1de0d3f4cf46af5"
+poppler_linux_x86_64_sha256 = "5479e97ce8b9eaa08b4db662acbddf825f8c1072133c2cf0f3c52706d9430fd8"
 mutool_md5 = "a64e3cc51a69b0852ef9f8803d2f299c"
 
 [[render]]
 page = 4
 dpi = 150
 poppler_sha256 = "63d7de6c7aba19276f363497bf1e9b2b1e558eeab9048801e1de0d3f4cf46af5"
+poppler_linux_x86_64_sha256 = "5479e97ce8b9eaa08b4db662acbddf825f8c1072133c2cf0f3c52706d9430fd8"
 mutool_md5 = "a64e3cc51a69b0852ef9f8803d2f299c"
 
 [[render]]
 page = 5
 dpi = 150
 poppler_sha256 = "63d7de6c7aba19276f363497bf1e9b2b1e558eeab9048801e1de0d3f4cf46af5"
+poppler_linux_x86_64_sha256 = "5479e97ce8b9eaa08b4db662acbddf825f8c1072133c2cf0f3c52706d9430fd8"
 mutool_md5 = "a64e3cc51a69b0852ef9f8803d2f299c"
 
 [[render]]
 page = 6
 dpi = 150
 poppler_sha256 = "63d7de6c7aba19276f363497bf1e9b2b1e558eeab9048801e1de0d3f4cf46af5"
+poppler_linux_x86_64_sha256 = "5479e97ce8b9eaa08b4db662acbddf825f8c1072133c2cf0f3c52706d9430fd8"
 mutool_md5 = "a64e3cc51a69b0852ef9f8803d2f299c"
 
 [[render]]
 page = 7
 dpi = 150
 poppler_sha256 = "af29e3f4c46c402ffc67f6a66c03ba94f9db41bc93798a1c432c24f3d032fc9b"
+poppler_linux_x86_64_sha256 = "04e306bfc77c0b337d38e97d8309a0de34d3b5541c65f9412b8314c4794d7ed2"
 mutool_md5 = "5d3e42947cc3a2ba2ef9ea0fd99a11f3"
 
 [[render]]
 page = 8
 dpi = 150
 poppler_sha256 = "af29e3f4c46c402ffc67f6a66c03ba94f9db41bc93798a1c432c24f3d032fc9b"
+poppler_linux_x86_64_sha256 = "04e306bfc77c0b337d38e97d8309a0de34d3b5541c65f9412b8314c4794d7ed2"
 mutool_md5 = "5d3e42947cc3a2ba2ef9ea0fd99a11f3"
 
 [[render]]
 page = 9
 dpi = 150
 poppler_sha256 = "af29e3f4c46c402ffc67f6a66c03ba94f9db41bc93798a1c432c24f3d032fc9b"
+poppler_linux_x86_64_sha256 = "04e306bfc77c0b337d38e97d8309a0de34d3b5541c65f9412b8314c4794d7ed2"
 mutool_md5 = "5d3e42947cc3a2ba2ef9ea0fd99a11f3"

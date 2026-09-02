@@ -90,3 +90,62 @@ output fonts are resolved at runtime and are never compiled from this
 directory. Output-font tests use separate assets under
 `crates/mimus/tests/assets/fonts/` through the same path/config injection used
 by the CLI.
+
+## M3 layout and mixed-metric fixture fonts
+
+`MimusMath.ttf` is a deterministic subset of the same DejaVu Sans 2.34 source
+used by `MimusExact.ttf`. It contains U+2211 and scales that glyph's outline
+threefold in the vertical direction while retaining the source font's
+ascender, descender, and horizontal advance. This creates the legal
+metric-versus-ink stress shape required by LAYOUT-04 without involving the
+production PDF or font stack.
+
+Pinned source:
+
+- TeX Live 2026 `fonts/truetype/public/dejavu/DejaVuSans.ttf`;
+- source SHA-256: `08ca98e69d9d8fa1065584b4f9ab7d49b6205abea6572b90e171b254845bb990`;
+- fonttools 4.63.0.
+
+Reproduce twice and compare with:
+
+```sh
+python3 corpus/fonts/generate_mimus_math.py DejaVuSans.ttf /tmp/math-a.ttf
+python3 corpus/fonts/generate_mimus_math.py DejaVuSans.ttf /tmp/math-b.ttf
+cmp /tmp/math-a.ttf /tmp/math-b.ttf
+```
+
+SHA-256: `d6dd910115e530ed76ca032c13bafde8d52e0725181bcb1fc59be6496a91b926`
+
+`MimusTermes.otf` and `MimusCursor.otf` are deterministic U+0020/U+0043/
+U+0049/U+004D/U+0053/U+0055 subsets of TeX Gyre Termes and Cursor 2.004.
+Their internal and PDF descriptor metrics are pinned to the independently
+specified TYPE-11 Times/Courier-compatible values, respectively 783/-216 and
+814/-300 units. The source SHA-256 values are respectively
+`cc3fe7c707b81428d23d54df3eadd9228a2bf6a4d43125d94df56f5f63134659`
+and `0667deb48aa0e88be8f499c4d308e8b9116f290e7f969b0f5a34ee15c9644272`.
+
+Both subsets use fonttools 4.63.0. Reproduce twice per source and compare with:
+
+```sh
+python3 corpus/fonts/generate_mimus_metric_font.py \
+  texgyretermes-regular.otf /tmp/termes-a.otf \
+  "Mimus Metric Termes" MimusMetricTermes 783 -216
+python3 corpus/fonts/generate_mimus_metric_font.py \
+  texgyretermes-regular.otf /tmp/termes-b.otf \
+  "Mimus Metric Termes" MimusMetricTermes 783 -216
+cmp /tmp/termes-a.otf /tmp/termes-b.otf
+
+python3 corpus/fonts/generate_mimus_metric_font.py \
+  texgyrecursor-regular.otf /tmp/cursor-a.otf \
+  "Mimus Metric Cursor" MimusMetricCursor 814 -300
+python3 corpus/fonts/generate_mimus_metric_font.py \
+  texgyrecursor-regular.otf /tmp/cursor-b.otf \
+  "Mimus Metric Cursor" MimusMetricCursor 814 -300
+cmp /tmp/cursor-a.otf /tmp/cursor-b.otf
+```
+
+The DejaVu license remains `LICENSE-DejaVu.txt`; the TeX Gyre subsets use the
+GUST Font License preserved in `LICENSE-GUST-Fonts.txt`.
+
+- `MimusTermes.otf`: `efe5361d55b776d098ce7bdfbc9ec04e75b38e0339fed8efbb4502c2aeb133f7`
+- `MimusCursor.otf`: `10db5aa979b0145e2417cd24c8e181b2c62c6e18a3680cd63859479ce6327420`

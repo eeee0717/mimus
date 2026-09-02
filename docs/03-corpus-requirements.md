@@ -177,6 +177,7 @@ PDF，`corpus determinism` 对同一配方连续生成两次并比较 SHA-256。
 | **字体子集标签** | 必须由引擎确定性产出——这是 XeTeX 出局的直接原因，见下 |
 | 字体 | 精确 fixture 钉死字体文件 + 记录其 SHA-256；现实排版 fixture 见下表 |
 | 工具版本 | 全部写进 `corpus/toolchain.toml` 并由 `corpus doctor` 精确比对；版本变化视为语料变更，需重新走验收 |
+| 渲染器平台 | 同版本 Poppler 的 PNG 字节可能因平台构建不同；`adjudicated.toml` 保留原裁定哈希并为实际不同的平台追加具名哈希，各平台仍作精确比对，不以跨平台差异放宽像素门禁 |
 | 浮点格式化 | 固定小数位数与舍入规则，不用平台默认 `repr` |
 
 #### 实测结论（2026-08-21，本机；由 `corpus determinism` 复现）

@@ -12,6 +12,17 @@ contain only `U+2217`, `U+0141`, and `U+03F5` plus the required glyphs. Keeping
 DejaVu's 2048 units-per-em and original advances is intentional: it covers the
 PDF `/W` precision boundary that a 1000 units-per-em synthetic font cannot.
 
+`MimusTestVariable.ttf` is a deterministic five-character subset of the
+production Noto Sans SC 2.004 variable font. It retains the original `fvar`,
+`gvar`, `HVAR`, and named Regular/Bold instances so tests can prove that the
+legacy default location remains byte-compatible for Regular while one Bold
+user-coordinate location drives planning metrics and embedded outlines. It
+contains only original glyphs; the generator never synthesizes glyphs into the
+variation tables.
+
+- Variable source SHA-256: `d68bafcb48a2707749396aa12bbbd833cb70401f3a9a689fd2902c7e0d295964`
+- fonttools: `4.63.0`
+
 The pinned upstream files are from Matplotlib tag `v3.11.1`:
 
 - Regular source SHA-256: `3fdf69cabf06049ea70a00b5919340e2ce1e6d02b0cc3c4b44fb6801bd1e0d22`
@@ -23,6 +34,14 @@ binary. Tests pass their paths through the public output-font configuration.
 Reproduce and compare two runs with:
 
 ```sh
+python3 crates/mimus/tests/assets/fonts/generate_test_fonts.py \
+  NotoSansSC-VF.ttf /tmp/variable-a.ttf \
+  --characters='M中文测试' --variable-subset
+python3 crates/mimus/tests/assets/fonts/generate_test_fonts.py \
+  NotoSansSC-VF.ttf /tmp/variable-b.ttf \
+  --characters='M中文测试' --variable-subset
+cmp /tmp/variable-a.ttf /tmp/variable-b.ttf
+
 python3 crates/mimus/tests/assets/fonts/generate_test_fonts.py \
   corpus/fonts/MimusCJK.ttf /tmp/regular-a.ttf "Mimus Test GB2312 Regular"
 python3 crates/mimus/tests/assets/fonts/generate_test_fonts.py \
@@ -75,3 +94,4 @@ The upstream licenses are preserved in `LICENSE-Noto-Sans-SC.txt` and
 - Bold SHA-256: `1a917349eb06866f5701532f0cea586d184edadbd1cfdd3f034f3a18f2ff5316`
 - Fallback Regular SHA-256: `3634d4b65a151c61dcb82968f6a3bdc33435d062c4c69a5ea57e3db20122ac1e`
 - Fallback Bold SHA-256: `d0f2fdc62e7cdf6e35c8b0629b19084917991603c0d51fe94109128176352b83`
+- Variable SHA-256: `a1105d5892eaad20ed1ad692827b06a7adc392f214a835740fa4d94bf5029ac5`

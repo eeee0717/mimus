@@ -227,6 +227,7 @@ def compact_row(report: dict[str, Any], v1: dict[str, Any] | None) -> dict[str, 
             "formula_proxy_violations": None,
             "continuity_violations": None,
             "inline_hole_count": None,
+            "ink_violations": None,
             "title_author_failures": None,
             "output_sha256": None,
             "pages": None,
@@ -238,6 +239,7 @@ def compact_row(report: dict[str, Any], v1: dict[str, Any] | None) -> dict[str, 
     ]
     formula = dimensions["mistranslation_risk"]["measurements"]["formula_unit_completeness_proxy"]
     continuity = dimensions["layout_drift"]["measurements"]["formula_neighbor_continuity"]
+    ink = dimensions["layout_drift"]["measurements"]["final_ink_geometry"]
     title_author = dimensions["structural_fidelity"]["measurements"]["title_author_conservation"]
     process = report["process"]
     return {
@@ -266,6 +268,7 @@ def compact_row(report: dict[str, Any], v1: dict[str, Any] | None) -> dict[str, 
         "formula_proxy_violations": formula["violations"],
         "continuity_violations": continuity.get("excessive_gap_count"),
         "inline_hole_count": continuity.get("unexplained_hole_count"),
+        "ink_violations": len(ink["violations"]),
         "title_author_failures": title_author.get("failures"),
         "output_sha256": report["output_sha256_recomputed"],
         "pages": report["pages"],
@@ -295,6 +298,9 @@ def aggregate(rows: list[dict[str, Any]], reproducibility: list[dict[str, Any]])
             "internal_rate": sum(row["internal_errors"] > 0 for row in producer_rows) / len(producer_rows),
             "typed_degradation_median": median(producer_typed),
             "typed_degradation_worst": max(producer_typed) if producer_typed else None,
+            "ink_violations": sum(
+                row["ink_violations"] or 0 for row in producer_rows
+            ),
         }
     return {
         "schema_version": 2,
@@ -305,6 +311,7 @@ def aggregate(rows: list[dict[str, Any]], reproducibility: list[dict[str, Any]])
             "internal_rate": sum(row["internal_errors"] > 0 for row in rows) / len(rows),
             "typed_degradation_median": (typed[(len(typed) - 1) // 2] + typed[len(typed) // 2]) / 2 if typed else None,
             "typed_degradation_worst": max(typed) if typed else None,
+            "ink_violations": sum(row["ink_violations"] or 0 for row in rows),
             "by_producer": by_producer,
         },
         "reproducibility": reproducibility,
@@ -325,8 +332,8 @@ def markdown(summary: dict[str, Any]) -> str:
     lines = [
         "# Scorecard v2 cluster baseline",
         "",
-        "| Paper | Producer | v1 | v2 | Status | Typed | Conservation | Formula | Gap | Hole | Title/author | Calls/paragraph | Retry | Echo | Cache hit |",
-        "| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Paper | Producer | v1 | v2 | Status | Typed | Conservation | Formula | Gap | Hole | Ink | Title/author | Calls/paragraph | Retry | Echo | Cache hit |",
+        "| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in summary["papers"]:
         status = "published" if row["published"] else f"Internal/6: {row.get('internal_reason', 'unknown')}"
@@ -334,7 +341,8 @@ def markdown(summary: dict[str, Any]) -> str:
             row["paper"], row["producer"], display(row["v1_total_score"]), display(row["v2_total_score"]),
             status, display(row["typed_degraded_paragraphs"]), display(row["conservation_rate"]),
             display(row["formula_proxy_violations"]), display(row["continuity_violations"]),
-            display(row["inline_hole_count"]), display(row["title_author_failures"]),
+            display(row["inline_hole_count"]), display(row["ink_violations"]),
+            display(row["title_author_failures"]),
             display(row["translation_calls_per_eligible_paragraph"]), display(row["retry_rate"]),
             display(row["echo_rate"]), display(row["cache_hit_rate"]),
         ]
@@ -344,7 +352,8 @@ def markdown(summary: dict[str, Any]) -> str:
         "",
         f"Publication rate: {cluster['publication_rate']:.1%}; Internal/6 rate: {cluster['internal_rate']:.1%}; "
         f"typed degradation median: {display(cluster['typed_degradation_median'])}; "
-        f"worst: {display(cluster['typed_degradation_worst'])}.",
+        f"worst: {display(cluster['typed_degradation_worst'])}; "
+        f"INK-01 violations: {display(cluster['ink_violations'])}.",
         "",
         "Per-page timing is not applicable because it is not present in the public artifacts.",
     ])

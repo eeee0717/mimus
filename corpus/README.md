@@ -5,6 +5,7 @@
 
 ```
 corpus/
+  ci-toolchain.toml  hosted Linux 的钉死 artifact / bottle 清单
   toolchain.toml     钉死的工具版本 + 每个现实排版引擎的确定性配方（唯一真源）
   determinism/       §2.6 重复生成门禁的探针源文件与共享确定性开关
   fonts/             精确 fixture 使用的钉死字体、许可证与可复现子集配方
@@ -14,26 +15,28 @@ corpus/
 门禁入口是 workspace 里的 `corpus` 二进制（`crates/corpus`）。
 
 ```sh
-cargo run -p corpus -- doctor        # §2.8 工具链齐备且版本精确匹配
-cargo run -p corpus -- determinism   # §2.6 每个引擎连续构建两次、SHA-256 必须一致
-cargo run -p corpus -- build unit-base-01-single-line unit-base-03-structured
-cargo run -p corpus -- verify unit-base-01-single-line unit-base-03-structured
-cargo run -p corpus -- trailer-id unit-order-01-natural
+cargo run --locked --offline -p corpus -- doctor        # §2.8 工具链齐备且版本精确匹配
+cargo run --locked --offline -p corpus -- determinism   # §2.6 每个引擎连续构建两次、SHA-256 必须一致
+cargo run --locked --offline -p corpus -- build unit-base-01-single-line unit-base-03-structured
+cargo run --locked --offline -p corpus -- verify unit-base-01-single-line unit-base-03-structured
+cargo run --locked --offline -p corpus -- trailer-id unit-order-01-natural
 ```
 
-## 为什么这不是 GitHub Actions 上的一个 job
+## Hosted CI
 
 `toolchain.toml` 里的版本是**精确匹配**（§2.6：版本变化视为语料变更）。
 qpdf 12.4.0 / poppler 26.08.0 / mutool 1.28.2 / Typst 0.15.1 / TeX Live 2026 这组
-组合无法从 ubuntu-latest 的发行版包里复现，硬塞进托管 runner 只会得到一个
-长期红着的 job——那比没有更糟，因为它会训练所有人忽略它。
+组合不能由 `ubuntu-latest` 的移动 apt 仓库提供。CI 因此从
+`ci-toolchain.toml` 安装钉死的 Linux x86_64 artifacts：固定 revision 的 Homebrew
+与 homebrew-core 提供逐 bottle SHA-256，Typst 和 TinyTeX 使用固定 release archive
+与 SHA-256。安装器在解包前核对长度与散列，Homebrew 在 pouring 前核对主工具和全部
+传递依赖的 bottle 散列；任一版本最终仍须通过 `corpus doctor` 的精确匹配。
 
-因此分工是：
-
-- **`.github/workflows/ci.yml` 的 `quality` job**：fmt / clippy / test，无外部依赖，
-  在任何机器上都能跑，是合并门禁。
-- **corpus 门禁**：在装有钉死工具链的机器上跑上面三条命令。语料变更的 PR 必须
-  附上这三条命令的输出。
+`.github/workflows/ci.yml` 的 `quality` job 在已经通过 workspace tests 的同一锁定依赖图中
+离线构建 `corpus` executable，连同 SHA-256 sidecar 交给 required `corpus` job。隔离 job
+先复核哈希，再以钉死工具链直接运行 doctor、determinism 与独立 verify，不建立第二份
+Cargo registry。XeTeX 仍是预期的不确定性负对照：若它意外变为确定性，determinism
+同样失败并要求重新裁定。
 
 ## 生成侧的硬约束
 
@@ -53,7 +56,9 @@ PDF writer。它不依赖 lopdf、PDFium、`pdfium-render` 或 `mimus-core`，�
 精确 fixture 的 `manifest.toml` 是先行手写规格。`corpus build` 只实现该规格，
 `corpus verify` 再通过固定输入字节前缀、对象图、原始 stream 字节、poppler 文本盒、
 MuPDF baseline、MuPDF SVG 字形轮廓和两个独立渲染器反向验收。精确几何不会由
-`adjudicate` 回填；其 `adjudicated.toml` 只保存渲染哈希。
+`adjudicate` 回填；其 `adjudicated.toml` 只保存渲染哈希。同版本 Poppler 的 PNG
+字节在 macOS arm64 与 Linux x86_64 间可能不同，因此保留原裁定哈希，并仅在实际
+不同的页面追加 `poppler_linux_x86_64_sha256`；每个平台仍执行逐字节精确门禁。
 
 后续畸形 fixture 使用 `method = "byte-mutation"`，并在 `[lineage]` 中记录合法父本
 fixture ID。唯一一条 `[[lineage.mutations]]` 必须同时记录 `byte_offset`、

@@ -141,6 +141,7 @@ bilingual review or a separately governed semantic evaluator.
 | LAY-05 | line-count change | output lines minus aligned source lines | major | pinned `pdftotext -bbox-layout`; reserved in schema v2 |
 | FOR-02 | formula-neighbor continuity | nearest same-line output gap exceeds `max(2 * source word-gap median, 1.5em)` | major per excessive neighbor gap | ParagraphFind IL + pinned MuPDF `stext.json` output extraction |
 | FOR-03 | unexplained inline hole | each FOR-02 excessive gap; area = gap width times extracted formula-line height | major per hole | same |
+| INK-01 | final publication ink geometry | every nonidentity published paragraph has complete bounded evidence; exact glyph/origin multiplicity and owned vector/image ink exist in the final PDF; every component stays inside CropBox and its owning container; no cross-paragraph or retained-ink collision | critical per violation | Write IL `publication_ink` + pinned MuPDF trace |
 
 LAY-05 is reserved because current debug IL does not expose final output line boxes. The comparator
 ledger may compute it from pinned extractor XML; the harness must not invent it from string length.
@@ -165,6 +166,41 @@ units remain visible in `formula_units` versus `matched_units`; v2 does not inve
 FOR-03 intentionally shares FOR-02's derived bound, matching the adjudicated single continuity
 contract for fixed-slot and relocation paths.
 
+FOR-04/FOR-05 attribute public MuPDF trace ink only when it satisfies the production-aligned
+formula-cap or row-separator geometry and has exactly one geometric owner among the formula units in
+the same paragraph. Broad neighborhood overlap is not ownership evidence: a rule below an adjacent
+formula or an accent above a different visual line is excluded. The output anchor search includes a
+`0.5em` paragraph-edge ink extent for source glyph side bearings; a candidate still passes only when
+every source formula glyph and every uniquely owned path/image is present under one identical delta.
+
+INK-01 closes the final-publication taxonomy independently of the planning implementation:
+
+| Ink class | Production execution point | Public evidence and final observation | Container / obstacle rule | Legal terminal state |
+| --- | --- | --- | --- | --- |
+| translated output glyphs | `plan_text_segment` / `place_formula_flow` plan at or above 8 pt; `build_typeset_fonts` fixes the rounded `/W` advances before `install_typeset_replacements` | additive IL v1 `TranslatedText` components record bounded line summaries; every glyph records its exact final visual bounds plus Unicode/baseline origin from the embedded subset face, and pinned MuPDF trace must match each declared glyph one-to-one | every component stays in resolved CropBox and the owning layout container, extended vertically only by accepted final ink; per-glyph ink, never whitespace inside a line summary, must not overlap another published paragraph or retained vector/image ink | publish with complete evidence, or preserve the whole source paragraph with the existing typed reason; identity and passthrough paragraphs require no evidence |
+| source formula glyph replay | `source_formula_units` and `place_formula_flow` preserve source bytes/font identity and apply one page-space delta | `SourceTextReplay` records each source glyph's final visual bounds and exact Unicode/baseline origin under one nonzero ownership group; MuPDF trace must match every declared glyph one-to-one | same CropBox/container rules; per-glyph ink participates in collisions, while components in the same formula group may overlap as one rigid body; other groups and paragraphs may not | complete fixed/relocated group, or typed `typeset_protocol` / `typeset_overflow` source preservation |
+| retained or replayed vector path | `paragraph_typeset_obstacles` blocks ordinary retained paths; `uniquely_owned_text_underlines` and `source_formula_units` alone may claim safe complete programs for replay | `VectorPath` records every replayed final bound (`group=0` for a text underline, nonzero for formula ownership); all other MuPDF trace paths remain retained obstacles | a replay must match trace at its declared bound; retained paths may not intersect published text; a nonzero vector group must have exactly one nonempty source-text owner | exact replay under the owner delta, or typed paragraph preservation; ambiguous path ownership is never evidence |
+| raster / inline image | `walk` records both `Do` Image XObjects and inline images under active clips; `paragraph_typeset_obstacles` blocks both, while `source_formula_units` may claim only a uniquely owned self-contained inline-image program | `InlineImage` records replayed formula images; unmatched MuPDF `fill_image` records are retained raster ink | partial overlap with published text is forbidden; an image containing the entire admissible layout container is classified as an intentional background rather than an obstacle; same-group formula image overlap is allowed | exact same-group inline replay, nonoverlapping/background retention, or typed paragraph preservation; Image XObjects are retained obstacles and never relocation programs |
+
+The oracle requires exactly one `publication_ink` entry for every paragraph whose Write IL is
+non-preserved and whose translation differs from reconstructed source text. Evidence on identity,
+passthrough, preserved, or unknown paragraphs is itself a violation. Component bounds must be finite
+and nonempty; glyph ink bounds must be finite, non-inverted, and contained by their component summary.
+Outline-free whitespace uses a zero-area box at its baseline and never participates in collision
+tests. Unmatched MuPDF text is not by itself a violation because a translated paragraph can retain
+passthrough source units; exactness means every declared output glyph is observed one-to-one at its
+declared origin. Retained path and image geometry is intersected with every active MuPDF trace clip;
+`clip_path` / `clip_image_mask` push a clip and `pop_clip` restores the prior state. The production
+walker mirrors PDF `W` / `W*` semantics: the rule takes effect only when the current path terminates,
+is saved and restored by `q` / `Q`, and follows Form scope isolation. In bilingual output the
+translated observation page is `2 * page_index + 1`; default
+output uses `page_index`. Trace coordinates are rebased from MuPDF's mediabox origin to the declared
+CropBox origin before matching. The sole fixture observation exemption is
+`unit-xobj-depth-overflow`: its adjudicated 65-Form input intentionally makes MuPDF trace terminate
+with `exception stack overflow!`, so the gate still checks evidence completeness, CropBox/container,
+formula ownership, and cross-paragraph geometry but records final trace observation as exempt. No
+paper or other fixture inherits that exemption.
+
 ### 2.4.1 Detection/execution alignment ledger
 
 Every FOR/CON detector must name the production action that enforces the same conservative contract,
@@ -181,6 +217,26 @@ pipeline handled the defect.
 | FOR-03 | same execution point and bound as FOR-02; it is the area projection of the same excessive gap, not a separate threshold | same repair/typed action as FOR-02 |
 | FOR-04 | `pass::source_formula_units` attaches uniquely owned path/image spans to the relocation unit; `paragraph_plans_leave_orphan_source_ink` rejects unclaimed source-slot ink before installation | exact source programs replay under the glyph delta; ambiguous ownership or residual ink becomes typed `typeset_protocol` |
 | FOR-05 | `pass::source_formula_units` uses whole-paragraph unique visual radical ownership and closes each unit over formula glyph/path/image components; `place_formula_flow` applies one delta to the resulting unit | missing/ambiguous ownership, unsafe replay, or a component that cannot share the unit delta becomes typed `typeset_protocol` |
+| INK-01 | `walk` tracks painted path, inline-image, and `Do` Image XObject geometry under deferred `W` / `W*` clips and `q` / `Q` state; `pass::typeset` emits `publication_ink` only after incompatible plan components are removed and output fonts fix final glyph origins; planning already enforces CropBox, owning layout container, other-paragraph ink, clipped retained path/image obstacles, and ADR-0020 ownership | any candidate failure remains typed source-preserved before publication; the independent Write-IL + MuPDF oracle applies the trace clip stack and treats missing/mismatched evidence or final collision as a critical artifact violation; only the named `unit-xobj-depth-overflow` trace observation is exempt |
+
+### 2.4.2 M3 adjudicated layout and typesetting policy ledger
+
+| Case | Detector and boundary | Production action / terminal state |
+| --- | --- | --- |
+| FORM-07 | `StylesAndFormulas` accepts each recorded model `inline_formula` assignment as one complete span; comma and bracket syntax inside that span do not create subspans | request preparation emits exactly one placeholder for each recorded span and restores that same unit |
+| ORDER-04 | `ParagraphFind` considers cross-column continuation only for one model `abstract` assignment whose lines form exactly two geometric columns with at least two lines each | flatten the left column top-to-bottom, then the right column top-to-bottom, into one paragraph; ordinary `text`, multiple model regions, fallback lines, and ambiguous column counts retain existing separation |
+| TYPE-05 | `mimus-quality-contract::{forbidden_line_start, forbidden_line_end}` is the single minimal punctuation set used by both final-PDF LNT-01 measurement and the shared ordinary/slotted/formula-flow token stream; paragraph-leading closing and paragraph-trailing opening punctuation are unsatisfiable | join every forbidden break before placement, never hang ink beyond the container, and return existing typed `typeset_overflow` when no legal line placement fits at or above 8pt |
+| TYPE-06 | output text is consumed exactly as returned; no script-transition detector adds spacing | glyph advances contain only output-font advances and explicit response whitespace; there is no automatic CJK/Latin gap |
+| TYPE-07 | `paragraph_typeset_obstacles` includes visible ink from every other paragraph and `ink_bounds_are_safe` applies the unchanged collision threshold to each independently planned paragraph | a plan that cannot avoid later paragraph ink at the 8 pt floor becomes typed `typeset_overflow`; no paragraph is moved |
+| TYPE-09 | `StylesAndFormulas` requires every character in the natural paragraph to share model `text`, the complete source to match the conservative math shape, at least one strong operator, and at most two whitespace-delimited operand-like tokens | mark the whole source paragraph passthrough, emit informational `math_passthrough`, create no request or output-font resource, and do not count degradation; all other model prose remains translatable |
+| FONT-10 | the Type0 walk proves reliable Unicode and PDF advance but `/CIDToGIDMap` resolves outside the embedded TrueType glyph count | retain the PDF advance; collision-check the transformed conservative font-level bbox union; set additive IL v1 `bbox_estimated`; emit informational `glyph_bbox_estimated`; all ordinary unreliable-font branches remain typed paragraph preservation |
+| output-font variation | `OutputFontFaces::parse` and `build_embedded_font` share the ADR-0018 slot resolver: Regular keeps the legacy default location; Bold prefers exact named `Bold`, then clamped `wght=700`, then an empty location; every `ttf-parser` metric and `subsetter` outline uses that user-coordinate list | the planner's rounded 1/1000-em advance must equal the embedded CID `/W`; configured ink drives wrapping, collision, 8 pt, and CropBox gates; Regular subset bytes remain compatible; a font that cannot be parsed or instantiated retains the existing typed `unsupported_font`/startup asset failure boundary; font identity remains absent from translation cache keys |
+| PARSE-06 | Parse checks every classic-xref normal entry against the objects lopdf actually parsed and retains the entry's object number, generation, and byte offset | reject as Input/2 `pdf_parse` with additive `detail.object_syntax`; publish no output; unrelated parse failures continue to omit detail |
+| STREAM-03 | the operator walk requires exactly two finite numeric operands for each `m` and `l`; any short, excess, or nonnumeric path makes vector ink ownership unknowable | mark the page `graphics_unreliable`, emit typed page degradation and summary, keep page IL empty, and publish the original page bytes |
+| PARA-05 | `ParagraphFind` considers an in-region natural boundary only when the whole region is uniformly model-backed, translatable `text`, on a real downward line step, the candidate first-line baseline origin is more than `1.2em` right of the lower-median line start, and the preceding line occupies no more than 80% of the model container width; every other label and mixed-policy region retains the established splitter | split at that line and create separate translation requests; indent alone, an underfilled predecessor alone, same-baseline prose fragments, sparse-column left outliers, formulas, charts, images, and passthrough categories retain their established composition |
+| PARA-09 / TYPE-12 | for uniformly model-backed `text` that remains translatable after page-zero author protection, `ParagraphFind` subtracts the median continuation baseline-origin x from the first-line baseline-origin x; visual ink and side bearings do not participate; nonpositive deltas are omitted | store positive page-space points in additive IL v1 `first_line_indent`; every Typeset candidate starts the first output line at exactly `container.left + indent` and continuation lines at `container.left`; an obstacle at that exact start fails closed; fallback, footnote, formula, and protected-author shapes omit the field |
+| FORM-12 | `uniquely_owned_text_underlines` accepts only one safe complete `q/Q` horizontal path, one complete translated text-show owner in the same content object, no characters outside the paragraph sharing its span, substantial below-baseline overlap, and one final single-line owner-to-output delta | exclude only that proven path from paragraph obstacles, claim its source span, replay it under the owner's exact page-space delta, and include the relocated path in safety/output bounds; any suspicious unsafe, incomplete, cross-object, multiply owned, multiline, or indeterminate case becomes typed `typeset_protocol` with the source paragraph and underline intact |
+| FORM-14 | `preferred_body_font_size` counts visible, non-whitespace, translatable characters by exact page-space font size after excluding geometrically proven super/subscripts; the character-weighted mode wins and exact ties choose the larger size | when proven script characters outnumber ordinary body characters, every fixed and obstacle-aware planner uses that single selected point size before the existing 8pt fallback sequence; otherwise the established mean-based start remains stable |
 
 Test-level alignment checklist:
 
@@ -201,7 +257,7 @@ paragraph is only a sample and never substitutes for the full formula audit.
 
 | ID | Subclass | Formula | Severity | Source |
 | --- | --- | --- | --- | --- |
-| LNT-01 | Chinese kinsoku | paragraph starts with closing punctuation or ends with opening punctuation | major | translated text |
+| LNT-01 | Chinese kinsoku | final output line starts with closing punctuation or ends with opening punctuation | major | pinned MuPDF final-PDF text lines, with translated-text fallback when extraction is unavailable |
 | LNT-02 | isolated punctuation | one-scalar punctuation paragraph | minor | translated text |
 | LNT-03 | placeholder residue | `{v`, `{l`, or `<b` token prefix remaining | critical | translated text + extracted PDF text |
 | LNT-04 | abnormal whitespace | leading/trailing or doubled ASCII whitespace | minor | translated text |

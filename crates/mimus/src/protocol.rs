@@ -542,6 +542,20 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 paragraph_index + 1
             );
         }
+        DiagnosticEvent::GlyphBboxEstimated {
+            page_index,
+            character_index,
+            font_object,
+            code,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "info[glyph_bbox_estimated]: page {} character {character_index} font {} {} R code {code}",
+                page_index + 1,
+                font_object[0],
+                font_object[1]
+            );
+        }
         DiagnosticEvent::UnsupportedOutputGlyph {
             page_index,
             reading_order,
@@ -678,6 +692,9 @@ const fn human_page_degrade_reason(reason: PageDegradeReason) -> &'static str {
         PageDegradeReason::BadFormBBox => "a form XObject has an unusable /BBox",
         PageDegradeReason::BadFormMatrix => "a form XObject has an unusable /Matrix",
         PageDegradeReason::XObjectNotAStream => "an XObject is not a stream",
+        PageDegradeReason::GraphicsUnreliable => {
+            "a graphics path has incomplete or invalid operands"
+        }
     }
 }
 

@@ -50,13 +50,23 @@ test output fonts, and production output assets consequently need distinct owner
    deterministic GB2312 level-one-scale assets under `crates/mimus/tests/assets/fonts/` through the
    public path/config seam. Those files include their generation recipe, pinned hashes, and OFL,
    and are never linked into a production target.
+7. The logical Regular slot keeps the font's default variation location and legacy subset path so
+   existing body-text output remains byte-compatible. A logical Bold slot resolves one variation
+   location before any font query: an exact named `Bold` instance wins; otherwise a `wght` axis
+   receives `700`, clamped to that axis's user-space bounds. Static fonts and variable fonts without
+   a Bold location use an empty coordinate list. The same user coordinates configure `ttf-parser`
+   before every advance, bounding-box, ascender, descender, wrapping, collision, and fitting query,
+   and instantiate the subsetter's outlines and metrics. Empty-coordinate fonts retain the legacy
+   subset path and bytes. Output-font identities and coordinates do not enter translation or
+   terminology cache keys.
 
 ## Production manifest
 
 The primary slots remain the pinned Noto Sans SC 2.004 variable subset already used to derive the
 corpus fixtures. Both logical weights map to that one SHA-256-pinned variable font and cache entry.
-This restores real CJK coverage but does **not** yet provide distinct static Regular and Bold
-outlines; bold text uses the variable font's default instance.
+Regular retains the established default-location subset while Bold resolves its named `wght=700`
+instance. The resulting static PDF subsets therefore carry distinct, metric-consistent outlines
+without duplicating the downloaded asset or changing ordinary body-text bytes.
 
 The 2026-08-27 L5 run exposed seven translated paragraphs containing `U+2217 ASTERISK OPERATOR`,
 `U+0141 LATIN CAPITAL LETTER L WITH STROKE`, or `U+03F5 GREEK LUNATE EPSILON SYMBOL`. Noto Sans
@@ -85,3 +95,5 @@ public manifest surface.
   glyphs, and the diagnostic identifies the missing sample and both exact font identities.
 - CI remains offline: download behavior is exercised only against a loopback HTTP server, then the
   same assets are resolved from cache after that server stops.
+- Variable-font style no longer splits planning from publication: `/W`, extractor positions,
+  wrapping, the 8 pt floor, CropBox checks, and collision checks all observe the instantiated slot.

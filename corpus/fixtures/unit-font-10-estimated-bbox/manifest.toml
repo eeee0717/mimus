@@ -1,0 +1,90 @@
+# FONT-10 exact contract. The CID, advance, descriptor metrics, and embedded
+# font bounds are specified independently of the production font decoder.
+
+schema_version = 1
+
+[identity]
+id = "unit-font-10-estimated-bbox"
+name = "Out-of-range CID with conservative estimated bounds"
+class = "unit"
+legality = "legal"
+cases = ["FONT-10"]
+priority = "M3"
+variable = "Identity-H shows CID 65535, beyond the embedded font glyph count, while ToUnicode and the PDF width remain valid"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-font-10-estimated-bbox.pdf"
+pdf_sha256 = "bdd292f6a9ec7e6b7a0d3a61d1a881ada90d13bca9e7b08e90e4c714e7354557"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 7, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9,10]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d666f6e742d31302d657374"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "MISSING_GID"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "M"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.168, 79.2, 131.136]
+visual_bbox = [72.597656, 117.878906, 78.597656, 128.460938]
+
+[[expected.content_stream]]
+object = 10
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 120 Tm
+<FFFF> Tj
+ET
+"""
+
+[[expected.reference]]
+from_object = 5
+path = ["/DescendantFonts", "0"]
+to_object = 6
+
+[[expected.reference]]
+from_object = 5
+path = ["/ToUnicode"]
+to_object = 9
+
+[[expected.behaviour]]
+id = "FONT-10-estimated-superset"
+assertion = "Production keeps the 600-unit PDF advance, marks bbox_estimated, collision-checks a transformed union of embedded global bounds, FontBBox, ascent/descent, and advance, and emits one typed info diagnostic"
+observable_via = "raw CID and width dictionaries, pinned embedded font tables, production IL, typed diagnostics, and independent renderers"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "glyphs", "font-advance", "pdf-bytes", "pdf-structure", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "The out-of-range CID has no glyph-specific outline even though its PDF width and Unicode mapping are usable"
+resolution = "Retain the paragraph and use a conservative transformed font-level bbox superset; never encode absence as an all-zero box"

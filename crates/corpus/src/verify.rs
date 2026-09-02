@@ -199,7 +199,13 @@ fn check_recorded_adjudication(manifest: &Manifest) -> Result<Outcome> {
                     render.page, render.dpi
                 ));
             }
-            if !is_lower_hex(&render.poppler_sha256, 64) || !is_lower_hex(&render.mutool_md5, 32) {
+            if !is_lower_hex(&render.poppler_sha256, 64)
+                || render
+                    .poppler_linux_x86_64_sha256
+                    .as_deref()
+                    .is_some_and(|value| !is_lower_hex(value, 64))
+                || !is_lower_hex(&render.mutool_md5, 32)
+            {
                 problems.push(format!("参考栅格 {index} 的哈希格式无效"));
             }
         }

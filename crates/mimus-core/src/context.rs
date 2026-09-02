@@ -183,6 +183,7 @@ pub(crate) struct ExtractedPage {
     pub recoveries: BTreeSet<RecoveryKind>,
     pub walked_characters: Vec<WalkedChar>,
     pub vector_paths: Vec<crate::walk::WalkedVectorPath>,
+    pub path_ink: Vec<crate::walk::WalkedPathInk>,
     pub inline_images: Vec<crate::walk::WalkedInlineImage>,
     pub content_streams: Vec<WalkedContentStream>,
     pub engine_characters: Vec<PageCharSnapshot>,

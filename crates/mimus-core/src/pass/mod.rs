@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
-use lopdf::{Document as LopdfDocument, Object, ObjectId};
+use lopdf::{Document as LopdfDocument, Object, ObjectId, xref::XrefEntry};
 use rayon::prelude::*;
 
 use crate::context::{
@@ -9,8 +9,8 @@ use crate::context::{
 };
 use crate::engine::{PageCharSnapshot, RgbaImage};
 use crate::error::{
-    AssetReason, ErrorReason, InputReason, InternalReason, IoReason, MimusError, Result,
-    TranslationReason, UsageReason,
+    AssetReason, ErrorReason, InputErrorDetail, InputReason, InternalReason, IoReason, MimusError,
+    Result, TranslationReason, UsageReason,
 };
 use crate::event::{
     Diagnostic, Diagnostics, Event, EventKind, FormulaBoundaryEvidence,
@@ -20,7 +20,7 @@ use crate::event::{
 use crate::geometry::{PageFrame, PageGeometryResolveError};
 use crate::il::{
     self, Char, LayoutAssignment, LayoutLabel, LayoutSource, PageGeometry, Paragraph,
-    PassthroughRef, Rect, TextCarrier, TextTransform, TranslationPolicy,
+    PassthroughRef, Point, Rect, TextCarrier, TextTransform, TranslationPolicy,
 };
 use crate::scan::{PageClass, prescan_page};
 #[cfg(test)]
@@ -64,6 +64,7 @@ pub const PIPELINE: [(Stage, Pass); 10] = [
 pub const INSPECT_STAGE_COUNT: usize = 4;
 const MAX_PAGE_TREE_DEPTH: usize = 128;
 const MAX_OBJECT_STREAM_BYTES: usize = 64 * 1024 * 1024;
+const FINAL_INK_GEOMETRY_TOLERANCE_PT: f64 = 0.01;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranslationResult {
@@ -294,6 +295,7 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     if pdf.was_encrypted() || pdf.is_encrypted() {
         return Err(encrypted_pdf_error());
     }
+    validate_xref_objects(&pdf)?;
     validate_object_streams(&pdf)?;
     let lopdf_pages = validated_page_ids(&pdf)?;
     let engine_pages = context.engine.page_count(&bytes)?;
@@ -341,6 +343,7 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
             recoveries: BTreeSet::new(),
             walked_characters: Vec::new(),
             vector_paths: Vec::new(),
+            path_ink: Vec::new(),
             inline_images: Vec::new(),
             content_streams: Vec::new(),
             engine_characters: Vec::new(),
@@ -361,6 +364,27 @@ pub fn parse(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     document.original_bytes = bytes;
     document.pdf = Some(pdf);
     document.extracted_pages = extracted_pages;
+    Ok(())
+}
+
+fn validate_xref_objects(pdf: &LopdfDocument) -> Result<()> {
+    for (&object_number, entry) in &pdf.reference_table.entries {
+        let XrefEntry::Normal { offset, generation } = *entry else {
+            continue;
+        };
+        if !pdf.objects.contains_key(&(object_number, generation)) {
+            return Err(MimusError::input(
+                InputReason::PdfParse,
+                format!(
+                    "could not parse object {object_number} {generation} at byte offset {offset}"
+                ),
+            )
+            .with_input_detail(InputErrorDetail::ObjectSyntax {
+                objid: [object_number, u32::from(generation)],
+                offset: u64::from(offset),
+            }));
+        }
+    }
     Ok(())
 }
 
@@ -659,6 +683,7 @@ pub fn scan_detect(document: &mut Document, context: &PassContext<'_>) -> Result
                 }
                 page.walked_characters = walked.characters;
                 page.vector_paths = walked.vector_paths;
+                page.path_ink = walked.path_ink;
                 page.inline_images = walked.inline_images;
                 page.content_streams = walked.content_streams;
             }
@@ -1252,6 +1277,7 @@ struct ParagraphDraft {
 pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
     let mut pages = Vec::with_capacity(document.extracted_pages.len());
     let mut unicode_recoveries = Vec::new();
+    let mut glyph_bbox_estimates = Vec::new();
     for extracted in &document.extracted_pages {
         if !extracted.is_translatable() {
             pages.push(il::Page {
@@ -1275,14 +1301,24 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
             .iter()
             .enumerate()
             .map(|(index, walked)| {
-                let visual_bbox = extracted
-                    .character_alignment
-                    .engine_indices_by_walk
-                    .get(index)
-                    .and_then(|engine_index| *engine_index)
-                    .and_then(|engine_index| extracted.engine_characters.get(engine_index))
-                    .filter(|_| walked.locatable)
-                    .map_or(walked.metric_box, |engine| engine.tight_box);
+                let visual_bbox = walked.estimated_bbox.unwrap_or_else(|| {
+                    extracted
+                        .character_alignment
+                        .engine_indices_by_walk
+                        .get(index)
+                        .and_then(|engine_index| *engine_index)
+                        .and_then(|engine_index| extracted.engine_characters.get(engine_index))
+                        .filter(|_| walked.locatable)
+                        .map_or(walked.metric_box, |engine| engine.tight_box)
+                });
+                if walked.estimated_bbox.is_some() {
+                    glyph_bbox_estimates.push(Diagnostic::GlyphBboxEstimated {
+                        page_index: extracted.index,
+                        character_index: index,
+                        font_object: [walked.font.object_number, u32::from(walked.font.generation)],
+                        code: walked.code,
+                    });
+                }
                 let small_edge_owner = (walked.visible
                     && walked.locatable
                     && walked
@@ -1314,6 +1350,7 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
                         baseline_origin: walked.baseline_origin,
                         r#box: walked.metric_box,
                         visual_bbox,
+                        bbox_estimated: walked.estimated_bbox.is_some(),
                         text_transform: walked.text_transform,
                         implicit_space_before: false,
                         layout: layout_assignment(
@@ -1381,11 +1418,23 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
             }
             let mut lines = build_text_lines(group.chars);
             merge_toc_page_numbers(&mut lines);
-            let columns = if group.assignment.label == LayoutLabel::Text {
-                split_parallel_model_columns(lines)
-            } else {
-                vec![lines]
+            let columns = match group.assignment.label {
+                LayoutLabel::Text => split_parallel_model_columns(lines),
+                LayoutLabel::Abstract => split_model_abstract_columns(lines),
+                _ => vec![lines],
             };
+            if group.assignment.label == LayoutLabel::Abstract && columns.len() > 1 {
+                let paragraph_lines = columns.into_iter().flatten().collect::<Vec<_>>();
+                let bounds = lines_bounds(&paragraph_lines);
+                drafts.push(ParagraphDraft {
+                    model_order: Some(group.assignment.reading_order),
+                    apparatus: false,
+                    column_left: bounds.left,
+                    top: bounds.top,
+                    lines: paragraph_lines,
+                });
+                continue;
+            }
             for column in columns {
                 for paragraph_lines in split_natural_paragraphs(column, group.assignment.label) {
                     let bounds = lines_bounds(&paragraph_lines);
@@ -1460,6 +1509,15 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
         if extracted.index == 0 {
             apply_title_author_passthrough(&mut paragraphs);
         }
+        for paragraph in &mut paragraphs {
+            if !paragraph
+                .chars()
+                .iter()
+                .all(first_line_indent_character_is_prose)
+            {
+                paragraph.first_line_indent = None;
+            }
+        }
         for (paragraph_index, paragraph) in paragraphs.iter().enumerate() {
             let recovered_character_count = paragraph
                 .chars()
@@ -1486,8 +1544,12 @@ pub fn paragraph_find(document: &mut Document, context: &PassContext<'_>) -> Res
     document.il = il::Document {
         schema_version: il::SCHEMA_VERSION,
         pages,
+        publication_ink: Vec::new(),
     };
     for diagnostic in unicode_recoveries {
+        document.diagnostics.push(diagnostic);
+    }
+    for diagnostic in glyph_bbox_estimates {
         document.diagnostics.push(diagnostic);
     }
     Ok(())
@@ -2020,6 +2082,15 @@ fn group_lines_into_columns(mut lines: Vec<TextLine>) -> Vec<Vec<TextLine>> {
     columns
 }
 
+fn split_model_abstract_columns(lines: Vec<TextLine>) -> Vec<Vec<TextLine>> {
+    let columns = group_lines_into_columns(lines.clone());
+    if columns.len() == 2 && columns.iter().all(|column| column.len() >= 2) {
+        columns
+    } else {
+        vec![lines]
+    }
+}
+
 fn split_parallel_model_columns(lines: Vec<TextLine>) -> Vec<Vec<TextLine>> {
     let Some(separator) = parallel_model_column_separator(&lines) else {
         return vec![lines];
@@ -2208,6 +2279,55 @@ fn split_natural_paragraphs(mut lines: Vec<TextLine>, label: LayoutLabel) -> Vec
         .get(steps.len() / 2)
         .copied()
         .unwrap_or(lines[0].font_size * 1.2);
+    let indent_boundary_eligible = label == LayoutLabel::Text
+        && lines.iter().flat_map(|line| &line.chars).all(|positioned| {
+            positioned.character.layout.is_some_and(|layout| {
+                layout.source == LayoutSource::Model
+                    && layout.label == LayoutLabel::Text
+                    && layout.policy == TranslationPolicy::Translate
+            })
+        });
+    if !indent_boundary_eligible {
+        return split_at_legacy_indent_boundaries(lines, typical);
+    }
+    let container = lines
+        .iter()
+        .flat_map(|line| &line.chars)
+        .filter_map(|positioned| positioned.character.layout.map(|layout| layout.bounds))
+        .reduce(Rect::union)
+        .unwrap_or_else(|| lines_bounds(&lines));
+    let available_width = (container.right - container.left).max(0.0);
+    let mut line_starts = lines
+        .iter()
+        .filter_map(line_baseline_start)
+        .collect::<Vec<_>>();
+    line_starts.sort_by(f64::total_cmp);
+    let normal_line_start = line_starts
+        .get(line_starts.len().saturating_sub(1) / 2)
+        .copied();
+    let mut paragraphs = vec![vec![lines.remove(0)]];
+    for line in lines {
+        let previous = paragraphs.last().unwrap().last().unwrap();
+        let gap = previous.baseline - line.baseline;
+        let previous_width = previous.bounds.right - previous.bounds.left;
+        let first_line_indented = normal_line_start
+            .zip(line_baseline_start(&line))
+            .is_some_and(|(normal, start)| start - normal > line.font_size * 1.2);
+        let previous_line_underfilled =
+            available_width > 0.0 && previous_width <= available_width * 0.8 + 0.01;
+        let next_visual_line = gap >= line.font_size * 0.5;
+        if gap > typical * 1.55
+            || (next_visual_line && first_line_indented && previous_line_underfilled)
+        {
+            paragraphs.push(vec![line]);
+        } else {
+            paragraphs.last_mut().unwrap().push(line);
+        }
+    }
+    paragraphs
+}
+
+fn split_at_legacy_indent_boundaries(mut lines: Vec<TextLine>, typical: f64) -> Vec<Vec<TextLine>> {
     let mut paragraphs = vec![vec![lines.remove(0)]];
     for line in lines {
         let previous = paragraphs.last().unwrap().last().unwrap();
@@ -2367,6 +2487,7 @@ fn paragraph_from_lines(
     weak_unicode_conflicts: &BTreeSet<usize>,
 ) -> Paragraph {
     let bounds = lines_bounds(&lines);
+    let first_line_indent = source_first_line_indent(&lines);
     let mut positioned = Vec::new();
     for line in lines {
         positioned.extend(line.chars);
@@ -2417,11 +2538,57 @@ fn paragraph_from_lines(
     Paragraph {
         reading_order,
         bounds,
+        first_line_indent,
         text: TextCarrier::Chars { chars },
         translated_text: None,
         translation_conservation: None,
         preserved,
     }
+}
+
+fn source_first_line_indent(lines: &[TextLine]) -> Option<f64> {
+    if !lines
+        .iter()
+        .flat_map(|line| &line.chars)
+        .all(|positioned| first_line_indent_character_is_prose(&positioned.character))
+    {
+        return None;
+    }
+    let first = line_baseline_start(lines.first()?)?;
+    let mut continuation_starts = lines
+        .iter()
+        .skip(1)
+        .filter_map(line_baseline_start)
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if continuation_starts.is_empty() {
+        return None;
+    }
+    continuation_starts.sort_by(f64::total_cmp);
+    let normal_start = continuation_starts[continuation_starts.len() / 2];
+    let indent = first - normal_start;
+    (indent.is_finite() && indent > 0.01).then_some(indent)
+}
+
+fn first_line_indent_character_is_prose(character: &Char) -> bool {
+    character.visible
+        && character.layout.is_some_and(|layout| {
+            layout.source == LayoutSource::Model
+                && layout.label == LayoutLabel::Text
+                && layout.policy == TranslationPolicy::Translate
+        })
+}
+
+fn line_baseline_start(line: &TextLine) -> Option<f64> {
+    line.chars
+        .iter()
+        .find(|positioned| {
+            positioned
+                .character
+                .unicode
+                .is_some_and(|unicode| !unicode.is_whitespace())
+        })
+        .map(|positioned| positioned.character.baseline_origin.x)
 }
 
 pub fn styles_and_formulas(document: &mut Document, _context: &PassContext<'_>) -> Result<()> {
@@ -3852,30 +4019,52 @@ fn mark_math_passthrough_units(
 ) {
     let TextCarrier::Chars { chars } = &mut paragraph.text;
     let mut math_units = Vec::new();
-    let mut start = 0;
-    while start < chars.len() {
-        let layout = chars[start].layout;
-        let mut end = start + 1;
-        while end < chars.len() && chars[end].layout == layout {
-            end += 1;
-        }
-        let Some(layout) = layout else {
-            start = end;
-            continue;
-        };
-        if layout.source != LayoutSource::FallbackLine {
-            start = end;
-            continue;
-        }
-        let source = request_text(&chars[start..end]);
-        if math_shape_is_passthrough(&source)
-            && chars[start..end]
+    let model_math = chars
+        .first()
+        .and_then(|character| character.layout)
+        .filter(|layout| layout.source == LayoutSource::Model && layout.label == LayoutLabel::Text)
+        .filter(|_| {
+            chars.iter().all(|character| {
+                character.layout.is_some_and(|layout| {
+                    layout.source == LayoutSource::Model && layout.label == LayoutLabel::Text
+                })
+            })
+        })
+        .map(|layout| (layout, request_text(chars)))
+        .filter(|(_, source)| model_math_shape_is_passthrough(source))
+        .filter(|_| {
+            chars
                 .iter()
                 .any(|character| character_is_translatable(character, content_objects))
-        {
-            math_units.push((layout.reading_order, source.trim().chars().count()));
+        });
+    if let Some((layout, source)) = model_math {
+        math_units.push((layout.reading_order, source.trim().chars().count()));
+    } else {
+        let mut start = 0;
+        while start < chars.len() {
+            let layout = chars[start].layout;
+            let mut end = start + 1;
+            while end < chars.len() && chars[end].layout == layout {
+                end += 1;
+            }
+            let Some(layout) = layout else {
+                start = end;
+                continue;
+            };
+            if layout.source != LayoutSource::FallbackLine {
+                start = end;
+                continue;
+            }
+            let source = request_text(&chars[start..end]);
+            if math_shape_is_passthrough(&source)
+                && chars[start..end]
+                    .iter()
+                    .any(|character| character_is_translatable(character, content_objects))
+            {
+                math_units.push((layout.reading_order, source.trim().chars().count()));
+            }
+            start = end;
         }
-        start = end;
     }
     if math_units.is_empty() {
         return;
@@ -3942,30 +4131,9 @@ fn math_shape_is_passthrough(source: &str) -> bool {
     let has_operand = characters
         .iter()
         .any(|character| character.is_alphanumeric());
-    let has_strong_operator = characters.iter().any(|character| {
-        matches!(
-            character,
-            '=' | '×'
-                | '÷'
-                | '±'
-                | '∓'
-                | '∑'
-                | '∏'
-                | '∫'
-                | '√'
-                | '∈'
-                | '∉'
-                | '≤'
-                | '≥'
-                | '≠'
-                | '≈'
-                | '∞'
-                | '∂'
-                | '∇'
-                | '⊗'
-                | '⋅'
-        )
-    });
+    let has_strong_operator = characters
+        .iter()
+        .any(|character| math_shape_has_strong_operator(*character));
     if has_operand && has_strong_operator {
         return true;
     }
@@ -3987,6 +4155,41 @@ fn math_shape_is_passthrough(source: &str) -> bool {
         })
         .count();
     has_operand && syntax_characters >= 3 && syntax_characters.saturating_mul(5) >= characters.len()
+}
+
+fn model_math_shape_is_passthrough(source: &str) -> bool {
+    math_shape_is_passthrough(source)
+        && source.chars().any(math_shape_has_strong_operator)
+        && source
+            .split_whitespace()
+            .filter(|token| token.chars().any(char::is_alphanumeric))
+            .count()
+            <= 2
+}
+
+fn math_shape_has_strong_operator(character: char) -> bool {
+    matches!(
+        character,
+        '=' | '×'
+            | '÷'
+            | '±'
+            | '∓'
+            | '∑'
+            | '∏'
+            | '∫'
+            | '√'
+            | '∈'
+            | '∉'
+            | '≤'
+            | '≥'
+            | '≠'
+            | '≈'
+            | '∞'
+            | '∂'
+            | '∇'
+            | '⊗'
+            | '⋅'
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -4084,6 +4287,7 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
     }
     let mut rewrites = Vec::with_capacity(document.il.pages.len());
     let mut preserved = Vec::new();
+    let mut publication_ink = Vec::new();
     for page in &document.il.pages {
         if page.paragraphs.is_empty() {
             continue;
@@ -4196,9 +4400,24 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
             let restored = document
                 .restored_translations
                 .get(&(page.index, paragraph.reading_order));
-            let obstacles = paragraph_typeset_obstacles(page, extracted, paragraph, true);
+            let Some(owned_underlines) =
+                uniquely_owned_text_underlines(paragraph, extracted, &content_objects)
+            else {
+                preserved.push((
+                    page.index,
+                    paragraph.reading_order,
+                    il::PreservedReason::TypesetProtocol,
+                ));
+                continue;
+            };
+            let underline_spans = owned_underlines
+                .iter()
+                .map(|underline| underline.replay.span)
+                .collect::<BTreeSet<_>>();
+            let obstacles =
+                paragraph_typeset_obstacles(page, extracted, paragraph, true, &underline_spans);
             let relocation_obstacles =
-                paragraph_typeset_obstacles(page, extracted, paragraph, false);
+                paragraph_typeset_obstacles(page, extracted, paragraph, false, &underline_spans);
             let geometry = ParagraphPlanningGeometry {
                 extracted,
                 content_objects: &content_objects,
@@ -4207,7 +4426,31 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 relocation_obstacles: &relocation_obstacles,
             };
             match plan_paragraph(paragraph, translated, restored, output_fonts, &geometry) {
-                Ok(paragraph_plans) => {
+                Ok(mut paragraph_plans) => {
+                    let Some(typeset_container) = paragraph_typeset_container(paragraph) else {
+                        preserved.push((
+                            page.index,
+                            paragraph.reading_order,
+                            il::PreservedReason::TypesetProtocol,
+                        ));
+                        continue;
+                    };
+                    if attach_text_underlines_to_plans(
+                        &mut paragraph_plans,
+                        &owned_underlines,
+                        page_bounds,
+                        typeset_container,
+                        &obstacles,
+                    )
+                    .is_none()
+                    {
+                        preserved.push((
+                            page.index,
+                            paragraph.reading_order,
+                            il::PreservedReason::TypesetProtocol,
+                        ));
+                        continue;
+                    }
                     if paragraph_plans_leave_orphan_source_ink(
                         paragraph,
                         extracted,
@@ -4317,9 +4560,15 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 let restored = document
                     .restored_translations
                     .get(&(page.index, paragraph.reading_order));
-                let obstacles = paragraph_typeset_obstacles(page, extracted, paragraph, true);
-                let relocation_obstacles =
-                    paragraph_typeset_obstacles(page, extracted, paragraph, false);
+                let obstacles =
+                    paragraph_typeset_obstacles(page, extracted, paragraph, true, &BTreeSet::new());
+                let relocation_obstacles = paragraph_typeset_obstacles(
+                    page,
+                    extracted,
+                    paragraph,
+                    false,
+                    &BTreeSet::new(),
+                );
                 let geometry = ParagraphPlanningGeometry {
                     extracted,
                     content_objects: &content_objects,
@@ -4475,44 +4724,105 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 })
                 .collect();
         }
-        let plans = planned_paragraphs
-            .into_iter()
-            .flat_map(|(_, plans)| plans)
-            .collect::<Vec<_>>();
-
         let mut output_fonts = BTreeMap::new();
         let mut typeset_characters = Vec::new();
-        if !plans.is_empty() {
+        if !planned_paragraphs.is_empty() {
             let configured_fonts = configured_fonts.ok_or_else(|| {
                 MimusError::internal(
                     InternalReason::InvariantViolation,
                     "translated text has no resolved output fonts",
                 )
             })?;
-            output_fonts = build_typeset_fonts(plans.iter(), configured_fonts)?;
-        }
-        for plan in &plans {
-            reused_fonts.extend(
-                plan.formula_relocations
+            output_fonts = build_typeset_fonts(
+                planned_paragraphs
                     .iter()
-                    .flat_map(|relocation| relocation.source_fonts.iter().cloned()),
-            );
-            install_typeset_replacements(
-                plan,
-                &output_fonts,
-                &streams,
-                &content_transforms,
-                &text_show_states,
-                &mut replacements,
+                    .flat_map(|(_, plans)| plans.iter()),
+                configured_fonts,
             )?;
-            typeset_characters.extend(planned_characters(plan, &output_fonts));
+            let incompatible = incompatible_final_ink_indices(
+                &planned_paragraphs,
+                page,
+                extracted,
+                page_bounds,
+                &output_fonts,
+            )?;
+            if !incompatible.is_empty() {
+                planned_paragraphs = planned_paragraphs
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(index, planned)| {
+                        if !incompatible.contains(&index) {
+                            return Some(planned);
+                        }
+                        let (reading_order, _) = &planned;
+                        let paragraph = page
+                            .paragraphs
+                            .iter()
+                            .find(|paragraph| paragraph.reading_order == *reading_order)
+                            .expect("planned paragraph belongs to its page");
+                        if paragraph.translated_text.as_deref()
+                            != Some(paragraph.source_text().as_str())
+                        {
+                            preserved.push((
+                                page.index,
+                                *reading_order,
+                                il::PreservedReason::TypesetOverflow,
+                            ));
+                        }
+                        None
+                    })
+                    .collect();
+                output_fonts = if planned_paragraphs.is_empty() {
+                    BTreeMap::new()
+                } else {
+                    build_typeset_fonts(
+                        planned_paragraphs
+                            .iter()
+                            .flat_map(|(_, plans)| plans.iter()),
+                        configured_fonts,
+                    )?
+                };
+            }
+        }
+        for (reading_order, plans) in &planned_paragraphs {
+            let paragraph = page
+                .paragraphs
+                .iter()
+                .find(|paragraph| paragraph.reading_order == *reading_order)
+                .expect("planned paragraph belongs to its page");
+            if paragraph.translated_text.as_deref() != Some(paragraph.source_text().as_str()) {
+                publication_ink.push(planned_publication_ink(
+                    page.index,
+                    page_bounds,
+                    paragraph,
+                    plans,
+                    &output_fonts,
+                )?);
+            }
+            for plan in plans {
+                reused_fonts.extend(
+                    plan.formula_relocations
+                        .iter()
+                        .flat_map(|relocation| relocation.source_fonts.iter().cloned()),
+                );
+                install_typeset_replacements(
+                    plan,
+                    &output_fonts,
+                    &streams,
+                    &content_transforms,
+                    &text_show_states,
+                    &mut replacements,
+                )?;
+                typeset_characters.extend(planned_characters(plan, &output_fonts));
+            }
         }
         let embedded_fonts = output_fonts
             .into_values()
             .map(|output| output.font)
             .collect();
-        let typeset_ink_bounds = plans
+        let typeset_ink_bounds = planned_paragraphs
             .iter()
+            .flat_map(|(_, plans)| plans)
             .flat_map(|plan| plan.ink_bounds.iter().copied())
             .collect();
         if replacements.is_empty() {
@@ -4548,6 +4858,7 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
             paragraph.preserved = Some(reason);
         }
     }
+    document.il.publication_ink = publication_ink;
     document.rewrites = rewrites;
     Ok(())
 }
@@ -4608,9 +4919,12 @@ fn paragraph_plans_leave_orphan_source_ink(
         if claimed.contains(&span) {
             continue;
         }
-        let left = path.start.x.min(path.end.x);
-        let right = path.start.x.max(path.end.x);
-        let y = (path.start.y + path.end.y) / 2.0;
+        let Some(bounds) = walked_vector_path_bounds(path) else {
+            continue;
+        };
+        let left = bounds.left;
+        let right = bounds.right;
+        let y = (bounds.bottom + bounds.top) / 2.0;
         let width = right - left;
         let overlap = (right.min(owner_bounds.right) - left.max(owner_bounds.left)).max(0.0);
         if width > 0.01
@@ -4627,14 +4941,17 @@ fn paragraph_plans_leave_orphan_source_ink(
         if claimed.contains(&span) {
             continue;
         }
-        let width = image.bounds.right - image.bounds.left;
-        let height = image.bounds.top - image.bounds.bottom;
+        let Some(bounds) = walked_image_bounds(image) else {
+            continue;
+        };
+        let width = bounds.right - bounds.left;
+        let height = bounds.top - bounds.bottom;
         if width <= owner_bounds.right - owner_bounds.left + em
             && height <= owner_bounds.top - owner_bounds.bottom + em
-            && image.bounds.right >= owner_bounds.left - em * 0.25
-            && image.bounds.left <= owner_bounds.right + em * 0.25
-            && image.bounds.top >= owner_bounds.bottom - em * 0.25
-            && image.bounds.bottom <= owner_bounds.top + em * 0.25
+            && bounds.right >= owner_bounds.left - em * 0.25
+            && bounds.left <= owner_bounds.right + em * 0.25
+            && bounds.top >= owner_bounds.bottom - em * 0.25
+            && bounds.bottom <= owner_bounds.top + em * 0.25
         {
             return Ok(true);
         }
@@ -4664,11 +4981,8 @@ fn typeset_overflow_detail(
         });
     let mut attempted_font_sizes_pt = Vec::new();
     if !chars.is_empty() {
-        let preferred = chars
-            .iter()
-            .map(|character| character.font_size)
-            .sum::<f64>()
-            / chars.len() as f64;
+        let char_refs = chars.iter().collect::<Vec<_>>();
+        let preferred = preferred_typeset_font_size(&char_refs).unwrap_or(chars[0].font_size);
         let mut size = preferred.max(MIN_FONT_SIZE_PT);
         loop {
             attempted_font_sizes_pt.push(size);
@@ -4709,6 +5023,7 @@ fn paragraph_typeset_obstacles(
     extracted: &ExtractedPage,
     paragraph: &Paragraph,
     include_owner_formula: bool,
+    excluded_vector_spans: &BTreeSet<SpanKey>,
 ) -> Vec<Rect> {
     let mut obstacles = page
         .paragraphs
@@ -4750,22 +5065,17 @@ fn paragraph_typeset_obstacles(
     });
     if !has_inline_formula {
         obstacles.extend(extracted.vector_paths.iter().filter_map(|path| {
-            let left = path.start.x.min(path.end.x);
-            let right = path.start.x.max(path.end.x);
-            let y = (path.start.y + path.end.y) / 2.0;
-            let bounds = Rect {
-                left,
-                bottom: y - 0.01,
-                right,
-                top: y + 0.01,
-            };
-            (right > left + 0.01 && rect_is_finite(bounds)).then_some(bounds)
+            let span = (path.content_object, path.byte_start, path.byte_end);
+            if excluded_vector_spans.contains(&span) {
+                return None;
+            }
+            walked_vector_path_bounds(path)
         }));
         obstacles.extend(
             extracted
                 .inline_images
                 .iter()
-                .map(|image| image.bounds)
+                .filter_map(walked_image_bounds)
                 .filter(|bounds| {
                     rect_is_finite(*bounds)
                         && bounds.right > bounds.left + 0.01
@@ -4776,10 +5086,296 @@ fn paragraph_typeset_obstacles(
     obstacles
 }
 
+fn uniquely_owned_text_underlines(
+    paragraph: &Paragraph,
+    extracted: &ExtractedPage,
+    content_objects: &BTreeSet<lopdf::ObjectId>,
+) -> Option<Vec<OwnedTextUnderline>> {
+    if paragraph.chars().iter().any(|character| {
+        character.layout.is_some_and(|layout| {
+            layout.label == LayoutLabel::InlineFormula
+                && layout.policy == TranslationPolicy::Passthrough
+        })
+    }) {
+        return Some(Vec::new());
+    }
+    let mut owners = BTreeMap::<SpanKey, Vec<&Char>>::new();
+    for character in paragraph.chars().iter().filter(|character| {
+        character.visible
+            && character.text_transform == TextTransform::Upright
+            && character
+                .layout
+                .is_some_and(|layout| layout.policy == TranslationPolicy::Translate)
+    }) {
+        let object_id = unique_page_content(character, content_objects)
+            .ok()
+            .flatten()?;
+        owners
+            .entry(span_key(character, object_id))
+            .or_default()
+            .push(character);
+    }
+
+    let mut underlines = Vec::new();
+    for path in &extracted.vector_paths {
+        let possible = owners
+            .iter()
+            .filter(|(_, characters)| text_show_may_own_underline(characters, path))
+            .collect::<Vec<_>>();
+        if possible.is_empty() {
+            continue;
+        }
+        let proven = possible
+            .iter()
+            .filter(|(span, characters)| {
+                text_show_owns_underline(
+                    paragraph,
+                    extracted,
+                    content_objects,
+                    **span,
+                    characters,
+                    path,
+                )
+            })
+            .collect::<Vec<_>>();
+        let [(owner_span, owner_characters)] = proven.as_slice() else {
+            return None;
+        };
+        if possible.len() != 1 {
+            return None;
+        }
+        let owner_origin = owner_characters
+            .iter()
+            .map(|character| character.baseline_origin)
+            .min_by(|left, right| left.x.total_cmp(&right.x))?;
+        let bounds = horizontal_path_bounds(path)?;
+        underlines.push(OwnedTextUnderline {
+            replay: FormulaVectorReplay {
+                span: (path.content_object, path.byte_start, path.byte_end),
+                content_transform: path.content_transform,
+                bounds,
+            },
+            owner_span: **owner_span,
+            owner_origin,
+            bounds,
+        });
+    }
+    Some(underlines)
+}
+
+fn horizontal_path_bounds(path: &crate::walk::WalkedVectorPath) -> Option<Rect> {
+    walked_vector_path_bounds(path)
+}
+
+fn walked_vector_path_bounds(path: &crate::walk::WalkedVectorPath) -> Option<Rect> {
+    let left = path.start.x.min(path.end.x);
+    let right = path.start.x.max(path.end.x);
+    let y = (path.start.y + path.end.y) / 2.0;
+    let bounds = Rect {
+        left,
+        bottom: y - 0.01,
+        right,
+        top: y + 0.01,
+    };
+    if right <= left + 0.01
+        || !rect_is_finite(bounds)
+        || path
+            .clips
+            .iter()
+            .any(|clip| !walked_clip_intersects_rect(clip, bounds))
+    {
+        return None;
+    }
+    clipped_ink_bounds(bounds, path.form_clip, &path.clips)
+}
+
+fn walked_image_bounds(image: &crate::walk::WalkedInlineImage) -> Option<Rect> {
+    if image
+        .clips
+        .iter()
+        .any(|clip| !walked_clip_intersects_rect(clip, image.bounds))
+    {
+        return None;
+    }
+    clipped_ink_bounds(image.bounds, image.form_clip, &image.clips)
+}
+
+fn clipped_ink_bounds(
+    bounds: Rect,
+    form_clip: Option<Rect>,
+    clips: &crate::walk::WalkedClipStack,
+) -> Option<Rect> {
+    let mut bounds = bounds;
+    for clip in form_clip
+        .into_iter()
+        .chain(clips.iter().filter_map(|clip| clip.bounds))
+    {
+        bounds = Rect {
+            left: bounds.left.max(clip.left),
+            bottom: bounds.bottom.max(clip.bottom),
+            right: bounds.right.min(clip.right),
+            top: bounds.top.min(clip.top),
+        };
+        if bounds.right <= bounds.left || bounds.top <= bounds.bottom {
+            return None;
+        }
+    }
+    Some(bounds)
+}
+
+fn text_show_may_own_underline(characters: &[&Char], path: &crate::walk::WalkedVectorPath) -> bool {
+    let Some(owner_bounds) = characters
+        .iter()
+        .map(|character| character.r#box)
+        .reduce(Rect::union)
+    else {
+        return false;
+    };
+    let em = characters
+        .iter()
+        .map(|character| character.font_size)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .fold(0.0_f64, f64::max);
+    let baseline = characters
+        .iter()
+        .map(|character| character.baseline_origin.y)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let Some(path_bounds) = horizontal_path_bounds(path) else {
+        return false;
+    };
+    let owner_width = owner_bounds.right - owner_bounds.left;
+    let path_width = path_bounds.right - path_bounds.left;
+    let overlap = (owner_bounds.right.min(path_bounds.right)
+        - owner_bounds.left.max(path_bounds.left))
+    .max(0.0);
+    em > 0.0
+        && baseline.is_finite()
+        && owner_width > 0.01
+        && path_width >= owner_width * 0.75
+        && path_width <= owner_width * 1.25
+        && overlap >= owner_width.min(path_width) * 0.8
+        && path_bounds.top <= baseline - em * 0.02
+        && path_bounds.bottom >= baseline - em * 0.35
+}
+
+fn text_show_owns_underline(
+    paragraph: &Paragraph,
+    extracted: &ExtractedPage,
+    content_objects: &BTreeSet<lopdf::ObjectId>,
+    span: SpanKey,
+    characters: &[&Char],
+    path: &crate::walk::WalkedVectorPath,
+) -> bool {
+    if !path.safe_to_replay
+        || span.0 != path.content_object
+        || !paragraph_owns_walked_span(paragraph, extracted, span, content_objects)
+    {
+        return false;
+    }
+    let Some(owner_bounds) = characters
+        .iter()
+        .map(|character| character.r#box)
+        .reduce(Rect::union)
+    else {
+        return false;
+    };
+    let Some(path_bounds) = horizontal_path_bounds(path) else {
+        return false;
+    };
+    let em = characters
+        .iter()
+        .map(|character| character.font_size)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .fold(0.0_f64, f64::max);
+    let baseline = characters[0].baseline_origin.y;
+    if em <= 0.0
+        || characters
+            .iter()
+            .any(|character| (character.baseline_origin.y - baseline).abs() > em * 0.05)
+    {
+        return false;
+    }
+    let owner_width = owner_bounds.right - owner_bounds.left;
+    let path_width = path_bounds.right - path_bounds.left;
+    let overlap = (owner_bounds.right.min(path_bounds.right)
+        - owner_bounds.left.max(path_bounds.left))
+    .max(0.0);
+    let byte_distance = if path.byte_end <= span.1 {
+        span.1 - path.byte_end
+    } else {
+        path.byte_start.saturating_sub(span.2)
+    };
+    path_width >= owner_width * 0.75
+        && path_width <= owner_width * 1.25
+        && overlap >= owner_width.min(path_width) * 0.8
+        && path_bounds.top <= baseline - em * 0.02
+        && path_bounds.bottom >= baseline - em * 0.35
+        && byte_distance <= 256
+}
+
+fn attach_text_underlines_to_plans(
+    plans: &mut [TypesetPlan],
+    underlines: &[OwnedTextUnderline],
+    page_bounds: Rect,
+    typeset_container: Rect,
+    obstacles: &[Rect],
+) -> Option<()> {
+    let mut relocated = Vec::new();
+    for underline in underlines {
+        let matching = plans
+            .iter()
+            .enumerate()
+            .filter(|(_, plan)| plan.spans.first() == Some(&underline.owner_span))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let [plan_index] = matching.as_slice() else {
+            return None;
+        };
+        let plan = &plans[*plan_index];
+        if plan.lines.len() != 1 || plan.baselines.len() != 1 {
+            return None;
+        }
+        let delta_x_pt = plan.baselines[0].0 - underline.owner_origin.x;
+        let delta_y_pt = plan.baselines[0].1 - underline.owner_origin.y;
+        if !delta_x_pt.is_finite() || !delta_y_pt.is_finite() {
+            return None;
+        }
+        let bounds = translated_rect(underline.bounds, delta_x_pt, delta_y_pt);
+        relocated.push((*plan_index, underline, delta_x_pt, delta_y_pt, bounds));
+    }
+    let relocated_bounds = relocated
+        .iter()
+        .map(|(_, _, _, _, bounds)| *bounds)
+        .collect::<Vec<_>>();
+    if relocated_bounds
+        .iter()
+        .any(|&bounds| !rect_contains(typeset_container, bounds, 0.01))
+        || !ink_bounds_are_safe(&relocated_bounds, page_bounds, obstacles)
+    {
+        return None;
+    }
+    for (plan_index, underline, delta_x_pt, delta_y_pt, bounds) in relocated {
+        plans[plan_index]
+            .text_vector_relocations
+            .push(TextVectorRelocation {
+                replay: underline.replay,
+                delta_x_pt,
+                delta_y_pt,
+            });
+        plans[plan_index].ink_bounds.push(bounds);
+    }
+    Some(())
+}
+
 fn plan_modified_spans(plan: &TypesetPlan) -> impl Iterator<Item = SpanKey> + '_ {
     plan.spans
         .iter()
         .copied()
+        .chain(
+            plan.text_vector_relocations
+                .iter()
+                .map(|relocation| relocation.replay.span),
+        )
         .chain(plan.formula_relocations.iter().flat_map(|relocation| {
             relocation
                 .spans
@@ -4820,6 +5416,7 @@ struct TypesetPlan {
     lines: Vec<Vec<crate::translate::StyledCharacter>>,
     baselines: Vec<(f64, f64)>,
     formula_relocations: Vec<FormulaRelocation>,
+    text_vector_relocations: Vec<TextVectorRelocation>,
     ink_bounds: Vec<Rect>,
     font_size: f64,
     single_line_expansion: Option<SingleLineBoundsExpansion>,
@@ -4835,6 +5432,8 @@ struct FormulaRelocation {
     delta_x_pt: f64,
     delta_y_pt: f64,
     characters: Vec<TypesetCharacter>,
+    text_ink_bounds: Rect,
+    glyph_ink_bounds: Vec<Rect>,
     source_fonts: Vec<il::FontRef>,
 }
 
@@ -4842,6 +5441,22 @@ struct FormulaRelocation {
 struct FormulaVectorReplay {
     span: SpanKey,
     content_transform: [f64; 6],
+    bounds: Rect,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OwnedTextUnderline {
+    replay: FormulaVectorReplay,
+    owner_span: SpanKey,
+    owner_origin: il::Point,
+    bounds: Rect,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TextVectorRelocation {
+    replay: FormulaVectorReplay,
+    delta_x_pt: f64,
+    delta_y_pt: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -4893,6 +5508,13 @@ struct MultiLineBoundsExpansion {
     bottom_pt: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SingleLineInkFit {
+    baseline_y: f64,
+    ink_bounds: Rect,
+    expansion: Option<SingleLineBoundsExpansion>,
+}
+
 struct BuiltOutputFont {
     font: EmbeddedFont,
     cids: BTreeMap<char, u16>,
@@ -4937,6 +5559,80 @@ impl OutputFontKey {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct OutputFontVariation {
+    tag: [u8; 4],
+    value: f32,
+}
+
+fn output_font_variations(
+    bytes: &[u8],
+    key: OutputFontKey,
+) -> std::result::Result<Vec<OutputFontVariation>, ()> {
+    use skrifa::MetadataProvider;
+
+    let font = skrifa::FontRef::from_index(bytes, 0).map_err(|_| ())?;
+    let axes = font.axes().iter().collect::<Vec<_>>();
+    if axes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // The Regular slot is the established default-location output contract. Keep it on the
+    // legacy subset path so adding Bold instantiation cannot change ordinary body text bytes.
+    if !key.is_bold() {
+        return Ok(Vec::new());
+    }
+
+    let instances = font.named_instances();
+    for index in 0..instances.len() {
+        let Some(instance) = instances.get(index) else {
+            continue;
+        };
+        let name = font
+            .localized_strings(instance.subfamily_name_id())
+            .english_or_first()
+            .map(|value| value.to_string());
+        if name.as_deref() != Some("Bold") {
+            continue;
+        }
+        let values = instance.user_coords().collect::<Vec<_>>();
+        if values.len() != axes.len() {
+            return Err(());
+        }
+        return Ok(axes
+            .iter()
+            .zip(values)
+            .map(|(axis, value)| OutputFontVariation {
+                tag: axis.tag().to_be_bytes(),
+                value,
+            })
+            .collect());
+    }
+
+    let weight_tag = skrifa::Tag::new(b"wght");
+    Ok(axes
+        .iter()
+        .find(|axis| axis.tag() == weight_tag)
+        .map(|axis| OutputFontVariation {
+            tag: axis.tag().to_be_bytes(),
+            value: 700.0_f32.clamp(axis.min_value(), axis.max_value()),
+        })
+        .into_iter()
+        .collect())
+}
+
+fn configured_output_font_face(
+    bytes: &[u8],
+    key: OutputFontKey,
+) -> std::result::Result<ttf_parser::Face<'_>, ()> {
+    let mut face = ttf_parser::Face::parse(bytes, 0).map_err(|_| ())?;
+    for variation in output_font_variations(bytes, key)? {
+        face.set_variation(ttf_parser::Tag::from_bytes(&variation.tag), variation.value)
+            .ok_or(())?;
+    }
+    Ok(face)
+}
+
 struct OutputFontFaces<'a> {
     primary_regular: ttf_parser::Face<'a>,
     primary_bold: ttf_parser::Face<'a>,
@@ -4947,12 +5643,22 @@ struct OutputFontFaces<'a> {
 impl<'a> OutputFontFaces<'a> {
     fn parse(fonts: &'a crate::context::OutputFonts) -> std::result::Result<Self, ()> {
         Ok(Self {
-            primary_regular: ttf_parser::Face::parse(&fonts.regular.bytes, 0).map_err(|_| ())?,
-            primary_bold: ttf_parser::Face::parse(&fonts.bold.bytes, 0).map_err(|_| ())?,
-            fallback_regular: ttf_parser::Face::parse(&fonts.fallback_regular.bytes, 0)
-                .map_err(|_| ())?,
-            fallback_bold: ttf_parser::Face::parse(&fonts.fallback_bold.bytes, 0)
-                .map_err(|_| ())?,
+            primary_regular: configured_output_font_face(
+                &fonts.regular.bytes,
+                OutputFontKey::PrimaryRegular,
+            )?,
+            primary_bold: configured_output_font_face(
+                &fonts.bold.bytes,
+                OutputFontKey::PrimaryBold,
+            )?,
+            fallback_regular: configured_output_font_face(
+                &fonts.fallback_regular.bytes,
+                OutputFontKey::FallbackRegular,
+            )?,
+            fallback_bold: configured_output_font_face(
+                &fonts.fallback_bold.bytes,
+                OutputFontKey::FallbackBold,
+            )?,
         })
     }
 
@@ -5077,6 +5783,17 @@ struct ParagraphPlanningGeometry<'a> {
     relocation_obstacles: &'a [Rect],
 }
 
+fn typeset_container<'a>(chars: impl IntoIterator<Item = &'a Char>) -> Option<Rect> {
+    chars
+        .into_iter()
+        .filter_map(|character| character.layout.map(|layout| layout.bounds))
+        .reduce(Rect::union)
+}
+
+fn paragraph_typeset_container(paragraph: &Paragraph) -> Option<Rect> {
+    typeset_container(paragraph.chars())
+}
+
 fn plan_paragraph<'a>(
     paragraph: &Paragraph,
     translated: &str,
@@ -5165,6 +5882,9 @@ fn plan_paragraph<'a>(
                 geometry.page_bounds,
                 geometry.obstacles,
                 line_slots.as_deref(),
+                (!mixed_with_formula)
+                    .then_some(paragraph.first_line_indent)
+                    .flatten(),
             )
             .map(|plan| (segment_index, plan))
         })
@@ -5300,6 +6020,10 @@ fn prepare_shared_formula_fixed_plans(
                     .iter()
                     .map(|(character, _)| character.visual_bbox)
                     .reduce(Rect::union)?;
+                let glyph_ink_bounds = matching
+                    .iter()
+                    .map(|(character, _)| character.visual_bbox)
+                    .collect();
                 let source_fonts = matching
                     .iter()
                     .map(|(character, _)| character.font.clone())
@@ -5314,6 +6038,8 @@ fn prepare_shared_formula_fixed_plans(
                     delta_x_pt: 0.0,
                     delta_y_pt: 0.0,
                     characters,
+                    text_ink_bounds: ink_bounds,
+                    glyph_ink_bounds,
                     source_fonts,
                 });
                 plans[owner].ink_bounds.push(ink_bounds);
@@ -5365,6 +6091,8 @@ fn prepare_shared_formula_fixed_plans(
                 delta_x_pt: 0.0,
                 delta_y_pt: 0.0,
                 characters,
+                text_ink_bounds: unit.glyph_ink_bounds.iter().copied().reduce(Rect::union)?,
+                glyph_ink_bounds: unit.glyph_ink_bounds,
                 source_fonts: unit.source_fonts,
             })
         })
@@ -5374,6 +6102,7 @@ fn prepare_shared_formula_fixed_plans(
         lines,
         baselines,
         formula_relocations,
+        text_vector_relocations: Vec::new(),
         ink_bounds,
         font_size,
         single_line_expansion: None,
@@ -5458,6 +6187,7 @@ fn plan_shared_number_identity<'a>(
         output_fonts,
         page_bounds,
         obstacles,
+        None,
         None,
     )
 }
@@ -5789,6 +6519,7 @@ struct SourceFormulaUnit<'a> {
     vector_paths: Vec<FormulaVectorReplay>,
     inline_images: Vec<FormulaVectorReplay>,
     bounds: Rect,
+    glyph_ink_bounds: Vec<Rect>,
     ink_bounds: Rect,
     source_fonts: Vec<il::FontRef>,
 }
@@ -5873,13 +6604,9 @@ fn plan_relocated_formula_flow<'a>(
             il::PreservedReason::Unlocatable,
         ));
     }
-    let container = text_chars
-        .iter()
-        .filter_map(|character| character.layout.map(|layout| layout.bounds))
-        .reduce(Rect::union)
-        .ok_or(TypesetPlanError::Preserved(
-            il::PreservedReason::TypesetOverflow,
-        ))?;
+    let container = typeset_container(text_chars.iter().copied()).ok_or(
+        TypesetPlanError::Preserved(il::PreservedReason::TypesetOverflow),
+    )?;
     let translated_segments = translated_segments
         .iter()
         .map(|segment| normalize_typeset_whitespace(segment))
@@ -5929,11 +6656,12 @@ fn plan_relocated_formula_flow<'a>(
             atoms.push(FormulaFlowAtom::Formula(segment_index));
         }
     }
-    let preferred = text_chars
-        .iter()
-        .map(|character| character.font_size)
-        .sum::<f64>()
-        / text_chars.len() as f64;
+    if formula_flow_kinsoku_is_unsatisfiable(&atoms) {
+        return Err(TypesetPlanError::Preserved(
+            il::PreservedReason::TypesetOverflow,
+        ));
+    }
+    let preferred = preferred_typeset_font_size(&text_chars).unwrap_or(text_chars[0].font_size);
     let first = text_chars[0];
     let mut size = preferred.max(MIN_FONT_SIZE_PT);
     loop {
@@ -5949,6 +6677,7 @@ fn plan_relocated_formula_flow<'a>(
             size,
             page_bounds,
             obstacles,
+            None,
         );
         if !may_expand {
             slots.retain(|slot| slot.baseline_y + descent >= container.bottom - 0.01);
@@ -6029,6 +6758,7 @@ fn plan_relocated_formula_flow<'a>(
                     lines: placement.lines,
                     baselines: placement.baselines,
                     formula_relocations: placement.formula_relocations,
+                    text_vector_relocations: Vec::new(),
                     ink_bounds: placement.ink_bounds,
                     font_size: size,
                     single_line_expansion: None,
@@ -6147,6 +6877,10 @@ fn source_formula_units<'a>(
                 .iter()
                 .map(|character| character.visual_bbox)
                 .reduce(Rect::union)?;
+            let glyph_ink_bounds = chars
+                .iter()
+                .map(|character| character.visual_bbox)
+                .collect();
             let bounds = metric_bounds.union(visual_bounds);
             if bounds.right <= bounds.left + 0.01 {
                 return None;
@@ -6179,6 +6913,7 @@ fn source_formula_units<'a>(
                 vector_paths: Vec::new(),
                 inline_images: Vec::new(),
                 bounds,
+                glyph_ink_bounds,
                 ink_bounds: visual_bounds,
                 source_fonts,
             })
@@ -6227,6 +6962,7 @@ fn source_formula_units<'a>(
         unit.spans.sort_unstable();
         unit.spans.dedup();
         unit.bounds = unit.bounds.union(radical.r#box).union(radical.visual_bbox);
+        unit.glyph_ink_bounds.insert(0, radical.visual_bbox);
         unit.ink_bounds = unit.ink_bounds.union(radical.visual_bbox);
         unit.source_fonts.push(radical.font.clone());
         unit.source_fonts.sort();
@@ -6266,6 +7002,7 @@ fn attach_uniquely_owned_formula_ink(
                 units[*index].vector_paths.push(FormulaVectorReplay {
                     span: (path.content_object, path.byte_start, path.byte_end),
                     content_transform: path.content_transform,
+                    bounds: path_bounds,
                 });
                 units[*index].bounds = units[*index].bounds.union(path_bounds);
                 units[*index].ink_bounds = units[*index].ink_bounds.union(path_bounds);
@@ -6282,12 +7019,14 @@ fn attach_uniquely_owned_formula_ink(
         match candidates.as_slice() {
             [] => continue,
             [index] => {
+                let bounds = walked_image_bounds(image)?;
                 units[*index].inline_images.push(FormulaVectorReplay {
                     span: (image.content_object, image.byte_start, image.byte_end),
                     content_transform: image.content_transform,
+                    bounds,
                 });
-                units[*index].bounds = units[*index].bounds.union(image.bounds);
-                units[*index].ink_bounds = units[*index].ink_bounds.union(image.bounds);
+                units[*index].bounds = units[*index].bounds.union(bounds);
+                units[*index].ink_bounds = units[*index].ink_bounds.union(bounds);
             }
             _ => return None,
         }
@@ -6392,6 +7131,12 @@ fn formula_owns_inline_image(
     unit: &SourceFormulaUnit<'_>,
     image: &crate::walk::WalkedInlineImage,
 ) -> bool {
+    if !image.replayable {
+        return false;
+    }
+    let Some(image_bounds) = walked_image_bounds(image) else {
+        return false;
+    };
     let em = unit
         .chars
         .iter()
@@ -6400,18 +7145,18 @@ fn formula_owns_inline_image(
         .fold(0.0_f64, f64::max);
     if em <= 0.0
         || image.content_object.0 == 0
-        || image.bounds.right <= image.bounds.left
-        || image.bounds.top <= image.bounds.bottom
-        || image.bounds.right - image.bounds.left > unit.bounds.right - unit.bounds.left + em
-        || image.bounds.top - image.bounds.bottom > unit.bounds.top - unit.bounds.bottom + em
+        || image_bounds.right <= image_bounds.left
+        || image_bounds.top <= image_bounds.bottom
+        || image_bounds.right - image_bounds.left > unit.bounds.right - unit.bounds.left + em
+        || image_bounds.top - image_bounds.bottom > unit.bounds.top - unit.bounds.bottom + em
     {
         return false;
     }
-    let overlap_x = (image.bounds.right.min(unit.bounds.right)
-        - image.bounds.left.max(unit.bounds.left))
+    let overlap_x = (image_bounds.right.min(unit.bounds.right)
+        - image_bounds.left.max(unit.bounds.left))
     .max(0.0);
-    let overlap_y = (image.bounds.top.min(unit.bounds.top)
-        - image.bounds.bottom.max(unit.bounds.bottom))
+    let overlap_y = (image_bounds.top.min(unit.bounds.top)
+        - image_bounds.bottom.max(unit.bounds.bottom))
     .max(0.0);
     if overlap_x <= 0.01 || overlap_y <= 0.01 {
         return false;
@@ -6596,6 +7341,18 @@ fn place_formula_flow(
                     delta_x_pt,
                     delta_y_pt,
                     characters,
+                    text_ink_bounds: unit
+                        .glyph_ink_bounds
+                        .iter()
+                        .copied()
+                        .map(|bounds| translated_rect(bounds, delta_x_pt, delta_y_pt))
+                        .reduce(Rect::union)?,
+                    glyph_ink_bounds: unit
+                        .glyph_ink_bounds
+                        .iter()
+                        .copied()
+                        .map(|bounds| translated_rect(bounds, delta_x_pt, delta_y_pt))
+                        .collect(),
                     source_fonts: unit.source_fonts.clone(),
                 });
                 formula_line_lefts.push(slot.left);
@@ -6645,6 +7402,25 @@ fn formula_flow_atoms_must_stay_together(left: &FormulaFlowAtom, right: &Formula
             .is_some_and(|character| formula_adjacent_punctuation(character.value)),
         _ => false,
     }
+}
+
+fn formula_flow_kinsoku_is_unsatisfiable(atoms: &[FormulaFlowAtom]) -> bool {
+    let starts_forbidden = match atoms.first() {
+        Some(FormulaFlowAtom::Text { characters, .. }) => characters
+            .iter()
+            .find(|character| !character.value.is_whitespace())
+            .is_some_and(|character| mimus_quality_contract::forbidden_line_start(character.value)),
+        _ => false,
+    };
+    let ends_forbidden = match atoms.last() {
+        Some(FormulaFlowAtom::Text { characters, .. }) => characters
+            .iter()
+            .rev()
+            .find(|character| !character.value.is_whitespace())
+            .is_some_and(|character| mimus_quality_contract::forbidden_line_end(character.value)),
+        _ => false,
+    };
+    starts_forbidden || ends_forbidden
 }
 
 fn planned_formula_continuity_text(
@@ -7147,6 +7923,7 @@ fn translated_rect(rect: Rect, delta_x: f64, delta_y: f64) -> Rect {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_text_segment<'a>(
     chars: &[&Char],
     translated: &[crate::translate::StyledCharacter],
@@ -7155,6 +7932,7 @@ fn plan_text_segment<'a>(
     page_bounds: Rect,
     obstacles: &[Rect],
     line_slots: Option<&[TypesetLineSlot]>,
+    first_line_indent: Option<f64>,
 ) -> std::result::Result<TypesetPlan, TypesetPlanError<'a>> {
     if chars.is_empty() {
         return Err(TypesetPlanError::Preserved(
@@ -7184,6 +7962,7 @@ fn plan_text_segment<'a>(
             lines: Vec::new(),
             baselines: Vec::new(),
             formula_relocations: Vec::new(),
+            text_vector_relocations: Vec::new(),
             ink_bounds: Vec::new(),
             font_size: chars[0].font_size.max(MIN_FONT_SIZE_PT),
             single_line_expansion: None,
@@ -7218,18 +7997,10 @@ fn plan_text_segment<'a>(
             });
         }
     }
-    let container = chars
-        .iter()
-        .filter_map(|character| character.layout.map(|layout| layout.bounds))
-        .reduce(Rect::union)
-        .ok_or(TypesetPlanError::Preserved(
-            il::PreservedReason::TypesetOverflow,
-        ))?;
-    let preferred = chars
-        .iter()
-        .map(|character| character.font_size)
-        .sum::<f64>()
-        / chars.len() as f64;
+    let container = typeset_container(chars.iter().copied()).ok_or(TypesetPlanError::Preserved(
+        il::PreservedReason::TypesetOverflow,
+    ))?;
+    let preferred = preferred_typeset_font_size(chars).unwrap_or(chars[0].font_size);
     let first = chars[0];
     let source_is_single_line = source_is_single_line(chars);
     let single_line_start_x = first.baseline_origin.x.max(container.left);
@@ -7264,6 +8035,7 @@ fn plan_text_segment<'a>(
                     lines,
                     baselines,
                     formula_relocations: Vec::new(),
+                    text_vector_relocations: Vec::new(),
                     ink_bounds,
                     font_size: size,
                     single_line_expansion: None,
@@ -7272,12 +8044,17 @@ fn plan_text_segment<'a>(
             }
         }
         if line_slots.is_none()
-            && let Some(lines) =
-                wrap_styled_text(&translated, &faces, size, container.right - container.left)
+            && let Some(lines) = wrap_styled_text(
+                &translated,
+                &faces,
+                size,
+                container.right - container.left,
+                first_line_indent.unwrap_or(0.0),
+            )
         {
             if source_is_single_line
                 && lines.len() == 1
-                && let Some(expansion) = single_line_ink_fit(
+                && let Some(fit) = single_line_ink_fit(
                     &lines[0],
                     &faces,
                     size,
@@ -7288,21 +8065,15 @@ fn plan_text_segment<'a>(
                     obstacles,
                 )
             {
-                let ink_bounds = planned_line_ink_bounds(
-                    &lines,
-                    &[(single_line_start_x, first.baseline_origin.y)],
-                    &faces,
-                    size,
-                )
-                .expect("single-line ink fit already resolved every output glyph");
                 return Ok(TypesetPlan {
                     spans,
                     lines,
-                    baselines: vec![(single_line_start_x, first.baseline_origin.y)],
+                    baselines: vec![(single_line_start_x, fit.baseline_y)],
                     formula_relocations: Vec::new(),
-                    ink_bounds,
+                    text_vector_relocations: Vec::new(),
+                    ink_bounds: vec![fit.ink_bounds],
                     font_size: size,
-                    single_line_expansion: expansion,
+                    single_line_expansion: fit.expansion,
                     multi_line_expansion: None,
                 });
             }
@@ -7314,7 +8085,11 @@ fn plan_text_segment<'a>(
                 .enumerate()
                 .map(|(index, _)| {
                     (
-                        container.left,
+                        if index == 0 {
+                            container.left + first_line_indent.unwrap_or(0.0)
+                        } else {
+                            container.left
+                        },
                         first_y - index as f64 * size * LINE_ADVANCE_EM,
                     )
                 })
@@ -7333,6 +8108,7 @@ fn plan_text_segment<'a>(
                         lines,
                         baselines,
                         formula_relocations: Vec::new(),
+                        text_vector_relocations: Vec::new(),
                         ink_bounds,
                         font_size: size,
                         single_line_expansion: None,
@@ -7354,6 +8130,7 @@ fn plan_text_segment<'a>(
                     size,
                     page_bounds,
                     obstacles,
+                    first_line_indent,
                 );
                 if let Some(slotted_lines) =
                     wrap_styled_text_in_slots(&translated, &faces, size, &slots)
@@ -7383,6 +8160,7 @@ fn plan_text_segment<'a>(
                             lines,
                             baselines,
                             formula_relocations: Vec::new(),
+                            text_vector_relocations: Vec::new(),
                             ink_bounds,
                             font_size: size,
                             single_line_expansion: None,
@@ -7428,6 +8206,7 @@ fn ink_bounds_are_safe(ink_bounds: &[Rect], page_bounds: Rect, obstacles: &[Rect
     }) && !rects_intersect_each_other(ink_bounds)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn obstacle_aware_multiline_slots(
     container: Rect,
     first_baseline_y: f64,
@@ -7436,6 +8215,7 @@ fn obstacle_aware_multiline_slots(
     size: f64,
     page_bounds: Rect,
     obstacles: &[Rect],
+    first_line_indent: Option<f64>,
 ) -> Vec<TypesetLineSlot> {
     let left = container.left.max(page_bounds.left);
     let right = container.right.min(page_bounds.right);
@@ -7483,6 +8263,21 @@ fn obstacle_aware_multiline_slots(
         );
         baseline_y -= size * LINE_ADVANCE_EM;
     }
+    if let Some(indent) = first_line_indent.filter(|indent| *indent > 0.01) {
+        let first_line_x = container.left + indent;
+        if first_line_x < page_bounds.left - 0.01 || first_line_x >= right - 0.01 {
+            return Vec::new();
+        }
+        let Some(slot_index) = slots.iter().position(|slot| {
+            (slot.baseline_y - first_baseline_y).abs() <= 0.01
+                && slot.left <= first_line_x + 0.01
+                && slot.right > first_line_x + 0.01
+        }) else {
+            return Vec::new();
+        };
+        slots.drain(..slot_index);
+        slots[0].left = first_line_x;
+    }
     slots
 }
 
@@ -7511,13 +8306,36 @@ fn single_line_ink_fit(
     container: Rect,
     page_bounds: Rect,
     obstacles: &[Rect],
-) -> Option<Option<SingleLineBoundsExpansion>> {
+) -> Option<SingleLineInkFit> {
     let ink = styled_line_ink_bounds(line, faces, size, start_x, baseline_y)?;
     if ink.left < container.left - 0.01 || ink.right > container.right + 0.01 {
         return None;
     }
     let top_pt = (ink.top - container.top).max(0.0);
     let bottom_pt = (container.bottom - ink.bottom).max(0.0);
+    if line.iter().any(|character| character.bold) && (top_pt > 0.01 || bottom_pt > 0.01) {
+        let delta_y = if top_pt > 0.01 && bottom_pt <= 0.01 {
+            -top_pt
+        } else if bottom_pt > 0.01 && top_pt <= 0.01 {
+            bottom_pt
+        } else {
+            0.0
+        };
+        let shifted = translated_rect(ink, 0.0, delta_y);
+        if delta_y != 0.0
+            && rect_contains(container, shifted, 0.01)
+            && rect_contains(page_bounds, shifted, 0.01)
+            && obstacles
+                .iter()
+                .all(|obstacle| intersection_area(shifted, *obstacle) <= 0.0001)
+        {
+            return Some(SingleLineInkFit {
+                baseline_y: baseline_y + delta_y,
+                ink_bounds: shifted,
+                expansion: None,
+            });
+        }
+    }
     let allowance =
         (size * SINGLE_LINE_MAX_VERTICAL_OVERFLOW_EM).min(SINGLE_LINE_MAX_VERTICAL_OVERFLOW_PT);
     if top_pt > allowance + 0.01 || bottom_pt > allowance + 0.01 {
@@ -7530,10 +8348,12 @@ fn single_line_ink_fit(
     {
         return None;
     }
-    Some(
-        (top_pt > 0.01 || bottom_pt > 0.01)
+    Some(SingleLineInkFit {
+        baseline_y,
+        ink_bounds: ink,
+        expansion: (top_pt > 0.01 || bottom_pt > 0.01)
             .then_some(SingleLineBoundsExpansion { top_pt, bottom_pt }),
-    )
+    })
 }
 
 fn styled_line_ink_bounds(
@@ -7606,7 +8426,15 @@ fn wrap_styled_text(
     faces: &OutputFontFaces<'_>,
     size: f64,
     width: f64,
+    first_line_indent: f64,
 ) -> Option<Vec<Vec<crate::translate::StyledCharacter>>> {
+    if !styled_text_kinsoku_is_satisfiable(text) {
+        return None;
+    }
+    let first_line_width = width - first_line_indent.max(0.0);
+    if !first_line_width.is_finite() || first_line_width <= 0.01 {
+        return None;
+    }
     let mut lines = vec![Vec::new()];
     let mut line_width = 0.0;
     for token in styled_text_tokens(text) {
@@ -7615,17 +8443,95 @@ fn wrap_styled_text(
             let glyph = face.glyph_index(character.value)?;
             Some(sum + glyph_advance_em(face, glyph)? * size)
         })?;
-        if token_width > width + 0.01 {
+        let line_limit = if lines.len() == 1 {
+            first_line_width
+        } else {
+            width
+        };
+        if token_width > line_limit + 0.01 && line_width <= 0.0 {
             return None;
         }
-        if line_width > 0.0 && line_width + token_width > width + 0.01 {
+        if line_width > 0.0 && line_width + token_width > line_limit + 0.01 {
             lines.push(Vec::new());
             line_width = 0.0;
+            if token_width > width + 0.01 {
+                return None;
+            }
         }
         lines.last_mut().unwrap().extend(token);
         line_width += token_width;
     }
     Some(lines)
+}
+
+fn preferred_body_font_size(chars: &[&Char]) -> Option<f64> {
+    let (body, ordinary) = body_and_ordinary_font_characters(chars);
+    font_size_mode(&ordinary).or_else(|| font_size_mode(&body))
+}
+
+fn preferred_typeset_font_size(chars: &[&Char]) -> Option<f64> {
+    let legacy_mean = chars
+        .iter()
+        .map(|character| character.font_size)
+        .sum::<f64>()
+        / chars.len() as f64;
+    let (body, ordinary) = body_and_ordinary_font_characters(chars);
+    let script_count = body.len().saturating_sub(ordinary.len());
+    if script_count <= ordinary.len() {
+        return (legacy_mean.is_finite() && legacy_mean > 0.0).then_some(legacy_mean);
+    }
+    preferred_body_font_size(chars)
+        .or_else(|| (legacy_mean.is_finite() && legacy_mean > 0.0).then_some(legacy_mean))
+}
+
+fn body_and_ordinary_font_characters<'a>(chars: &[&'a Char]) -> (Vec<&'a Char>, Vec<&'a Char>) {
+    let body = chars
+        .iter()
+        .copied()
+        .filter(|character| {
+            character.visible
+                && character.font_size.is_finite()
+                && character.font_size > 0.0
+                && character
+                    .unicode
+                    .is_some_and(|unicode| !unicode.is_whitespace())
+                && character
+                    .layout
+                    .is_some_and(|layout| layout.policy == TranslationPolicy::Translate)
+        })
+        .collect::<Vec<_>>();
+    let ordinary = body
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            !body.iter().copied().any(|anchor| {
+                !std::ptr::eq(anchor, *candidate) && geometrically_proves_script(anchor, candidate)
+            })
+        })
+        .collect();
+    (body, ordinary)
+}
+
+fn font_size_mode(chars: &[&Char]) -> Option<f64> {
+    let mut counts = Vec::<(f64, usize)>::new();
+    for candidate in chars {
+        if let Some((_, count)) = counts
+            .iter_mut()
+            .find(|(size, _)| size.to_bits() == candidate.font_size.to_bits())
+        {
+            *count += 1;
+        } else {
+            counts.push((candidate.font_size, 1));
+        }
+    }
+    counts
+        .into_iter()
+        .max_by(|(left_size, left_count), (right_size, right_count)| {
+            left_count
+                .cmp(right_count)
+                .then_with(|| left_size.total_cmp(right_size))
+        })
+        .map(|(size, _)| size)
 }
 
 fn wrap_styled_text_in_slots(
@@ -7634,6 +8540,9 @@ fn wrap_styled_text_in_slots(
     size: f64,
     slots: &[TypesetLineSlot],
 ) -> Option<Vec<(usize, Vec<crate::translate::StyledCharacter>)>> {
+    if !styled_text_kinsoku_is_satisfiable(text) {
+        return None;
+    }
     let mut lines = Vec::<(usize, Vec<crate::translate::StyledCharacter>)>::new();
     let mut slot_index = 0_usize;
     let mut line_width = 0.0;
@@ -7675,19 +8584,45 @@ fn styled_text_tokens(
     text: &[crate::translate::StyledCharacter],
 ) -> Vec<Vec<crate::translate::StyledCharacter>> {
     let mut tokens = Vec::<Vec<crate::translate::StyledCharacter>>::new();
-    for &character in text {
+    for (index, &character) in text.iter().enumerate() {
         let joins_ascii_word = character.value.is_ascii_alphanumeric()
-            && tokens
-                .last()
-                .and_then(|token| token.last())
+            && index
+                .checked_sub(1)
+                .and_then(|previous| text.get(previous))
                 .is_some_and(|previous| previous.value.is_ascii_alphanumeric());
-        if joins_ascii_word {
+        let previous_nonspace = text[..index]
+            .iter()
+            .rev()
+            .find(|candidate| !candidate.value.is_whitespace());
+        let next_nonspace = text[index..]
+            .iter()
+            .find(|candidate| !candidate.value.is_whitespace());
+        let joins_kinsoku_group = !tokens.is_empty()
+            && (next_nonspace.is_some_and(|candidate| {
+                mimus_quality_contract::forbidden_line_start(candidate.value)
+            }) || previous_nonspace.is_some_and(|candidate| {
+                mimus_quality_contract::forbidden_line_end(candidate.value)
+            }));
+        if joins_ascii_word || joins_kinsoku_group {
             tokens.last_mut().unwrap().push(character);
         } else {
             tokens.push(vec![character]);
         }
     }
     tokens
+}
+
+fn styled_text_kinsoku_is_satisfiable(text: &[crate::translate::StyledCharacter]) -> bool {
+    let first = text
+        .iter()
+        .find(|character| !character.value.is_whitespace());
+    let last = text
+        .iter()
+        .rev()
+        .find(|character| !character.value.is_whitespace());
+    !first.is_some_and(|character| mimus_quality_contract::forbidden_line_start(character.value))
+        && !last
+            .is_some_and(|character| mimus_quality_contract::forbidden_line_end(character.value))
 }
 
 fn glyph_advance_em(face: &ttf_parser::Face<'_>, glyph: ttf_parser::GlyphId) -> Option<f64> {
@@ -7701,7 +8636,8 @@ fn build_embedded_font(
     key: OutputFontKey,
 ) -> std::result::Result<(EmbeddedFont, BTreeMap<char, u16>), ()> {
     let bytes = &source_font.bytes;
-    let face = ttf_parser::Face::parse(bytes, 0).map_err(|_| ())?;
+    let face = configured_output_font_face(bytes, key)?;
+    let variations = output_font_variations(bytes, key)?;
     let mut remapper = subsetter::GlyphRemapper::new();
     let mut original = Vec::new();
     for character in used {
@@ -7709,7 +8645,15 @@ fn build_embedded_font(
         remapper.remap(glyph.0);
         original.push((*character, glyph));
     }
-    let font_bytes = subsetter::subset(bytes, 0, &remapper).map_err(|_| ())?;
+    let font_bytes = if variations.is_empty() {
+        subsetter::subset(bytes, 0, &remapper).map_err(|_| ())?
+    } else {
+        let variations = variations
+            .iter()
+            .map(|variation| (subsetter::Tag::new(&variation.tag), variation.value))
+            .collect::<Vec<_>>();
+        subsetter::subset_with_variations(bytes, 0, &variations, &remapper).map_err(|_| ())?
+    };
     let mut cids = BTreeMap::new();
     let mut glyphs = original
         .into_iter()
@@ -7775,6 +8719,382 @@ fn build_typeset_fonts<'a>(
         output_fonts.insert(key, BuiltOutputFont { font, cids });
     }
     Ok(output_fonts)
+}
+
+fn incompatible_final_ink_indices(
+    planned_paragraphs: &[(usize, Vec<TypesetPlan>)],
+    page: &il::Page,
+    extracted: &ExtractedPage,
+    crop_box: Rect,
+    fonts: &BTreeMap<OutputFontKey, BuiltOutputFont>,
+) -> Result<BTreeSet<usize>> {
+    let mut publications = Vec::<(usize, il::PublicationInk)>::new();
+    let mut incompatible = BTreeSet::new();
+    for (index, (reading_order, plans)) in planned_paragraphs.iter().enumerate() {
+        let paragraph = page
+            .paragraphs
+            .iter()
+            .find(|paragraph| paragraph.reading_order == *reading_order)
+            .expect("planned paragraph belongs to its page");
+        if paragraph.translated_text.as_deref() == Some(paragraph.source_text().as_str()) {
+            continue;
+        }
+        let publication = planned_publication_ink(page.index, crop_box, paragraph, plans, fonts)?;
+        if publication_has_retained_ink_collision(&publication, plans, extracted) {
+            incompatible.insert(index);
+        }
+        publications.push((index, publication));
+    }
+    for (left_offset, (_, left)) in publications.iter().enumerate() {
+        for (right_index, right) in &publications[left_offset + 1..] {
+            if publications_overlap(left, right) {
+                incompatible.insert(*right_index);
+            }
+        }
+    }
+    Ok(expand_incompatible_plan_indices(
+        planned_paragraphs,
+        incompatible,
+    ))
+}
+
+fn expand_incompatible_plan_indices(
+    planned_paragraphs: &[(usize, Vec<TypesetPlan>)],
+    mut incompatible: BTreeSet<usize>,
+) -> BTreeSet<usize> {
+    let paragraph_spans = planned_paragraphs
+        .iter()
+        .map(|(_, plans)| {
+            plans
+                .iter()
+                .flat_map(plan_modified_spans)
+                .collect::<BTreeSet<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut blocked_spans = incompatible
+        .iter()
+        .flat_map(|index| paragraph_spans[*index].iter().copied())
+        .collect::<BTreeSet<_>>();
+    loop {
+        let joined = paragraph_spans
+            .iter()
+            .enumerate()
+            .filter(|(index, spans)| {
+                !incompatible.contains(index) && !spans.is_disjoint(&blocked_spans)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if joined.is_empty() {
+            return incompatible;
+        }
+        for index in joined {
+            blocked_spans.extend(paragraph_spans[index].iter().copied());
+            incompatible.insert(index);
+        }
+    }
+}
+
+fn publication_has_retained_ink_collision(
+    publication: &il::PublicationInk,
+    plans: &[TypesetPlan],
+    extracted: &ExtractedPage,
+) -> bool {
+    let claimed_path_scopes =
+        plans
+            .iter()
+            .flat_map(|plan| {
+                plan.text_vector_relocations
+                    .iter()
+                    .map(|relocation| relocation.replay.span)
+                    .chain(plan.formula_relocations.iter().flat_map(|relocation| {
+                        relocation.vector_paths.iter().map(|path| path.span)
+                    }))
+            })
+            .map(|span| (span.0, span.1))
+            .collect::<BTreeSet<_>>();
+    let claimed_images = plans
+        .iter()
+        .flat_map(|plan| &plan.formula_relocations)
+        .flat_map(|relocation| relocation.inline_images.iter().map(|image| image.span))
+        .collect::<BTreeSet<_>>();
+    publication_glyph_bounds(publication).any(|glyph_bounds| {
+        extracted.path_ink.iter().any(|ink| {
+            !ink.replay_scope
+                .is_some_and(|scope| claimed_path_scopes.contains(&scope))
+                && !(ink.filled
+                    && retained_fill_contains_rect(ink, publication.admissible_container))
+                && retained_path_intersects_rect(ink, glyph_bounds)
+        }) || extracted.inline_images.iter().any(|image| {
+            let span = (image.content_object, image.byte_start, image.byte_end);
+            !claimed_images.contains(&span)
+                && !walked_image_contains_rect(image, publication.admissible_container)
+                && walked_image_intersects_rect(image, glyph_bounds)
+        })
+    })
+}
+
+fn publications_overlap(left: &il::PublicationInk, right: &il::PublicationInk) -> bool {
+    let right_bounds = publication_collision_bounds(right).collect::<Vec<_>>();
+    publication_collision_bounds(left).any(|left_bound| {
+        right_bounds
+            .iter()
+            .any(|&right_bound| rects_overlap(left_bound, right_bound, 0.01))
+    })
+}
+
+fn publication_glyph_bounds(publication: &il::PublicationInk) -> impl Iterator<Item = Rect> + '_ {
+    publication
+        .components
+        .iter()
+        .flat_map(|component| match component {
+            il::PublicationInkComponent::TranslatedText { glyphs, .. }
+            | il::PublicationInkComponent::SourceTextReplay { glyphs, .. } => glyphs
+                .iter()
+                .map(|glyph| glyph.ink_bounds)
+                .filter(|bounds| bounds.right > bounds.left && bounds.top > bounds.bottom)
+                .collect::<Vec<_>>(),
+            il::PublicationInkComponent::VectorPath { .. }
+            | il::PublicationInkComponent::InlineImage { .. } => Vec::new(),
+        })
+}
+
+fn publication_collision_bounds(
+    publication: &il::PublicationInk,
+) -> impl Iterator<Item = Rect> + '_ {
+    publication
+        .components
+        .iter()
+        .flat_map(|component| match component {
+            il::PublicationInkComponent::TranslatedText { glyphs, .. }
+            | il::PublicationInkComponent::SourceTextReplay { glyphs, .. } => glyphs
+                .iter()
+                .map(|glyph| glyph.ink_bounds)
+                .filter(|bounds| bounds.right > bounds.left && bounds.top > bounds.bottom)
+                .collect::<Vec<_>>(),
+            il::PublicationInkComponent::VectorPath { bounds, .. }
+            | il::PublicationInkComponent::InlineImage { bounds, .. } => vec![*bounds],
+        })
+}
+
+fn retained_path_intersects_rect(ink: &crate::walk::WalkedPathInk, rect: Rect) -> bool {
+    if intersection_area(ink.bounds, rect) <= 0.0001
+        || ink
+            .form_clip
+            .is_some_and(|clip| intersection_area(clip, rect) <= 0.0001)
+        || ink
+            .clips
+            .iter()
+            .any(|clip| !walked_clip_intersects_rect(clip, rect))
+    {
+        return false;
+    }
+    if ink.filled {
+        return ink
+            .segments
+            .iter()
+            .any(|segment| path_segment_intersects_rect(*segment, rect))
+            || rect_corners(rect)
+                .into_iter()
+                .any(|point| point_in_retained_fill(point, ink));
+    }
+    let expanded = expanded_rect(rect, ink.stroke_radius);
+    ink.segments
+        .iter()
+        .any(|segment| path_segment_intersects_rect(*segment, expanded))
+}
+
+fn retained_fill_contains_rect(ink: &crate::walk::WalkedPathInk, rect: Rect) -> bool {
+    if !ink.filled
+        || ink
+            .form_clip
+            .is_some_and(|clip| !rect_contains(clip, rect, FINAL_INK_GEOMETRY_TOLERANCE_PT))
+        || ink
+            .clips
+            .iter()
+            .any(|clip| !walked_clip_contains_rect(clip, rect))
+    {
+        return false;
+    }
+    rect_corners(rect)
+        .into_iter()
+        .chain([Point {
+            x: (rect.left + rect.right) / 2.0,
+            y: (rect.bottom + rect.top) / 2.0,
+        }])
+        .all(|point| point_in_retained_fill(point, ink))
+        && !ink
+            .segments
+            .iter()
+            .any(|segment| path_segment_intersects_rect(*segment, rect))
+}
+
+fn walked_image_intersects_rect(image: &crate::walk::WalkedInlineImage, rect: Rect) -> bool {
+    walked_image_bounds(image).is_some_and(|bounds| intersection_area(bounds, rect) > 0.0001)
+        && image
+            .clips
+            .iter()
+            .all(|clip| walked_clip_intersects_rect(clip, rect))
+}
+
+fn walked_image_contains_rect(image: &crate::walk::WalkedInlineImage, rect: Rect) -> bool {
+    rect_contains(image.bounds, rect, FINAL_INK_GEOMETRY_TOLERANCE_PT)
+        && image
+            .form_clip
+            .is_none_or(|clip| rect_contains(clip, rect, FINAL_INK_GEOMETRY_TOLERANCE_PT))
+        && image
+            .clips
+            .iter()
+            .all(|clip| walked_clip_contains_rect(clip, rect))
+}
+
+fn walked_clip_intersects_rect(clip: &crate::walk::WalkedClipPath, rect: Rect) -> bool {
+    let Some(bounds) = clip.bounds else {
+        return false;
+    };
+    if intersection_area(bounds, rect) <= 0.0001 {
+        return false;
+    }
+    clip.segments
+        .iter()
+        .any(|segment| path_segment_intersects_rect(*segment, rect))
+        || rect_corners(rect)
+            .into_iter()
+            .any(|point| point_in_walked_clip(point, clip))
+        || clip
+            .segments
+            .iter()
+            .any(|segment| point_in_rect(segment.start, rect))
+}
+
+fn walked_clip_contains_rect(clip: &crate::walk::WalkedClipPath, rect: Rect) -> bool {
+    clip.bounds
+        .is_some_and(|bounds| rect_contains(bounds, rect, FINAL_INK_GEOMETRY_TOLERANCE_PT))
+        && rect_corners(rect)
+            .into_iter()
+            .chain([Point {
+                x: (rect.left + rect.right) / 2.0,
+                y: (rect.bottom + rect.top) / 2.0,
+            }])
+            .all(|point| point_in_walked_clip(point, clip))
+        && !clip
+            .segments
+            .iter()
+            .any(|segment| path_segment_intersects_rect(*segment, rect))
+}
+
+fn point_in_walked_clip(point: Point, clip: &crate::walk::WalkedClipPath) -> bool {
+    if clip.even_odd {
+        return clip.segments.iter().fold(false, |inside, segment| {
+            let crosses = (segment.start.y > point.y) != (segment.end.y > point.y)
+                && point.x
+                    < (segment.end.x - segment.start.x) * (point.y - segment.start.y)
+                        / (segment.end.y - segment.start.y)
+                        + segment.start.x;
+            inside ^ crosses
+        });
+    }
+    clip.segments.iter().fold(0_i32, |winding, segment| {
+        let cross = (segment.end.x - segment.start.x) * (point.y - segment.start.y)
+            - (point.x - segment.start.x) * (segment.end.y - segment.start.y);
+        if segment.start.y <= point.y && segment.end.y > point.y && cross > 0.0 {
+            winding + 1
+        } else if segment.start.y > point.y && segment.end.y <= point.y && cross < 0.0 {
+            winding - 1
+        } else {
+            winding
+        }
+    }) != 0
+}
+
+fn point_in_retained_fill(point: Point, ink: &crate::walk::WalkedPathInk) -> bool {
+    if ink.even_odd {
+        return ink.segments.iter().fold(false, |inside, segment| {
+            let crosses = (segment.start.y > point.y) != (segment.end.y > point.y)
+                && point.x
+                    < (segment.end.x - segment.start.x) * (point.y - segment.start.y)
+                        / (segment.end.y - segment.start.y)
+                        + segment.start.x;
+            inside ^ crosses
+        });
+    }
+    ink.segments.iter().fold(0_i32, |winding, segment| {
+        let cross = (segment.end.x - segment.start.x) * (point.y - segment.start.y)
+            - (point.x - segment.start.x) * (segment.end.y - segment.start.y);
+        if segment.start.y <= point.y && segment.end.y > point.y && cross > 0.0 {
+            winding + 1
+        } else if segment.start.y > point.y && segment.end.y <= point.y && cross < 0.0 {
+            winding - 1
+        } else {
+            winding
+        }
+    }) != 0
+}
+
+fn path_segment_intersects_rect(segment: crate::walk::WalkedPathSegment, rect: Rect) -> bool {
+    let dx = segment.end.x - segment.start.x;
+    let dy = segment.end.y - segment.start.y;
+    let mut minimum = 0.0_f64;
+    let mut maximum = 1.0_f64;
+    for (p, q) in [
+        (-dx, segment.start.x - rect.left),
+        (dx, rect.right - segment.start.x),
+        (-dy, segment.start.y - rect.bottom),
+        (dy, rect.top - segment.start.y),
+    ] {
+        if p.abs() <= 1e-12 {
+            if q < 0.0 {
+                return false;
+            }
+            continue;
+        }
+        let ratio = q / p;
+        if p < 0.0 {
+            minimum = minimum.max(ratio);
+        } else {
+            maximum = maximum.min(ratio);
+        }
+        if minimum > maximum {
+            return false;
+        }
+    }
+    true
+}
+
+fn rect_corners(rect: Rect) -> [Point; 4] {
+    [
+        Point {
+            x: rect.left,
+            y: rect.bottom,
+        },
+        Point {
+            x: rect.left,
+            y: rect.top,
+        },
+        Point {
+            x: rect.right,
+            y: rect.bottom,
+        },
+        Point {
+            x: rect.right,
+            y: rect.top,
+        },
+    ]
+}
+
+fn expanded_rect(rect: Rect, amount: f64) -> Rect {
+    Rect {
+        left: rect.left - amount,
+        bottom: rect.bottom - amount,
+        right: rect.right + amount,
+        top: rect.top + amount,
+    }
+}
+
+fn rects_overlap(left: Rect, right: Rect, tolerance: f64) -> bool {
+    left.right > right.left + tolerance
+        && right.right > left.left + tolerance
+        && left.top > right.bottom + tolerance
+        && right.top > left.bottom + tolerance
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7853,6 +9173,7 @@ fn is_typeset_replacement_collision(error: &MimusError) -> bool {
         message.as_str(),
         "typeset span has an incompatible existing replacement"
             | "formula relocation overlaps another typeset replacement"
+            | "vector relocation overlaps another typeset replacement"
             | "split formula span was not neutralized by its translated owner"
             | "split formula span has an incompatible translated replacement"
     )
@@ -7890,6 +9211,15 @@ fn install_typeset_replacements(
         text_show_states,
         replacements,
     )?;
+    for relocation in &plan.text_vector_relocations {
+        install_vector_relocation(
+            relocation.replay,
+            relocation.delta_x_pt,
+            relocation.delta_y_pt,
+            streams,
+            replacements,
+        )?;
+    }
     for relocation in &plan.formula_relocations {
         install_formula_relocation(
             relocation,
@@ -7898,6 +9228,43 @@ fn install_typeset_replacements(
             text_show_states,
             replacements,
         )?;
+    }
+    Ok(())
+}
+
+fn install_vector_relocation(
+    replay: FormulaVectorReplay,
+    delta_x_pt: f64,
+    delta_y_pt: f64,
+    streams: &BTreeMap<lopdf::ObjectId, &[u8]>,
+    replacements: &mut BTreeMap<SpanKey, Vec<u8>>,
+) -> Result<()> {
+    let source = streams
+        .get(&replay.span.0)
+        .and_then(|stream| stream.get(replay.span.1..replay.span.2))
+        .ok_or_else(|| span_out_of_bounds(replay.span.0, replay.span.1, replay.span.2, 0))?;
+    let (delta_x, delta_y) =
+        content_relative_delta(replay.content_transform, delta_x_pt, delta_y_pt).ok_or_else(
+            || {
+                MimusError::internal(
+                    InternalReason::InvariantViolation,
+                    "vector path has a singular content transform",
+                )
+            },
+        )?;
+    let mut replacement = format!(
+        "q\n1 0 0 1 {} {} cm\n",
+        pdf_number(delta_x),
+        pdf_number(delta_y)
+    )
+    .into_bytes();
+    replacement.extend_from_slice(source);
+    replacement.extend_from_slice(b"\nQ\n");
+    if replacements.insert(replay.span, replacement).is_some() {
+        return Err(MimusError::internal(
+            InternalReason::InvariantViolation,
+            "vector relocation overlaps another typeset replacement",
+        ));
     }
     Ok(())
 }
@@ -8124,35 +9491,13 @@ fn install_formula_relocation(
         .iter()
         .chain(&relocation.inline_images)
     {
-        let source = streams
-            .get(&path.span.0)
-            .and_then(|stream| stream.get(path.span.1..path.span.2))
-            .ok_or_else(|| span_out_of_bounds(path.span.0, path.span.1, path.span.2, 0))?;
-        let (delta_x, delta_y) = content_relative_delta(
-            path.content_transform,
+        install_vector_relocation(
+            *path,
             relocation.delta_x_pt,
             relocation.delta_y_pt,
-        )
-        .ok_or_else(|| {
-            MimusError::internal(
-                InternalReason::InvariantViolation,
-                "formula vector path has a singular content transform",
-            )
-        })?;
-        let mut replacement = format!(
-            "q\n1 0 0 1 {} {} cm\n",
-            pdf_number(delta_x),
-            pdf_number(delta_y)
-        )
-        .into_bytes();
-        replacement.extend_from_slice(source);
-        replacement.extend_from_slice(b"\nQ\n");
-        if replacements.insert(path.span, replacement).is_some() {
-            return Err(MimusError::internal(
-                InternalReason::InvariantViolation,
-                "formula vector relocation overlaps another typeset replacement",
-            ));
-        }
+            streams,
+            replacements,
+        )?;
     }
     Ok(())
 }
@@ -8383,9 +9728,26 @@ fn planned_characters(
     plan: &TypesetPlan,
     fonts: &BTreeMap<OutputFontKey, BuiltOutputFont>,
 ) -> Vec<TypesetCharacter> {
-    let mut output = Vec::new();
+    let mut output = planned_line_characters(plan, fonts)
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    output.extend(
+        plan.formula_relocations
+            .iter()
+            .flat_map(|relocation| relocation.characters.iter().cloned()),
+    );
+    output
+}
+
+fn planned_line_characters(
+    plan: &TypesetPlan,
+    fonts: &BTreeMap<OutputFontKey, BuiltOutputFont>,
+) -> Vec<Vec<TypesetCharacter>> {
+    let mut output = Vec::with_capacity(plan.lines.len());
     for (line, &(start_x, baseline_y)) in plan.lines.iter().zip(&plan.baselines) {
         let mut x = start_x;
+        let mut planned_line = Vec::with_capacity(line.len());
         for character in line {
             let key =
                 built_font_key(fonts, *character).expect("typeset character has an embedded font");
@@ -8395,19 +9757,204 @@ fn planned_characters(
                 .iter()
                 .find_map(|(_, value, advance)| (*value == character.value).then_some(*advance))
                 .expect("typeset glyph exists in its embedded font");
-            output.push(TypesetCharacter {
+            planned_line.push(TypesetCharacter {
                 unicode: character.value,
                 baseline_origin: il::Point { x, y: baseline_y },
             });
             x += f64::from(glyph_width_1000(advance, font.units_per_em)) / 1000.0 * plan.font_size;
         }
+        output.push(planned_line);
     }
-    output.extend(
-        plan.formula_relocations
-            .iter()
-            .flat_map(|relocation| relocation.characters.iter().cloned()),
-    );
     output
+}
+
+fn planned_line_publication_glyphs(
+    plan: &TypesetPlan,
+    fonts: &BTreeMap<OutputFontKey, BuiltOutputFont>,
+) -> Result<Vec<Vec<il::PublicationGlyph>>> {
+    let faces = fonts
+        .iter()
+        .map(|(&key, font)| {
+            ttf_parser::Face::parse(&font.font.font_bytes, 0)
+                .map(|face| (key, face))
+                .map_err(|_| {
+                    MimusError::internal(
+                        InternalReason::InvariantViolation,
+                        "embedded output font could not be parsed for publication ink",
+                    )
+                })
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let mut output = Vec::with_capacity(plan.lines.len());
+    for (line, &(start_x, baseline_y)) in plan.lines.iter().zip(&plan.baselines) {
+        let mut x = start_x;
+        let mut planned_line = Vec::with_capacity(line.len());
+        for character in line {
+            let key = built_font_key(fonts, *character).ok_or_else(|| {
+                MimusError::internal(
+                    InternalReason::InvariantViolation,
+                    "typeset character has no embedded font for publication ink",
+                )
+            })?;
+            let font = &fonts[&key];
+            let cid = *font.cids.get(&character.value).ok_or_else(|| {
+                MimusError::internal(
+                    InternalReason::InvariantViolation,
+                    "typeset glyph has no output CID for publication ink",
+                )
+            })?;
+            let advance = font
+                .font
+                .glyphs
+                .iter()
+                .find_map(|(candidate, _, advance)| (*candidate == cid).then_some(*advance))
+                .ok_or_else(|| {
+                    MimusError::internal(
+                        InternalReason::InvariantViolation,
+                        "typeset glyph has no output advance for publication ink",
+                    )
+                })?;
+            let face = &faces[&key];
+            let scale = plan.font_size / f64::from(face.units_per_em());
+            let baseline_origin = il::Point { x, y: baseline_y };
+            let ink_bounds = face.glyph_bounding_box(ttf_parser::GlyphId(cid)).map_or(
+                Rect {
+                    left: x,
+                    bottom: baseline_y,
+                    right: x,
+                    top: baseline_y,
+                },
+                |bounds| Rect {
+                    left: x + f64::from(bounds.x_min) * scale,
+                    bottom: baseline_y + f64::from(bounds.y_min) * scale,
+                    right: x + f64::from(bounds.x_max) * scale,
+                    top: baseline_y + f64::from(bounds.y_max) * scale,
+                },
+            );
+            planned_line.push(il::PublicationGlyph {
+                unicode: character.value,
+                baseline_origin,
+                ink_bounds,
+            });
+            x += f64::from(glyph_width_1000(advance, font.font.units_per_em)) / 1000.0
+                * plan.font_size;
+        }
+        output.push(planned_line);
+    }
+    Ok(output)
+}
+
+fn planned_publication_ink(
+    page_index: usize,
+    crop_box: Rect,
+    paragraph: &Paragraph,
+    plans: &[TypesetPlan],
+    fonts: &BTreeMap<OutputFontKey, BuiltOutputFont>,
+) -> Result<il::PublicationInk> {
+    let mut components = Vec::new();
+    let mut next_formula_group = 1usize;
+    for plan in plans {
+        let line_characters = planned_line_publication_glyphs(plan, fonts)?;
+        if line_characters.len() != plan.lines.len() || plan.ink_bounds.len() < plan.lines.len() {
+            return Err(MimusError::internal(
+                InternalReason::InvariantViolation,
+                "final publication ink does not align with planned text lines",
+            ));
+        }
+        for (line_index, glyphs) in line_characters.into_iter().enumerate() {
+            if glyphs.is_empty() {
+                continue;
+            }
+            components.push(il::PublicationInkComponent::TranslatedText {
+                ownership_group: 0,
+                bounds: plan.ink_bounds[line_index],
+                glyphs,
+            });
+        }
+        for relocation in &plan.text_vector_relocations {
+            components.push(il::PublicationInkComponent::VectorPath {
+                ownership_group: 0,
+                bounds: translated_rect(
+                    relocation.replay.bounds,
+                    relocation.delta_x_pt,
+                    relocation.delta_y_pt,
+                ),
+            });
+        }
+        for relocation in &plan.formula_relocations {
+            if relocation.characters.len() != relocation.glyph_ink_bounds.len() {
+                return Err(MimusError::internal(
+                    InternalReason::InvariantViolation,
+                    "formula publication glyphs do not align with their ink bounds",
+                ));
+            }
+            let ownership_group = next_formula_group;
+            next_formula_group += 1;
+            components.push(il::PublicationInkComponent::SourceTextReplay {
+                ownership_group,
+                bounds: relocation.text_ink_bounds,
+                glyphs: relocation
+                    .characters
+                    .iter()
+                    .zip(&relocation.glyph_ink_bounds)
+                    .map(|(glyph, &ink_bounds)| il::PublicationGlyph {
+                        unicode: glyph.unicode,
+                        baseline_origin: glyph.baseline_origin,
+                        ink_bounds,
+                    })
+                    .collect(),
+            });
+            components.extend(relocation.vector_paths.iter().map(|path| {
+                il::PublicationInkComponent::VectorPath {
+                    ownership_group,
+                    bounds: translated_rect(
+                        path.bounds,
+                        relocation.delta_x_pt,
+                        relocation.delta_y_pt,
+                    ),
+                }
+            }));
+            components.extend(relocation.inline_images.iter().map(|image| {
+                il::PublicationInkComponent::InlineImage {
+                    ownership_group,
+                    bounds: translated_rect(
+                        image.bounds,
+                        relocation.delta_x_pt,
+                        relocation.delta_y_pt,
+                    ),
+                }
+            }));
+        }
+    }
+    let Some(component_bounds) = components
+        .iter()
+        .map(il::PublicationInkComponent::bounds)
+        .reduce(Rect::union)
+    else {
+        return Err(MimusError::internal(
+            InternalReason::InvariantViolation,
+            "a non-identity publication has no final ink evidence",
+        ));
+    };
+    let owning_container = paragraph_typeset_container(paragraph).ok_or_else(|| {
+        MimusError::internal(
+            InternalReason::InvariantViolation,
+            "a non-identity publication has no owning layout container",
+        )
+    })?;
+    let admissible_container = Rect {
+        left: owning_container.left,
+        bottom: owning_container.bottom.min(component_bounds.bottom),
+        right: owning_container.right,
+        top: owning_container.top.max(component_bounds.top),
+    };
+    Ok(il::PublicationInk {
+        page_index,
+        reading_order: paragraph.reading_order,
+        crop_box,
+        admissible_container,
+        components,
+    })
 }
 
 fn pdf_number(value: f64) -> String {
@@ -8739,10 +10286,13 @@ fn retained_input_characters(
         &mut engine_owners,
         baseline_tolerance_pt,
     );
-    let owner_states = engine_owners
-        .iter()
-        .map(|owner| owner.map(|walk_index| modified_walk[walk_index]))
-        .collect::<Vec<_>>();
+    let (owner_states, has_walk_candidates) = engine_modification_states(
+        &page.walked_characters,
+        &page.engine_characters,
+        &engine_owners,
+        &modified_walk,
+        baseline_tolerance_pt,
+    );
     let mut next_state = vec![None; owner_states.len()];
     let mut next = None;
     for index in (0..owner_states.len()).rev() {
@@ -8760,7 +10310,10 @@ fn retained_input_characters(
                 previous = *state;
             }
             let removed = state.unwrap_or(false)
-                || (state.is_none() && previous == Some(true) && next_state[index] == Some(true));
+                || (state.is_none()
+                    && !has_walk_candidates[index]
+                    && previous == Some(true)
+                    && next_state[index] == Some(true));
             removed.then_some(index)
         })
         .collect::<BTreeSet<_>>();
@@ -8775,6 +10328,78 @@ fn retained_input_characters(
             baseline_origin: character.baseline_origin,
         })
         .collect())
+}
+
+fn engine_modification_states(
+    walked: &[crate::walk::WalkedChar],
+    engine: &[PageCharSnapshot],
+    owners: &[Option<usize>],
+    modified_walk: &[bool],
+    tolerance: f64,
+) -> (Vec<Option<bool>>, Vec<bool>) {
+    let mut states = owners
+        .iter()
+        .map(|owner| owner.and_then(|walk_index| modified_walk.get(walk_index).copied()))
+        .collect::<Vec<_>>();
+    let mut has_walk_candidates = owners.iter().map(Option::is_some).collect::<Vec<_>>();
+    if states.len() != engine.len()
+        || walked.len() != modified_walk.len()
+        || !tolerance.is_finite()
+        || tolerance < 0.0
+    {
+        return (states, has_walk_candidates);
+    }
+
+    let cell_size = tolerance.max(f64::EPSILON);
+    let mut buckets = HashMap::<(i64, i64), Vec<usize>>::new();
+    for (walk_index, character) in walked.iter().enumerate() {
+        if character.locatable
+            && character.baseline_origin.x.is_finite()
+            && character.baseline_origin.y.is_finite()
+        {
+            buckets
+                .entry(baseline_grid_key(character.baseline_origin, cell_size))
+                .or_default()
+                .push(walk_index);
+        }
+    }
+
+    for (engine_index, character) in engine.iter().enumerate() {
+        if states[engine_index].is_some() || !valid_engine_alignment_anchor(character) {
+            continue;
+        }
+        let (grid_x, grid_y) = baseline_grid_key(character.baseline_origin, cell_size);
+        let mut consensus = None;
+        let mut conflicting = false;
+        for offset_x in -1..=1 {
+            for offset_y in -1..=1 {
+                let Some(walk_indices) = buckets.get(&(grid_x + offset_x, grid_y + offset_y))
+                else {
+                    continue;
+                };
+                for &walk_index in walk_indices {
+                    if !point_close(
+                        walked[walk_index].baseline_origin,
+                        character.baseline_origin,
+                        tolerance,
+                    ) {
+                        continue;
+                    }
+                    has_walk_candidates[engine_index] = true;
+                    let modified = modified_walk[walk_index];
+                    if consensus.is_some_and(|state| state != modified) {
+                        conflicting = true;
+                    } else {
+                        consensus = Some(modified);
+                    }
+                }
+            }
+        }
+        if !conflicting {
+            states[engine_index] = consensus;
+        }
+    }
+    (states, has_walk_candidates)
 }
 
 fn exact_unicode_sequence(walked: &[crate::walk::WalkedChar], engine: &[PageCharSnapshot]) -> bool {
@@ -9850,6 +11475,28 @@ mod tests {
     }
 
     #[test]
+    fn missing_normal_xref_object_reports_its_id_and_offset() {
+        let mut pdf = LopdfDocument::with_version("1.7");
+        pdf.reference_table.entries.insert(
+            12,
+            XrefEntry::Normal {
+                offset: 4096,
+                generation: 3,
+            },
+        );
+
+        let error = validate_xref_objects(&pdf).unwrap_err();
+        assert_eq!(error.reason(), ErrorReason::Input(InputReason::PdfParse));
+        assert_eq!(
+            error.input_detail(),
+            Some(InputErrorDetail::ObjectSyntax {
+                objid: [12, 3],
+                offset: 4096,
+            })
+        );
+    }
+
+    #[test]
     fn page_tree_validation_rejects_missing_and_non_page_kids() {
         for kid in [Object::Reference((99, 0)), Object::Reference((5, 0))] {
             let mut pdf = LopdfDocument::load(fixture()).unwrap();
@@ -9994,6 +11641,14 @@ mod tests {
     impl Translator for CjkTranslator {
         fn translate(&self, _request: &crate::translate::TranslationRequest<'_>) -> Result<String> {
             Ok("MIMUS中文测试".to_owned())
+        }
+    }
+
+    struct VariableFontTranslator;
+
+    impl Translator for VariableFontTranslator {
+        fn translate(&self, _request: &crate::translate::TranslationRequest<'_>) -> Result<String> {
+            Ok("M中文测试".to_owned())
         }
     }
 
@@ -10249,6 +11904,25 @@ mod tests {
         }
     }
 
+    fn test_variable_output_fonts() -> crate::context::OutputFonts {
+        let variable = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../mimus/tests/assets/fonts/MimusTestVariable.ttf"
+        ));
+        let mut fonts = test_output_fonts();
+        for (font, source) in [
+            (&mut fonts.regular, "test:variable-regular"),
+            (&mut fonts.bold, "test:variable-bold"),
+        ] {
+            font.bytes = variable.to_vec();
+            font.postscript_name = "NotoSansSC".to_owned();
+            font.source = source.to_owned();
+            font.sha256 =
+                "a1105d5892eaad20ed1ad692827b06a7adc392f214a835740fa4d94bf5029ac5".to_owned();
+        }
+        fonts
+    }
+
     fn assert_typeset_ink_is_disjoint(typeset_ink: &[Rect], retained_ink: &[Rect]) {
         assert!(!typeset_ink.is_empty(), "expected planned typeset ink");
         assert!(
@@ -10270,6 +11944,280 @@ mod tests {
             output_fonts: Some(test_output_fonts()),
             ..crate::context::PipelineConfig::default()
         }
+    }
+
+    fn inspected_fixture_chars() -> Vec<Char> {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        document.il.pages[0].paragraphs[0].chars().to_vec()
+    }
+
+    fn synthetic_text_line(template: &Char, start: f64, width: f64, baseline: f64) -> TextLine {
+        let mut character = template.clone();
+        character.unicode = Some('M');
+        character.baseline_origin = Point {
+            x: start,
+            y: baseline,
+        };
+        character.r#box = Rect {
+            left: start,
+            bottom: baseline - 2.0,
+            right: start + width,
+            top: baseline + 8.0,
+        };
+        character.visual_bbox = character.r#box;
+        let layout = character.layout.as_mut().unwrap();
+        layout.bounds = Rect {
+            left: 0.0,
+            bottom: 0.0,
+            right: 100.0,
+            top: 120.0,
+        };
+        layout.label = LayoutLabel::Text;
+        layout.source = LayoutSource::Model;
+        layout.policy = TranslationPolicy::Translate;
+        text_line(vec![PositionedChar {
+            walked_index: 0,
+            locatable: true,
+            character,
+            force_no_space_before: false,
+            small_edge_character: false,
+        }])
+    }
+
+    #[test]
+    fn natural_paragraph_split_requires_indent_and_previous_underfill() {
+        let template = inspected_fixture_chars().remove(0);
+        let full_previous = synthetic_text_line(&template, 10.0, 85.0, 100.0);
+        let indented = synthetic_text_line(&template, 30.0, 30.0, 88.0);
+        assert_eq!(
+            split_natural_paragraphs(vec![full_previous, indented.clone()], LayoutLabel::Text,)
+                .len(),
+            1,
+            "indent alone must not split after a filled line"
+        );
+
+        let underfilled_previous = synthetic_text_line(&template, 10.0, 40.0, 100.0);
+        assert_eq!(
+            split_natural_paragraphs(
+                vec![underfilled_previous.clone(), indented.clone()],
+                LayoutLabel::Text,
+            )
+            .len(),
+            2,
+            "indent plus an underfilled previous line is a natural paragraph boundary"
+        );
+
+        let same_baseline = synthetic_text_line(&template, 30.0, 30.0, 100.0);
+        assert_eq!(
+            split_natural_paragraphs(vec![underfilled_previous, same_baseline], LayoutLabel::Text,)
+                .len(),
+            1,
+            "same-baseline fragments are not consecutive visual lines"
+        );
+
+        let mut formula_fragment = synthetic_text_line(&template, 30.0, 30.0, 100.0);
+        let layout = formula_fragment.chars[0].character.layout.as_mut().unwrap();
+        layout.label = LayoutLabel::InlineFormula;
+        layout.policy = TranslationPolicy::Passthrough;
+        assert_eq!(
+            split_natural_paragraphs(
+                vec![
+                    synthetic_text_line(&template, 10.0, 10.0, 100.0),
+                    formula_fragment,
+                ],
+                LayoutLabel::Text,
+            )
+            .len(),
+            2,
+            "formula-bearing regions retain their established composition boundary"
+        );
+
+        let sparse_column = vec![
+            synthetic_text_line(&template, 145.0, 10.0, 100.0),
+            synthetic_text_line(&template, 140.0, 10.0, 88.0),
+            synthetic_text_line(&template, 157.0, 10.0, 76.0),
+        ];
+        assert_eq!(
+            split_natural_paragraphs(sparse_column, LayoutLabel::Text).len(),
+            1,
+            "the leftmost sparse-column outlier is not the normal line start"
+        );
+
+        assert_eq!(
+            split_natural_paragraphs(
+                vec![synthetic_text_line(&template, 10.0, 40.0, 100.0), indented,],
+                LayoutLabel::Algorithm,
+            )
+            .len(),
+            1,
+            "passthrough categories do not create translation-request boundaries"
+        );
+    }
+
+    #[test]
+    fn first_line_indent_uses_baseline_origins_not_quote_ink() {
+        let mut template = inspected_fixture_chars().remove(0);
+        let layout = template.layout.as_mut().unwrap();
+        layout.source = LayoutSource::Model;
+        layout.label = LayoutLabel::Text;
+        layout.policy = TranslationPolicy::Translate;
+        let indented = vec![
+            synthetic_text_line(&template, 30.0, 30.0, 100.0),
+            synthetic_text_line(&template, 10.0, 60.0, 88.0),
+            synthetic_text_line(&template, 10.0, 60.0, 76.0),
+        ];
+        assert_eq!(source_first_line_indent(&indented), Some(20.0));
+
+        let mut quote = synthetic_text_line(&template, 10.0, 60.0, 100.0);
+        quote.chars[0].character.unicode = Some('“');
+        quote.chars[0].character.visual_bbox.left = 4.0;
+        let prose = vec![quote, synthetic_text_line(&template, 10.0, 60.0, 88.0)];
+        assert_eq!(source_first_line_indent(&prose), None);
+
+        let mut footnote = indented.clone();
+        for positioned in footnote.iter_mut().flat_map(|line| &mut line.chars) {
+            positioned.character.layout.as_mut().unwrap().label = LayoutLabel::Footnote;
+        }
+        assert_eq!(source_first_line_indent(&footnote), None);
+
+        let mut fallback = indented;
+        for positioned in fallback.iter_mut().flat_map(|line| &mut line.chars) {
+            positioned.character.layout.as_mut().unwrap().source = LayoutSource::FallbackLine;
+        }
+        assert_eq!(source_first_line_indent(&fallback), None);
+    }
+
+    #[test]
+    fn body_font_size_mode_counts_characters_breaks_ties_up_and_excludes_scripts() {
+        let template = inspected_fixture_chars().remove(0);
+        let mut chars = (0..5).map(|_| template.clone()).collect::<Vec<_>>();
+        for (character, size) in chars.iter_mut().zip([7.0, 7.0, 7.0, 10.0, 10.0]) {
+            character.font_size = size;
+        }
+        let refs = chars.iter().collect::<Vec<_>>();
+        assert_eq!(preferred_body_font_size(&refs), Some(7.0));
+        assert!((preferred_typeset_font_size(&refs).unwrap() - 8.2).abs() <= f64::EPSILON);
+
+        let tied = [&chars[0], &chars[1], &chars[3], &chars[4]];
+        assert_eq!(preferred_body_font_size(&tied), Some(10.0));
+
+        let mut anchor = template.clone();
+        anchor.font_size = 10.0;
+        anchor.baseline_origin = Point { x: 10.0, y: 100.0 };
+        anchor.r#box = Rect {
+            left: 10.0,
+            bottom: 98.0,
+            right: 20.0,
+            top: 108.0,
+        };
+        let mut upper = anchor.clone();
+        upper.font_size = 7.0;
+        upper.baseline_origin = Point { x: 20.0, y: 104.0 };
+        upper.r#box = Rect {
+            left: 20.0,
+            bottom: 102.0,
+            right: 25.0,
+            top: 109.0,
+        };
+        let mut lower = upper.clone();
+        lower.baseline_origin = Point { x: 5.0, y: 96.0 };
+        lower.r#box = Rect {
+            left: 5.0,
+            bottom: 94.0,
+            right: 10.0,
+            top: 101.0,
+        };
+        let script_chars = [&anchor, &upper, &lower];
+        assert_eq!(preferred_body_font_size(&script_chars), Some(10.0));
+        assert_eq!(preferred_typeset_font_size(&script_chars), Some(10.0));
+    }
+
+    #[test]
+    fn typeset_preserves_absolute_first_line_indent_across_wrapping() {
+        let mut chars = inspected_fixture_chars();
+        chars.last_mut().unwrap().baseline_origin.y -= 12.0;
+        let char_refs = chars.iter().collect::<Vec<_>>();
+        let translated = "中文测"
+            .chars()
+            .map(|value| crate::translate::StyledCharacter { value, bold: false })
+            .collect::<Vec<_>>();
+        let planned = plan_text_segment(
+            &char_refs,
+            &translated,
+            &BTreeSet::from([(9, 0)]),
+            &test_output_fonts(),
+            Rect {
+                left: 0.0,
+                bottom: 0.0,
+                right: 300.0,
+                top: 200.0,
+            },
+            &[],
+            None,
+            Some(20.0),
+        )
+        .unwrap();
+
+        assert!(planned.baselines.len() >= 2);
+        assert!((planned.baselines[0].0 - planned.baselines[1].0 - 20.0).abs() <= 0.001);
+    }
+
+    #[test]
+    fn obstacle_slots_preserve_or_reject_the_absolute_first_line_indent() {
+        let container = Rect {
+            left: 10.0,
+            bottom: 20.0,
+            right: 100.0,
+            top: 100.0,
+        };
+        let page = Rect {
+            left: 0.0,
+            bottom: 0.0,
+            right: 120.0,
+            top: 120.0,
+        };
+        let slots =
+            obstacle_aware_multiline_slots(container, 88.0, 8.0, -2.0, 8.0, page, &[], Some(20.0));
+        assert_eq!(slots[0].left, 30.0);
+        assert!(
+            slots
+                .iter()
+                .find(|slot| slot.baseline_y < 88.0 - 0.01)
+                .is_some_and(|slot| slot.left == container.left),
+            "continuation lines return to the source container edge"
+        );
+
+        let covering_indent = Rect {
+            left: 25.0,
+            bottom: 80.0,
+            right: 40.0,
+            top: 100.0,
+        };
+        assert!(
+            obstacle_aware_multiline_slots(
+                container,
+                88.0,
+                8.0,
+                -2.0,
+                8.0,
+                page,
+                &[covering_indent],
+                Some(20.0),
+            )
+            .is_empty(),
+            "an obstacle at the absolute indent must fail closed"
+        );
     }
 
     fn scan_fixture() -> PathBuf {
@@ -11100,6 +13048,44 @@ mod tests {
         font_embed(&mut document, &context).unwrap();
 
         let rewrite = &document.rewrites[0];
+        let [publication] = document.il.publication_ink.as_slice() else {
+            panic!("the translated paragraph must expose final publication ink");
+        };
+        assert_eq!((publication.page_index, publication.reading_order), (0, 0));
+        assert_eq!(
+            publication.crop_box,
+            document.extracted_pages[0].frame.unwrap().crop_box
+        );
+        assert_eq!(publication.admissible_container.left, 72.0);
+        assert_eq!(publication.admissible_container.right, 122.0);
+        assert!(publication.components.iter().all(|component| {
+            rect_contains(publication.admissible_container, component.bounds(), 0.01)
+        }));
+        let publication_glyphs = publication
+            .components
+            .iter()
+            .filter_map(|component| match component {
+                il::PublicationInkComponent::TranslatedText {
+                    ownership_group,
+                    glyphs,
+                    ..
+                } => {
+                    assert_eq!(*ownership_group, 0);
+                    Some(glyphs)
+                }
+                _ => None,
+            })
+            .flatten()
+            .map(|glyph| (glyph.unicode, glyph.baseline_origin))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            publication_glyphs,
+            rewrite
+                .typeset_characters
+                .iter()
+                .map(|glyph| (glyph.unicode, glyph.baseline_origin))
+                .collect::<Vec<_>>()
+        );
         let font = &rewrite.embedded_fonts[0];
         assert_eq!(
             font.glyphs
@@ -11164,6 +13150,219 @@ mod tests {
         assert!(bold.base_font.ends_with("+NotoSansSC-Bold"));
         assert_eq!(bold_cids.len(), font.glyphs.len());
         assert_ne!(bold.font_bytes, font.font_bytes);
+    }
+
+    #[test]
+    fn variable_output_font_bold_instance_configures_metrics_and_subsets() {
+        let output_fonts = test_variable_output_fonts();
+        let regular_variations =
+            output_font_variations(&output_fonts.regular.bytes, OutputFontKey::PrimaryRegular)
+                .unwrap();
+        let bold_variations =
+            output_font_variations(&output_fonts.bold.bytes, OutputFontKey::PrimaryBold).unwrap();
+        assert!(regular_variations.is_empty());
+        assert_eq!(
+            bold_variations,
+            [OutputFontVariation {
+                tag: *b"wght",
+                value: 700.0,
+            }]
+        );
+
+        let faces = OutputFontFaces::parse(&output_fonts).unwrap();
+        let regular_face = faces.face(OutputFontKey::PrimaryRegular);
+        let bold_face = faces.face(OutputFontKey::PrimaryBold);
+        let regular_glyph = regular_face.glyph_index('M').unwrap();
+        let bold_glyph = bold_face.glyph_index('M').unwrap();
+        let default_face = ttf_parser::Face::parse(&output_fonts.regular.bytes, 0).unwrap();
+        assert_eq!(
+            regular_face.glyph_hor_advance(regular_glyph),
+            default_face.glyph_hor_advance(default_face.glyph_index('M').unwrap())
+        );
+        assert_eq!(bold_face.glyph_hor_advance(bold_glyph), Some(853));
+        assert_ne!(
+            regular_face.glyph_bounding_box(regular_glyph),
+            bold_face.glyph_bounding_box(bold_glyph)
+        );
+
+        let used = BTreeSet::from(['M', '中', '文', '测', '试']);
+        let (regular, regular_cids) =
+            build_embedded_font(&used, &output_fonts.regular, OutputFontKey::PrimaryRegular)
+                .unwrap();
+        let (bold, bold_cids) =
+            build_embedded_font(&used, &output_fonts.bold, OutputFontKey::PrimaryBold).unwrap();
+        assert_ne!(regular.font_bytes, bold.font_bytes);
+
+        let mut legacy_regular_remapper = subsetter::GlyphRemapper::new();
+        for value in &used {
+            legacy_regular_remapper.remap(default_face.glyph_index(*value).unwrap().0);
+        }
+        assert_eq!(
+            regular.font_bytes,
+            subsetter::subset(&output_fonts.regular.bytes, 0, &legacy_regular_remapper).unwrap()
+        );
+
+        for (embedded, cids, source) in [
+            (&regular, &regular_cids, regular_face),
+            (&bold, &bold_cids, bold_face),
+        ] {
+            let subset_face = ttf_parser::Face::parse(&embedded.font_bytes, 0).unwrap();
+            for (cid, value, embedded_advance) in &embedded.glyphs {
+                assert_eq!(cids[value], *cid);
+                let source_glyph = source.glyph_index(*value).unwrap();
+                assert_eq!(
+                    source.glyph_hor_advance(source_glyph),
+                    Some(*embedded_advance)
+                );
+                assert_eq!(
+                    subset_face.glyph_hor_advance(ttf_parser::GlyphId(*cid)),
+                    Some(*embedded_advance)
+                );
+                assert_eq!(
+                    glyph_width_1000(*embedded_advance, embedded.units_per_em),
+                    (glyph_advance_em(source, source_glyph).unwrap() * 1000.0) as u32
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn static_output_font_subsets_remain_byte_compatible() {
+        let output_fonts = test_output_fonts();
+        assert!(
+            output_font_variations(&output_fonts.regular.bytes, OutputFontKey::PrimaryRegular)
+                .unwrap()
+                .is_empty()
+        );
+        let used = BTreeSet::from(['M', '中']);
+        let (embedded, _) =
+            build_embedded_font(&used, &output_fonts.regular, OutputFontKey::PrimaryRegular)
+                .unwrap();
+        let face = ttf_parser::Face::parse(&output_fonts.regular.bytes, 0).unwrap();
+        let mut remapper = subsetter::GlyphRemapper::new();
+        for value in &used {
+            remapper.remap(face.glyph_index(*value).unwrap().0);
+        }
+        let legacy = subsetter::subset(&output_fonts.regular.bytes, 0, &remapper).unwrap();
+        assert_eq!(embedded.font_bytes, legacy);
+    }
+
+    #[test]
+    fn variable_font_geometry_checks_use_configured_8pt_ink() {
+        let output_fonts = test_variable_output_fonts();
+        let faces = OutputFontFaces::parse(&output_fonts).unwrap();
+        let line = |bold| [crate::translate::StyledCharacter { value: 'M', bold }];
+        let regular =
+            styled_line_ink_bounds(&line(false), &faces, MIN_FONT_SIZE_PT, 0.0, 0.0).unwrap();
+        let bold = styled_line_ink_bounds(&line(true), &faces, MIN_FONT_SIZE_PT, 0.0, 0.0).unwrap();
+        assert!(bold.right > regular.right);
+
+        let boundary = (regular.right + bold.right) / 2.0;
+        let crop_box = Rect {
+            left: -1.0,
+            bottom: regular.bottom.min(bold.bottom) - 1.0,
+            right: boundary,
+            top: regular.top.max(bold.top) + 1.0,
+        };
+        assert!(ink_bounds_are_safe(&[regular], crop_box, &[]));
+        assert!(!ink_bounds_are_safe(&[bold], crop_box, &[]));
+
+        let page = Rect {
+            right: bold.right + 1.0,
+            ..crop_box
+        };
+        let obstacle = Rect {
+            left: boundary,
+            bottom: bold.bottom,
+            right: bold.right + 0.1,
+            top: bold.top,
+        };
+        assert!(ink_bounds_are_safe(&[regular], page, &[obstacle]));
+        assert!(!ink_bounds_are_safe(&[bold], page, &[obstacle]));
+    }
+
+    #[test]
+    fn variable_font_pdf_widths_and_extractor_positions_match_planning() {
+        let output_fonts = test_variable_output_fonts();
+        let config = crate::context::PipelineConfig {
+            output_fonts: Some(output_fonts),
+            ..crate::context::PipelineConfig::default()
+        };
+        let translator = VariableFontTranslator;
+        let events = RecordingEventSink::default();
+        let mut document = translate_fixture_once(&translator, &events, config.clone()).unwrap();
+        for character in match &mut document.il.pages[0].paragraphs[0].text {
+            TextCarrier::Chars { chars } => chars,
+        } {
+            character.layout.as_mut().unwrap().bounds = Rect {
+                left: 72.0,
+                bottom: 80.0,
+                right: 150.0,
+                top: 140.0,
+            };
+        }
+        document.extracted_pages[0].layout_regions[0].bounds = Rect {
+            left: 72.0,
+            bottom: 80.0,
+            right: 150.0,
+            top: 140.0,
+        };
+        let engine = FakeEngine::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config,
+        };
+
+        typeset(&mut document, &context).unwrap();
+        font_embed(&mut document, &context).unwrap();
+        let rewrite = &document.rewrites[0];
+        let embedded = rewrite
+            .embedded_fonts
+            .iter()
+            .find(|font| font.resource_name == OutputFontKey::PrimaryRegular.resource_name())
+            .unwrap();
+        let original = document.pdf.as_ref().unwrap();
+        let (bytes, _) =
+            build_incremental(&document.original_bytes, original, &document.rewrites).unwrap();
+        let output = LopdfDocument::load_mem(&bytes).unwrap();
+        let page_id = output.get_pages()[&1];
+        let fonts = output.get_page_fonts(page_id).unwrap();
+        let type0 = fonts.get(b"MimusR".as_slice()).unwrap();
+        let descendant_id = type0.get(b"DescendantFonts").unwrap().as_array().unwrap()[0]
+            .as_reference()
+            .unwrap();
+        let widths = output
+            .get_dictionary(descendant_id)
+            .unwrap()
+            .get(b"W")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let published_widths = widths
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| {
+                (
+                    u16::try_from(pair[0].as_i64().unwrap()).unwrap(),
+                    u32::try_from(pair[1].as_array().unwrap()[0].as_i64().unwrap()).unwrap(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        for (cid, _, advance) in &embedded.glyphs {
+            assert_eq!(
+                published_widths[cid],
+                glyph_width_1000(*advance, embedded.units_per_em)
+            );
+        }
+
+        let pdfium = crate::engine::pdfium::PdfiumEngine::from_environment().unwrap();
+        let extracted = pdfium.page_characters(&bytes, 0).unwrap();
+        validate_typeset_characters(0, &rewrite.typeset_characters, &extracted, 0.01).unwrap();
     }
 
     #[test]
@@ -11325,7 +13524,7 @@ mod tests {
         let faces = OutputFontFaces::parse(&output_fonts).unwrap();
         let line = "中文"
             .chars()
-            .map(|value| crate::translate::StyledCharacter { value, bold: true })
+            .map(|value| crate::translate::StyledCharacter { value, bold: false })
             .collect::<Vec<_>>();
         let container = Rect {
             left: 72.0,
@@ -11350,6 +13549,7 @@ mod tests {
             &[],
         )
         .unwrap()
+        .expansion
         .unwrap();
         assert!(expansion.top_pt <= SINGLE_LINE_MAX_VERTICAL_OVERFLOW_PT);
         assert!(expansion.bottom_pt <= SINGLE_LINE_MAX_VERTICAL_OVERFLOW_PT);
@@ -11418,6 +13618,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bold_single_line_ink_rebases_inside_container_before_expanding() {
+        let output_fonts = test_variable_output_fonts();
+        let faces = OutputFontFaces::parse(&output_fonts).unwrap();
+        let line = [crate::translate::StyledCharacter {
+            value: 'M',
+            bold: true,
+        }];
+        let baseline_y = 120.0;
+        let ink = styled_line_ink_bounds(&line, &faces, 12.0, 72.0, baseline_y).unwrap();
+        let container = Rect {
+            left: 71.0,
+            bottom: ink.bottom - 1.0,
+            right: ink.right + 1.0,
+            top: ink.top - 0.25,
+        };
+        let page = Rect {
+            left: 0.0,
+            bottom: 0.0,
+            right: 300.0,
+            top: 200.0,
+        };
+
+        let fit = single_line_ink_fit(&line, &faces, 12.0, 72.0, baseline_y, container, page, &[])
+            .unwrap();
+        assert!(fit.baseline_y < baseline_y);
+        assert!(fit.expansion.is_none());
+        assert!(rect_contains(container, fit.ink_bounds, 0.01));
+    }
+
     /// 真实论文 `1706.03762v7.pdf` 页 12（0 基）段 69 `Attention Visualizations` 的
     /// 几何：容器与原文足迹取自 L5-4 的 typeset IL，障碍取自被外层 Form `/BBox`
     /// 裁掉的 `Input-Input Layer5` 的 `visual_bbox`（#110）。
@@ -11463,6 +13693,7 @@ mod tests {
                 },
                 r#box: container,
                 visual_bbox: container,
+                bbox_estimated: false,
                 text_transform: TextTransform::Upright,
                 implicit_space_before: false,
                 layout: Some(LayoutAssignment {
@@ -11495,6 +13726,7 @@ mod tests {
             page_bounds,
             &[phantom],
             None,
+            None,
         );
         assert!(
             matches!(
@@ -11514,6 +13746,7 @@ mod tests {
             &output_fonts,
             page_bounds,
             &[],
+            None,
             None,
         )
         .unwrap_or_else(|_| panic!("the heading fits its own footprint once the phantom is gone"));
@@ -11549,6 +13782,7 @@ mod tests {
         let paragraph = Paragraph {
             reading_order: 69,
             bounds: container,
+            first_line_indent: None,
             text: TextCarrier::Chars {
                 chars: vec![Char {
                     unicode: Some('A'),
@@ -11567,6 +13801,7 @@ mod tests {
                     },
                     r#box: container,
                     visual_bbox: container,
+                    bbox_estimated: false,
                     text_transform: TextTransform::Upright,
                     implicit_space_before: false,
                     layout: Some(LayoutAssignment {
@@ -11648,6 +13883,8 @@ mod tests {
             end: Point { x: 180.0, y: 110.0 },
             content_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             safe_to_replay: true,
+            form_clip: None,
+            clips: Default::default(),
         }];
         let image = Rect {
             left: 190.0,
@@ -11661,6 +13898,9 @@ mod tests {
             byte_end: 4,
             bounds: image,
             content_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            replayable: true,
+            form_clip: None,
+            clips: Default::default(),
         }];
 
         let obstacles = paragraph_typeset_obstacles(
@@ -11668,6 +13908,7 @@ mod tests {
             &document.extracted_pages[0],
             &document.il.pages[0].paragraphs[0],
             true,
+            &BTreeSet::new(),
         );
 
         assert!(obstacles.contains(&image));
@@ -11677,6 +13918,284 @@ mod tests {
             right: 180.0,
             top: 110.01,
         }));
+    }
+
+    #[test]
+    fn text_underline_requires_safe_unique_ownership_and_one_output_delta() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let translator = CountingTranslator::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+        let paragraph = &document.il.pages[0].paragraphs[0];
+        let owner_bounds = paragraph
+            .chars()
+            .iter()
+            .map(|character| character.r#box)
+            .reduce(Rect::union)
+            .unwrap();
+        let owner_origin = paragraph.chars()[0].baseline_origin;
+        let owner_span = (
+            document.extracted_pages[0].content_streams[0].object_id,
+            paragraph.chars()[0].passthrough.byte_start,
+            paragraph.chars()[0].passthrough.byte_end,
+        );
+        let path = crate::walk::WalkedVectorPath {
+            content_object: owner_span.0,
+            byte_start: owner_span.1.saturating_sub(1),
+            byte_end: owner_span.1,
+            start: Point {
+                x: owner_bounds.left,
+                y: owner_origin.y - 2.0,
+            },
+            end: Point {
+                x: owner_bounds.right,
+                y: owner_origin.y - 2.0,
+            },
+            content_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            safe_to_replay: true,
+            form_clip: None,
+            clips: Default::default(),
+        };
+        document.extracted_pages[0].vector_paths = vec![path.clone()];
+        let content_objects = BTreeSet::from([owner_span.0]);
+        let underlines = uniquely_owned_text_underlines(
+            paragraph,
+            &document.extracted_pages[0],
+            &content_objects,
+        )
+        .expect("the complete safe show owns its exact underline");
+        assert_eq!(underlines.len(), 1);
+
+        let mut plans = vec![TypesetPlan {
+            spans: vec![owner_span],
+            lines: vec![vec![crate::translate::StyledCharacter {
+                value: '中',
+                bold: false,
+            }]],
+            baselines: vec![(owner_origin.x - 18.0, owner_origin.y)],
+            formula_relocations: Vec::new(),
+            text_vector_relocations: Vec::new(),
+            ink_bounds: Vec::new(),
+            font_size: 12.0,
+            single_line_expansion: None,
+            multi_line_expansion: None,
+        }];
+        attach_text_underlines_to_plans(
+            &mut plans,
+            &underlines,
+            Rect {
+                left: 0.0,
+                bottom: 0.0,
+                right: 300.0,
+                top: 200.0,
+            },
+            Rect {
+                left: owner_bounds.left - 20.0,
+                bottom: owner_bounds.bottom - 5.0,
+                right: owner_bounds.right,
+                top: owner_bounds.top + 5.0,
+            },
+            &[],
+        )
+        .expect("one output line gives the owner one determinate delta");
+        assert_eq!(plans[0].text_vector_relocations.len(), 1);
+        assert_eq!(plans[0].text_vector_relocations[0].delta_x_pt, -18.0);
+        assert_eq!(plans[0].text_vector_relocations[0].delta_y_pt, 0.0);
+        assert!((plans[0].ink_bounds[0].left - (owner_bounds.left - 18.0)).abs() < 0.001);
+
+        plans[0].text_vector_relocations.clear();
+        plans[0].ink_bounds.clear();
+        assert!(
+            attach_text_underlines_to_plans(
+                &mut plans,
+                &underlines,
+                Rect {
+                    left: 0.0,
+                    bottom: 0.0,
+                    right: 300.0,
+                    top: 200.0,
+                },
+                Rect {
+                    left: owner_bounds.left - 17.0,
+                    bottom: owner_bounds.bottom - 5.0,
+                    right: owner_bounds.right,
+                    top: owner_bounds.top + 5.0,
+                },
+                &[],
+            )
+            .is_none(),
+            "a relocated underline outside its owning paragraph container must fail closed"
+        );
+
+        document.extracted_pages[0].vector_paths[0].safe_to_replay = false;
+        assert!(
+            uniquely_owned_text_underlines(
+                paragraph,
+                &document.extracted_pages[0],
+                &content_objects,
+            )
+            .is_none(),
+            "a suspicious underline that cannot be replayed independently must fail closed"
+        );
+
+        document.extracted_pages[0].vector_paths[0].safe_to_replay = true;
+        document.extracted_pages[0].vector_paths[0].end.x =
+            owner_bounds.left + (owner_bounds.right - owner_bounds.left) * 0.5;
+        assert!(
+            uniquely_owned_text_underlines(
+                paragraph,
+                &document.extracted_pages[0],
+                &content_objects,
+            )
+            .expect("a short neighboring rule is not suspicious ownership")
+            .is_empty(),
+            "a rule that is too short to be an underline must remain an ordinary obstacle"
+        );
+    }
+
+    #[test]
+    fn retained_fill_collision_uses_polygon_geometry_and_background_coverage() {
+        let segment = |start, end| crate::walk::WalkedPathSegment { start, end };
+        let glyph = Rect {
+            left: 19.0,
+            bottom: 18.0,
+            right: 30.0,
+            top: 25.0,
+        };
+        let hull_only = crate::walk::WalkedPathInk {
+            segments: vec![
+                segment(Point { x: 10.0, y: 30.0 }, Point { x: 20.0, y: 30.0 }),
+                segment(Point { x: 20.0, y: 30.0 }, Point { x: 10.0, y: 20.0 }),
+                segment(Point { x: 10.0, y: 20.0 }, Point { x: 10.0, y: 30.0 }),
+                segment(Point { x: 30.0, y: 10.0 }, Point { x: 40.0, y: 10.0 }),
+                segment(Point { x: 40.0, y: 10.0 }, Point { x: 40.0, y: 0.0 }),
+                segment(Point { x: 40.0, y: 0.0 }, Point { x: 30.0, y: 10.0 }),
+            ],
+            bounds: Rect {
+                left: 10.0,
+                bottom: 0.0,
+                right: 40.0,
+                top: 30.0,
+            },
+            filled: true,
+            even_odd: false,
+            stroke_radius: 0.0,
+            form_clip: None,
+            clips: Default::default(),
+            replay_scope: None,
+        };
+        assert!(!retained_path_intersects_rect(&hull_only, glyph));
+
+        let partial = crate::walk::WalkedPathInk {
+            segments: vec![
+                segment(Point { x: 20.0, y: 18.0 }, Point { x: 25.0, y: 18.0 }),
+                segment(Point { x: 25.0, y: 18.0 }, Point { x: 25.0, y: 25.0 }),
+                segment(Point { x: 25.0, y: 25.0 }, Point { x: 20.0, y: 25.0 }),
+                segment(Point { x: 20.0, y: 25.0 }, Point { x: 20.0, y: 18.0 }),
+            ],
+            bounds: Rect {
+                left: 20.0,
+                bottom: 18.0,
+                right: 25.0,
+                top: 25.0,
+            },
+            filled: true,
+            even_odd: false,
+            stroke_radius: 0.0,
+            form_clip: None,
+            clips: Default::default(),
+            replay_scope: None,
+        };
+        assert!(retained_path_intersects_rect(&partial, glyph));
+        let mut clipped_partial = partial.clone();
+        clipped_partial.clips.push(crate::walk::WalkedClipPath {
+            segments: vec![
+                segment(Point { x: 0.0, y: 30.0 }, Point { x: 100.0, y: 30.0 }),
+                segment(Point { x: 100.0, y: 30.0 }, Point { x: 100.0, y: 40.0 }),
+                segment(Point { x: 100.0, y: 40.0 }, Point { x: 0.0, y: 40.0 }),
+                segment(Point { x: 0.0, y: 40.0 }, Point { x: 0.0, y: 30.0 }),
+            ],
+            bounds: Some(Rect {
+                left: 0.0,
+                bottom: 30.0,
+                right: 100.0,
+                top: 40.0,
+            }),
+            even_odd: false,
+        });
+        assert!(!retained_path_intersects_rect(&clipped_partial, glyph));
+
+        let background = crate::walk::WalkedPathInk {
+            segments: vec![
+                segment(Point { x: 0.0, y: 0.0 }, Point { x: 100.0, y: 0.0 }),
+                segment(Point { x: 100.0, y: 0.0 }, Point { x: 100.0, y: 100.0 }),
+                segment(Point { x: 100.0, y: 100.0 }, Point { x: 0.0, y: 100.0 }),
+                segment(Point { x: 0.0, y: 100.0 }, Point { x: 0.0, y: 0.0 }),
+            ],
+            bounds: Rect {
+                left: 0.0,
+                bottom: 0.0,
+                right: 100.0,
+                top: 100.0,
+            },
+            filled: true,
+            even_odd: false,
+            stroke_radius: 0.0,
+            form_clip: None,
+            clips: Default::default(),
+            replay_scope: None,
+        };
+        assert!(retained_fill_contains_rect(
+            &background,
+            Rect {
+                left: 10.0,
+                bottom: 10.0,
+                right: 90.0,
+                top: 90.0,
+            }
+        ));
+        let mut clipped_background = background;
+        clipped_background.clips = clipped_partial.clips;
+        assert!(!retained_fill_contains_rect(
+            &clipped_background,
+            Rect {
+                left: 10.0,
+                bottom: 10.0,
+                right: 90.0,
+                top: 90.0,
+            }
+        ));
+    }
+
+    #[test]
+    fn cjk_kinsoku_tokens_keep_opening_and_closing_punctuation_off_breaks() {
+        let styled = |text: &str| {
+            text.chars()
+                .map(|value| crate::translate::StyledCharacter { value, bold: false })
+                .collect::<Vec<_>>()
+        };
+        let tokens = styled_text_tokens(&styled("甲乙丙（）丁戊己。庚"))
+            .into_iter()
+            .map(|token| token.into_iter().map(|character| character.value).collect())
+            .collect::<Vec<String>>();
+        assert_eq!(tokens, ["甲", "乙", "丙", "（）", "丁", "戊", "己。", "庚"]);
+        let spaced = styled_text_tokens(&styled("甲 ，乙（ 丙"))
+            .into_iter()
+            .map(|token| token.into_iter().map(|character| character.value).collect())
+            .collect::<Vec<String>>();
+        assert_eq!(spaced, ["甲 ，", "乙", "（ 丙"]);
+        assert!(!styled_text_kinsoku_is_satisfiable(&styled("）甲")));
+        assert!(!styled_text_kinsoku_is_satisfiable(&styled("甲（")));
+        assert!(styled_text_kinsoku_is_satisfiable(&styled("甲（）乙")));
     }
 
     #[test]
@@ -12230,6 +14749,45 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_unresolved_output_owners_share_their_span_modification_state() {
+        let pdf = LopdfDocument::load(fixture()).unwrap();
+        let page_id = pdf.get_pages()[&1];
+        let mut character = walk_page(&pdf, page_id).unwrap().characters[0].clone();
+        character.unicode = None;
+        character.unicode_provenance = UnicodeProvenance::Unresolved;
+        character.baseline_origin = Point {
+            x: 473.95,
+            y: 284.462,
+        };
+        let mut second_character = character.clone();
+        second_character.baseline_origin.x += 0.006_974;
+        let walked = [character, second_character];
+
+        let template = FakeEngine::default().page_characters(&[], 0).unwrap()[0].clone();
+        let engine = ['u', 't'].map(|unicode| PageCharSnapshot {
+            unicode: Some(unicode),
+            unicode_value: u32::from(unicode),
+            baseline_origin: Point {
+                x: 473.950_012,
+                y: 284.462_006,
+            },
+            ..template.clone()
+        });
+        let owners = [None, None];
+
+        for (modified, expected) in [
+            ([false, false], Some(false)),
+            ([true, true], Some(true)),
+            ([false, true], None),
+        ] {
+            let (states, has_walk_candidates) =
+                engine_modification_states(&walked, &engine, &owners, &modified, 0.01);
+            assert_eq!(states, [expected, expected]);
+            assert_eq!(has_walk_candidates, [true, true]);
+        }
+    }
+
+    #[test]
     fn typeset_matrix_compensates_for_the_active_content_transform() {
         let matrix =
             content_relative_text_matrix([1.0, 0.0, 0.0, -1.0, 30.0, 117.0], 25.0, 100.0).unwrap();
@@ -12279,6 +14837,7 @@ mod tests {
             }]],
             baselines: vec![(25.0, 100.0)],
             formula_relocations: Vec::new(),
+            text_vector_relocations: Vec::new(),
             ink_bounds: Vec::new(),
             font_size: 8.0,
             single_line_expansion: None,
@@ -12360,6 +14919,7 @@ mod tests {
             }]],
             baselines: vec![(x, 100.0)],
             formula_relocations: Vec::new(),
+            text_vector_relocations: Vec::new(),
             ink_bounds: Vec::new(),
             font_size: 8.0,
             single_line_expansion: None,
@@ -12434,6 +14994,7 @@ mod tests {
             }]],
             baselines: vec![(x, 100.0)],
             formula_relocations: Vec::new(),
+            text_vector_relocations: Vec::new(),
             ink_bounds: Vec::new(),
             font_size: 8.0,
             single_line_expansion: None,
@@ -12451,6 +15012,8 @@ mod tests {
                 delta_x_pt: 1.0,
                 delta_y_pt: 0.0,
                 characters: Vec::new(),
+                text_ink_bounds: Rect::default(),
+                glyph_ink_bounds: Vec::new(),
                 source_fonts: Vec::new(),
             });
         let planned = vec![(0, vec![first_paragraph]), (1, vec![second_paragraph])];
@@ -12511,6 +15074,7 @@ mod tests {
             Paragraph {
                 reading_order: 0,
                 bounds: layout_bounds,
+                first_line_indent: None,
                 text: TextCarrier::Chars {
                     chars: chars[..1].to_vec(),
                 },
@@ -12521,6 +15085,7 @@ mod tests {
             Paragraph {
                 reading_order: 1,
                 bounds: layout_bounds,
+                first_line_indent: None,
                 text: TextCarrier::Chars {
                     chars: chars[1..].to_vec(),
                 },
@@ -12769,6 +15334,7 @@ mod tests {
             Paragraph {
                 reading_order: 0,
                 bounds: chars[0].r#box,
+                first_line_indent: None,
                 text: TextCarrier::Chars {
                     chars: chars[..1].to_vec(),
                 },
@@ -12783,6 +15349,7 @@ mod tests {
                     .map(|character| character.r#box)
                     .reduce(Rect::union)
                     .unwrap(),
+                first_line_indent: None,
                 text: TextCarrier::Chars {
                     chars: chars[1..].to_vec(),
                 },
@@ -12867,6 +15434,7 @@ mod tests {
         document.il.pages[0].paragraphs = vec![Paragraph {
             reading_order: 0,
             bounds: layout_bounds,
+            first_line_indent: None,
             text: TextCarrier::Chars { chars },
             translated_text: Some("中文".to_owned()),
             translation_conservation: None,
@@ -12919,6 +15487,7 @@ mod tests {
         document.il.pages[0].paragraphs = vec![Paragraph {
             reading_order: 0,
             bounds: layout_bounds,
+            first_line_indent: None,
             text: TextCarrier::Chars { chars },
             translated_text: Some("中文".to_owned()),
             translation_conservation: None,
@@ -12989,6 +15558,7 @@ mod tests {
             Paragraph {
                 reading_order: 0,
                 bounds: chars[0].layout.unwrap().bounds,
+                first_line_indent: None,
                 text: TextCarrier::Chars {
                     chars: chars[..1].to_vec(),
                 },
@@ -12999,6 +15569,7 @@ mod tests {
             Paragraph {
                 reading_order: 1,
                 bounds: normal_bounds,
+                first_line_indent: None,
                 text: TextCarrier::Chars {
                     chars: chars[1..5].to_vec(),
                 },
@@ -13009,6 +15580,7 @@ mod tests {
             Paragraph {
                 reading_order: 2,
                 bounds: normal_bounds,
+                first_line_indent: None,
                 text: TextCarrier::Chars {
                     chars: chars[5..].to_vec(),
                 },
@@ -13086,6 +15658,7 @@ mod tests {
             Paragraph {
                 reading_order: 0,
                 bounds,
+                first_line_indent: None,
                 text: TextCarrier::Chars {
                     chars: chars[..1].to_vec(),
                 },
@@ -13096,6 +15669,7 @@ mod tests {
             Paragraph {
                 reading_order: 1,
                 bounds,
+                first_line_indent: None,
                 text: TextCarrier::Chars {
                     chars: chars[1..5].to_vec(),
                 },
@@ -13106,6 +15680,7 @@ mod tests {
             Paragraph {
                 reading_order: 2,
                 bounds,
+                first_line_indent: None,
                 text: TextCarrier::Chars {
                     chars: chars[5..].to_vec(),
                 },
@@ -13819,7 +16394,23 @@ mod tests {
     }
 
     #[test]
-    fn math_shape_heuristic_only_applies_to_fallback_layout() {
+    fn math_shape_heuristic_accepts_a_whole_model_math_paragraph_only() {
+        for math in ["dmodel×dk", "x = y"] {
+            assert!(
+                model_math_shape_is_passthrough(math),
+                "missed model formula {math:?}"
+            );
+        }
+        for prose in [
+            "Footnote marker appears inside word¹ without starting a new paragraph.",
+            "x = y describes the observed relation in prose.",
+        ] {
+            assert!(
+                !model_math_shape_is_passthrough(prose),
+                "matched model prose {prose:?}"
+            );
+        }
+
         let mut document = Document::for_inspection(fixture());
         let engine = FakeEngine::default();
         let translator = CountingTranslator::default();
@@ -13845,6 +16436,20 @@ mod tests {
         }
         let content_objects = BTreeSet::from([chars[0].passthrough.content_object]);
         let mut diagnostics = Vec::new();
+
+        mark_math_passthrough_units(paragraph, &content_objects, 0, 0, &mut diagnostics);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert!(paragraph.chars().iter().all(|character| {
+            character.layout.unwrap().policy == TranslationPolicy::Passthrough
+        }));
+
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        for (character, unicode) in chars.iter_mut().zip(['M', 'I', 'M']) {
+            character.unicode = Some(unicode);
+            character.layout.as_mut().unwrap().policy = TranslationPolicy::Translate;
+        }
+        diagnostics.clear();
 
         mark_math_passthrough_units(paragraph, &content_objects, 0, 0, &mut diagnostics);
 
@@ -14591,6 +17196,7 @@ mod tests {
         document.il.pages[0].paragraphs = vec![Paragraph {
             reading_order: 0,
             bounds: owner,
+            first_line_indent: None,
             text: TextCarrier::Chars { chars },
             translated_text: None,
             translation_conservation: None,
@@ -14705,6 +17311,7 @@ mod tests {
         document.il.pages[0].paragraphs = vec![Paragraph {
             reading_order: 0,
             bounds: owner,
+            first_line_indent: None,
             text: TextCarrier::Chars { chars },
             translated_text: None,
             translation_conservation: None,
@@ -14792,6 +17399,7 @@ mod tests {
             vector_paths: Vec::new(),
             inline_images: Vec::new(),
             bounds: character.r#box.union(character.visual_bbox),
+            glyph_ink_bounds: vec![character.visual_bbox],
             ink_bounds: character.visual_bbox,
             source_fonts: vec![character.font.clone()],
         }];
@@ -14809,11 +17417,28 @@ mod tests {
             },
             content_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             safe_to_replay: false,
+            form_clip: None,
+            clips: Default::default(),
         }];
 
         assert!(
             attach_uniquely_owned_formula_ink(&mut units, &document.extracted_pages[0]).is_none(),
             "a formula-related path that cannot be replayed independently must fail closed"
+        );
+
+        let retained_xobject = crate::walk::WalkedInlineImage {
+            content_object: (character.passthrough.content_object, 0),
+            byte_start: character.passthrough.byte_end + 21,
+            byte_end: character.passthrough.byte_end + 28,
+            bounds: character.visual_bbox,
+            content_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            replayable: false,
+            form_clip: None,
+            clips: Default::default(),
+        };
+        assert!(
+            !formula_owns_inline_image(&units[0], &retained_xobject),
+            "an Image XObject invocation is not a self-contained formula replay program"
         );
     }
 
@@ -14891,6 +17516,7 @@ mod tests {
         document.il.pages[0].paragraphs = vec![Paragraph {
             reading_order: 0,
             bounds: owner,
+            first_line_indent: None,
             text: TextCarrier::Chars { chars },
             translated_text: None,
             translation_conservation: None,
@@ -14977,6 +17603,7 @@ mod tests {
             vector_paths: Vec::new(),
             inline_images: Vec::new(),
             bounds: character.r#box.union(character.visual_bbox),
+            glyph_ink_bounds: vec![character.visual_bbox],
             ink_bounds: character.visual_bbox,
             source_fonts: vec![character.font.clone()],
         };
@@ -14994,6 +17621,8 @@ mod tests {
             },
             content_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             safe_to_replay: true,
+            form_clip: None,
+            clips: Default::default(),
         };
 
         assert!(
@@ -15065,6 +17694,7 @@ mod tests {
         document.il.pages[0].paragraphs = vec![Paragraph {
             reading_order: 0,
             bounds: owner,
+            first_line_indent: None,
             text: TextCarrier::Chars { chars },
             translated_text: None,
             translation_conservation: None,
@@ -15629,6 +18259,7 @@ mod tests {
             vector_paths: Vec::new(),
             inline_images: Vec::new(),
             bounds: formula_bounds,
+            glyph_ink_bounds: vec![formula_bounds],
             ink_bounds: formula_bounds,
             source_fonts: Vec::new(),
         }];
@@ -15678,6 +18309,7 @@ mod tests {
                 vector_paths: Vec::new(),
                 inline_images: Vec::new(),
                 bounds,
+                glyph_ink_bounds: vec![bounds],
                 ink_bounds: bounds,
                 source_fonts: Vec::new(),
             }

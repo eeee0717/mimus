@@ -1,0 +1,87 @@
+schema_version = 1
+
+[identity]
+id = "unit-cmap-09-valid-scalar-parent"
+name = "Valid single-scalar ToUnicode control"
+class = "unit"
+legality = "legal"
+cases = ["CMAP-09"]
+priority = "M3"
+variable = "One CID maps to the valid single UTF-16BE scalar U+0041"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-cmap-09-valid-scalar-parent.pdf"
+pdf_sha256 = "de81a0245ba0c0efe448e82a7c5368e37a490526c974cf440233dda74be3b767"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 9, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d636d61702d30392d76616c"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "CMAP09_CONTROL"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "A"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.168, 82.356, 131.136]
+visual_bbox = [73.177734, 120.0, 81.181641, 128.748047]
+
+[[expected.content_stream]]
+object = 11
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 120 Tm
+<0007> Tj
+ET
+"""
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 11
+
+[[expected.reference]]
+from_object = 9
+path = ["/ToUnicode"]
+to_object = 8
+
+[[expected.behaviour]]
+id = "CMAP-09-valid-control"
+assertion = "The valid U+0041 target remains one Unicode scalar and the paragraph is not preserved"
+observable_via = "raw ToUnicode bytes, production inspect IL, and independent glyph geometry"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "CMAP-09 needs a legal parent whose only child change is the four-hex-digit UTF-16BE target"
+resolution = "Pin U+0041 in the parent and reserve the equal-length D800 mutation for the malformed child"

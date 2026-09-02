@@ -1,0 +1,106 @@
+schema_version = 1
+
+[identity]
+id = "unit-layout-04-large-summation"
+name = "Tall summation metric and ink ownership"
+class = "unit"
+legality = "legal"
+cases = ["LAYOUT-04"]
+priority = "M3"
+variable = "One inline summation outline is three times its source height while retaining ordinary font metrics and advance"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-layout-04-large-summation.pdf"
+pdf_sha256 = "e613dc903e983f1ab3b48a8bf63464e2e9d3f7d5acaef144499008e751ec2dbc"
+font_provenance = "vendored"
+fonts = [
+  { file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" },
+  { file = "../../fonts/MimusMath.ttf", sha256 = "d6dd910115e530ed76ca032c13bafde8d52e0725181bcb1fc59be6496a91b926", pdf_object = 9, descriptor_object = 10, subset_tag = "MIMUSM", base_name = "MimusTallSummation" },
+]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 240.0, 180.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d6c61796f75742d30342d6c"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "LAYOUT04"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS ∑ MIMUS"
+baseline_origin = [72.0, 100.0]
+metric_box = [72.0, 97.168, 169.032, 111.136]
+visual_bbox = [73.177734, 93.091797, 168.361219, 125.892578]
+
+[[expected.content_stream]]
+object = 13
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 100 Tm
+(MIMUS ) Tj
+/FS 12 Tf
+1 0 0 1 116.472 100 Tm
+(S) Tj
+/F1 12 Tf
+1 0 0 1 124.56 100 Tm
+( MIMUS) Tj
+ET
+"""
+
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/FS"]
+to_object = 9
+
+[[expected.reference]]
+from_object = 9
+path = ["/FontDescriptor"]
+to_object = 10
+
+[[expected.reference]]
+from_object = 10
+path = ["/FontFile2"]
+to_object = 11
+
+[[expected.reference]]
+from_object = 9
+path = ["/ToUnicode"]
+to_object = 12
+
+[[expected.behaviour]]
+id = "LAYOUT-04-formula-ownership"
+assertion = "The summation ink is over twice the metric-box height yet belongs to the nested inline_formula model region and becomes exactly one formula composition"
+observable_via = "pinned outline arithmetic, recorded model boxes, ParagraphFind IL, and StylesAndFormulas IL"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "LAYOUT-04 needs independently controlled ink that is much taller than the metric box"
+resolution = "Scale only the pinned U+2211 outline threefold while retaining DejaVu Sans ascender, descender, and advance metrics"

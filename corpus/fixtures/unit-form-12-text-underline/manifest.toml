@@ -1,0 +1,161 @@
+# unit-form-12-text-underline -- expected manifest
+#
+# This specification predates the exact writer recipe. The first MIMUS show is
+# underlined by a self-contained horizontal q/Q stroke of exactly its advance.
+
+schema_version = 1
+
+[identity]
+id = "unit-form-12-text-underline"
+name = "Uniquely owned text underline follows its translated owner"
+class = "unit"
+legality = "legal"
+cases = ["FORM-12"]
+priority = "M3"
+variable = "A safe horizontal path uniquely underlines the first of two complete text-show operands in one translated paragraph"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-form-12-text-underline.pdf"
+pdf_sha256 = "ea795757d8e4ba6be06901409c73bef69bf66a265b01a7880b46e1528e76e0b7"
+font_provenance = "vendored"
+fonts = [
+    { file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" },
+]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d666f726d2d31322d746578"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+bookmarks = 0
+bookmark_depth = 0
+annotations = 0
+form_fields = 0
+optional_content_groups = 0
+named_destinations = 0
+uri_actions = 0
+
+[[expected.block]]
+key = "FORM12"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUSMIMUS"
+baseline_origin = [90.0, 140.0]
+metric_box = [72.0, 119.168, 130.656, 151.136]
+visual_bbox = [73.177734, 121.830078, 129.985219, 148.90625]
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 90 140 Tm
+(MIMUS) Tj
+ET
+q
+0.5 w
+90 138 m
+130.656 138 l
+S
+Q
+BT
+/F1 12 Tf
+1 0 0 1 72 122 Tm
+(MIMUS) Tj
+ET
+"""
+
+[[expected.reference]]
+from_object = 1
+path = ["/Pages"]
+to_object = 2
+
+[[expected.reference]]
+from_object = 2
+path = ["/Kids", "0"]
+to_object = 3
+
+[[expected.reference]]
+from_object = 3
+path = ["/Parent"]
+to_object = 2
+
+[[expected.reference]]
+from_object = 3
+path = ["/Resources"]
+to_object = 4
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 9
+
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 5
+
+[[expected.reference]]
+from_object = 5
+path = ["/FontDescriptor"]
+to_object = 6
+
+[[expected.reference]]
+from_object = 5
+path = ["/ToUnicode"]
+to_object = 8
+
+[[expected.reference]]
+from_object = 6
+path = ["/FontFile2"]
+to_object = 7
+
+[[expected.behaviour]]
+id = "FORM-12-unique-owner-translation"
+assertion = "The underline is replayed inside a -18pt x translation with the first replacement span, and no stroke remains at the source x=90 slot"
+observable_via = "walker ownership, decoded output stream, MuPDF stroke geometry, and final rendered output"
+
+[[expected.behaviour]]
+id = "FORM-12-ambiguous-owner-terminal"
+assertion = "A nearby underline without one safe complete text-show owner preserves the whole paragraph as typeset_protocol instead of deleting or abandoning ink"
+observable_via = "production ownership unit test and write-stage typed paragraph state"
+
+[oracle]
+checks = [
+    "determinism",
+    "legality",
+    "page-geometry",
+    "structure",
+    "hand-written-geometry",
+    "pdf-bytes",
+    "pdf-structure",
+    "render",
+]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "Deleting or retaining a moved owner's underline would lose content or leave orphan source-slot ink"
+resolution = "Only a uniquely owned, safe, complete horizontal stroke follows one determinate single-line owner delta; every ambiguous case is typed source preservation"

@@ -1,0 +1,119 @@
+# PARA-05 exact contract. A single M is 10.356pt wide at 12pt, so every source
+# line is unambiguously underfilled in the 200pt model container.
+
+schema_version = 1
+
+[identity]
+id = "unit-para-05-natural-split"
+name = "Two natural paragraphs inside one model region"
+class = "unit"
+legality = "legal"
+cases = ["PARA-05"]
+priority = "M3"
+variable = "The third line is indented 24pt and follows a line occupying only 5.2 percent of the 200pt model container"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-para-05-natural-split.pdf"
+pdf_sha256 = "86c9c91e22ae3b99354c7bb3eac20143f3c1102b3de9fdb0625beb23a9cd3ba3"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1,2,3,4,5,6,7,8,9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d706172612d30352d6e6174"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 4
+columns = 1
+
+[[expected.block]]
+key = "P1_FULL"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "M"
+baseline_origin = [72.0, 160.0]
+metric_box = [72.0, 157.168, 82.356, 171.136]
+visual_bbox = [73.177734, 160.0, 81.181641, 168.748047]
+
+[[expected.block]]
+key = "P1_SHORT"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "M"
+baseline_origin = [72.0, 146.0]
+metric_box = [72.0, 143.168, 82.356, 157.136]
+visual_bbox = [73.177734, 146.0, 81.181641, 154.748047]
+
+[[expected.block]]
+key = "P2_INDENTED"
+page = 0
+column = "full"
+draw_order = 3
+reading_order = 3
+text = "M"
+baseline_origin = [96.0, 132.0]
+metric_box = [96.0, 129.168, 106.356, 143.136]
+visual_bbox = [97.177734, 132.0, 105.181641, 140.748047]
+
+[[expected.block]]
+key = "P2_CONTINUATION"
+page = 0
+column = "full"
+draw_order = 4
+reading_order = 4
+text = "M"
+baseline_origin = [72.0, 118.0]
+metric_box = [72.0, 115.168, 82.356, 129.136]
+visual_bbox = [73.177734, 118.0, 81.181641, 126.748047]
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 160 Tm
+(M) Tj
+1 0 0 1 72 146 Tm
+(M) Tj
+1 0 0 1 96 132 Tm
+(M) Tj
+1 0 0 1 72 118 Tm
+(M) Tj
+ET
+"""
+
+[[expected.behaviour]]
+id = "PARA-05-dual-evidence"
+assertion = "One recorded model text region becomes exactly two paragraphs only at the line carrying both a greater-than-1.2em indent and an underfilled predecessor"
+observable_via = "hand-derived widths and baselines, recorded model region, production paragraph IL, and captured requests"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "glyphs", "transformed-text-geometry", "pdf-bytes", "pdf-structure", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "A short line alone is normally the final line of an ordinary paragraph"
+resolution = "Require both the source indent and the preceding line at no more than 80 percent of the model container width"

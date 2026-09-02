@@ -49,6 +49,11 @@ pub struct RenderReference {
     pub page: usize,
     pub dpi: u32,
     pub poppler_sha256: String,
+    /// Poppler bottles with the same version can render different PNG bytes across
+    /// operating systems. Keep the original adjudication and pin the hosted Linux
+    /// realization separately when it differs.
+    #[serde(default)]
+    pub poppler_linux_x86_64_sha256: Option<String>,
     pub mutool_md5: String,
 }
 
@@ -109,7 +114,14 @@ impl Adjudicated {
             );
         }
 
-        if self.render != fresh.render {
+        let render_differs = self.render.len() != fresh.render.len()
+            || self.render.iter().zip(&fresh.render).any(|(old, new)| {
+                old.page != new.page
+                    || old.dpi != new.dpi
+                    || old.expected_poppler_sha256() != new.poppler_sha256
+                    || old.mutool_md5 != new.mutool_md5
+            });
+        if render_differs {
             out.push(format!(
                 "参考栅格哈希变了：已记录 {:?}，本次 {:?}",
                 self.render, fresh.render
@@ -131,6 +143,7 @@ impl Adjudicated {
         s.push_str("#   metric_box      ← poppler pdftotext -bbox-layout（现实排版裁定）\n");
         s.push_str("#   visual_bbox     ← mutool draw -F stext 字形 quad（现实排版近似值）\n");
         s.push_str("#   baseline_origin ← mutool stext 首字符 origin（现实排版裁定）\n#\n");
+        s.push_str("# 同版本 Poppler 的 PNG 在平台间不保证字节相同；差异平台另记钉死哈希。\n");
         s.push_str("# 坐标一律在 PDF 页面空间：单位 pt、原点左下、/Rotate 之前（§2.2）。\n\n");
 
         s.push_str(&format!("schema_version = {}\n", self.schema_version));
@@ -154,10 +167,25 @@ impl Adjudicated {
             s.push_str(&format!("page = {}\n", r.page));
             s.push_str(&format!("dpi = {}\n", r.dpi));
             s.push_str(&format!("poppler_sha256 = {:?}\n", r.poppler_sha256));
+            if let Some(sha256) = &r.poppler_linux_x86_64_sha256 {
+                s.push_str(&format!("poppler_linux_x86_64_sha256 = {sha256:?}\n"));
+            }
             s.push_str(&format!("mutool_md5 = {:?}\n", r.mutool_md5));
         }
 
         s
+    }
+}
+
+impl RenderReference {
+    fn expected_poppler_sha256(&self) -> &str {
+        if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            self.poppler_linux_x86_64_sha256
+                .as_deref()
+                .unwrap_or(&self.poppler_sha256)
+        } else {
+            &self.poppler_sha256
+        }
     }
 }
 
@@ -179,6 +207,7 @@ impl From<&PageRaster> for RenderReference {
             page: r.index,
             dpi: crate::oracle::render::DPI,
             poppler_sha256: r.poppler_sha256.clone(),
+            poppler_linux_x86_64_sha256: None,
             mutool_md5: r.mutool_md5.clone(),
         }
     }
@@ -226,6 +255,7 @@ mod tests {
                 page: 0,
                 dpi: 150,
                 poppler_sha256: "aa".into(),
+                poppler_linux_x86_64_sha256: None,
                 mutool_md5: "bb".into(),
             }],
         }
@@ -255,6 +285,19 @@ mod tests {
         let mut b = sample();
         b.render[0].mutool_md5 = "cc".into();
         assert!(a.differences(&b).iter().any(|d| d.contains("栅格")));
+    }
+
+    #[test]
+    fn linux_poppler_hash_is_additive_and_round_trips() {
+        let mut a = sample();
+        a.render[0].poppler_linux_x86_64_sha256 = Some("cc".into());
+        let text = a.to_toml();
+        assert!(text.contains("poppler_linux_x86_64_sha256 = \"cc\""));
+        let b: Adjudicated = toml::from_str(&text).unwrap();
+        assert_eq!(
+            b.render[0].poppler_linux_x86_64_sha256.as_deref(),
+            Some("cc")
+        );
     }
 
     #[test]

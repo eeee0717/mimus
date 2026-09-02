@@ -1,0 +1,61 @@
+schema_version = 1
+
+[identity]
+id = "mal-cmap-09-isolated-surrogate"
+name = "Isolated high surrogate in ToUnicode"
+class = "mal"
+legality = "malformed"
+cases = ["CMAP-09"]
+priority = "M3"
+variable = "The ToUnicode target changes from U+0041 to the isolated high surrogate D800"
+
+[source]
+method = "byte-mutation"
+pdf = "mal-cmap-09-isolated-surrogate.pdf"
+pdf_sha256 = "a681aa96c271cc18878539d4e1cfd2bb6332f24e7be71b736d68f3bfab9b6395"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735" }]
+
+[lineage]
+parent = "unit-cmap-09-valid-scalar-parent"
+
+[[lineage.mutations]]
+byte_offset = 2860
+original_bytes = [48, 48, 52, 49]
+replacement_bytes = [68, 56, 48, 48]
+description = "change the ToUnicode target from <0041> to the isolated high surrogate <D800>"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+block = []
+declared_failure = "content-semantics:CMAP-09"
+
+[[expected.degradation]]
+scope = "paragraph"
+page = 0
+paragraph = 0
+reason = "unreliable_unicode"
+
+[expected.structure]
+pages = 1
+blocks = 0
+columns = 1
+
+[[expected.behaviour]]
+id = "CMAP-09-isolated-surrogate"
+assertion = "The CID has unicode=null rather than U+FFFD, paragraph 0 is preserved as unreliable_unicode, and processing does not panic"
+observable_via = "one-range lineage, production inspect IL, degradation_summary, output byte equality, and zero panic"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "Rust char cannot represent an isolated UTF-16 surrogate"
+resolution = "Invalidate the complete ToUnicode map, expose no replacement scalar, and preserve the affected paragraph"

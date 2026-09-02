@@ -17,8 +17,8 @@ pub use context::{
     Document, OutputFont, OutputFonts, PassContext, PassSnapshotSink, PipelineConfig,
 };
 pub use error::{
-    AssetReason, ErrorReason, ExitCategory, InputReason, InternalReason, IoReason, MimusError,
-    Result, RetryReason, TranslationReason, UsageReason,
+    AssetReason, ErrorReason, ExitCategory, InputErrorDetail, InputReason, InternalReason,
+    IoReason, MimusError, Result, RetryReason, TranslationReason, UsageReason,
 };
 
 /// Core version used by the CLI as its version source of truth.

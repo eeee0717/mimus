@@ -1,6 +1,6 @@
 # M3 scorecard v2 baseline
 
-Date: 2026-08-30, refreshed 2026-08-31. Schema: scorecard v2. Thresholds remain proposals pending
+Date: 2026-08-30, refreshed 2026-09-01. Schema: scorecard v2. Thresholds remain proposals pending
 user approval. The 20-paper cluster rows in Sections 1-3 preserve an `invalid-profile` historical
 run and are not comparable with a conserving baseline. Sections 4-7 retain separate real-anchor,
 process, and acceptance history. Section 8 is the current 20-paper conserving-fake and closed-cache
@@ -232,72 +232,80 @@ behavior or archival copy, not a production regression and not a reason to recon
 
 `v2` is the automatic scorecard v2 total. `Typed` is the terminal typed preserved-paragraph count.
 `Con` is CON-01 conservation. `Formula`, `Gap`, and `Hole` are the FOR-01 proxy, FOR-02, and FOR-03
-violation counts; `T/A` is failed STR-05 title/author invariants. Fake output cannot establish
-semantic translation quality, so these totals are mechanical regression measurements only.
+violation counts; `Ink` and `Rigid` are FOR-04 and FOR-05; `T/A` is failed STR-05 title/author
+invariants. Fake output cannot establish semantic translation quality, so these totals are mechanical
+regression measurements only.
 
-| Paper | Producer | v2 | Typed | Con | Formula | Gap | Hole | T/A |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 01 Adam | pdfTeX | 93.333333 | 152 | 1.000000 | 88 | 0 | 0 | 0 |
-| 02 ResNet | pdfTeX | 96.663267 | 219 | 1.000000 | 8 | 0 | 0 | 0 |
-| 03 SqueezeNet | pdfTeX | 94.778369 | 130 | 1.000000 | 19 | 0 | 0 | 0 |
-| 04 MobileNets | pdfTeX | 96.050839 | 137 | 1.000000 | 3 | 0 | 0 | 0 |
-| 05 BERT | pdfTeX | 96.699401 | 104 | 1.000000 | 6 | 0 | 0 | 0 |
-| 06 DDPM | pdfTeX | 95.084077 | 273 | 1.000000 | 56 | 1 | 1 | 0 |
-| 07 ViT | pdfTeX | 97.629634 | 179 | 1.000000 | 7 | 2 | 2 | 0 |
-| 08 LoRA | pdfTeX | 95.950947 | 273 | 1.000000 | 54 | 0 | 0 | 0 |
-| 09 Repliable onion routing | XeTeX | 89.415467 | 1,280 | 1.000000 | 274 | 16 | 16 | 0 |
-| 10 Compact IBE | XeTeX | 92.927487 | 146 | 1.000000 | 89 | 1 | 1 | 0 |
-| 11 SDitH hardware | XeTeX | 96.301919 | 168 | 1.000000 | 63 | 0 | 0 | 0 |
-| 12 Hertz side channel | XeTeX | 94.401963 | 85 | 1.000000 | 84 | 1 | 1 | 0 |
-| 13 Information-theoretic MPC | LuaTeX | 95.476251 | 175 | 1.000000 | 38 | 19 | 19 | 0 |
-| 14 Masked comparisons | LuaTeX | 96.204460 | 253 | 1.000000 | 39 | 1 | 1 | 0 |
-| 15 LWE two-step | LuaTeX | 91.944698 | 305 | 1.000000 | 151 | 1 | 1 | 0 |
-| 16 Supersingular orientations | LuaTeX | 81.879565 | 496 | 1.000000 | 401 | 2 | 2 | 0 |
-| 17 Informational consciousness | Word | 97.785404 | 32 | 1.000000 | 0 | 0 | 0 | 0 |
-| 18 Consciousness model | Word | 94.842937 | 124 | 1.000000 | 16 | 5 | 5 | 0 |
-| 19 Multibeam IoT | Word | 93.435773 | 122 | 1.000000 | 2 | 0 | 0 | 0 |
-| 20 Tuberculosis biosensor | Word | 95.474718 | 32 | 1.000000 | 1 | 0 | 0 | 0 |
+| Paper | Producer | v2 | Typed | Con | Formula | Gap | Hole | Ink | Rigid | T/A |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 01 Adam | pdfTeX | 93.318966 | 152 | 1.000000 | 88 | 0 | 0 | 0 | 0 | 0 |
+| 02 ResNet | pdfTeX | 98.384383 | 20 | 1.000000 | 8 | 0 | 0 | 0 | 0 | 0 |
+| 03 SqueezeNet | pdfTeX | 95.769723 | 20 | 1.000000 | 11 | 0 | 0 | 0 | 0 | 0 |
+| 04 MobileNets | pdfTeX | 98.496032 | 4 | 1.000000 | 5 | 1 | 1 | 0 | 0 | 0 |
+| 05 BERT | pdfTeX | 97.285482 | 5 | 1.000000 | 3 | 1 | 1 | 0 | 0 | 0 |
+| 06 DDPM | pdfTeX | 95.740492 | 85 | 1.000000 | 48 | 0 | 0 | 0 | 0 | 0 |
+| 07 ViT | pdfTeX | 99.108393 | 8 | 1.000000 | 2 | 3 | 3 | 0 | 0 | 0 |
+| 08 LoRA | pdfTeX | 96.335498 | 25 | 1.000000 | 39 | 0 | 0 | 0 | 0 | 0 |
+| 09 Repliable onion routing | XeTeX | 87.232674 | 1,113 | 1.000000 | 274 | 17 | 17 | 0 | 0 | 0 |
+| 10 Compact IBE | XeTeX | 91.911922 | 107 | 1.000000 | 89 | 1 | 1 | 2 | 0 | 0 |
+| 11 SDitH hardware | XeTeX | 95.521806 | 72 | 1.000000 | 63 | 1 | 1 | 0 | 0 | 0 |
+| 12 Hertz side channel | XeTeX | 90.666845 | 11 | 1.000000 | 84 | 11 | 11 | 0 | 0 | 0 |
+| 13 Information-theoretic MPC | LuaTeX | 94.535178 | 27 | 1.000000 | 38 | 24 | 24 | 0 | 0 | 0 |
+| 14 Masked comparisons | LuaTeX | 95.910949 | 43 | 1.000000 | 39 | 0 | 0 | 0 | 0 | 0 |
+| 15 LWE two-step | LuaTeX | 90.144038 | 128 | 1.000000 | 127 | 6 | 6 | 0 | 0 | 0 |
+| 16 Supersingular orientations | LuaTeX | 83.764106 | 175 | 1.000000 | 178 | 5 | 5 | 0 | 0 | 0 |
+| 17 Informational consciousness | Word | 95.678227 | 20 | 1.000000 | 0 | 0 | 0 | 0 | 0 | 0 |
+| 18 Consciousness model | Word | 91.367401 | 69 | 1.000000 | 16 | 19 | 19 | 0 | 0 | 0 |
+| 19 Multibeam IoT | Word | 90.713475 | 48 | 1.000000 | 2 | 1 | 1 | 0 | 0 | 0 |
+| 20 Tuberculosis biosensor | Word | 96.716659 | 0 | 1.000000 | 1 | 2 | 2 | 0 | 0 | 0 |
 
-All 20 papers publish and `Internal/6` is zero. The cluster typed median is 160 and the worst is
-1,280. Producer strata are:
+All 20 papers publish and `Internal/6` is zero. The cluster typed median is 35 and the worst is
+1,113. Producer strata are:
 
 | Producer | Papers | Published | Internal/6 | Typed median | Typed worst |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| pdfTeX | 8 | 8/8 | 0 | 165.5 | 273 |
-| XeTeX | 4 | 4/4 | 0 | 157.0 | 1,280 |
-| LuaTeX | 4 | 4/4 | 0 | 279.0 | 496 |
-| Word | 4 | 4/4 | 0 | 77.0 | 124 |
+| pdfTeX | 8 | 8/8 | 0 | 20.0 | 152 |
+| XeTeX | 4 | 4/4 | 0 | 89.5 | 1,113 |
+| LuaTeX | 4 | 4/4 | 0 | 85.5 | 175 |
+| Word | 4 | 4/4 | 0 | 34.0 | 69 |
 
-The loopback accepted 3,208 translation responses and zero term-extraction calls. Every fake output
-has the same Unicode character length as its input. All 20 published PDF hashes, typed counts,
-conservation rates, and continuity/hole counts match the corrected #142 replay. ResNet and Repliable
-onion routing reproducibility reruns are byte-identical with SHA-256
-`e35dda966ddebbd6fb76eb61fa4f258a49fd6217268fa3efd46d6fed487ab4a3` and
-`39f4ce503bb0e01feea39d1d8cd1d883691c78715ecc5f06d9ace6a2f1e995a3`, respectively.
+The primary loopback run accepted 3,275 conserving translation responses and zero term-extraction
+calls. Every checked request names `m3-118-conserving-fake-v1`; no real provider or paper download
+was used. Aggregate CON-01 is **7,161/7,161**, STR-05 has zero failures, and FOR-02/FOR-03 report
+92/92 continuity findings without a new unexplained regression.
 
-Aggregate CON-01 is **5,605/5,605** after the #152 same-boundary reconciliation. The previous sole
-scorecard miss, token `h` at `(15,35)` in paper 14, was manufactured by concatenating two
-translatable runs across formula-owned content. Runtime now tokenizes both the prepared source and
-the restored validated target per formula-delimited semantic segment, and the Translate IL exposes
-the exact normalized multisets plus bounded raw-shape hashes. For that paragraph, request SHA-256 is
-`c73fdc1df3442f30ae646adcf9dbff91f72880d316481659a401137facdbf2fd` and response SHA-256 is
-`a82f3396877513b9ee4169343af87a0c6e74238f4589559d8de0136d2c9e6035`; source and target both
-contain exactly `0`, `2`, and `16` once. The 20-paper loopback rerun published 20/20 with zero
-conservation miss and no real provider call. Paper 14 is 493/493, and its output remains byte-identical
-at `a781d44d1261ded878462179891f545866c03034477edf062529092b9484d13b`.
+FOR-04 is 2/2,597: both rows are the same two paper-10 vector paths present in the base, policy, and
+final scorecards. They predate #150 and remain attributed accepted-baseline findings. FOR-05 is
+0/55. Its denominator and the paper-06 inherited findings changed because the final scorecard now
+requires production-aligned cap/row geometry and a unique formula owner instead of assigning every
+nearby trace path to every formula. Paper 15's path belongs to the visual line above; paper 16's two
+neighboring paths belong to other formula units, and its real overbar moved under the exact glyph
+delta. The regression tests preserve both the unique-owner and paragraph-edge anchor cases.
+
+Among the 18 papers with a comparable pre-#150 published artifact, Adam remains byte-identical and
+the other 17 hashes change because the configured variable-font Bold instance now affects both
+planning metrics and embedded outlines. Paper 15 and paper 16 publish only after the final retained-
+character repair. Their final SHA-256 values are
+`1af7633e922d2012fe06f8dfa039a2fbfcc48f7dd9b63ddabeff07d33f5505a2` and
+`57f31f736e0bea9a35886d79d7a2a61303ccd70ffb4a11ccf678993961d3e3c4`.
 
 ### 8.3 Current closed-cache anchor
 
 The accepted input cache had SHA-256
 `e5e825564ff2166c672db271c48745b1e467057ab8be09d51f4adca14f58e94c` before replay. The endpoint
 `http://127.0.0.1:9/v1` was confirmed closed. All 108 paragraph requests were cache hits; there were
-zero misses and zero provider calls. The published PDF is byte-identical to the accepted artifact:
+zero misses, zero retries, zero errors, and zero provider calls in each mode. This is the one baseline
+update after TYPE-05, FORM-12, and #150: the previous accepted default SHA was
+`b3de6f10522f64a7e8bedba292c01d51724fb616f298bd4917ed8e54a475c0ef`; the combined TYPE-05 /
+FORM-12 policy candidate was `44fc1ee63e0adbf350e9985f83c8bef905c9384a194f2669fe6dc5133eaf0e16`
+but was not adopted as a separate baseline; the final default and `--bilingual` SHA-256 values are:
 
-`b3de6f10522f64a7e8bedba292c01d51724fb616f298bd4917ed8e54a475c0ef`
+- default: `1e34692b54c52306c1cadcd4aad3a7c01ceae6a30a1b0787021b681100266622`;
+- bilingual: `5f2c6cd3d8ee36d81c0c6582cacc4cfec3f7b91f6cc5e8df32235af308333743`.
 
 | Measurement | Current anchor |
 | --- | ---: |
-| scorecard v2 total | 97.997210 |
+| scorecard v2 total | 97.646525 |
 | conclusion | `automatic_score_only` |
 | typed rows | `(3,12) unreliable_unicode`; `(4,6) typeset_overflow` |
 | CON-01 | 161/161 |
@@ -306,9 +314,9 @@ zero misses and zero provider calls. The published PDF is byte-identical to the 
 | FOR-04 orphan source ink | 0/71 |
 | FOR-05 rigid-body integrity | 0/4 |
 | STR-05 title/author failures | 0 |
-| page-0 extracted lines | 58 |
-| page-0 forbidden starts / ends / isolated CJK punctuation lines | 0 / 0 / 0 |
+| page count default / bilingual | 15 / 30 |
 
-`qpdf --check` passes. The anchor has 61 measured formula-neighbor gaps with maximum 9 pt and no
-unexplained inline hole. The score change from Section 7.1's `97.988578` is diagnostic-policy input,
-not a PDF change: the artifact SHA-256 is identical.
+`qpdf --check` passes for both modes. The default anchor has 62 measured formula-neighbor gaps with
+maximum 2 pt and no unexplained inline hole. Its score and PDF bytes change because the final policy
+and variable-font layers are active; the cache key remains font-independent, as proved by the same
+108 immutable-cache hits.

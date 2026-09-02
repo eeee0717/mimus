@@ -1,0 +1,93 @@
+schema_version = 1
+
+[identity]
+id = "unit-type-11-mixed-descents"
+name = "Mixed Times and Courier compatible descents"
+class = "unit"
+legality = "legal"
+cases = ["TYPE-11"]
+priority = "M3"
+variable = "One source line switches from a -216-unit proportional font descent to a -300-unit monospace descent"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-type-11-mixed-descents.pdf"
+pdf_sha256 = "2597f2c32fd9cd68b3ea5062658d7964be8eccf4958a7b082ea7f7207429727e"
+font_provenance = "vendored"
+fonts = [
+  { file = "../../fonts/MimusTermes.otf", sha256 = "efe5361d55b776d098ce7bdfbc9ec04e75b38e0339fed8efbb4502c2aeb133f7", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUST", base_name = "MimusMetricTermes" },
+  { file = "../../fonts/MimusCursor.otf", sha256 = "10db5aa979b0145e2417cd24c8e181b2c62c6e18a3680cd63859479ce6327420", pdf_object = 9, descriptor_object = 10, subset_tag = "MIMUSQ", base_name = "MimusMetricCursor" },
+]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 240.0, 180.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d747970652d31312d6d6978"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "TYPE11"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS CIMUS"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 116.4, 151.668, 129.768]
+visual_bbox = [72.144, 119.808, 150.564, 128.112]
+
+[[expected.content_stream]]
+object = 13
+compressed = false
+bytes = """BT
+/FT 12 Tf
+1 0 0 1 72 120 Tm
+(MIMUS ) Tj
+/FC 12 Tf
+1 0 0 1 115.668 120 Tm
+(CIMUS) Tj
+ET
+"""
+
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/FT"]
+to_object = 5
+
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/FC"]
+to_object = 9
+
+[[expected.behaviour]]
+id = "TYPE-11-common-output-baseline"
+assertion = "A translation planned from mixed -216/-300 source descents emits every primary and fallback output-font run on one baseline with less than 0.3pt spread"
+observable_via = "pinned input font metrics, captured request, output font resources, and independent final-PDF baseline extraction"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "TYPE-11 requires distinct deterministic proportional and monospace input metrics"
+resolution = "Pin renamed TeX Gyre subsets with the adjudicated Times/Courier-compatible descents and preserve their independently derived outlines and advances"

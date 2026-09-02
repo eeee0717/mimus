@@ -1,0 +1,53 @@
+schema_version = 1
+
+[identity]
+id = "unit-type-06-zero-inter-script-spacing"
+name = "No automatic CJK Latin spacing"
+class = "unit"
+legality = "legal"
+cases = ["TYPE-06"]
+priority = "M3"
+variable = "The loopback translation has adjacent Han and Latin runs without explicit whitespace"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-type-06-zero-inter-script-spacing.typ"
+pdf = "unit-type-06-zero-inter-script-spacing.pdf"
+pdf_sha256 = "5d80664d6b579f6d23960f37235afc95569785f29b6d7f8f7fae285c41f45ca0"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 120.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "TYPE06"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "Inter-script spacing stays explicit."
+
+[[expected.behaviour]]
+id = "TYPE-06-zero-insertion"
+assertion = "Typeset inserts zero extra spacing at adjacent Han/Latin boundaries and preserves only explicit response whitespace"
+observable_via = "captured response, final-PDF glyph origins, and output-font advances"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "reading-order", "dual-parser-geometry", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "Automatic quarter-em CJK/Latin spacing is an unaccepted visual policy"
+resolution = "V1 inserts no spacing and treats existing response whitespace as the only source of a gap"

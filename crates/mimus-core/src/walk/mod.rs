@@ -3,6 +3,7 @@ mod tokenizer;
 
 use std::collections::BTreeSet;
 use std::ops::Range;
+use std::sync::Arc;
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
 
@@ -36,6 +37,7 @@ pub struct WalkedChar {
     pub engine_mismatch_tolerated: bool,
     pub baseline_origin: Point,
     pub metric_box: Rect,
+    pub estimated_bbox: Option<Rect>,
     pub text_transform: TextTransform,
     pub content_transform: [f64; 6],
     pub text_matrix_before_glyph: [f64; 6],
@@ -60,6 +62,77 @@ pub(crate) struct WalkedVectorPath {
     pub end: Point,
     pub content_transform: [f64; 6],
     pub safe_to_replay: bool,
+    pub form_clip: Option<Rect>,
+    pub clips: WalkedClipStack,
+}
+
+/// Page-space geometry for a painted path, independent of whether its source
+/// program can be replayed. Planning uses this to reject final text ink that
+/// would touch retained vector ink.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WalkedPathInk {
+    pub segments: Vec<WalkedPathSegment>,
+    pub bounds: Rect,
+    pub filled: bool,
+    pub even_odd: bool,
+    pub stroke_radius: f64,
+    pub form_clip: Option<Rect>,
+    pub clips: WalkedClipStack,
+    pub replay_scope: Option<(ObjectId, usize)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WalkedClipPath {
+    pub segments: Vec<WalkedPathSegment>,
+    pub bounds: Option<Rect>,
+    pub even_odd: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct WalkedClipStack {
+    head: Option<Arc<WalkedClipNode>>,
+}
+
+#[derive(Debug)]
+struct WalkedClipNode {
+    clip: WalkedClipPath,
+    parent: Option<Arc<WalkedClipNode>>,
+}
+
+impl WalkedClipStack {
+    pub(crate) fn push(&mut self, clip: WalkedClipPath) {
+        self.head = Some(Arc::new(WalkedClipNode {
+            clip,
+            parent: self.head.take(),
+        }));
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &WalkedClipPath> {
+        std::iter::successors(self.head.as_deref(), |node| node.parent.as_deref())
+            .map(|node| &node.clip)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.iter().count()
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.head.is_none()
+    }
+}
+
+impl PartialEq for WalkedClipStack {
+    fn eq(&self, other: &Self) -> bool {
+        self.iter().eq(other.iter())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct WalkedPathSegment {
+    pub start: Point,
+    pub end: Point,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +142,11 @@ pub(crate) struct WalkedInlineImage {
     pub byte_end: usize,
     pub bounds: Rect,
     pub content_transform: [f64; 6],
+    /// Only an inline `BI`/`ID`/`EI` program is self-contained for relocation.
+    /// Image XObject invocations are retained obstacles, never formula replay candidates.
+    pub replayable: bool,
+    pub form_clip: Option<Rect>,
+    pub clips: WalkedClipStack,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +201,14 @@ impl Matrix {
         (a * d - b * c).abs() <= 1e-12
     }
 
+    fn max_scale(self) -> f64 {
+        let [a, b, c, d, _, _] = self.0;
+        let squared_sum = a * a + b * b + c * c + d * d;
+        let determinant = a * d - b * c;
+        let discriminant = (squared_sum * squared_sum - 4.0 * determinant * determinant).max(0.0);
+        ((squared_sum + discriminant.sqrt()) / 2.0).sqrt()
+    }
+
     fn page_rotation(degrees: i32) -> Self {
         match degrees.rem_euclid(360) {
             0 => Self::IDENTITY,
@@ -148,6 +234,7 @@ struct GraphicsState {
     rendering_mode: i32,
     rise: f64,
     line_width: f64,
+    clips: WalkedClipStack,
     phase: TextPhase,
 }
 
@@ -166,6 +253,7 @@ impl Default for GraphicsState {
             rendering_mode: 0,
             rise: 0.0,
             line_width: 1.0,
+            clips: WalkedClipStack::default(),
             phase: TextPhase::Outside,
         }
     }
@@ -184,6 +272,7 @@ struct Walker<'a> {
     operands: Vec<Token>,
     characters: Vec<WalkedChar>,
     vector_paths: Vec<WalkedVectorPath>,
+    path_ink: Vec<WalkedPathInk>,
     inline_images: Vec<WalkedInlineImage>,
     content_object: ObjectId,
     recoveries: BTreeSet<RecoveryKind>,
@@ -200,6 +289,7 @@ struct Walker<'a> {
     visual_rotation: Matrix,
     current_operator: Option<(ObjectId, Range<usize>)>,
     vector_scopes: Vec<VectorScope>,
+    current_path: CurrentPath,
 }
 
 #[derive(Debug)]
@@ -212,6 +302,108 @@ struct VectorScope {
     safe: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+struct CurrentPath {
+    segments: Vec<WalkedPathSegment>,
+    implicit_fill_closures: Vec<WalkedPathSegment>,
+    current: Option<Point>,
+    subpath_start: Option<Point>,
+    pending_clip_even_odd: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CubicPathKind {
+    Full,
+    InitialAtCurrent,
+    FinalAtEnd,
+}
+
+impl CurrentPath {
+    fn move_to(&mut self, point: Point) {
+        if let (Some(start), Some(end)) = (self.subpath_start, self.current)
+            && points_differ(start, end)
+        {
+            self.implicit_fill_closures.push(WalkedPathSegment {
+                start: end,
+                end: start,
+            });
+        }
+        self.current = Some(point);
+        self.subpath_start = Some(point);
+    }
+
+    fn line_to(&mut self, point: Point) {
+        if let Some(start) = self.current {
+            self.segments.push(WalkedPathSegment { start, end: point });
+        }
+        self.current = Some(point);
+        self.subpath_start.get_or_insert(point);
+    }
+
+    fn curve_to(&mut self, control1: Point, control2: Point, end: Point) {
+        let Some(start) = self.current else {
+            self.move_to(end);
+            return;
+        };
+        let mut previous = start;
+        for step in 1..=16 {
+            let t = f64::from(step) / 16.0;
+            let inverse = 1.0 - t;
+            let point = Point {
+                x: inverse.powi(3) * start.x
+                    + 3.0 * inverse.powi(2) * t * control1.x
+                    + 3.0 * inverse * t * t * control2.x
+                    + t.powi(3) * end.x,
+                y: inverse.powi(3) * start.y
+                    + 3.0 * inverse.powi(2) * t * control1.y
+                    + 3.0 * inverse * t * t * control2.y
+                    + t.powi(3) * end.y,
+            };
+            self.segments.push(WalkedPathSegment {
+                start: previous,
+                end: point,
+            });
+            previous = point;
+        }
+        self.current = Some(end);
+    }
+
+    fn close_subpath(&mut self) {
+        if let (Some(start), Some(end)) = (self.subpath_start, self.current)
+            && points_differ(start, end)
+        {
+            self.segments.push(WalkedPathSegment {
+                start: end,
+                end: start,
+            });
+        }
+        self.current = self.subpath_start;
+        self.subpath_start = None;
+    }
+
+    fn fill_segments(&self) -> Vec<WalkedPathSegment> {
+        let mut segments = self.segments.clone();
+        segments.extend_from_slice(&self.implicit_fill_closures);
+        if let (Some(start), Some(end)) = (self.subpath_start, self.current)
+            && points_differ(start, end)
+        {
+            segments.push(WalkedPathSegment {
+                start: end,
+                end: start,
+            });
+        }
+        segments
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+fn points_differ(left: Point, right: Point) -> bool {
+    (left.x - right.x).abs() + (left.y - right.y).abs() > 1e-9
+}
+
 struct ScopeSnapshot {
     resources: Dictionary,
     state: GraphicsState,
@@ -221,6 +413,7 @@ struct ScopeSnapshot {
     text_object_is_implicit: bool,
     content_object: ObjectId,
     form_clip: Option<Rect>,
+    current_path: CurrentPath,
 }
 
 /// 一页走查的结果。`recoveries` 用集合而非计数：ADR-0013 §3 要求恢复决定
@@ -230,6 +423,7 @@ struct ScopeSnapshot {
 pub struct PageWalk {
     pub characters: Vec<WalkedChar>,
     pub(crate) vector_paths: Vec<WalkedVectorPath>,
+    pub(crate) path_ink: Vec<WalkedPathInk>,
     pub(crate) inline_images: Vec<WalkedInlineImage>,
     pub recoveries: BTreeSet<RecoveryKind>,
     pub form_cycles: Vec<Vec<ObjectId>>,
@@ -293,6 +487,7 @@ pub(crate) fn walk_page_detailed_with_rotation(
         operands: Vec::new(),
         characters: Vec::new(),
         vector_paths: Vec::new(),
+        path_ink: Vec::new(),
         inline_images: Vec::new(),
         content_object: (0, 0),
         recoveries: BTreeSet::new(),
@@ -308,6 +503,7 @@ pub(crate) fn walk_page_detailed_with_rotation(
         visual_rotation: Matrix::page_rotation(rotate_degrees),
         current_operator: None,
         vector_scopes: Vec::new(),
+        current_path: CurrentPath::default(),
     };
     let mut content_streams = Vec::with_capacity(content_objects.len());
     for object_id in content_objects {
@@ -343,9 +539,16 @@ pub(crate) fn walk_page_detailed_with_rotation(
         content_streams.push(WalkedContentStream { object_id, decoded });
     }
     walker.finish();
+    if let Some(reason) = walker.degradation.take() {
+        return Err(PageWalkError::Degraded {
+            reason,
+            source: walk_error("graphics operators could not be interpreted reliably"),
+        });
+    }
     Ok(PageWalk {
         characters: walker.characters,
         vector_paths: walker.vector_paths,
+        path_ink: walker.path_ink,
         inline_images: walker.inline_images,
         recoveries: walker.recoveries,
         form_cycles: walker.form_cycles,
@@ -364,36 +567,7 @@ impl Walker<'_> {
                     if let Some(scope) = self.vector_scopes.last_mut() {
                         scope.safe = false;
                     }
-                    let corners = [
-                        self.state.ctm.point(0.0, 0.0),
-                        self.state.ctm.point(1.0, 0.0),
-                        self.state.ctm.point(0.0, 1.0),
-                        self.state.ctm.point(1.0, 1.0),
-                    ];
-                    self.inline_images.push(WalkedInlineImage {
-                        content_object: token.content_object,
-                        byte_start: token.span.start,
-                        byte_end: token.span.end,
-                        bounds: Rect {
-                            left: corners
-                                .iter()
-                                .map(|point| point.x)
-                                .fold(f64::INFINITY, f64::min),
-                            bottom: corners
-                                .iter()
-                                .map(|point| point.y)
-                                .fold(f64::INFINITY, f64::min),
-                            right: corners
-                                .iter()
-                                .map(|point| point.x)
-                                .fold(f64::NEG_INFINITY, f64::max),
-                            top: corners
-                                .iter()
-                                .map(|point| point.y)
-                                .fold(f64::NEG_INFINITY, f64::max),
-                        },
-                        content_transform: self.state.ctm.0,
-                    });
+                    self.record_image(token.content_object, token.span.start, token.span.end, true);
                     if !self.operands.is_empty() {
                         self.recoveries.insert(RecoveryKind::ArityExcess);
                         self.operands.clear();
@@ -549,13 +723,37 @@ impl Walker<'_> {
             b"w" => self.set_graphics_number(operands, |state, value| {
                 state.line_width = value;
             }),
-            b"m" => self.record_vector_point(operands, true),
-            b"l" => self.record_vector_point(operands, false),
+            b"m" => {
+                if let Some(point) = self.record_vector_point(operands, true) {
+                    self.current_path.move_to(point);
+                }
+            }
+            b"l" => {
+                if let Some(point) = self.record_vector_point(operands, false) {
+                    self.current_path.line_to(point);
+                }
+            }
+            b"c" => self.record_cubic_path(operands, CubicPathKind::Full),
+            b"v" => self.record_cubic_path(operands, CubicPathKind::InitialAtCurrent),
+            b"y" => self.record_cubic_path(operands, CubicPathKind::FinalAtEnd),
+            b"h" => self.current_path.close_subpath(),
+            b"re" => self.record_path_rectangle(operands),
             b"S" => {
                 if let Some(scope) = self.vector_scopes.last_mut() {
                     scope.stroke_count += 1;
                 }
+                self.paint_current_path(false, false, true, false);
             }
+            b"s" => self.paint_current_path(false, false, true, true),
+            b"f" | b"F" => self.paint_current_path(true, false, false, false),
+            b"f*" => self.paint_current_path(true, true, false, false),
+            b"B" => self.paint_current_path(true, false, true, false),
+            b"B*" => self.paint_current_path(true, true, true, false),
+            b"b" => self.paint_current_path(true, false, true, true),
+            b"b*" => self.paint_current_path(true, true, true, true),
+            b"W" => self.current_path.pending_clip_even_odd = Some(false),
+            b"W*" => self.current_path.pending_clip_even_odd = Some(true),
+            b"n" => self.finish_current_path(),
             b"Tj" => {
                 self.enter_text_phase();
                 if let Some(tail) = self.operand_tail(operands, 1) {
@@ -667,7 +865,14 @@ impl Walker<'_> {
         };
         let subtype = stream.dict.get(b"Subtype").and_then(Object::as_name).ok();
         match subtype {
-            Some(b"Image") => Ok(()),
+            Some(b"Image") => {
+                let byte_end = self
+                    .current_operator
+                    .as_ref()
+                    .map_or(tail[0].span.end, |(_, span)| span.end);
+                self.record_image(tail[0].content_object, tail[0].span.start, byte_end, false);
+                Ok(())
+            }
             Some(b"Form") => self.execute_form(name, object_id, &stream),
             _ => Err(self.degrade_error(
                 PageDegradeReason::MissingResource,
@@ -678,6 +883,48 @@ impl Walker<'_> {
                 ),
             )),
         }
+    }
+
+    fn record_image(
+        &mut self,
+        content_object: ObjectId,
+        byte_start: usize,
+        byte_end: usize,
+        replayable: bool,
+    ) {
+        let corners = [
+            self.state.ctm.point(0.0, 0.0),
+            self.state.ctm.point(1.0, 0.0),
+            self.state.ctm.point(0.0, 1.0),
+            self.state.ctm.point(1.0, 1.0),
+        ];
+        self.inline_images.push(WalkedInlineImage {
+            content_object,
+            byte_start,
+            byte_end,
+            bounds: Rect {
+                left: corners
+                    .iter()
+                    .map(|point| point.x)
+                    .fold(f64::INFINITY, f64::min),
+                bottom: corners
+                    .iter()
+                    .map(|point| point.y)
+                    .fold(f64::INFINITY, f64::min),
+                right: corners
+                    .iter()
+                    .map(|point| point.x)
+                    .fold(f64::NEG_INFINITY, f64::max),
+                top: corners
+                    .iter()
+                    .map(|point| point.y)
+                    .fold(f64::NEG_INFINITY, f64::max),
+            },
+            content_transform: self.state.ctm.0,
+            replayable,
+            form_clip: self.form_clip,
+            clips: self.state.clips.clone(),
+        });
     }
 
     fn execute_form(
@@ -829,6 +1076,7 @@ impl Walker<'_> {
             text_object_is_implicit: std::mem::replace(&mut self.text_object_is_implicit, false),
             content_object: std::mem::replace(&mut self.content_object, content_object),
             form_clip: std::mem::replace(&mut self.form_clip, form_clip),
+            current_path: std::mem::take(&mut self.current_path),
         }
     }
 
@@ -841,6 +1089,7 @@ impl Walker<'_> {
         self.text_object_is_implicit = snapshot.text_object_is_implicit;
         self.content_object = snapshot.content_object;
         self.form_clip = snapshot.form_clip;
+        self.current_path = snapshot.current_path;
     }
 
     /// 字符是否整体落在累积 Form 裁剪框之外。只有**完全**在某一侧才判为裁掉，
@@ -856,6 +1105,15 @@ impl Walker<'_> {
             || metric_box.left > clip.right + FORM_CLIP_TOLERANCE_PT
             || metric_box.top < clip.bottom - FORM_CLIP_TOLERANCE_PT
             || metric_box.bottom > clip.top + FORM_CLIP_TOLERANCE_PT
+    }
+
+    fn clipped_by_path(&self, metric_box: Rect) -> bool {
+        rect_is_finite(metric_box)
+            && self
+                .state
+                .clips
+                .iter()
+                .any(|clip| !clip_path_intersects_rect(clip, metric_box))
     }
 
     fn finish_scoped(&mut self) {
@@ -877,6 +1135,7 @@ impl Walker<'_> {
         }
         self.state.phase = TextPhase::Outside;
         self.text_object_is_implicit = false;
+        self.current_path.clear();
     }
 
     fn classify_error(&mut self, error: MimusError) -> PageWalkError {
@@ -914,6 +1173,7 @@ impl Walker<'_> {
             self.graphics_stack.clear();
         }
         self.vector_scopes.clear();
+        self.current_path.clear();
         if self.compatibility_depth != 0 {
             self.recoveries.insert(RecoveryKind::CompatibilityUnclosed);
             self.compatibility_depth = 0;
@@ -988,24 +1248,152 @@ impl Walker<'_> {
         }
     }
 
-    fn record_vector_point(&mut self, operands: &[Token], starts_path: bool) {
-        let Some(values) = self.numeric_tail(operands, 2) else {
+    fn record_vector_point(&mut self, operands: &[Token], starts_path: bool) -> Option<Point> {
+        let values = (operands.len() == 2).then(|| {
+            operands
+                .iter()
+                .map(|token| match token.kind {
+                    TokenKind::Number(value) => value.is_finite().then_some(value),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+        });
+        let Some(Some(values)) = values else {
             if let Some(scope) = self.vector_scopes.last_mut() {
                 scope.safe = false;
             }
-            return;
+            self.degradation
+                .get_or_insert(PageDegradeReason::GraphicsUnreliable);
+            self.current_path.clear();
+            return None;
         };
         let point = self.state.ctm.point(values[0], values[1]);
-        let Some(scope) = self.vector_scopes.last_mut() else {
+        if let Some(scope) = self.vector_scopes.last_mut() {
+            if starts_path {
+                if !scope.points.is_empty() {
+                    scope.safe = false;
+                }
+                scope.points.clear();
+            }
+            scope.points.push(point);
+        }
+        Some(point)
+    }
+
+    fn record_cubic_path(&mut self, operands: &[Token], kind: CubicPathKind) {
+        let count = match kind {
+            CubicPathKind::Full => 6,
+            CubicPathKind::InitialAtCurrent | CubicPathKind::FinalAtEnd => 4,
+        };
+        let Some(values) = self.numeric_tail(operands, count) else {
+            self.current_path.clear();
             return;
         };
-        if starts_path {
-            if !scope.points.is_empty() {
-                scope.safe = false;
-            }
-            scope.points.clear();
+        if values.iter().any(|value| !value.is_finite()) {
+            self.current_path.clear();
+            return;
         }
-        scope.points.push(point);
+        let (control1, control2, end) = match kind {
+            CubicPathKind::Full => (
+                self.state.ctm.point(values[0], values[1]),
+                self.state.ctm.point(values[2], values[3]),
+                self.state.ctm.point(values[4], values[5]),
+            ),
+            CubicPathKind::InitialAtCurrent => {
+                let Some(current) = self.current_path.current else {
+                    self.current_path.clear();
+                    return;
+                };
+                (
+                    current,
+                    self.state.ctm.point(values[0], values[1]),
+                    self.state.ctm.point(values[2], values[3]),
+                )
+            }
+            CubicPathKind::FinalAtEnd => {
+                let end = self.state.ctm.point(values[2], values[3]);
+                (self.state.ctm.point(values[0], values[1]), end, end)
+            }
+        };
+        self.current_path.curve_to(control1, control2, end);
+    }
+
+    fn record_path_rectangle(&mut self, operands: &[Token]) {
+        let Some(values) = self.numeric_tail(operands, 4) else {
+            self.current_path.clear();
+            return;
+        };
+        if values.iter().any(|value| !value.is_finite()) {
+            self.current_path.clear();
+            return;
+        }
+        let [x, y, width, height] = values.as_slice() else {
+            unreachable!("numeric_tail returned four values");
+        };
+        self.current_path.move_to(self.state.ctm.point(*x, *y));
+        self.current_path
+            .line_to(self.state.ctm.point(*x + *width, *y));
+        self.current_path
+            .line_to(self.state.ctm.point(*x + *width, *y + *height));
+        self.current_path
+            .line_to(self.state.ctm.point(*x, *y + *height));
+        self.current_path.close_subpath();
+    }
+
+    fn paint_current_path(&mut self, fill: bool, even_odd: bool, stroke: bool, close: bool) {
+        if close {
+            self.current_path.close_subpath();
+        }
+        let fill_segments = fill.then(|| self.current_path.fill_segments());
+        let all_segments = fill_segments
+            .as_deref()
+            .unwrap_or(&self.current_path.segments);
+        let Some(raw_bounds) = path_segment_bounds(all_segments) else {
+            self.finish_current_path();
+            return;
+        };
+        let replay_scope = self
+            .vector_scopes
+            .last()
+            .map(|scope| (scope.content_object, scope.byte_start));
+        if fill {
+            self.path_ink.push(WalkedPathInk {
+                segments: fill_segments.expect("fill geometry was prepared"),
+                bounds: raw_bounds,
+                filled: true,
+                even_odd,
+                stroke_radius: 0.0,
+                form_clip: self.form_clip,
+                clips: self.state.clips.clone(),
+                replay_scope,
+            });
+        }
+        if stroke {
+            let stroke_radius = self.state.line_width.abs() * self.state.ctm.max_scale() / 2.0;
+            self.path_ink.push(WalkedPathInk {
+                segments: self.current_path.segments.clone(),
+                bounds: expand_rect(raw_bounds, stroke_radius),
+                filled: false,
+                even_odd: false,
+                stroke_radius,
+                form_clip: self.form_clip,
+                clips: self.state.clips.clone(),
+                replay_scope,
+            });
+        }
+        self.finish_current_path();
+    }
+
+    fn finish_current_path(&mut self) {
+        if let Some(even_odd) = self.current_path.pending_clip_even_odd {
+            let segments = self.current_path.fill_segments();
+            self.state.clips.push(WalkedClipPath {
+                bounds: path_segment_bounds(&segments),
+                segments,
+                even_odd,
+            });
+        }
+        self.current_path.clear();
     }
 
     fn finish_vector_scope(&mut self) {
@@ -1026,6 +1414,22 @@ impl Walker<'_> {
         if (start.y - end.y).abs() > 0.01 || (start.x - end.x).abs() <= 0.01 {
             return;
         }
+        let bounds = Rect {
+            left: start.x.min(end.x),
+            bottom: (start.y + end.y) / 2.0 - 0.01,
+            right: start.x.max(end.x),
+            top: (start.y + end.y) / 2.0 + 0.01,
+        };
+        let fully_visible = self.form_clip.is_none_or(|clip| {
+            bounds.left >= clip.left
+                && bounds.bottom >= clip.bottom
+                && bounds.right <= clip.right
+                && bounds.top <= clip.top
+        }) && self
+            .state
+            .clips
+            .iter()
+            .all(|clip| clip_path_contains_rect(clip, bounds));
         self.vector_paths.push(WalkedVectorPath {
             content_object: scope.content_object,
             byte_start: scope.byte_start,
@@ -1033,7 +1437,9 @@ impl Walker<'_> {
             start,
             end,
             content_transform: scope.content_transform,
-            safe_to_replay: scope.safe,
+            safe_to_replay: scope.safe && fully_visible,
+            form_clip: self.form_clip,
+            clips: self.state.clips.clone(),
         });
     }
 
@@ -1140,13 +1546,23 @@ impl Walker<'_> {
                     part_width * self.state.horizontal_scale,
                     font.ascent_em * self.state.font_size + self.state.rise,
                 );
-                let clipped_out = self.clipped_by_form_bbox(metric_box);
-                if clipped_out {
+                let estimated_bbox = glyph.estimated_bbox_em.map(|bbox| {
+                    transformed_box(
+                        transform,
+                        bbox.left * self.state.font_size * self.state.horizontal_scale,
+                        bbox.bottom * self.state.font_size + self.state.rise,
+                        bbox.right * self.state.font_size * self.state.horizontal_scale,
+                        bbox.top * self.state.font_size + self.state.rise,
+                    )
+                });
+                let clipped_by_form = self.clipped_by_form_bbox(metric_box);
+                if clipped_by_form {
                     self.recoveries.insert(RecoveryKind::ClippedFormContent);
                     if let Some(&form) = self.active_forms.last() {
                         self.clipped_form_object_ids.insert(form);
                     }
                 }
+                let clipped_out = clipped_by_form || self.clipped_by_path(metric_box);
                 self.characters.push(WalkedChar {
                     unicode,
                     unicode_provenance: glyph.unicode_provenance,
@@ -1162,6 +1578,7 @@ impl Walker<'_> {
                     engine_mismatch_tolerated: font.engine_mismatch_tolerated,
                     baseline_origin: baseline,
                     metric_box,
+                    estimated_bbox,
                     text_transform: classify_transform(self.visual_rotation.then(transform)),
                     content_transform: self.state.ctm.0,
                     text_matrix_before_glyph,
@@ -1340,6 +1757,176 @@ fn split_glued_operator(value: &[u8]) -> Option<(f64, &'static [u8])> {
         let number = std::str::from_utf8(prefix).ok()?.parse::<f64>().ok()?;
         number.is_finite().then_some((number, *suffix))
     })
+}
+
+fn path_segment_bounds(segments: &[WalkedPathSegment]) -> Option<Rect> {
+    segments
+        .iter()
+        .flat_map(|segment| [segment.start, segment.end])
+        .map(|point| Rect {
+            left: point.x,
+            bottom: point.y,
+            right: point.x,
+            top: point.y,
+        })
+        .reduce(Rect::union)
+}
+
+fn expand_rect(rect: Rect, amount: f64) -> Rect {
+    Rect {
+        left: rect.left - amount,
+        bottom: rect.bottom - amount,
+        right: rect.right + amount,
+        top: rect.top + amount,
+    }
+}
+
+fn clip_path_intersects_rect(clip: &WalkedClipPath, rect: Rect) -> bool {
+    let Some(bounds) = clip.bounds else {
+        return false;
+    };
+    if bounds.right < rect.left
+        || bounds.left > rect.right
+        || bounds.top < rect.bottom
+        || bounds.bottom > rect.top
+    {
+        return false;
+    }
+    clip.segments
+        .iter()
+        .any(|segment| path_segment_intersects_rect(*segment, rect))
+        || rect_corners(rect)
+            .into_iter()
+            .any(|point| point_in_clip_path(point, clip))
+        || clip
+            .segments
+            .iter()
+            .any(|segment| point_in_rect(segment.start, rect))
+}
+
+fn clip_path_contains_rect(clip: &WalkedClipPath, rect: Rect) -> bool {
+    clip.bounds.is_some_and(|bounds| {
+        rect.left >= bounds.left - 1e-7
+            && rect.bottom >= bounds.bottom - 1e-7
+            && rect.right <= bounds.right + 1e-7
+            && rect.top <= bounds.top + 1e-7
+    }) && rect_corners(rect)
+        .into_iter()
+        .chain([Point {
+            x: (rect.left + rect.right) / 2.0,
+            y: (rect.bottom + rect.top) / 2.0,
+        }])
+        .all(|point| point_in_clip_path(point, clip))
+        && !clip
+            .segments
+            .iter()
+            .any(|segment| path_segment_intersects_rect(*segment, rect))
+}
+
+fn point_in_clip_path(point: Point, clip: &WalkedClipPath) -> bool {
+    if clip
+        .segments
+        .iter()
+        .any(|segment| point_segment_distance(point, *segment) <= 1e-7)
+    {
+        return true;
+    }
+    if clip.even_odd {
+        return clip.segments.iter().fold(false, |inside, segment| {
+            let crosses = (segment.start.y > point.y) != (segment.end.y > point.y)
+                && point.x
+                    < (segment.end.x - segment.start.x) * (point.y - segment.start.y)
+                        / (segment.end.y - segment.start.y)
+                        + segment.start.x;
+            inside ^ crosses
+        });
+    }
+    clip.segments.iter().fold(0_i32, |winding, segment| {
+        let cross = (segment.end.x - segment.start.x) * (point.y - segment.start.y)
+            - (point.x - segment.start.x) * (segment.end.y - segment.start.y);
+        if segment.start.y <= point.y && segment.end.y > point.y && cross > 0.0 {
+            winding + 1
+        } else if segment.start.y > point.y && segment.end.y <= point.y && cross < 0.0 {
+            winding - 1
+        } else {
+            winding
+        }
+    }) != 0
+}
+
+fn point_in_rect(point: Point, rect: Rect) -> bool {
+    point.x >= rect.left - 1e-7
+        && point.x <= rect.right + 1e-7
+        && point.y >= rect.bottom - 1e-7
+        && point.y <= rect.top + 1e-7
+}
+
+fn rect_corners(rect: Rect) -> [Point; 4] {
+    [
+        Point {
+            x: rect.left,
+            y: rect.bottom,
+        },
+        Point {
+            x: rect.left,
+            y: rect.top,
+        },
+        Point {
+            x: rect.right,
+            y: rect.bottom,
+        },
+        Point {
+            x: rect.right,
+            y: rect.top,
+        },
+    ]
+}
+
+fn point_segment_distance(point: Point, segment: WalkedPathSegment) -> f64 {
+    let delta_x = segment.end.x - segment.start.x;
+    let delta_y = segment.end.y - segment.start.y;
+    let length_squared = delta_x * delta_x + delta_y * delta_y;
+    if length_squared <= 1e-18 {
+        return ((point.x - segment.start.x).powi(2) + (point.y - segment.start.y).powi(2)).sqrt();
+    }
+    let ratio = (((point.x - segment.start.x) * delta_x + (point.y - segment.start.y) * delta_y)
+        / length_squared)
+        .clamp(0.0, 1.0);
+    let projected = Point {
+        x: segment.start.x + ratio * delta_x,
+        y: segment.start.y + ratio * delta_y,
+    };
+    ((point.x - projected.x).powi(2) + (point.y - projected.y).powi(2)).sqrt()
+}
+
+fn path_segment_intersects_rect(segment: WalkedPathSegment, rect: Rect) -> bool {
+    let dx = segment.end.x - segment.start.x;
+    let dy = segment.end.y - segment.start.y;
+    let mut minimum = 0.0_f64;
+    let mut maximum = 1.0_f64;
+    for (p, q) in [
+        (-dx, segment.start.x - rect.left),
+        (dx, rect.right - segment.start.x),
+        (-dy, segment.start.y - rect.bottom),
+        (dy, rect.top - segment.start.y),
+    ] {
+        if p.abs() <= 1e-12 {
+            if q < 0.0 {
+                return false;
+            }
+            continue;
+        }
+        let ratio = q / p;
+        if p < 0.0 {
+            minimum = minimum.max(ratio);
+        } else {
+            maximum = maximum.min(ratio);
+        }
+        if minimum > maximum {
+            return false;
+        }
+    }
+    true
 }
 
 fn is_known_operator(operator: &[u8]) -> bool {
@@ -1904,6 +2491,63 @@ mod tests {
     }
 
     #[test]
+    fn production_walk_records_image_xobjects_as_clipped_retained_obstacles() {
+        let mut document = Document::load(fixture()).unwrap();
+        let image_id = document.add_object(lopdf::Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 1,
+                "Height" => 1,
+                "ColorSpace" => "DeviceGray",
+                "BitsPerComponent" => 8,
+            },
+            vec![0],
+        ));
+        document
+            .get_object_mut((4, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("XObject", dictionary! { "Im" => image_id });
+        document
+            .get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(b"q 30 40 5 5 re W n 20 0 0 10 30 40 cm /Im Do Q /Im Do".to_vec());
+        let page_id = document.get_pages()[&1];
+
+        let walked = walk_page(&document, page_id).unwrap();
+
+        assert_eq!(walked.inline_images.len(), 2);
+        let clipped = &walked.inline_images[0];
+        assert_eq!(
+            clipped.bounds,
+            Rect {
+                left: 30.0,
+                bottom: 40.0,
+                right: 50.0,
+                top: 50.0,
+            }
+        );
+        assert!(!clipped.replayable);
+        assert_eq!(clipped.clips.len(), 1);
+        let restored = &walked.inline_images[1];
+        assert_eq!(
+            restored.bounds,
+            Rect {
+                left: 0.0,
+                bottom: 0.0,
+                right: 1.0,
+                top: 1.0,
+            }
+        );
+        assert!(!restored.replayable);
+        assert!(restored.clips.is_empty());
+    }
+
+    #[test]
     fn detailed_walk_failures_distinguish_syntax_nesting_and_decode_degradation() {
         for (id, expected) in [
             (
@@ -1941,6 +2585,140 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn malformed_path_operands_degrade_the_page_after_an_otherwise_successful_walk() {
+        for path in ["0 0 m 20 l", "0 0 m 10 20 30 l", "0 0 m /Bad 20 l"] {
+            let mut document = Document::load(fixture()).unwrap();
+            document
+                .get_object_mut((9, 0))
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_plain_content(
+                    format!("{path} S BT /F1 12 Tf 1 0 0 1 72 120 Tm (MIMUS) Tj ET").into_bytes(),
+                );
+            let page_id = document.get_pages()[&1];
+
+            assert!(matches!(
+                walk_page_detailed(&document, page_id),
+                Err(PageWalkError::Degraded {
+                    reason: PageDegradeReason::GraphicsUnreliable,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn production_walk_records_transformed_stroke_and_fill_ink() {
+        let walked =
+            walk_program(b"q .01 0 0 .01 20 60 cm 100 w 0 0 m 1000 0 l S Q\n10 10 20 30 re f")
+                .unwrap();
+
+        assert_eq!(walked.path_ink.len(), 2);
+        let stroke = &walked.path_ink[0];
+        assert!(!stroke.filled);
+        assert!((stroke.stroke_radius - 0.5).abs() < 0.001);
+        assert_eq!(
+            stroke.bounds,
+            Rect {
+                left: 19.5,
+                bottom: 59.5,
+                right: 30.5,
+                top: 60.5,
+            }
+        );
+        assert!(stroke.replay_scope.is_some());
+
+        let fill = &walked.path_ink[1];
+        assert!(fill.filled);
+        assert!(!fill.even_odd);
+        assert_eq!(
+            fill.bounds,
+            Rect {
+                left: 10.0,
+                bottom: 10.0,
+                right: 30.0,
+                top: 40.0,
+            }
+        );
+        assert_eq!(fill.segments.len(), 4);
+        assert_eq!(fill.replay_scope, None);
+    }
+
+    #[test]
+    fn production_walk_applies_and_restores_path_clips() {
+        let walked = walk_program(
+            b"q 0 50 100 50 re W n 20 20 10 10 re f\n\
+              BT /F1 12 Tf 1 0 0 1 20 20 Tm (M) Tj ET Q\n\
+              20 20 10 10 re f BT /F1 12 Tf 1 0 0 1 20 20 Tm (M) Tj ET",
+        )
+        .unwrap();
+
+        assert_eq!(walked.path_ink.len(), 2);
+        assert_eq!(walked.path_ink[0].clips.len(), 1);
+        assert!(walked.path_ink[1].clips.is_empty());
+        assert!(!walked.characters[0].visible);
+        assert!(walked.characters[1].visible);
+    }
+
+    #[test]
+    fn clipping_path_takes_effect_after_the_current_path_is_painted() {
+        let walked = walk_program(
+            b"0 0 100 100 re W f 20 20 10 10 re f 0 50 100 50 re W* n 20 20 10 10 re f",
+        )
+        .unwrap();
+
+        assert_eq!(walked.path_ink.len(), 3);
+        assert!(walked.path_ink[0].clips.is_empty());
+        assert_eq!(walked.path_ink[1].clips.len(), 1);
+        assert_eq!(walked.path_ink[2].clips.len(), 2);
+        assert!(walked.path_ink[2].clips.iter().any(|clip| clip.even_odd));
+    }
+
+    #[test]
+    fn out_of_range_composite_gid_keeps_advance_and_estimates_a_conservative_bbox() {
+        let mut document = Document::load(fixture_path("unit-cmap-embedded-ok")).unwrap();
+        document
+            .get_object_mut((5, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Encoding", Object::Name(b"Identity-H".to_vec()));
+        document
+            .get_object_mut((10, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(
+                b"1 begincodespacerange <0000> <FFFF> endcodespacerange 1 beginbfchar <FFFF> <004D> endbfchar"
+                    .to_vec(),
+            );
+        document
+            .get_object_mut((11, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(b"BT /F1 12 Tf 1 0 0 1 72 120 Tm <FFFF> Tj ET".to_vec());
+        let page_id = document.get_pages()[&1];
+
+        let walked = walk_page_detailed(&document, page_id).unwrap();
+        let [character] = walked.characters.as_slice() else {
+            panic!("expected one decoded CID")
+        };
+        let estimated = character
+            .estimated_bbox
+            .expect("the absent outline must use a font-level estimate");
+        assert_eq!(character.unicode, Some('M'));
+        assert_eq!(character.code, 0xffff);
+        assert!((character.advance - 7.2).abs() < 0.001);
+        assert!(character.font_supported);
+        assert!(estimated.left <= character.metric_box.left);
+        assert!(estimated.bottom <= character.metric_box.bottom);
+        assert!(estimated.right > character.metric_box.right);
+        assert!(estimated.top >= character.metric_box.top);
     }
 
     #[test]

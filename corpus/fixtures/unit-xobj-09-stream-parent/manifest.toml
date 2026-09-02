@@ -1,0 +1,87 @@
+schema_version = 1
+
+[identity]
+id = "unit-xobj-09-stream-parent"
+name = "Legal Form stream parent for non-stream mutation"
+class = "unit"
+legality = "legal"
+cases = ["XOBJ-09"]
+priority = "M3"
+variable = "X1 resolves to indirect Form stream object 10 while dictionary object 11 remains unreachable"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-xobj-09-stream-parent.pdf"
+pdf_sha256 = "ba75de61bd21c87291038bb2e59caedcaee12029a6c48509a2a8046026e71df0"
+font_provenance = "vendored"
+fonts = [{ file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" }]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 200.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d786f626a2d30392d737472"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "XOBJ09_CONTROL"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "MIMUS"
+baseline_origin = [72.0, 120.0]
+metric_box = [72.0, 117.168, 112.656, 131.136]
+visual_bbox = [73.177734, 119.830078, 111.985219, 128.90625]
+
+[[expected.content_stream]]
+object = 10
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 72 120 Tm
+(MIMUS) Tj
+ET
+"""
+
+[[expected.content_stream]]
+object = 12
+compressed = false
+bytes = "/X1 Do\n"
+
+[[expected.reference]]
+from_object = 4
+path = ["/XObject", "/X1"]
+to_object = 10
+
+[[expected.behaviour]]
+id = "XOBJ-09-stream-control"
+assertion = "X1 resolves to Form stream object 10 and produces the expected text without page degradation"
+observable_via = "exact object graph, production inspect IL, and independent renderers"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "hand-written-geometry", "pdf-bytes", "pdf-structure", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "XOBJ-09 needs a legal parent with an equal-width reference to a dormant plain dictionary"
+resolution = "Place the live Form at object 10 and the dormant dictionary at object 11 so the malformed child changes one digit only"

@@ -3,7 +3,9 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 
-use crate::error::{ExitCategory, InternalReason, MimusError, Result, RetryReason};
+use crate::error::{
+    ExitCategory, InputErrorDetail, InternalReason, MimusError, Result, RetryReason,
+};
 use crate::il;
 
 // CONTEXT "双 schema_version": CLI 事件协议与 IL 的演进节奏不同，禁止共用版本号。
@@ -77,6 +79,8 @@ pub enum EventKind {
         message: String,
         hint: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<InputErrorDetail>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         scanned_pages: Option<usize>,
         #[serde(skip_serializing_if = "Option::is_none")]
         total_pages: Option<usize>,
@@ -141,6 +145,7 @@ impl EventKind {
             reason: error.reason(),
             message: error.to_string(),
             hint: error.hint().map(str::to_owned),
+            detail: error.input_detail(),
             scanned_pages,
             total_pages,
         }
@@ -256,6 +261,7 @@ pub enum DiagnosticId {
     TranslationFailureProfile,
     MathPassthrough,
     FormulaBoundaryExpanded,
+    GlyphBboxEstimated,
     UnsupportedOutputGlyph,
     SingleLineBoundsExpanded,
     MultiLineBoundsExpanded,
@@ -366,6 +372,8 @@ pub enum PageDegradeReason {
     BadFormMatrix,
     /// XObject 不是流对象。
     XObjectNotAStream,
+    /// 矢量路径的操作数不完整，无法可靠证明路径墨迹及其所有权。
+    GraphicsUnreliable,
 }
 
 /// 汇总事件里的一条段级保留记录。
@@ -522,6 +530,12 @@ pub enum Diagnostic {
         expanded_character_count: usize,
         evidence: FormulaBoundaryEvidence,
     },
+    GlyphBboxEstimated {
+        page_index: usize,
+        character_index: usize,
+        font_object: [u32; 2],
+        code: u32,
+    },
     UnsupportedOutputGlyph {
         page_index: usize,
         reading_order: usize,
@@ -584,6 +598,7 @@ impl Diagnostic {
             Self::TranslationFailureProfile { .. } => DiagnosticId::TranslationFailureProfile,
             Self::MathPassthrough { .. } => DiagnosticId::MathPassthrough,
             Self::FormulaBoundaryExpanded { .. } => DiagnosticId::FormulaBoundaryExpanded,
+            Self::GlyphBboxEstimated { .. } => DiagnosticId::GlyphBboxEstimated,
             Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
             Self::SingleLineBoundsExpanded { .. } => DiagnosticId::SingleLineBoundsExpanded,
             Self::MultiLineBoundsExpanded { .. } => DiagnosticId::MultiLineBoundsExpanded,
@@ -601,6 +616,7 @@ impl Diagnostic {
                 | Self::TranslationFailureProfile { .. }
                 | Self::MathPassthrough { .. }
                 | Self::FormulaBoundaryExpanded { .. }
+                | Self::GlyphBboxEstimated { .. }
                 | Self::SingleLineBoundsExpanded { .. }
                 | Self::MultiLineBoundsExpanded { .. }
                 | Self::LinkBordersStripped { .. }
@@ -756,6 +772,12 @@ pub enum DiagnosticEvent {
         expanded_character_count: usize,
         evidence: FormulaBoundaryEvidence,
     },
+    GlyphBboxEstimated {
+        page_index: usize,
+        character_index: usize,
+        font_object: [u32; 2],
+        code: u32,
+    },
     UnsupportedOutputGlyph {
         page_index: usize,
         reading_order: usize,
@@ -820,6 +842,7 @@ impl DiagnosticEvent {
             Self::TranslationFailureProfile { .. } => DiagnosticId::TranslationFailureProfile,
             Self::MathPassthrough { .. } => DiagnosticId::MathPassthrough,
             Self::FormulaBoundaryExpanded { .. } => DiagnosticId::FormulaBoundaryExpanded,
+            Self::GlyphBboxEstimated { .. } => DiagnosticId::GlyphBboxEstimated,
             Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
             Self::SingleLineBoundsExpanded { .. } => DiagnosticId::SingleLineBoundsExpanded,
             Self::MultiLineBoundsExpanded { .. } => DiagnosticId::MultiLineBoundsExpanded,
@@ -1069,6 +1092,17 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 expanded_character_count: *expanded_character_count,
                 evidence: *evidence,
             },
+            Diagnostic::GlyphBboxEstimated {
+                page_index,
+                character_index,
+                font_object,
+                code,
+            } => Self::GlyphBboxEstimated {
+                page_index: *page_index,
+                character_index: *character_index,
+                font_object: *font_object,
+                code: *code,
+            },
             Diagnostic::UnsupportedOutputGlyph {
                 page_index,
                 reading_order,
@@ -1198,6 +1232,7 @@ impl Diagnostics {
                         | DiagnosticId::TranslationFailureProfile
                         | DiagnosticId::MathPassthrough
                         | DiagnosticId::FormulaBoundaryExpanded
+                        | DiagnosticId::GlyphBboxEstimated
                         | DiagnosticId::SingleLineBoundsExpanded
                         | DiagnosticId::MultiLineBoundsExpanded
                 )
@@ -1693,6 +1728,26 @@ mod tests {
     }
 
     #[test]
+    fn object_syntax_error_serializes_typed_input_detail() {
+        let error = MimusError::input(InputReason::PdfParse, "bad object").with_input_detail(
+            InputErrorDetail::ObjectSyntax {
+                objid: [12, 3],
+                offset: 4096,
+            },
+        );
+        let value = serde_json::to_value(Event::new(EventKind::from_error(&error))).unwrap();
+        assert_eq!(value["category"], "input");
+        assert_eq!(value["reason"], "pdf_parse");
+        assert_eq!(value["detail"]["kind"], "object_syntax");
+        assert_eq!(value["detail"]["objid"], serde_json::json!([12, 3]));
+        assert_eq!(value["detail"]["offset"], 4096);
+
+        let ordinary = MimusError::input(InputReason::PdfParse, "ordinary parse failure");
+        let value = serde_json::to_value(Event::new(EventKind::from_error(&ordinary))).unwrap();
+        assert!(value.get("detail").is_none());
+    }
+
+    #[test]
     fn translation_identity_is_informational_while_suspicious_echo_rate_is_a_warning() {
         let mut diagnostics = Diagnostics::default();
         diagnostics.push(Diagnostic::TranslationIdentity {
@@ -1714,6 +1769,25 @@ mod tests {
                 DiagnosticEvent::SuspiciousTranslationEchoRate { .. }
             ]
         ));
+    }
+
+    #[test]
+    fn estimated_glyph_bbox_has_typed_informational_provenance() {
+        let mut diagnostics = Diagnostics::default();
+        diagnostics.push(Diagnostic::GlyphBboxEstimated {
+            page_index: 2,
+            character_index: 7,
+            font_object: [15, 0],
+            code: 65_535,
+        });
+
+        assert_eq!(diagnostics.warning_count(), 0);
+        let value = serde_json::to_value(&diagnostics.events()[0]).unwrap();
+        assert_eq!(value["id"], "glyph_bbox_estimated");
+        assert_eq!(value["page_index"], 2);
+        assert_eq!(value["character_index"], 7);
+        assert_eq!(value["font_object"], serde_json::json!([15, 0]));
+        assert_eq!(value["code"], 65_535);
     }
 
     #[test]

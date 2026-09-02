@@ -1,0 +1,69 @@
+schema_version = 1
+
+[identity]
+id = "unit-type-07-vertical-conflict"
+name = "Later paragraph preserves on vertical conflict"
+class = "unit"
+legality = "legal"
+cases = ["TYPE-07"]
+priority = "M3"
+variable = "Three independent model paragraphs have 0.3pt model gaps and the two-line middle translation expands into the following paragraph's visual ink"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-type-07-vertical-conflict.typ"
+pdf = "unit-type-07-vertical-conflict.pdf"
+pdf_sha256 = "a242d91463aab200734961df2cc611a2d1fc992d8fb4cee9f2dc54f2d667d8ca"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 240.0, 140.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 3
+columns = 1
+
+[[expected.block]]
+key = "P1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "First control paragraph."
+
+[[expected.block]]
+key = "P2"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "Second conflict paragraph."
+
+[[expected.block]]
+key = "P3"
+page = 0
+column = "full"
+draw_order = 3
+reading_order = 3
+text = "Third control paragraph."
+
+[[expected.behaviour]]
+id = "TYPE-07-typed-conflict"
+assertion = "The middle paragraph is typed-preserved when its multiline plan reaches the following paragraph; no paragraph is moved"
+observable_via = "recorded model containers, Typeset IL, typed overflow detail, and final source/output glyph origins"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "reading-order", "dual-parser-geometry", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "Coordinated cross-paragraph movement belongs to later layout work"
+resolution = "Keep independent planning and use the existing collision check to typed-preserve the later conflicting paragraph"

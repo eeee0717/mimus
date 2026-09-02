@@ -1,0 +1,53 @@
+schema_version = 1
+
+[identity]
+id = "unit-type-09-model-formula-only"
+name = "Pure formula mislabelled as model paragraph"
+class = "unit"
+legality = "legal"
+cases = ["TYPE-09"]
+priority = "M3"
+variable = "A model text region contains only the formula-shaped string dmodel multiplied by dk"
+
+[source]
+method = "realistic-typesetting"
+engine = "typst"
+source_file = "unit-type-09-model-formula-only.typ"
+pdf = "unit-type-09-model-formula-only.pdf"
+pdf_sha256 = "13743803bfbd6f357070c8f9af6995804f5d378675e92ac22ad320eb99aa7e4c"
+font_provenance = "typst-embedded"
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 240.0, 120.0]
+rotate = 0
+
+[expected]
+geometry_source = "dual-parser-adjudicated"
+tolerance_pt = 0.05
+
+[expected.structure]
+pages = 1
+blocks = 1
+columns = 1
+
+[[expected.block]]
+key = "TYPE09"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "dmodel×dk"
+
+[[expected.behaviour]]
+id = "TYPE-09-typed-passthrough"
+assertion = "The pure formula paragraph is informational typed passthrough, creates no translation request, and preserves its source bytes"
+observable_via = "recorded model mislabel, math_passthrough diagnostic, captured request count, and decoded stream equality"
+
+[oracle]
+checks = ["determinism", "legality", "page-geometry", "structure", "reading-order", "dual-parser-geometry", "render"]
+
+[[adjudication]]
+date = "2026-09-01"
+issue = "A model paragraph with no prose font-size sample must not disappear through an untyped planning skip"
+resolution = "Treat the whole pure-formula paragraph as source passthrough and emit the existing typed informational diagnostic"

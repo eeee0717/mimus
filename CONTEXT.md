@@ -32,7 +32,7 @@
 | 23 | 质量回归四件套：全语料 IL 快照 + 占位符守恒 + 零 panic + 几何断言；**CI 绿才能合并**；渲染像素 diff 待渲染路径稳定后加 | — |
 | 24 | 语料：**Corpus v1 已从零建立，M1 以 133 份 fixture / 72 个去重 case 收口**；每份均由独立门禁验收，普通 CI 全量执行 production path 与 `corpus verify`。旧 23 份合成语料永久作废、不得参考；真实语料不进 repo、发布前人工 checklist | — |
 | 25 | CLI：子命令结构（`translate` / `assets pull` / `inspect`）；配置三层 flags > env > `~/.config/mimus/config.toml`；API key 不走明文 flag；两级人类可读进度；V1 `--json` 输出版本化 NDJSON，当前公开协议为 v2；细粒度 flags 随功能里程碑落地 | [ADR-0008](docs/adr/0008-agent-skill.md)、[ADR-0011](docs/adr/0011-cli-machine-protocol.md) |
-| 26 | 里程碑：M-1、M0 与 M1 已收口；M1 以 `none` 后端 walking skeleton 和 133 份全语料门禁完成，仍以语料断言而非模块完成度收口 | [docs/02-milestones.md](docs/02-milestones.md) |
+| 26 | 里程碑：M-1 至 M3 已收口；M1 以 `none` 后端 walking skeleton 和 133 份全语料门禁完成，M2 以离线 loopback 翻译合同完成，M3 以 46/46 primary case、201 份 fixture、20/20 分层真实论文守恒回放及封闭 INK-01/原子发布门禁完成；仍以语料与最终产物断言而非模块完成度收口，M4 自 #38 closing stack 合入后解锁 | [docs/02-milestones.md](docs/02-milestones.md) |
 | 27 | 术语细节：用户 `--glossary` 覆盖自动表；`--dump-glossary` 导出复用；`--no-auto-terms` 开关；自动表指纹进缓存键 | — |
 | 28 | 性能：V1 无硬指标；方向值=20 页论文除 LLM 外 <5 分钟（arm64 笔记本）；LLM 段落级并发默认 4、指数退避重试 3 次、重试尽降级保原文 | — |
 | 29 | crate 结构：**生产侧**两分——`mimus-core`（lib：IL/pass/引擎 trait/翻译层）+ `mimus`（bin：CLI/进度/配置）。`mimus-quality-contract` 是无 PDF/引擎/IL 依赖的纯规则 leaf crate，供生产门禁与独立 scorecard 共用数值/词法合同，不成为第三条流水线；workspace 另含非生产成员 `corpus`（语料门禁工具），它不依赖 `mimus-core`，也不进 release archive | — |
@@ -57,6 +57,10 @@
 | 48 | model `inline_formula` 仍是公式存在性的唯一权威；StylesAndFormulas 只可在同段、同行、视觉紧邻且有脚本基线、定界符配平、经 Mathematical Alphanumeric Symbols 锚证明的同数学字体连续 run 或紧连数学后缀证据时扩展既有公式边界，不得凭启发式新建或收缩 model 公式。跨提取顺序或带隐式空格的 ASCII 数字候选仅在字号、基线、metric box 同时证明且唯一匹配一个既有锚时扩展，并归到该锚 reading order；跨序字母仍须相邻 run 证据，歧义即不扩展。每类扩展发 `formula_boundary_expanded` typed info，扩入字符继续受 ADR-0020 的源字节、字体和相对几何合同保护 | [ADR-0020](docs/adr/0020-inline-formula-flow-relocation.md) |
 | 49 | inline formula 的 fixed-slot 与 relocation 成功路径共用一个阅读连续性 oracle：同行邻接与跨行前导空洞上界为 `max(2×源 text→text 词间距中位数, 1.5×源字号中位数)`，公式间距不得污染样本；公式邻接标点不拆行、单元阅读序不逆转。fixed 不连续先尝试既有边界内的 relocation，仍失败则 `typeset_overflow` typed 段级保留；不得靠缩字号或扩大碰撞容差满足 oracle | [ADR-0020](docs/adr/0020-inline-formula-flow-relocation.md) §6 |
 | 50 | IL `Char.font_size` 是 ParagraphFind 与 Typeset 使用的页面空间 em：`abs(Tf) × |CTM × Tm` 的竖直基向量 `|`；walker 继续保留原始 `Tf` 给精确源操作数/公式重放。无 inline formula 的段落还把 walker 保留的水平 vector path 与 inline image 当作排版障碍；公式段继续由 ADR-0020 的既有所有权和重放合同处理 | [ADR-0007](docs/adr/0007-ir-design.md)、[ADR-0020](docs/adr/0020-inline-formula-flow-relocation.md) |
+| 51 | 跨栏合并只接受 model 证据：一个 `abstract` model assignment 同时覆盖两个经多行几何证明的平行栏时，ParagraphFind 按左栏自上而下、再右栏自上而下合成一个段；无 model 覆盖、多个 model region 或普通 `text` region 均维持分栏，不凭句法猜测续接 | — |
+| 52 | model 将纯公式误标为 `text` 时，只有整个自然段都属于 model `text`、完整 source 命中保守数学形状、含强数学运算符、按空白分隔的 operand-like token 不超过 2 个且无其它 model label，才整段 source passthrough 并发 `math_passthrough` typed info；不建立 `inline_formula`、不产生请求、不计 degradation。普通 model prose（包括只含上下标但无强运算符的句子）保持翻译 | — |
+| 53 | 中文译文采用 V1 最小禁则集：行首禁闭合标点、行尾禁开放标点，不做悬挂标点；普通、障碍槽与公式流共享同一字符集合和断行 token，段首闭合或段尾开放等无法满足的布局走既有 `typeset_overflow`，不放宽 8pt、碰撞或 CropBox | [docs/10-quality-scorecard.md](docs/10-quality-scorecard.md) §2.4.2 |
+| 54 | 非公式下划线只有在安全完整 `q/Q` 横线、同 content object、唯一完整 text-show owner、段外无共享字符、下方充分重叠且最终单行 replacement delta 唯一时才随 owner 刚体平移；原 path span 被 replacement 声明且新墨迹进入安全边界。任何可疑但不完备的所有权整段 `typeset_protocol` 保留，绝不删除或把下划线留在移动前槽位 | [docs/10-quality-scorecard.md](docs/10-quality-scorecard.md) §2.4.2 |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
@@ -66,8 +70,10 @@
 | 不翻·原样保留 | doc_title, header, footer, header_image, footer_image, image, chart, seal, algorithm, display_formula, formula_number, number, vertical_text, reference, reference_content, table（表体，`--translate-table` 可开） |
 | 占位符处理 | inline_formula（在所属段落内以 `{v1}` 占位送翻，返回后还原） |
 
-公式漏检兜底政策（#35）：生产 layout 模型接入（#84）后，偏保守的数学形状启发式仅对
-`fallback_line`（即无模型覆盖区域）生效；任何真实 model label 优先。命中单元所在的整个自然段改为
+公式漏检兜底政策（#35）：生产 layout 模型接入（#84）后，偏保守的数学形状启发式默认仅对
+`fallback_line`（即无模型覆盖区域）生效；任何真实 model label 优先。唯一例外是决策 #52
+的整段 model `text` 纯公式误标形状，该分支只做 typed passthrough，不把启发式结果提升为
+`inline_formula`。命中单元所在的整个自然段改为
 passthrough，不进入翻译请求，并按命中单元发出不计 degradation、不影响 strict 的
 `math_passthrough` info 诊断。自然段是当前远端翻译与 cache 的原子；整段保留避免把
 含公式段裁成未经验证的新请求，并在重组时误处理公式邻接文本。该政策宁可将少量散文

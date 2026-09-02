@@ -266,7 +266,8 @@ fn measure(args: MeasureArgs) -> Result<()> {
     let styled: Il = read_json(args.debug_dir.join("04-styles_and_formulas.il.json"))?;
     let translated: Il = read_json(args.debug_dir.join("06-translate.il.json"))?;
     let typeset: Il = read_json(args.debug_dir.join("07-typeset.il.json"))?;
-    let write: Il = read_json(args.debug_dir.join("09-write.il.json"))?;
+    let write_path = args.debug_dir.join("09-write.il.json");
+    let write: Il = read_json(write_path.clone())?;
     let events = read_ndjson(&args.ndjson)?;
     let glossary = args.glossary.as_deref().map(read_glossary).transpose()?;
     let semantic_evaluation = args
@@ -277,6 +278,7 @@ fn measure(args: MeasureArgs) -> Result<()> {
     let output_chars = extracted_character_count(&args.output_pdf)?;
     let denominator = output_chars.max(1) as f64;
     let direct_content_objects = qpdf_direct_content_objects(&args.input_pdf)?;
+    let ink_audit = scorecard::audit_publication_ink_paths(&write_path, &args.output_pdf)?;
 
     let mut dimensions = BTreeMap::new();
     dimensions.insert(
@@ -311,12 +313,13 @@ fn measure(args: MeasureArgs) -> Result<()> {
             &typeset,
             &events,
             &args.output_pdf,
+            &ink_audit,
             denominator,
         ),
     );
     dimensions.insert(
         "typesetting_lint".into(),
-        lint(&translated, &events, denominator),
+        lint(&translated, &events, &args.output_pdf, denominator),
     );
 
     let input_bytes = fs::read(&args.input_pdf)?;
@@ -623,6 +626,7 @@ fn risk(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layout(
     before: &Il,
     styled: &Il,
@@ -630,6 +634,7 @@ fn layout(
     after: &Il,
     events: &[Value],
     output_pdf: &Path,
+    ink_audit: &scorecard::InkAudit,
     denominator: f64,
 ) -> Dimension {
     let mut offsets = Vec::new();
@@ -659,12 +664,17 @@ fn layout(
     let hole_count = continuity.as_ref().map_or(0, |m| m.unexplained_hole_count);
     let weighted = (drifted * 3 + expansions) as f64
         + continuity_violations as f64 * 5.0
-        + hole_count as f64 * 5.0;
+        + hole_count as f64 * 5.0
+        + ink_audit.violation_count() as f64 * 10.0;
     let mut m = BTreeMap::new();
     m.insert("median_offset_pt".into(), median(&mut offsets).into());
     m.insert("median_iou".into(), median(&mut ious).into());
     m.insert("median_font_scale".into(), median(&mut font_ratios).into());
     m.insert("bounds_expansions".into(), expansions.into());
+    m.insert(
+        "final_ink_geometry".into(),
+        serde_json::to_value(ink_audit).unwrap(),
+    );
     m.insert(
         "formula_neighbor_continuity".into(),
         continuity
@@ -685,29 +695,30 @@ fn layout(
             .unwrap_or_else(|| not_applicable("mutool stext evidence unavailable")),
     );
     dimension(
-        &["LAY-01", "LAY-02", "LAY-03", "LAY-04", "FOR-02", "FOR-03"],
+        &[
+            "LAY-01", "LAY-02", "LAY-03", "LAY-04", "FOR-02", "FOR-03", "INK-01",
+        ],
         weighted,
         denominator,
         m,
     )
 }
 
-fn lint(after: &Il, events: &[Value], denominator: f64) -> Dimension {
+fn lint(after: &Il, events: &[Value], output_pdf: &Path, denominator: f64) -> Dimension {
     let texts: Vec<&str> = after
         .pages
         .iter()
         .flat_map(|p| &p.paragraphs)
         .filter_map(|p| p.translated_text.as_deref())
         .collect();
-    let forbidden_start = "，。！？；：、）】》”’";
-    let forbidden_end = "（【《“‘";
-    let kinsoku = texts
+    let paragraph_kinsoku = texts
         .iter()
         .filter(|t| {
-            t.starts_with(|c| forbidden_start.contains(c))
-                || t.ends_with(|c| forbidden_end.contains(c))
+            t.starts_with(mimus_quality_contract::forbidden_line_start)
+                || t.ends_with(mimus_quality_contract::forbidden_line_end)
         })
         .count();
+    let kinsoku = output_line_kinsoku_violations(output_pdf).unwrap_or(paragraph_kinsoku);
     let isolated = texts
         .iter()
         .filter(|t| t.chars().count() == 1 && t.chars().all(is_punctuation))
@@ -742,6 +753,33 @@ fn lint(after: &Il, events: &[Value], denominator: f64) -> Dimension {
             ("abnormal_whitespace", whitespace),
             ("english_residual_proxy", echoes),
         ]),
+    )
+}
+
+fn output_line_kinsoku_violations(output_pdf: &Path) -> Option<usize> {
+    let temp = tempfile::NamedTempFile::new().ok()?;
+    let output = Command::new("mutool")
+        .args(["draw", "-q", "-F", "stext.json", "-o"])
+        .arg(temp.path())
+        .arg(output_pdf)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let document: StextDocument = serde_json::from_slice(&fs::read(temp.path()).ok()?).ok()?;
+    Some(
+        document
+            .pages
+            .iter()
+            .flat_map(|page| &page.blocks)
+            .flat_map(|block| &block.lines)
+            .filter(|line| {
+                let text = line.text.trim();
+                text.starts_with(mimus_quality_contract::forbidden_line_start)
+                    || text.ends_with(mimus_quality_contract::forbidden_line_end)
+            })
+            .count(),
     )
 }
 
@@ -1290,9 +1328,10 @@ fn formula_rigid_body_integrity_from_traces(
 ) -> Result<FormulaRigidBodyIntegrity> {
     let source_pages = parse_trace(source_trace)?;
     let output_pages = parse_trace(output_trace)?;
+    let units = formula_units(styled);
     let mut checked = 0;
     let mut evidence = Vec::new();
-    for unit in formula_units(styled) {
+    for (unit_index, unit) in units.iter().enumerate() {
         let Some(published_paragraph) =
             find_paragraph(published, unit.page_index, unit.reading_order)
         else {
@@ -1302,14 +1341,14 @@ fn formula_rigid_body_integrity_from_traces(
         {
             continue;
         }
-        let (Some(bounds), Some(source_page), Some(output_page)) = (
+        let (Some(_bounds), Some(source_page), Some(output_page)) = (
             unit.source_bounds,
             source_pages.get(unit.page_index),
             output_pages.get(unit.page_index),
         ) else {
             continue;
         };
-        let source_ink = formula_neighborhood_ink(source_page, bounds, unit.font_size);
+        let source_ink = uniquely_owned_formula_ink(&units, unit_index, source_page);
         if !unit.has_attached_source_radical && source_ink.is_empty() {
             continue;
         }
@@ -1326,7 +1365,7 @@ fn formula_rigid_body_integrity_from_traces(
         checked += 1;
         let tolerance = unit.font_size.max(1.0) * 0.08;
         let (anchor_unicode, anchor_origin) = unit.source_glyphs[0];
-        let output_owner = expand_rect(unit.paragraph.bounds, unit.font_size * 0.25);
+        let output_owner = expand_rect(unit.paragraph.bounds, unit.font_size * 0.5);
         let preserves_one_delta = output_page
             .glyphs
             .iter()
@@ -1379,19 +1418,88 @@ fn formula_rigid_body_integrity_from_traces(
     })
 }
 
-fn formula_neighborhood_ink(page: &TracePage, bounds: Rect, font_size: f64) -> Vec<TraceInk> {
-    let neighborhood = expand_rect(bounds, font_size * 0.75);
+fn uniquely_owned_formula_ink(
+    units: &[FormulaUnit<'_>],
+    unit_index: usize,
+    page: &TracePage,
+) -> Vec<TraceInk> {
+    let unit = &units[unit_index];
     page.ink
         .iter()
         .copied()
         .filter(|ink| {
-            let width = ink.bounds.right - ink.bounds.left;
-            let height = ink.bounds.top - ink.bounds.bottom;
-            rects_overlap(ink.bounds, neighborhood)
-                && width <= bounds.right - bounds.left + font_size
-                && height <= bounds.top - bounds.bottom + font_size
+            let owners = units
+                .iter()
+                .enumerate()
+                .filter(|(_, candidate)| {
+                    candidate.page_index == unit.page_index
+                        && std::ptr::eq(candidate.paragraph, unit.paragraph)
+                        && formula_owns_trace_ink(candidate, ink)
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            owners.as_slice() == [unit_index]
         })
         .collect()
+}
+
+fn formula_owns_trace_ink(unit: &FormulaUnit<'_>, ink: &TraceInk) -> bool {
+    let Some(bounds) = unit.source_bounds else {
+        return false;
+    };
+    let em = unit.font_size;
+    if !em.is_finite() || em <= 0.0 {
+        return false;
+    }
+    let width = ink.bounds.right - ink.bounds.left;
+    let height = ink.bounds.top - ink.bounds.bottom;
+    let unit_width = bounds.right - bounds.left;
+    match ink.kind {
+        TraceInkKind::VectorPath => {
+            if width <= 0.01 || width <= height || width > em * 4.0 || width > unit_width + em {
+                return false;
+            }
+            let overlap =
+                (ink.bounds.right.min(bounds.right) - ink.bounds.left.max(bounds.left)).max(0.0);
+            let comparable_width = width.min(unit_width);
+            if comparable_width <= 0.01 || overlap < comparable_width * 0.5 {
+                return false;
+            }
+            let y = (ink.bounds.bottom + ink.bounds.top) / 2.0;
+            if y < bounds.bottom - em * 0.25 || y > bounds.top + em * 0.5 {
+                return false;
+            }
+            let highest_baseline = unit
+                .source_glyphs
+                .iter()
+                .map(|(_, origin)| origin.y)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let caps_formula = y >= highest_baseline - em * 0.05 && y <= bounds.top + em * 0.5;
+            let separates_formula_rows = unit
+                .source_glyphs
+                .iter()
+                .any(|(_, origin)| origin.y > y + em * 0.05)
+                && unit
+                    .source_glyphs
+                    .iter()
+                    .any(|(_, origin)| origin.y < y - em * 0.05);
+            caps_formula || separates_formula_rows
+        }
+        TraceInkKind::InlineImage => {
+            if width <= 0.0
+                || height <= 0.0
+                || width > unit_width + em
+                || height > bounds.top - bounds.bottom + em
+            {
+                return false;
+            }
+            let overlap_x =
+                (ink.bounds.right.min(bounds.right) - ink.bounds.left.max(bounds.left)).max(0.0);
+            let overlap_y =
+                (ink.bounds.top.min(bounds.top) - ink.bounds.bottom.max(bounds.bottom)).max(0.0);
+            overlap_x > 0.01 && overlap_y > 0.01
+        }
+    }
 }
 
 fn mutool_trace(path: &Path) -> Option<String> {
@@ -1420,7 +1528,7 @@ fn orphan_source_ink_from_traces(
     let units = formula_units(styled);
     let mut checked = 0;
     let mut evidence = Vec::new();
-    for unit in units {
+    for (unit_index, unit) in units.iter().enumerate() {
         let Some(published_paragraph) =
             find_paragraph(published, unit.page_index, unit.reading_order)
         else {
@@ -1431,7 +1539,7 @@ fn orphan_source_ink_from_traces(
             continue;
         }
         checked += 1;
-        let (Some(formula_bounds), Some(source_page), Some(output_page)) = (
+        let (Some(_formula_bounds), Some(source_page), Some(output_page)) = (
             unit.source_bounds,
             source_pages.get(unit.page_index),
             output_pages.get(unit.page_index),
@@ -1447,17 +1555,10 @@ fn orphan_source_ink_from_traces(
         if source_formula_still_present {
             continue;
         }
-        let neighborhood = expand_rect(formula_bounds, unit.font_size * 0.75);
-        for ink in &source_page.ink {
-            let width = ink.bounds.right - ink.bounds.left;
-            let height = ink.bounds.top - ink.bounds.bottom;
-            if !rects_overlap(ink.bounds, neighborhood)
-                || width > formula_bounds.right - formula_bounds.left + unit.font_size
-                || height > formula_bounds.top - formula_bounds.bottom + unit.font_size
-                || !output_page.ink.iter().any(|candidate| {
-                    candidate.kind == ink.kind && rect_close(candidate.bounds, ink.bounds, 0.05)
-                })
-            {
+        for ink in uniquely_owned_formula_ink(&units, unit_index, source_page) {
+            if !output_page.ink.iter().any(|candidate| {
+                candidate.kind == ink.kind && rect_close(candidate.bounds, ink.bounds, 0.05)
+            }) {
                 continue;
             }
             evidence.push(OrphanInkEvidence {
@@ -1652,13 +1753,6 @@ fn expand_rect(rect: Rect, amount: f64) -> Rect {
         right: rect.right + amount,
         top: rect.top + amount,
     }
-}
-
-fn rects_overlap(left: Rect, right: Rect) -> bool {
-    left.right >= right.left
-        && right.right >= left.left
-        && left.top >= right.bottom
-        && right.top >= left.bottom
 }
 
 fn rect_close(left: Rect, right: Rect, tolerance: f64) -> bool {
@@ -3396,6 +3490,86 @@ mod tests {
             formula_rigid_body_integrity_from_traces(&styled, &published, source, fixed).unwrap();
         assert_eq!(fixed.checked_formula_units, 1);
         assert_eq!(fixed.violations, 0);
+    }
+
+    #[test]
+    fn formula_ink_is_audited_only_for_its_unique_geometric_owner() {
+        let styled: Il = serde_json::from_value(serde_json::json!({
+            "pages": [{"index": 0, "geometry": {"height": 100.0}, "paragraphs": [{
+                "reading_order": 4,
+                "bounds": {"left": 10.0, "bottom": 20.0, "right": 90.0, "top": 50.0},
+                "text": {"chars": [
+                    {"unicode":"x", "font_size":10.0, "baseline_origin":{"x":40.0,"y":40.0}, "box":{"left":40.0,"bottom":35.0,"right":45.0,"top":45.0}, "layout":{"label":"inline_formula","policy":"passthrough"}},
+                    {"unicode":"y", "font_size":10.0, "baseline_origin":{"x":46.0,"y":40.0}, "box":{"left":46.0,"bottom":35.0,"right":51.0,"top":45.0}, "layout":{"label":"inline_formula","policy":"passthrough"}},
+                    {"unicode":".", "font_size":10.0, "baseline_origin":{"x":52.0,"y":40.0}, "box":{"left":52.0,"bottom":35.0,"right":54.0,"top":45.0}, "layout":{"label":"text","policy":"translate"}},
+                    {"unicode":"u", "font_size":10.0, "baseline_origin":{"x":40.0,"y":30.0}, "box":{"left":40.0,"bottom":25.0,"right":45.0,"top":35.0}, "layout":{"label":"inline_formula","policy":"passthrough"}},
+                    {"unicode":"v", "font_size":10.0, "baseline_origin":{"x":46.0,"y":30.0}, "box":{"left":46.0,"bottom":25.0,"right":51.0,"top":35.0}, "layout":{"label":"inline_formula","policy":"passthrough"}}
+                ]}
+            }]}]
+        }))
+        .unwrap();
+        let published: Il = serde_json::from_value(serde_json::json!({
+            "pages": [{"index": 0, "geometry": {"height": 100.0}, "paragraphs": [{
+                "reading_order": 4,
+                "bounds": {"left": 10.0, "bottom": 20.0, "right": 90.0, "top": 50.0},
+                "text": {"chars": []},
+                "translated_text": "translated"
+            }]}]
+        }))
+        .unwrap();
+        let source = r#"<document><page number="1" mediabox="0 0 100 100">
+          <fill_text transform="1 0 0 -1 0 100"><span><g unicode="x" x="40" y="40"/><g unicode="y" x="46" y="40"/><g unicode="u" x="40" y="30"/><g unicode="v" x="46" y="30"/></span></fill_text>
+          <stroke_path linewidth="0.4" transform="1 0 0 -1 40 65"><moveto x="0" y="0"/><lineto x="10" y="0"/></stroke_path>
+        </page></document>"#;
+        let output = r#"<document><page number="1" mediabox="0 0 100 100">
+          <fill_text transform="1 0 0 -1 -10 100"><span><g unicode="x" x="40" y="40"/><g unicode="y" x="46" y="40"/></span></fill_text>
+          <fill_text transform="1 0 0 -1 0 100"><span><g unicode="u" x="40" y="30"/><g unicode="v" x="46" y="30"/></span></fill_text>
+          <stroke_path linewidth="0.4" transform="1 0 0 -1 40 65"><moveto x="0" y="0"/><lineto x="10" y="0"/></stroke_path>
+        </page></document>"#;
+
+        let rigid =
+            formula_rigid_body_integrity_from_traces(&styled, &published, source, output).unwrap();
+        assert_eq!(rigid.checked_formula_units, 1);
+        assert_eq!(rigid.violations, 0);
+        let orphan = orphan_source_ink_from_traces(&styled, &published, source, output).unwrap();
+        assert_eq!(orphan.violations, 0);
+    }
+
+    #[test]
+    fn formula_rigid_body_anchor_may_include_half_em_ink_extent() {
+        let styled: Il = serde_json::from_value(serde_json::json!({
+            "pages": [{"index": 0, "geometry": {"height": 100.0}, "paragraphs": [{
+                "reading_order": 4,
+                "bounds": {"left": 10.0, "bottom": 20.0, "right": 90.0, "top": 50.0},
+                "text": {"chars": [
+                    {"unicode":"u", "font_size":10.0, "baseline_origin":{"x":40.0,"y":40.0}, "box":{"left":40.0,"bottom":35.0,"right":45.0,"top":45.0}, "layout":{"label":"inline_formula","policy":"passthrough"}},
+                    {"unicode":"v", "font_size":10.0, "baseline_origin":{"x":46.0,"y":40.0}, "box":{"left":46.0,"bottom":35.0,"right":51.0,"top":45.0}, "layout":{"label":"inline_formula","policy":"passthrough"}}
+                ]}
+            }]}]
+        }))
+        .unwrap();
+        let published: Il = serde_json::from_value(serde_json::json!({
+            "pages": [{"index": 0, "geometry": {"height": 100.0}, "paragraphs": [{
+                "reading_order": 4,
+                "bounds": {"left": 10.0, "bottom": 20.0, "right": 90.0, "top": 50.0},
+                "text": {"chars": []},
+                "translated_text": "translated"
+            }]}]
+        }))
+        .unwrap();
+        let source = r#"<document><page number="1" mediabox="0 0 100 100">
+          <fill_text transform="1 0 0 -1 0 100"><span><g unicode="u" x="40" y="40"/><g unicode="v" x="46" y="40"/></span></fill_text>
+          <stroke_path linewidth="0.4" transform="1 0 0 -1 40 55"><moveto x="0" y="0"/><lineto x="10" y="0"/></stroke_path>
+        </page></document>"#;
+        let output = r#"<document><page number="1" mediabox="0 0 100 100">
+          <fill_text transform="1 0 0 -1 -32.6 100"><span><g unicode="u" x="40" y="40"/><g unicode="v" x="46" y="40"/></span></fill_text>
+          <stroke_path linewidth="0.4" transform="1 0 0 -1 7.4 55"><moveto x="0" y="0"/><lineto x="10" y="0"/></stroke_path>
+        </page></document>"#;
+
+        let rigid =
+            formula_rigid_body_integrity_from_traces(&styled, &published, source, output).unwrap();
+        assert_eq!(rigid.checked_formula_units, 1);
+        assert_eq!(rigid.violations, 0);
     }
 
     #[test]
