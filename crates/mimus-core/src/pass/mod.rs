@@ -11787,10 +11787,8 @@ mod tests {
             .prepared_translations
             .iter()
             .filter(|(_, prepared)| !prepared.is_local_identity())
-            .filter_map(|(key, prepared)| {
-                (!prepared.request_text().is_empty())
-                    .then(|| (*key, prepared.request_text().to_owned()))
-            })
+            .filter(|(_, prepared)| !prepared.request_text().is_empty())
+            .map(|(key, prepared)| (*key, prepared.request_text().to_owned()))
             .collect()
     }
 
