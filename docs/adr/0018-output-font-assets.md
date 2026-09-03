@@ -50,23 +50,25 @@ test output fonts, and production output assets consequently need distinct owner
    deterministic GB2312 level-one-scale assets under `crates/mimus/tests/assets/fonts/` through the
    public path/config seam. Those files include their generation recipe, pinned hashes, and OFL,
    and are never linked into a production target.
-7. The logical Regular slot keeps the font's default variation location and legacy subset path so
-   existing body-text output remains byte-compatible. A logical Bold slot resolves one variation
-   location before any font query: an exact named `Bold` instance wins; otherwise a `wght` axis
-   receives `700`, clamped to that axis's user-space bounds. Static fonts and variable fonts without
-   a Bold location use an empty coordinate list. The same user coordinates configure `ttf-parser`
-   before every advance, bounding-box, ascender, descender, wrapping, collision, and fitting query,
-   and instantiate the subsetter's outlines and metrics. Empty-coordinate fonts retain the legacy
-   subset path and bytes. Output-font identities and coordinates do not enter translation or
-   terminology cache keys.
+7. Each logical weight slot resolves one variation location before any font query. An exact named
+   `Regular` or `Bold` instance wins for the corresponding slot; otherwise a `wght` axis receives
+   `400` or `700`, clamped to that axis's user-space bounds. Static fonts and variable fonts without
+   a matching instance or `wght` axis use an empty coordinate list. The same user coordinates
+   configure `ttf-parser` before every advance, bounding-box, ascender, descender, wrapping,
+   collision, and fitting query, and instantiate the subsetter's outlines and metrics. The embedded
+   `/BaseFont` uses the named instance's fvar `postScriptNameID` when present, otherwise the family
+   name plus logical slot. Output-font identities and coordinates do not enter translation or
+   terminology cache keys. This replaces the prior Regular default-location/byte-compatibility
+   rule: on 2026-09-03 the production Noto VF default was proven to be `wght=100`, which had made
+   all ordinary Chinese body text Thin instead of Regular.
 
 ## Production manifest
 
 The primary slots remain the pinned Noto Sans SC 2.004 variable subset already used to derive the
 corpus fixtures. Both logical weights map to that one SHA-256-pinned variable font and cache entry.
-Regular retains the established default-location subset while Bold resolves its named `wght=700`
-instance. The resulting static PDF subsets therefore carry distinct, metric-consistent outlines
-without duplicating the downloaded asset or changing ordinary body-text bytes.
+Regular resolves its named `wght=400` instance while Bold resolves its named `wght=700` instance.
+The resulting static PDF subsets therefore carry distinct, metric-consistent outlines without
+duplicating the downloaded asset.
 
 The 2026-08-27 L5 run exposed seven translated paragraphs containing `U+2217 ASTERISK OPERATOR`,
 `U+0141 LATIN CAPITAL LETTER L WITH STROKE`, or `U+03F5 GREEK LUNATE EPSILON SYMBOL`. Noto Sans

@@ -43,6 +43,15 @@ jobs:
             "https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_onnx/resolve/$LAYOUT_MODEL_COMMIT/inference.onnx"
           echo "$LAYOUT_MODEL_SHA256  pp-doclayoutv3.onnx" | sha256sum --check
 
+      - name: Install pinned production output font
+        env:
+          NOTO_COMMIT: 523d033d6cb47f4a80c58a35753646f5c3608a78
+          NOTO_SC_VF_SHA256: d68bafcb48a2707749396aa12bbbd833cb70401f3a9a689fd2902c7e0d295964
+        run: |
+          curl --fail --location --retry 3 --output NotoSansSC-VF.ttf \
+            "https://raw.githubusercontent.com/notofonts/noto-cjk/$NOTO_COMMIT/Sans/Variable/TTF/Subset/NotoSansSC-VF.ttf"
+          echo "$NOTO_SC_VF_SHA256  NotoSansSC-VF.ttf" | sha256sum --check
+
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -54,6 +63,14 @@ jobs:
           MIMUS_PDFIUM_LIBRARY: ${{ github.workspace }}/pdfium/lib/libpdfium.so
           MIMUS_LAYOUT_MODEL: ${{ github.workspace }}/pp-doclayoutv3.onnx
         run: cargo test --workspace --all-targets --all-features
+
+      - name: Verify production font instance outline
+        env:
+          MIMUS_PINNED_OUTPUT_FONT: ${{ github.workspace }}/NotoSansSC-VF.ttf
+        run: >-
+          cargo test --locked --offline -p mimus-core
+          pass::tests::pinned_full_variable_font_regular_subset_matches_wght_400_outline
+          -- --ignored --exact
 
       - name: Audit committed Corpus v1 evidence
         run: cargo run --locked --offline -p corpus -- audit
