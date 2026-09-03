@@ -2691,6 +2691,54 @@ fn page_zero_title_and_bounded_author_block_are_policy_passthrough() {
 }
 
 #[test]
+fn page_zero_author_geometry_ignores_reading_order_and_excludes_outside_body() {
+    let output = run_inspect_with_recording(
+        "unit-para-17-author-columns",
+        "unit-para-17-title-author-reordered",
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = parse_events(&output.stdout);
+    assert_one_terminal_last(&events, "result");
+    let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap();
+
+    for author_order in [11, 12] {
+        let author = paragraphs
+            .iter()
+            .find(|paragraph| {
+                paragraph["text"]["chars"][0]["layout"]["reading_order"] == author_order
+            })
+            .unwrap();
+        assert!(
+            author["text"]["chars"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|character| character["layout"]["policy"] == "passthrough"),
+            "{author:#?}"
+        );
+    }
+
+    let outside_body = paragraphs
+        .iter()
+        .find(|paragraph| paragraph["text"]["chars"][0]["layout"]["reading_order"] == 3)
+        .unwrap();
+    assert!(
+        outside_body["text"]["chars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|character| character["layout"]["policy"] == "translate"),
+        "{outside_body:#?}"
+    );
+}
+
+#[test]
 fn title_and_author_passthrough_skip_translation_and_keep_source_identity() {
     let directory = tempfile::tempdir().unwrap();
     let output_path = directory.path().join("title-author.pdf");

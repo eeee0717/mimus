@@ -1619,24 +1619,37 @@ fn apply_title_author_passthrough(paragraphs: &mut [Paragraph]) {
     else {
         return;
     };
+    let title = &paragraphs[title_index];
     let Some(lower_index) = paragraphs
         .iter()
         .enumerate()
-        .skip(title_index + 1)
-        .find_map(|(index, paragraph)| {
+        .filter(|(_, paragraph)| {
             paragraph_has_only_label(paragraph, LayoutLabel::Abstract)
-                .then_some(index)
-                .or_else(|| {
-                    paragraph_has_only_label(paragraph, LayoutLabel::ParagraphTitle)
-                        .then_some(index)
-                })
+                || paragraph_has_only_label(paragraph, LayoutLabel::ParagraphTitle)
         })
+        .filter(|(_, paragraph)| paragraph.bounds.top < title.bounds.bottom)
+        .max_by(|(_, left), (_, right)| left.bounds.top.total_cmp(&right.bounds.top))
+        .map(|(index, _)| index)
     else {
         return;
     };
+    let lower = &paragraphs[lower_index];
+    let Some(band) = mimus_quality_contract::title_author_band(
+        title.bounds.bottom,
+        lower.bounds.top,
+        title
+            .chars()
+            .iter()
+            .chain(lower.chars())
+            .map(|character| character.font_size),
+    ) else {
+        return;
+    };
 
-    for paragraph in &mut paragraphs[title_index + 1..lower_index] {
-        if !paragraph_has_only_label(paragraph, LayoutLabel::Text) {
+    for paragraph in paragraphs {
+        if !paragraph_has_only_label(paragraph, LayoutLabel::Text)
+            || !band.contains(paragraph.bounds.bottom, paragraph.bounds.top)
+        {
             continue;
         }
         for character in paragraph_chars_mut(paragraph) {

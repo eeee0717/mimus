@@ -134,6 +134,55 @@ pub fn formula_items_share_line(
         && right_top > left_bottom + 0.01
 }
 
+/// The page-zero visual band in which `text` paragraphs are treated as the
+/// complete author block. Coordinates use PDF bottom-left space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TitleAuthorBand {
+    pub lower: f64,
+    pub upper: f64,
+    pub tolerance: f64,
+}
+
+impl TitleAuthorBand {
+    /// Returns whether a paragraph lies completely inside the author band.
+    pub fn contains(self, paragraph_bottom: f64, paragraph_top: f64) -> bool {
+        paragraph_bottom.is_finite()
+            && paragraph_top.is_finite()
+            && paragraph_bottom <= paragraph_top
+            && paragraph_bottom >= self.lower - 0.01
+            && paragraph_top <= self.upper + 0.01
+    }
+}
+
+/// Builds the page-zero title/author band from its two geometric anchors.
+///
+/// The title's bottom edge is the upper anchor and the abstract or first
+/// paragraph-title's top edge is the lower anchor. Half the median anchor font
+/// size supplies a line-height-scale tolerance for minor detector/ink overlap.
+pub fn title_author_band(
+    title_bottom: f64,
+    lower_anchor_top: f64,
+    anchor_font_sizes: impl IntoIterator<Item = f64>,
+) -> Option<TitleAuthorBand> {
+    if !title_bottom.is_finite()
+        || !lower_anchor_top.is_finite()
+        || lower_anchor_top >= title_bottom
+    {
+        return None;
+    }
+    let tolerance = median(
+        anchor_font_sizes
+            .into_iter()
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .collect(),
+    )? * 0.5;
+    Some(TitleAuthorBand {
+        lower: lower_anchor_top - tolerance,
+        upper: title_bottom + tolerance,
+        tolerance,
+    })
+}
+
 /// Extracts the conservative numeric, reference, and unit tokens that must be
 /// preserved by translation. Tokens are normalized only when the source and
 /// target spellings are lexically explicit equivalents.
@@ -496,6 +545,22 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn title_author_band_uses_geometry_and_half_median_anchor_font_size() {
+        let band = title_author_band(90.0, 30.0, [10.0, 14.0]).unwrap();
+        assert_eq!(band.tolerance, 6.0);
+        assert_eq!((band.lower, band.upper), (24.0, 96.0));
+        assert!(band.contains(40.0, 80.0));
+        assert!(!band.contains(10.0, 20.0));
+        assert!(!band.contains(97.0, 100.0));
+    }
+
+    #[test]
+    fn title_author_band_rejects_missing_line_height_and_reversed_anchors() {
+        assert!(title_author_band(90.0, 30.0, []).is_none());
+        assert!(title_author_band(30.0, 90.0, [10.0]).is_none());
+    }
 
     #[test]
     fn v1_kinsoku_set_covers_cjk_closing_and_opening_punctuation_only() {
