@@ -195,7 +195,7 @@ impl ResolvedConfig {
                 )
                 .with_hint("set MIMUS_CACHE_DIR or provide explicit font and layout-model paths")
             })?;
-        let font_cache_dir = asset_cache_root.join("fonts/noto-sans-sc-2.004");
+        let font_cache_dir = asset_cache_root.join("fonts/noto-serif-sc-2.001");
         let layout_model_cache_dir = asset_cache_root.join(format!(
             "models/pp-doclayoutv3-{}",
             crate::layout_assets::MODEL_COMMIT

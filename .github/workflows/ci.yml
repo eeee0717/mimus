@@ -46,11 +46,11 @@ jobs:
       - name: Install pinned production output font
         env:
           NOTO_COMMIT: 523d033d6cb47f4a80c58a35753646f5c3608a78
-          NOTO_SC_VF_SHA256: d68bafcb48a2707749396aa12bbbd833cb70401f3a9a689fd2902c7e0d295964
+          NOTO_SERIF_SC_VF_SHA256: 69467baf421bdbb32b292d6c092ed033ca32e5f7a0d06194e69901287b50b2f3
         run: |
-          curl --fail --location --retry 3 --output NotoSansSC-VF.ttf \
-            "https://raw.githubusercontent.com/notofonts/noto-cjk/$NOTO_COMMIT/Sans/Variable/TTF/Subset/NotoSansSC-VF.ttf"
-          echo "$NOTO_SC_VF_SHA256  NotoSansSC-VF.ttf" | sha256sum --check
+          curl --fail --location --retry 3 --output NotoSerifSC-VF.ttf \
+            "https://raw.githubusercontent.com/notofonts/noto-cjk/$NOTO_COMMIT/Serif/Variable/TTF/Subset/NotoSerifSC-VF.ttf"
+          echo "$NOTO_SERIF_SC_VF_SHA256  NotoSerifSC-VF.ttf" | sha256sum --check
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -66,7 +66,7 @@ jobs:
 
       - name: Verify production font instance outline
         env:
-          MIMUS_PINNED_OUTPUT_FONT: ${{ github.workspace }}/NotoSansSC-VF.ttf
+          MIMUS_PINNED_OUTPUT_FONT: ${{ github.workspace }}/NotoSerifSC-VF.ttf
         run: >-
           cargo test --locked --offline -p mimus-core
           pass::tests::pinned_full_variable_font_regular_subset_matches_wght_400_outline

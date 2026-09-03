@@ -24,7 +24,7 @@
 | 15 | 翻译政策表（见下）；`doc_title` 原样保留；页 0 在 `doc_title` 与 `abstract`/首个 `paragraph_title` 双锚之间的完整视觉作者块原样保留；表体默认不翻留 `--translate-table` 实验开关 | — |
 | 16 | 错误恢复：三层降级（段→页→文档，宁保原文不出坏译文）+ 结束汇总 + `--strict`；畸形 PDF fail-fast、修复函数语料驱动；退出码 0/1/2/3/4/5/6 分类（Usage/Input/Asset/Translation/Io/Internal） | [ADR-0011](docs/adr/0011-cli-machine-protocol.md)、[ADR-0017](docs/adr/0017-translation-degradation-and-strict.md) |
 | 17 | V1 单进程；PDFium 崩溃（abort）接受，子进程隔离推 V2 | — |
-| 18 | 输出字体按字符级走主字体 Noto Sans SC 2.004 → 回退字体 DejaVu Sans 2.35；两族各有 Regular/Bold 槽，均按 flag > env > config > SHA 缓存 > manifest 下载解析，经 `PassContext` 注入并按需子集化；主槽用 `--font`/`--font-bold`，回退槽用 `--font-fallback`/`--font-fallback-bold`。两族皆缺才整段 `unsupported_font`，诊断列出双方身份；italic 映射正常字重。Noto 主字体仍以同一份可变字体承载两个逻辑槽，静态双字重仍是 follow-up | [ADR-0018](docs/adr/0018-output-font-assets.md) |
+| 18 | 输出字体按字符级走主字体 Noto Serif SC 2.001（宋体）→ 回退字体 DejaVu Sans 2.35；两族各有 Regular/Bold 槽，均按 flag > env > config > SHA 缓存 > manifest 下载解析，经 `PassContext` 注入并按需子集化；主槽用 `--font`/`--font-bold`，可据此切回 Noto Sans SC 等黑体，回退槽用 `--font-fallback`/`--font-fallback-bold`。两族皆缺才整段 `unsupported_font`，诊断列出双方身份；italic 映射正常字重。Noto 主字体仍以同一份可变字体承载两个逻辑槽，Regular/Bold 分别固定到命名实例或 `wght=400/700` | [ADR-0018](docs/adr/0018-output-font-assets.md) |
 | 19 | 术语：**保留自动术语提取**（独立 pass，LLM）+ `--glossary` 用户术语表 | — |
 | 20 | 翻译层：`Translator` trait 可扩展；V1 实现 OpenAI-compatible Responses API + `none` 直通；纯空白及不含字母的数字/符号源形状在本地直接判为 identity，不进术语或翻译后端、不产生新排版墨迹；其余可翻形状收到 echo 后单次语义重试，再次 echo 则缓存为 `Identity`、发段级 `suspicious_echo` 并进 summary，但不算硬降级、不触发 strict；邮箱形状保持一次后端 identity；六类占位符违规均单次语义重试，重试请求按子类附加缺失/重复/未知 token 或顺序纠错提示，仍违规才仅降级所属段；原请求、缓存键与 validator 不变，无效响应不入缓存 | [ADR-0016](docs/adr/0016-responses-api-and-translation-config.md)、[ADR-0017](docs/adr/0017-translation-degradation-and-strict.md) |
 | 21 | 翻译缓存：V1 即做，redb，键含(原文,模型,目标语,prompt 版本,术语指纹)；`--no-cache` | — |
@@ -62,6 +62,7 @@
 | 53 | 中文译文采用 V1 最小禁则集：行首禁闭合标点、行尾禁开放标点，不做悬挂标点；普通、障碍槽与公式流共享同一字符集合和断行 token，段首闭合或段尾开放等无法满足的布局走既有 `typeset_overflow`，不放宽 8pt、碰撞或 CropBox | [docs/10-quality-scorecard.md](docs/10-quality-scorecard.md) §2.4.2 |
 | 54 | 非公式下划线只有在安全完整 `q/Q` 横线、同 content object、唯一完整 text-show owner、段外无共享字符、下方充分重叠且最终单行 replacement delta 唯一时才随 owner 刚体平移；原 path span 被 replacement 声明且新墨迹进入安全边界。任何可疑但不完备的所有权整段 `typeset_protocol` 保留，绝不删除或把下划线留在移动前槽位 | [docs/10-quality-scorecard.md](docs/10-quality-scorecard.md) §2.4.2 |
 | 55 | V1 写回器只改写页面顶层 `/Contents`，**不翻译 Form XObject 内文字**。仅含 Form-owned `Translate` 文字的段落以 additive IL v1 / CLI v2 原因 `form_xobject_content` typed 保留；同时含页面级 `Translate` 文字的混合段继续处理页面级单元，不因 Form 片段整段保留。若页面全部可见直立文字均在 Form 内，且文档至少有一个这类页面含 `Translate` 内容，则按整页包装根因将这些 wrapper 页的全部段落 typed 入账（覆盖 pdfpages/pdfjam 与带封面 reprint）。该原因优先于 `unreliable_unicode`，`--strict` 可阻断发布；纯 `Passthrough` 图表 Form 文档不触发。Form 内改写推迟到 V1 后候选 | [ADR-0013](docs/adr/0013-bounded-walk-and-graded-degradation.md)、[ADR-0017](docs/adr/0017-translation-degradation-and-strict.md) |
+| 56 | **用户裁定（2026-09-03）**：输出主字体正式默认使用 Noto Serif SC 2.001（宋体），以匹配 Times 类论文正文；Noto Sans SC 等黑体继续通过 `--font` / `--font-bold` 显式选择。此项不是待验证候选，后续再基线以宋体为准 | [ADR-0018](docs/adr/0018-output-font-assets.md) |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
@@ -201,4 +202,4 @@ model `inline_formula` 的**存在性**保持绝对权威，但模型框边缘�
 
 M-1 与 M0 已收口，无遗留架构风险阻塞 M1。当前实现入口是 #14：以 `none` 后端往返单行原生 PDF；架构设计只覆盖支撑该 walking skeleton 所需的接口与边界。
 
-V2 展望项（扫描件/OCR、子进程隔离、像素 diff、宋体字族、中→英、GUI）见 `docs/02-milestones.md` 末节，随触发条件另行立项。
+V2 展望项（扫描件/OCR、子进程隔离、像素 diff、中→英、GUI）见 `docs/02-milestones.md` 末节，随触发条件另行立项。

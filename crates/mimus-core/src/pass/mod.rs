@@ -4536,6 +4536,7 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                         continue;
                     }
                     if paragraph_plans_leave_orphan_source_ink(
+                        page,
                         paragraph,
                         extracted,
                         &content_objects,
@@ -4948,11 +4949,21 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
 }
 
 fn paragraph_plans_leave_orphan_source_ink(
+    page: &il::Page,
     paragraph: &Paragraph,
     extracted: &ExtractedPage,
     content_objects: &BTreeSet<lopdf::ObjectId>,
     plans: &[TypesetPlan],
 ) -> Result<bool> {
+    if plans_move_formula_ink_owned_by_another_paragraph(
+        page,
+        paragraph,
+        extracted,
+        content_objects,
+        plans,
+    ) {
+        return Ok(true);
+    }
     let claimed = plans
         .iter()
         .flat_map(plan_modified_spans)
@@ -5041,6 +5052,70 @@ fn paragraph_plans_leave_orphan_source_ink(
         }
     }
     Ok(false)
+}
+
+fn plans_move_formula_ink_owned_by_another_paragraph(
+    page: &il::Page,
+    paragraph: &Paragraph,
+    extracted: &ExtractedPage,
+    content_objects: &BTreeSet<lopdf::ObjectId>,
+    plans: &[TypesetPlan],
+) -> bool {
+    let content_object_numbers = content_objects
+        .iter()
+        .map(|object_id| object_id.0)
+        .collect::<BTreeSet<_>>();
+    let other_units = page
+        .paragraphs
+        .iter()
+        .filter(|candidate| candidate.reading_order != paragraph.reading_order)
+        .filter_map(|candidate| {
+            source_formula_units(
+                candidate,
+                extracted,
+                content_objects,
+                &content_object_numbers,
+                false,
+            )
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    if other_units.is_empty() {
+        return false;
+    }
+    plans
+        .iter()
+        .flat_map(|plan| &plan.formula_relocations)
+        .filter(|relocation| {
+            relocation.delta_x_pt.abs() > 0.01 || relocation.delta_y_pt.abs() > 0.01
+        })
+        .any(|relocation| {
+            relocation.vector_paths.iter().any(|replay| {
+                extracted
+                    .vector_paths
+                    .iter()
+                    .find(|path| {
+                        (path.content_object, path.byte_start, path.byte_end) == replay.span
+                    })
+                    .is_none_or(|path| {
+                        other_units
+                            .iter()
+                            .any(|unit| formula_owns_vector_path(unit, path))
+                    })
+            }) || relocation.inline_images.iter().any(|replay| {
+                extracted
+                    .inline_images
+                    .iter()
+                    .find(|image| {
+                        (image.content_object, image.byte_start, image.byte_end) == replay.span
+                    })
+                    .is_none_or(|image| {
+                        other_units
+                            .iter()
+                            .any(|unit| formula_owns_inline_image(unit, image))
+                    })
+            })
+        })
 }
 
 /// 逐段 `typeset_overflow` 明细。之前 NDJSON 里只有 `degradation_summary` 一行汇总，
@@ -6670,7 +6745,7 @@ struct FormulaFlowPlacement {
 
 enum FormulaFlowAttempt {
     Placed(FormulaFlowPlacement),
-    NoFit { continuity_blocked: bool },
+    NoFit,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6814,16 +6889,8 @@ fn plan_relocated_formula_flow<'a>(
                 il::PreservedReason::TypesetProtocol,
             ))? {
             FormulaFlowAttempt::Placed(placement) => placement,
-            FormulaFlowAttempt::NoFit {
-                continuity_blocked: true,
-            } => {
-                return Err(TypesetPlanError::Preserved(
-                    il::PreservedReason::TypesetOverflow,
-                ));
-            }
-            FormulaFlowAttempt::NoFit {
-                continuity_blocked: false,
-            } => {
+            FormulaFlowAttempt::NoFit => {
+                // This is still geometric packing before the continuity oracle.
                 if size <= MIN_FONT_SIZE_PT + 0.001 {
                     break;
                 }
@@ -7381,13 +7448,10 @@ fn place_formula_flow(
     let mut formula_ink = Vec::new();
     let mut slot_index = 0_usize;
     let Some(first_slot) = slots.first() else {
-        return Some(FormulaFlowAttempt::NoFit {
-            continuity_blocked: false,
-        });
+        return Some(FormulaFlowAttempt::NoFit);
     };
     let mut cursor = first_slot.left;
     let mut open_text_slot = None;
-    let mut continuity_blocked = false;
     for (atom_index, atom) in atoms.iter().enumerate() {
         let width = match atom {
             FormulaFlowAtom::Text { characters, .. } => {
@@ -7410,17 +7474,14 @@ fn place_formula_flow(
         let unbreakable_width = width + attached_width;
         loop {
             let Some(slot) = slots.get(slot_index) else {
-                return Some(FormulaFlowAttempt::NoFit { continuity_blocked });
+                return Some(FormulaFlowAttempt::NoFit);
             };
             if unbreakable_width <= slot.right - cursor + 0.01 {
                 break;
             }
-            if attached_width > 0.0 && width <= slot.right - cursor + 0.01 {
-                continuity_blocked = true;
-            }
             slot_index += 1;
             let Some(next_slot) = slots.get(slot_index) else {
-                return Some(FormulaFlowAttempt::NoFit { continuity_blocked });
+                return Some(FormulaFlowAttempt::NoFit);
             };
             cursor = next_slot.left;
             open_text_slot = None;
@@ -13595,13 +13656,13 @@ mod tests {
         let bytes = std::fs::read(path).unwrap();
         assert_eq!(
             format!("{:x}", Sha256::digest(&bytes)),
-            "d68bafcb48a2707749396aa12bbbd833cb70401f3a9a689fd2902c7e0d295964"
+            "69467baf421bdbb32b292d6c092ed033ca32e5f7a0d06194e69901287b50b2f3"
         );
         let source = crate::context::OutputFont {
             bytes,
-            postscript_name: "NotoSansSC-Thin".to_owned(),
+            postscript_name: "NotoSerifSC-ExtraLight".to_owned(),
             source: "test:pinned-production-vf".to_owned(),
-            sha256: "d68bafcb48a2707749396aa12bbbd833cb70401f3a9a689fd2902c7e0d295964".to_owned(),
+            sha256: "69467baf421bdbb32b292d6c092ed033ca32e5f7a0d06194e69901287b50b2f3".to_owned(),
         };
 
         let default_face = ttf_parser::Face::parse(&source.bytes, 0).unwrap();
@@ -13620,7 +13681,7 @@ mod tests {
             OutputFontKey::PrimaryRegular,
         )
         .unwrap();
-        assert!(embedded.base_font.ends_with("+NotoSansSC-Regular"));
+        assert!(embedded.base_font.ends_with("+NotoSerifSC-Regular"));
         let subset_face = ttf_parser::Face::parse(&embedded.font_bytes, 0).unwrap();
         let subset_bounds = subset_face
             .glyph_bounding_box(ttf_parser::GlyphId(cids[&'一']))
@@ -17829,6 +17890,118 @@ mod tests {
     }
 
     #[test]
+    fn formula_relocation_rejects_ink_owned_by_another_paragraph() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("cross-paragraph-formula-ink.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        const RULE: &[u8] = b"q\n1 0 0 1 218 148 cm\n0 0 m 16 0 l S\nQ";
+        pdf.get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(
+                [
+                    b"BT /F1 12 Tf\n1 0 0 1 72 140 Tm\n(MIM) Tj\n1 0 0 1 72 126 Tm\n(MIMUS) Tj\nET\n"
+                        .as_slice(),
+                    RULE,
+                    b"\nBT /F1 12 Tf\n1 0 0 1 220 140 Tm\n(U) Tj\n1 0 0 1 220 135 Tm\n(IM) Tj\n1 0 0 1 238 140 Tm\n(S) Tj\nET\n",
+                ]
+                .concat(),
+            );
+        pdf.save(&input).unwrap();
+        let mut document = Document::for_inspection(&input);
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: "\u{4e2d}{v1}\u{6587}",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let mut chars = document.il.pages[0]
+            .paragraphs
+            .iter()
+            .flat_map(|paragraph| paragraph.chars().iter().cloned())
+            .collect::<Vec<_>>();
+        chars.sort_by(|left, right| {
+            right
+                .baseline_origin
+                .y
+                .total_cmp(&left.baseline_origin.y)
+                .then_with(|| left.baseline_origin.x.total_cmp(&right.baseline_origin.x))
+        });
+        let owner = Rect {
+            left: 72.0,
+            bottom: 110.0,
+            right: 260.0,
+            top: 152.0,
+        };
+        for character in &mut chars {
+            character.layout.as_mut().unwrap().bounds = owner;
+        }
+        document.extracted_pages[0].layout_regions[0].bounds = owner;
+        let (mut denominator, mut chars): (Vec<_>, Vec<_>) = chars
+            .into_iter()
+            .partition(|character| (character.baseline_origin.y - 135.0).abs() <= 0.01);
+        assert_eq!(denominator.len(), 2);
+        let numerator = chars
+            .iter_mut()
+            .find(|character| {
+                character.unicode == Some('U')
+                    && (character.baseline_origin.x - 220.0).abs() <= 0.01
+            })
+            .unwrap();
+        for character in std::iter::once(numerator).chain(denominator.iter_mut()) {
+            let layout = character.layout.as_mut().unwrap();
+            layout.label = LayoutLabel::InlineFormula;
+            layout.policy = TranslationPolicy::Passthrough;
+        }
+        let denominator_bounds = denominator
+            .iter()
+            .map(|character| character.r#box.union(character.visual_bbox))
+            .reduce(Rect::union)
+            .unwrap();
+        document.il.pages[0].paragraphs = vec![
+            Paragraph {
+                reading_order: 0,
+                bounds: owner,
+                first_line_indent: None,
+                text: TextCarrier::Chars { chars },
+                translated_text: None,
+                translation_conservation: None,
+                preserved: None,
+            },
+            Paragraph {
+                reading_order: 1,
+                bounds: denominator_bounds,
+                first_line_indent: None,
+                text: TextCarrier::Chars { chars: denominator },
+                translated_text: None,
+                translation_conservation: None,
+                preserved: Some(il::PreservedReason::TypesetProtocol),
+            },
+        ];
+
+        styles_and_formulas(&mut document, &context).unwrap();
+        translate(&mut document, &context).unwrap();
+        typeset(&mut document, &context).unwrap();
+
+        assert_eq!(
+            document.il.pages[0].paragraphs[0].preserved,
+            Some(il::PreservedReason::TypesetProtocol),
+            "formula ink with a second paragraph owner must remain at its source geometry"
+        );
+    }
+
+    #[test]
     fn formula_vector_scope_with_other_visible_content_fails_closed() {
         let mut document = Document::for_inspection(fixture());
         let engine = FakeEngine::default();
@@ -18698,7 +18871,7 @@ mod tests {
     }
 
     #[test]
-    fn punctuation_continuity_failure_does_not_enter_smaller_font_candidates() {
+    fn formula_punctuation_group_does_not_split_across_slots() {
         let output_fonts = test_output_fonts();
         let faces = OutputFontFaces::parse(&output_fonts).unwrap();
         let formula_bounds = Rect {
@@ -18737,9 +18910,117 @@ mod tests {
 
         assert!(matches!(
             place_formula_flow(&atoms, &formula_units, &faces, 12.0, &slots),
-            Some(FormulaFlowAttempt::NoFit {
-                continuity_blocked: true
-            })
+            Some(FormulaFlowAttempt::NoFit)
+        ));
+    }
+
+    #[test]
+    fn formula_flow_geometry_retries_smaller_font_before_continuity_oracle() {
+        let mut document = Document::for_inspection(fixture());
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: crate::context::PipelineConfig::default(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let output_fonts = test_output_fonts();
+        let faces = OutputFontFaces::parse(&output_fonts).unwrap();
+        let preferred = 12.0;
+        let smaller = preferred - 0.5;
+        let styled = |value| crate::translate::StyledCharacter { value, bold: false };
+        let translated_segments = vec![
+            Vec::new(),
+            vec![
+                styled(','),
+                styled(' '),
+                styled('中'),
+                styled(' '),
+                styled('文'),
+            ],
+        ];
+
+        let paragraph = &mut document.il.pages[0].paragraphs[0];
+        let TextCarrier::Chars { chars } = &mut paragraph.text;
+        for character in chars.iter_mut() {
+            character.font_size = preferred;
+        }
+        let formula = &mut chars[0];
+        let formula_bounds = formula.r#box.union(formula.visual_bbox);
+        let layout = formula.layout.as_mut().unwrap();
+        layout.label = LayoutLabel::InlineFormula;
+        layout.policy = TranslationPolicy::Passthrough;
+
+        let comma = [styled(',')];
+        let preferred_chain_width = formula_bounds.right - formula_bounds.left
+            + styled_token_width(&comma, &faces, preferred).unwrap();
+        let smaller_chain_width = formula_bounds.right - formula_bounds.left
+            + styled_token_width(&comma, &faces, smaller).unwrap();
+        let first_slot_width = (preferred_chain_width + smaller_chain_width) / 2.0;
+        let remainder_width = styled_token_width(
+            &[styled(' '), styled('中'), styled(' '), styled('文')],
+            &faces,
+            preferred,
+        )
+        .unwrap();
+        let baseline_y = chars[1].baseline_origin.y;
+        let container = Rect {
+            left: 72.0,
+            bottom: baseline_y + faces.descent_em() * preferred,
+            right: 72.0 + first_slot_width + 5.0 + remainder_width + 1.0,
+            top: baseline_y + faces.ascent_em() * preferred,
+        };
+        for character in chars.iter_mut() {
+            character.layout.as_mut().unwrap().bounds = container;
+        }
+        paragraph.bounds = container;
+
+        let content_objects = paragraph
+            .chars()
+            .iter()
+            .map(|character| (character.passthrough.content_object, 0))
+            .collect::<BTreeSet<_>>();
+        let content_object_numbers = content_objects
+            .iter()
+            .map(|object_id| object_id.0)
+            .collect::<BTreeSet<_>>();
+        let source_segments = source_text_segments(paragraph.chars(), &content_object_numbers);
+        assert_eq!(source_segments.len(), 2);
+        let obstacle = Rect {
+            left: container.left + first_slot_width,
+            bottom: container.bottom - 1.0,
+            right: container.left + first_slot_width + 5.0,
+            top: container.top + 1.0,
+        };
+        let page_bounds = Rect {
+            left: 0.0,
+            bottom: 0.0,
+            right: 612.0,
+            top: 792.0,
+        };
+
+        let plan = plan_relocated_formula_flow(
+            paragraph,
+            &source_segments,
+            &translated_segments,
+            &document.extracted_pages[0],
+            &content_objects,
+            &output_fonts,
+            page_bounds,
+            &[obstacle],
+        )
+        .expect("the next smaller geometric candidate keeps formula punctuation together");
+
+        assert!((plan.font_size - smaller).abs() <= 0.001);
+        assert!(ink_bounds_are_safe(
+            &plan.ink_bounds,
+            page_bounds,
+            &[obstacle]
         ));
     }
 

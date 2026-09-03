@@ -76,6 +76,15 @@ struct Rect {
 #[derive(Debug, Deserialize)]
 struct Il {
     pages: Vec<Page>,
+    #[serde(default)]
+    publication_ink: Vec<PublicationOwner>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PublicationOwner {
+    page_index: usize,
+    reading_order: usize,
+    admissible_container: Rect,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1365,7 +1374,7 @@ fn formula_rigid_body_integrity_from_traces(
         checked += 1;
         let tolerance = unit.font_size.max(1.0) * 0.08;
         let (anchor_unicode, anchor_origin) = unit.source_glyphs[0];
-        let output_owner = expand_rect(unit.paragraph.bounds, unit.font_size * 0.5);
+        let output_owner = formula_output_owner(published, unit);
         let preserves_one_delta = output_page
             .glyphs
             .iter()
@@ -1416,6 +1425,17 @@ fn formula_rigid_body_integrity_from_traces(
         violations: evidence.len(),
         evidence,
     })
+}
+
+fn formula_output_owner(published: &Il, unit: &FormulaUnit<'_>) -> Rect {
+    let mut owners = published.publication_ink.iter().filter(|owner| {
+        owner.page_index == unit.page_index && owner.reading_order == unit.reading_order
+    });
+    let unique = owners.next().filter(|_| owners.next().is_none());
+    expand_rect(
+        unique.map_or(unit.paragraph.bounds, |owner| owner.admissible_container),
+        unit.font_size * 0.5,
+    )
 }
 
 fn uniquely_owned_formula_ink(
@@ -3603,6 +3623,48 @@ mod tests {
         let output = r#"<document><page number="1" mediabox="0 0 100 100">
           <fill_text transform="1 0 0 -1 -32.6 100"><span><g unicode="u" x="40" y="40"/><g unicode="v" x="46" y="40"/></span></fill_text>
           <stroke_path linewidth="0.4" transform="1 0 0 -1 7.4 55"><moveto x="0" y="0"/><lineto x="10" y="0"/></stroke_path>
+        </page></document>"#;
+
+        let rigid =
+            formula_rigid_body_integrity_from_traces(&styled, &published, source, output).unwrap();
+        assert_eq!(rigid.checked_formula_units, 1);
+        assert_eq!(rigid.violations, 0);
+    }
+
+    #[test]
+    fn formula_rigid_body_anchor_uses_published_admissible_expansion() {
+        let styled: Il = serde_json::from_value(serde_json::json!({
+            "pages": [{"index": 0, "geometry": {"height": 100.0}, "paragraphs": [{
+                "reading_order": 4,
+                "bounds": {"left": 10.0, "bottom": 20.0, "right": 90.0, "top": 50.0},
+                "text": {"chars": [
+                    {"unicode":"u", "font_size":10.0, "baseline_origin":{"x":40.0,"y":40.0}, "box":{"left":40.0,"bottom":35.0,"right":45.0,"top":45.0}, "layout":{"label":"inline_formula","policy":"passthrough"}},
+                    {"unicode":"v", "font_size":10.0, "baseline_origin":{"x":46.0,"y":40.0}, "box":{"left":46.0,"bottom":35.0,"right":51.0,"top":45.0}, "layout":{"label":"inline_formula","policy":"passthrough"}}
+                ]}
+            }]}]
+        }))
+        .unwrap();
+        let published: Il = serde_json::from_value(serde_json::json!({
+            "pages": [{"index": 0, "geometry": {"height": 100.0}, "paragraphs": [{
+                "reading_order": 4,
+                "bounds": {"left": 10.0, "bottom": 20.0, "right": 90.0, "top": 50.0},
+                "text": {"chars": []},
+                "translated_text": "translated"
+            }]}],
+            "publication_ink": [{
+                "page_index": 0,
+                "reading_order": 4,
+                "admissible_container": {"left": 10.0, "bottom": 5.0, "right": 90.0, "top": 50.0}
+            }]
+        }))
+        .unwrap();
+        let source = r#"<document><page number="1" mediabox="0 0 100 100">
+          <fill_text transform="1 0 0 -1 0 100"><span><g unicode="u" x="40" y="40"/><g unicode="v" x="46" y="40"/></span></fill_text>
+          <stroke_path linewidth="0.4" transform="1 0 0 -1 40 55"><moveto x="0" y="0"/><lineto x="10" y="0"/></stroke_path>
+        </page></document>"#;
+        let output = r#"<document><page number="1" mediabox="0 0 100 100">
+          <fill_text transform="1 0 0 -1 0 130"><span><g unicode="u" x="40" y="40"/><g unicode="v" x="46" y="40"/></span></fill_text>
+          <stroke_path linewidth="0.4" transform="1 0 0 -1 40 85"><moveto x="0" y="0"/><lineto x="10" y="0"/></stroke_path>
         </page></document>"#;
 
         let rigid =

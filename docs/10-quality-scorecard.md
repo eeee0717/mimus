@@ -120,9 +120,12 @@ release an artifact.
 FOR-05 independently checks the positive invariant that a published formula is one rigid body. It
 reconstructs each source unit from formula glyphs plus uniquely associated vector/image ink, then
 accepts the output only when every component is found after the same `(delta_x, delta_y)`. Candidate
-glyph anchors are restricted to the owning paragraph bounds, so an identical formula elsewhere on
-the page cannot satisfy the unit. FOR-04 catches ink abandoned at the source slot; FOR-05 catches a
-missing component or components translated by different deltas even when the old slot is clean.
+glyph anchors are restricted to the unique matching `publication_ink.admissible_container`, expanded
+by `0.5em` for source-glyph side bearings, so an identical formula elsewhere on the page cannot
+satisfy the unit. Missing or duplicate publication evidence falls back to the source paragraph bounds
+only for additive-IL compatibility; INK-01 independently rejects that incomplete ownership evidence.
+FOR-04 catches ink abandoned at the source slot; FOR-05 catches a missing component or components
+translated by different deltas even when the old slot is clean.
 Both rules read the Typeset terminal state, so an ADR-0013 typed paragraph is excluded only after the
 production pass has actually recorded its source-preserving reason; Translate IL alone is not a
 publication-state oracle.
@@ -170,8 +173,10 @@ FOR-04/FOR-05 attribute public MuPDF trace ink only when it satisfies the produc
 formula-cap or row-separator geometry and has exactly one geometric owner among the formula units in
 the same paragraph. Broad neighborhood overlap is not ownership evidence: a rule below an adjacent
 formula or an accent above a different visual line is excluded. The output anchor search includes a
-`0.5em` paragraph-edge ink extent for source glyph side bearings; a candidate still passes only when
-every source formula glyph and every uniquely owned path/image is present under one identical delta.
+`0.5em` ink extent around the unique Write-IL `admissible_container`; a candidate still passes only
+when every source formula glyph and every uniquely owned path/image is present under one identical
+delta. This permits an accepted `multi_line_bounds_expanded` plan to use its published owner instead
+of the narrower source paragraph while retaining the page-wide and cross-paragraph INK-01 checks.
 
 INK-01 closes the final-publication taxonomy independently of the planning implementation:
 
@@ -420,7 +425,7 @@ v0.6.3 reference. The BabelDOC PDF and all paper bytes remain out of the reposit
 | BabelDOC translates the conference footer; mimus leaves it English | mimus `footer` policy is explicit passthrough | coverage | policy-conforming, not a defect |
 | company/author superscripts | mimus changes `Ashish Vaswani* / Google Brain` to `* Ashish Vaswani / 谷歌大脑`; `*`, `†`, `‡` move and affiliation entities change. BabelDOC corrupts Toronto as `†多伦`, so it is corroborating evidence only | OVR-02, major | #125 |
 | author-grid line and column drift | Ashish changes 3 lines to 2, left edge drifts -1.832 pt and height -8.859 pt; Noam email splits at `.`, and Niki/Jakob become one extraction block | LAY-01 / LAY-05, major | #126 |
-| Chinese title/body weight | NotoSansSC variable font renders materially thinner than source/BabelDOC bold text | typesetting style, minor | existing #113 |
+| Chinese title/body weight | Before M3.7, the Noto Sans SC VF defaulted to Thin for Regular; M3.7 pins `wght=400/700` and makes Noto Serif SC the default | typesetting style, minor | resolved by #113 |
 | abstract position | heading source `(283.758,386.532)-(328.243,397.280)`, mimus `(283.758,382.826)-(307.668,397.172)`, BabelDOC `(283.866,384.739)-(307.776,401.906)`; Chinese width change is expected, vertical shifts are measurable | LAY-01, minor candidate | retained in baseline; no new issue pending broader sample |
 | page 13 attention heading | mimus and BabelDOC left/right/bottom match; top differs 0.48 pt at 150 DPI; figure and rotated labels remain intact | LAY-01, minor | accepted render quantization, no defect |
 

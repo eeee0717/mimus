@@ -5,6 +5,8 @@
 - 修订：2026-08-30 补充数字串尾、相邻公式原子链与源 radical 附着合同
 - 修订：2026-08-31 补充公式矢量/inline-image 墨迹所有权、源槽残留门禁，以及跨提取段
   radical 的整段唯一视觉归属合同
+- 修订：2026-09-03 补充发布后公式 owner 必须以唯一 `publication_ink`
+  `admissible_container` 证据界定，并与整页/跨段 INK-01 门禁独立
 
 ## 背景
 
@@ -94,6 +96,20 @@ relocation 才闭合该 scope、中和源程序并以同一 delta 重放。Types
 前还要执行通用源槽残留墨迹 oracle：已改写字符槽附近、未被同一计划认领且不属于保留
 内容的路径或 inline image 会使整段 typed 保留。更宽的表格线、下划线和装饰线不得仅因
 接近公式被吸入刚体；所有权证据不足时选择保留，而不是猜测。
+
+### 4.2 发布 owner 与独立墨迹门禁
+
+合法的 `multi_line_bounds_expanded` 计划可把整个公式刚体移到原段框之外，但仍在生产
+规划器已接受的 owner 内。Write IL 因此必须对每个非 identity 发布段输出唯一
+`publication_ink` 记录，其 `admissible_container` 是 FOR-05 搜索该公式输出锚的所有权
+边界。搜索可向外扩 `0.5em` 吸收源字形 side bearing，但候选刚体的每个文字、
+路径和图像组件仍必须共享同一页空间 delta。缺失或重复的发布记录只允许评分器
+为兼容旧 additive IL 回退到源段框；对当前产物，这同时是独立 INK-01 证据不完整违例。
+
+`admissible_container` 不是放宽几何。生产规划仍先执行 8 pt、CropBox、保留墨迹和非 owner
+layout region 门禁；发布后 INK-01 仍在整页核对每个组件的容器内包含、跨段碰撞
+与保留 path/image 碰撞。FOR-05 只据此避免把一个已合法下移约 `0.99em` 的刚体
+误报为丢失，不改变 FOR-04 源槽残留判定。
 
 ### 5. 公式单元边界
 
