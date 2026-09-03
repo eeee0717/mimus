@@ -1647,7 +1647,8 @@ fn apply_title_author_passthrough(paragraphs: &mut [Paragraph]) {
     };
 
     for paragraph in paragraphs {
-        if !paragraph_has_only_label(paragraph, LayoutLabel::Text)
+        if !(paragraph_has_only_label(paragraph, LayoutLabel::Text)
+            || paragraph_has_only_label(paragraph, LayoutLabel::FallbackLine))
             || !band.contains(paragraph.bounds.bottom, paragraph.bounds.top)
         {
             continue;

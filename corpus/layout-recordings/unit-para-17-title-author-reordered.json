@@ -25,20 +25,6 @@
           "label": "text",
           "source": "model",
           "confidence": 1.0
-        },
-        {
-          "bounds": { "left": 135.0, "bottom": 116.0, "right": 165.0, "top": 132.0 },
-          "reading_order": 11,
-          "label": "text",
-          "source": "model",
-          "confidence": 1.0
-        },
-        {
-          "bounds": { "left": 175.0, "bottom": 116.0, "right": 200.0, "top": 132.0 },
-          "reading_order": 12,
-          "label": "text",
-          "source": "model",
-          "confidence": 1.0
         }
       ]
     }

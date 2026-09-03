@@ -2707,13 +2707,26 @@ fn page_zero_author_geometry_ignores_reading_order_and_excludes_outside_body() {
         .as_array()
         .unwrap();
 
-    for author_order in [11, 12] {
-        let author = paragraphs
-            .iter()
-            .find(|paragraph| {
-                paragraph["text"]["chars"][0]["layout"]["reading_order"] == author_order
-            })
-            .unwrap();
+    let abstract_order = paragraphs
+        .iter()
+        .find(|paragraph| paragraph["text"]["chars"][0]["layout"]["label"] == "abstract")
+        .unwrap()["reading_order"]
+        .as_u64()
+        .unwrap();
+    let authors = paragraphs
+        .iter()
+        .filter(|paragraph| {
+            paragraph["text"]["chars"][0]["layout"]["label"] == "fallback_line"
+                && paragraph["bounds"]["bottom"].as_f64().unwrap() > 112.0
+                && paragraph["bounds"]["top"].as_f64().unwrap() < 136.0
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(authors.len(), 2, "{paragraphs:#?}");
+    for author in authors {
+        assert!(
+            author["reading_order"].as_u64().unwrap() > abstract_order,
+            "fallback authors must follow the model abstract in reading order: {author:#?}"
+        );
         assert!(
             author["text"]["chars"]
                 .as_array()

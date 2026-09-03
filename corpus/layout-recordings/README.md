@@ -25,6 +25,7 @@ changing the existing Corpus production baseline.
 
 `unit-para-17-title-author-reordered.json` is the generated author-column fixture's adjudicated
 policy overlay for the page-zero geometry regression. Its abstract has model order 2 while the two
-author regions have orders 11 and 12; a separate `text` region lies geometrically above the title
-band. This proves author protection and its negative boundary without treating reading order as
+author regions are deliberately absent from model output and become trailing `fallback_line`
+paragraphs; a separate model `text` region lies geometrically above the title band. This proves
+author protection and its negative boundary without treating reading order or model ownership as
 the author-block delimiter.

@@ -289,7 +289,7 @@ The shared geometric definition ignores paragraph index and model reading order.
 the page-0 `doc_title` paragraph is the upper anchor. The nearest geometrically lower `abstract` or
 `paragraph_title` paragraph supplies its top edge as the lower anchor. The band extends by half the
 median positive font size across both anchors on each side, a line-height-scale tolerance reported
-as `band_tolerance`; only `text` paragraphs whose full bounds lie inside the resulting
+as `band_tolerance`; only textual `text` or `fallback_line` paragraphs whose full bounds lie inside the resulting
 `band_lower`/`band_upper` interval belong to the author block. Production passthrough and STR-05
 call the same `mimus-quality-contract::title_author_band` function. A missing/reversed anchor or
 missing anchor font-size evidence remains not applicable rather than widening the band.

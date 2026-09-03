@@ -2360,7 +2360,7 @@ fn title_author_conservation(before: &Il, write: &Il) -> Option<TitleAuthorConse
         .paragraphs
         .iter()
         .filter(|paragraph| {
-            has_only_label(paragraph, "text")
+            (has_only_label(paragraph, "text") || has_only_label(paragraph, "fallback_line"))
                 && band.contains(paragraph.bounds.bottom, paragraph.bounds.top)
         })
         .collect::<Vec<_>>();
@@ -3848,8 +3848,8 @@ mod tests {
                 test_paragraph_at(1, "text", "passthrough", "email@example.com", 70.0),
                 test_paragraph_at(2, "abstract", "translate", "Abstract", 30.0),
                 test_paragraph_at(3, "text", "translate", "Body outside band", 10.0),
-                test_paragraph_at(11, "text", "translate", "Author names", 60.0),
-                test_paragraph_at(12, "text", "translate", "Institution", 50.0)
+                test_paragraph_at(11, "fallback_line", "translate", "Author names", 60.0),
+                test_paragraph_at(12, "fallback_line", "translate", "Institution", 50.0)
             ]}]
         }))
         .unwrap();
