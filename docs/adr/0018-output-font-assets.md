@@ -64,11 +64,17 @@ test output fonts, and production output assets consequently need distinct owner
 
 ## Production manifest
 
-The primary slots remain the pinned Noto Sans SC 2.004 variable subset already used to derive the
-corpus fixtures. Both logical weights map to that one SHA-256-pinned variable font and cache entry.
+The primary slots use the pinned Noto Serif SC 2.001 variable subset from noto-cjk commit
+`523d033d6cb47f4a80c58a35753646f5c3608a78`, path
+`Serif/Variable/TTF/Subset/NotoSerifSC-VF.ttf`, SHA-256
+`69467baf421bdbb32b292d6c092ed033ca32e5f7a0d06194e69901287b50b2f3`, and cache directory
+`fonts/noto-serif-sc-2.001/`. Both logical weights map to that one variable font and cache entry.
 Regular resolves its named `wght=400` instance while Bold resolves its named `wght=700` instance.
 The resulting static PDF subsets therefore carry distinct, metric-consistent outlines without
-duplicating the downloaded asset.
+duplicating the downloaded asset. Noto Serif SC is the default because its serif construction
+matches the Times-like body typography common in academic papers. Noto Sans SC remains available
+through `--font` and `--font-bold`; this changes neither resolution precedence nor cache-key
+semantics.
 
 The 2026-08-27 L5 run exposed seven translated paragraphs containing `U+2217 ASTERISK OPERATOR`,
 `U+0141 LATIN CAPITAL LETTER L WITH STROKE`, or `U+03F5 GREEK LUNATE EPSILON SYMBOL`. Noto Sans

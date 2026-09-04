@@ -1,10 +1,9 @@
 # M3 scorecard v2 baseline
 
-Date: 2026-08-30, refreshed 2026-09-01. Schema: scorecard v2. Thresholds remain proposals pending
+Date: 2026-08-30, refreshed 2026-09-03. Schema: scorecard v2. Thresholds remain proposals pending
 user approval. The 20-paper cluster rows in Sections 1-3 preserve an `invalid-profile` historical
-run and are not comparable with a conserving baseline. Sections 4-7 retain separate real-anchor,
-process, and acceptance history. Section 8 is the current 20-paper conserving-fake and closed-cache
-anchor baseline.
+run and are not comparable with a conserving baseline. Sections 4-8 retain separate real-anchor,
+process, acceptance, and pre-M3.7 history. Section 9 is the current Noto Serif SC 2.001 baseline.
 
 ## 1. Historical evidence and conclusion (cluster `invalid-profile`)
 
@@ -320,3 +319,131 @@ but was not adopted as a separate baseline; the final default and `--bilingual` 
 maximum 2 pt and no unexplained inline hole. Its score and PDF bytes change because the final policy
 and variable-font layers are active; the cache key remains font-independent, as proved by the same
 108 immutable-cache hits.
+
+## 9. M3.7 Noto Serif SC baseline (accepted 2026-09-03)
+
+The user selected Noto Serif SC 2.001 as the production default. The asset is the variable TTF at
+noto-cjk commit `523d033d6cb47f4a80c58a35753646f5c3608a78`, path
+`Serif/Variable/TTF/Subset/NotoSerifSC-VF.ttf`, size 25,139,544 bytes, SHA-256
+`69467baf421bdbb32b292d6c092ed033ca32e5f7a0d06194e69901287b50b2f3`, and cache directory
+`fonts/noto-serif-sc-2.001/`. It was fetched once from the corresponding raw GitHub URL. Noto Sans
+SC remains selectable through `--font` and `--font-bold`.
+
+Regular and Bold resolve the exact named instances when present, otherwise clamped `wght=400/700`.
+For `U+4E00`, the full variable-font default ExtraLight bounds are `[53,401,953,505]`, the resolved
+Regular bounds are `[47,397,958,514]`, and the embedded Regular subset bounds are
+`[48,398,959,514]`. `pdffonts` reports `NotoSerifSC-Regular` and `NotoSerifSC-Bold` for the final BERT
+artifact.
+
+### 9.1 Closed-cache BERT replay
+
+The immutable M3.6 cache SHA-256 is
+`7def75b43ed17ab3b909e152f6abdffacdfa28d4f52f104c384714e58fef2c5d`. The adjudicated dev-only
+migration copied its unique `extracted_glossaries_v1` value to the new production-computed key in a
+writable cache copy. The deliverable `05-bert-m3-7-author-geometry.redb` has SHA-256
+`e9b9c11d25a8ba2ed91b3c02961c88820f0e6aa58bdbf4fc889cf697b039a797`; its provenance sidecar has
+SHA-256 `9727e547e5393c5231de70678d94206ca2599e3e1954c132551e9702a7f79648` and records
+`model_calls: 0`.
+
+The final replay used default cache-resolved fonts, model `m35-proxy-model`, auto terms enabled, and
+the confirmed-closed endpoint `http://127.0.0.1:9/v1`. It published with 197 cache hits, zero misses,
+zero transport failures, and zero model calls. Page-zero reading orders 11 and 12 remain source
+identity as `Jacob Devlin Ming-Wei Chang Kenton Lee Kristina Toutanova` and `Google AI Language`.
+The full Translate IL is byte-identical to the adjudication-validated migrated replay; only those two
+requests were removed relative to M3.6. The final PDF SHA-256 is
+`bb485d9ba02760934b5a5412f76f6a8b7b0ea2025d0cce0bcd281a559b5989fa`.
+
+| Measurement | Final BERT |
+| --- | ---: |
+| scorecard v2 total | 97.502090 |
+| conclusion | `automatic_score_only` |
+| typed rows | 14 |
+| CON-01 | 380/380 |
+| FOR-01 proxy | 3 |
+| FOR-02 / FOR-03 | 1 / 1 |
+| FOR-04 orphan source ink | 0/21 |
+| FOR-05 rigid-body integrity | 0/0 |
+| INK-01 | 0/181 publications; 870 components |
+| STR-05 title/author failures | 0 |
+
+### 9.2 Final 20-paper conserving-fake matrix
+
+`Ink` is FOR-04 and `Rigid` is FOR-05. The matrix comes from the accepted run after FOR-05 began
+using the unique Write-IL `admissible_container`; scores from the earlier false-positive run are not
+the baseline.
+
+| Paper | Producer | v2 | Typed | Con | Formula | Gap | Hole | Ink | Rigid | T/A |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 01 Adam | pdfTeX | 90.886015 | 556 | 1.000000 | 80 | 0 | 0 | 0 | 0 | 0 |
+| 02 ResNet | pdfTeX | 98.308487 | 22 | 1.000000 | 8 | 0 | 0 | 0 | 0 | 0 |
+| 03 SqueezeNet | pdfTeX | 94.674860 | 40 | 1.000000 | 11 | 0 | 0 | 0 | 0 | 0 |
+| 04 MobileNets | pdfTeX | 98.483401 | 4 | 1.000000 | 5 | 1 | 1 | 0 | 0 | 0 |
+| 05 BERT | pdfTeX | 97.186985 | 8 | 1.000000 | 3 | 1 | 1 | 0 | 0 | 0 |
+| 06 DDPM | pdfTeX | 95.734756 | 85 | 1.000000 | 48 | 0 | 0 | 0 | 0 | 0 |
+| 07 ViT | pdfTeX | 98.873281 | 25 | 1.000000 | 2 | 0 | 0 | 0 | 0 | 0 |
+| 08 LoRA | pdfTeX | 96.345861 | 26 | 1.000000 | 39 | 0 | 0 | 0 | 0 | 0 |
+| 09 Repliable onion routing | XeTeX | 87.242840 | 1,114 | 1.000000 | 274 | 16 | 16 | 0 | 0 | 0 |
+| 10 Compact IBE | XeTeX | 91.915119 | 106 | 1.000000 | 89 | 1 | 1 | 2 | 0 | 0 |
+| 11 SDitH hardware | XeTeX | 95.520313 | 72 | 1.000000 | 63 | 1 | 1 | 0 | 0 | 0 |
+| 12 Hertz side channel | XeTeX | 90.206650 | 35 | 1.000000 | 84 | 11 | 11 | 0 | 0 | 0 |
+| 13 Information-theoretic MPC | LuaTeX | 94.883171 | 32 | 1.000000 | 38 | 18 | 18 | 0 | 0 | 0 |
+| 14 Masked comparisons | LuaTeX | 95.905461 | 44 | 1.000000 | 39 | 0 | 0 | 0 | 0 | 0 |
+| 15 LWE two-step | LuaTeX | 90.109823 | 126 | 1.000000 | 127 | 5 | 5 | 0 | 0 | 0 |
+| 16 Supersingular orientations | LuaTeX | 83.776234 | 173 | 1.000000 | 178 | 5 | 5 | 0 | 0 | 0 |
+| 17 Informational consciousness | Word | 95.457662 | 24 | 1.000000 | 0 | 0 | 0 | 0 | 0 | 0 |
+| 18 Consciousness model | Word | 91.149963 | 85 | 1.000000 | 16 | 18 | 18 | 0 | 0 | 0 |
+| 19 Multibeam IoT | Word | 90.772033 | 50 | 1.000000 | 2 | 1 | 1 | 0 | 0 | 0 |
+| 20 Tuberculosis biosensor | Word | 96.832673 | 0 | 1.000000 | 1 | 2 | 2 | 0 | 0 | 0 |
+
+All 20 papers publish and `Internal/6` is zero. The cluster typed median is 42 and the worst is
+1,114. Producer strata are:
+
+| Producer | Papers | Published | Internal/6 | Typed median | Typed worst |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| pdfTeX | 8 | 8/8 | 0 | 25.5 | 556 |
+| XeTeX | 4 | 4/4 | 0 | 89.0 | 1,114 |
+| LuaTeX | 4 | 4/4 | 0 | 85.0 | 173 |
+| Word | 4 | 4/4 | 0 | 37.0 | 85 |
+
+The primary run accepted 3,251 conserving responses; the two deterministic reruns bring the log to
+3,663 requests. Every request names `m3-118-conserving-fake-v1`, no term-extraction request was made,
+and no real provider was used. Aggregate CON-01 is **7,151/7,151**. FOR-04 remains the same two
+accepted paper-10 findings, now 2/2,418 with no new row. FOR-05 is 0/46, INK-01 is zero across 2,972
+published paragraphs and 9,803 components, and STR-05 has zero failures. FOR-02/FOR-03 report 80/80
+mechanical findings.
+
+The accepted run has 160 `typeset_overflow` rows. It removes seven from the initial Serif run and
+adds none; relative to the Sans control it removes eight and adds seven, for one fewer in aggregate.
+The 8 pt floor, collision, CropBox, FOR-04/FOR-05, and INK-01 contracts are unchanged. ResNet is
+byte-identical across reruns at
+`4d21d06d90c1a4cf70e2412727d7c1b9fc53e57a85229d3acf9f9272722a7dcf`; Repliable onion routing is
+byte-identical at `6dbf6f14262d5120b0b9bd77d065d34b930cfea0b326783f45127bfaa2597870`.
+
+The FOR-05 correction is an evaluator ownership fix, not a production relaxation. Supersingular
+orientations page 5/order 4 moved the complete formula and its fraction rule by approximately
+`(-10.2071, -10.2849) pt`; its unchanged output SHA-256 is
+`f802f8e34cfb18f68948caa2e275830eb2943835d81c6393e1114a123b8c4032`. The source paragraph plus
+`0.5em` window was narrower than the accepted `multi_line_bounds_expanded` owner, so the old
+scorecard reported one false FOR-05 violation. The unique published `admissible_container` removes
+that false positive while independent CON, FOR-04, INK-01, and STR-05 results remain unchanged.
+
+### 9.3 Re-anchored real replay
+
+The accepted immutable cache remains
+`e5e825564ff2166c672db271c48745b1e467057ab8be09d51f4adca14f58e94c`. With the archived 96-entry
+glossary (`abc661f7ab8a80209e05adccf3cbf56418cf710a9fb0eddebe8945c9c001705a`) and the closed endpoint,
+default and bilingual modes each hit 108 entries with zero misses, transport failures, retries, or
+provider calls. The new outputs are:
+
+- default: `eea884d23484ff6a1336cc0c1c1c1ada60bfc593173ccc442dec75ef0e9e2ab7`;
+- bilingual: `1901f9ce2fecc7fb524dd7c9051f9aca18dc4afa631d9f0f846c82918331912a`.
+
+The default score is 97.626297 with the same two typed rows, CON-01 161/161, FOR-01 6,
+FOR-02/FOR-03 0/0, FOR-04 0/71, FOR-05 0/4, INK-01 zero across 107 publications and 348 components,
+and STR-05 zero. Default and bilingual page counts are 15 and 30; `qpdf --check` passes both.
+
+The out-of-repository page-one abstract comparison is
+`.context/m3-7/comparison/m3-7-final-compare-abstract.png`, SHA-256
+`9cbbe2dcf3eb50fd56491ccb6f9ad0f1ae02aad65036878a05ab58469fe03cb9`. Its left-to-right panels are
+the old Thin default, explicit Sans 400, final Serif output, and BabelDOC Source Han Serif reference,
+all rendered at 150 DPI over the same crop.

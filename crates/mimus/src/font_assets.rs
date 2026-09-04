@@ -11,7 +11,8 @@ use crate::config::FontPathSelection;
 
 const MAX_FONT_BYTES: u64 = 64 * 1024 * 1024;
 const NOTO_COMMIT: &str = "523d033d6cb47f4a80c58a35753646f5c3608a78";
-const NOTO_SC_VF_SHA256: &str = "d68bafcb48a2707749396aa12bbbd833cb70401f3a9a689fd2902c7e0d295964";
+const NOTO_SERIF_SC_VF_SHA256: &str =
+    "69467baf421bdbb32b292d6c092ed033ca32e5f7a0d06194e69901287b50b2f3";
 const MATPLOTLIB_TAG: &str = "v3.11.1";
 const DEJAVU_REGULAR_SHA256: &str =
     "3fdf69cabf06049ea70a00b5919340e2ce1e6d02b0cc3c4b44fb6801bd1e0d22";
@@ -53,7 +54,7 @@ pub(crate) fn resolve_fonts(
 
 fn production_manifest() -> FontManifest {
     let url = format!(
-        "https://raw.githubusercontent.com/notofonts/noto-cjk/{NOTO_COMMIT}/Sans/Variable/TTF/Subset/NotoSansSC-VF.ttf"
+        "https://raw.githubusercontent.com/notofonts/noto-cjk/{NOTO_COMMIT}/Serif/Variable/TTF/Subset/NotoSerifSC-VF.ttf"
     );
     let fallback_url = |filename: &str| {
         format!(
@@ -62,14 +63,14 @@ fn production_manifest() -> FontManifest {
     };
     FontManifest {
         regular: FontDescriptor {
-            filename: "NotoSansSC-VF.ttf",
+            filename: "NotoSerifSC-VF.ttf",
             url: url.clone(),
-            sha256: NOTO_SC_VF_SHA256,
+            sha256: NOTO_SERIF_SC_VF_SHA256,
         },
         bold: FontDescriptor {
-            filename: "NotoSansSC-VF.ttf",
+            filename: "NotoSerifSC-VF.ttf",
             url,
-            sha256: NOTO_SC_VF_SHA256,
+            sha256: NOTO_SERIF_SC_VF_SHA256,
         },
         fallback_regular: FontDescriptor {
             filename: "DejaVuSans-2.35.ttf",
@@ -375,6 +376,21 @@ mod tests {
     fn pdf_font_names_are_restricted_to_safe_name_characters() {
         assert_eq!(sanitize_pdf_name("Noto Sans SC/Bold"), "NotoSansSCBold");
         assert_eq!(sanitize_pdf_name("[]"), "MimusOutput");
+    }
+
+    #[test]
+    fn production_manifest_pins_noto_serif_sc_for_both_primary_slots() {
+        let manifest = production_manifest();
+        for descriptor in [&manifest.regular, &manifest.bold] {
+            assert_eq!(descriptor.filename, "NotoSerifSC-VF.ttf");
+            assert_eq!(descriptor.sha256, NOTO_SERIF_SC_VF_SHA256);
+            assert_eq!(
+                descriptor.url,
+                format!(
+                    "https://raw.githubusercontent.com/notofonts/noto-cjk/{NOTO_COMMIT}/Serif/Variable/TTF/Subset/NotoSerifSC-VF.ttf"
+                )
+            );
+        }
     }
 
     #[test]

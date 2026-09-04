@@ -17,6 +17,20 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
 ```
 
+## Output fonts
+
+Translated text defaults to the SHA-pinned Noto Serif SC variable font (宋体), with Regular and
+Bold instantiated at `wght=400` and `wght=700`. To use a sans-serif/黑体 face instead, provide its
+Regular and Bold slots explicitly; one variable font may serve both:
+
+```sh
+mimus translate --font /path/to/NotoSansSC-VF.ttf \
+  --font-bold /path/to/NotoSansSC-VF.ttf input.pdf
+```
+
+The existing flag, environment, config, cache, and asset-mirror precedence is unchanged. DejaVu
+Sans 2.35 remains the fallback for characters absent from the primary CJK font.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
