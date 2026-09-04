@@ -1,0 +1,154 @@
+name: Release archives
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - Cargo.lock
+      - Cargo.toml
+      - crates/mimus/**
+      - crates/mimus-core/**
+      - crates/mimus-quality-contract/**
+      - release/**
+      - scripts/release/**
+      - LICENSE
+      - THIRD_PARTY_NOTICES
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            os: macos-15
+            rust_target: aarch64-apple-darwin
+            pdfium_archive: pdfium-mac-arm64.tgz
+            pdfium_sha256: b1f2f17c7432a9942514dda5094ee9822c743bdfd07e7187725efbd34fde941f
+            pdfium_library_path: lib/libpdfium.dylib
+            pdfium_library_name: libpdfium.dylib
+            pdfium_library_sha256: cfab7b27942132aea1a1ff7ff42ce970c39f7d928c1fc317ea99d3bfa3a43d0c
+            archive_format: tar.gz
+          - platform: macos-x64
+            os: macos-15-intel
+            rust_target: x86_64-apple-darwin
+            pdfium_archive: pdfium-mac-x64.tgz
+            pdfium_sha256: e0afb6905e97438a9159aaa5b6c4fe188d97a7e3be05dc4782422c3ca7e1ce1a
+            pdfium_library_path: lib/libpdfium.dylib
+            pdfium_library_name: libpdfium.dylib
+            pdfium_library_sha256: 52531418840ca9ce4e72bf400c2d6d7399ea984a32d2aa3e509271b3988c5614
+            archive_format: tar.gz
+          - platform: linux-x64
+            os: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-gnu
+            pdfium_archive: pdfium-linux-x64.tgz
+            pdfium_sha256: be513e8021a5bf8eb2116e00d78c3bacb82c5a02b3785156ae14fe5e33084385
+            pdfium_library_path: lib/libpdfium.so
+            pdfium_library_name: libpdfium.so
+            pdfium_library_sha256: 601372e82c3ee834b8ca673408cc2a4fbe6a3e599f375179533da22bfee9b869
+            archive_format: tar.gz
+          - platform: windows-x64
+            os: windows-2022
+            rust_target: x86_64-pc-windows-msvc
+            pdfium_archive: pdfium-win-x64.tgz
+            pdfium_sha256: c78a8cd51b48abafcb266d868e401afefda1d189aa01ebbe743dc1d144e06031
+            pdfium_library_path: bin/pdfium.dll
+            pdfium_library_name: pdfium.dll
+            pdfium_library_sha256: 3aabcd60cec7c2bae8e40d63110b6b53dfe657015f268496fdf9ef9460cbe4d5
+            archive_format: zip
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add "${{ matrix.rust_target }}"
+
+      - name: Build, audit, and smoke test archive
+        shell: bash
+        env:
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+          RUST_TARGET: ${{ matrix.rust_target }}
+          PDFIUM_ARCHIVE: ${{ matrix.pdfium_archive }}
+          PDFIUM_ARCHIVE_SHA256: ${{ matrix.pdfium_sha256 }}
+          PDFIUM_LIBRARY_PATH: ${{ matrix.pdfium_library_path }}
+          PDFIUM_LIBRARY_NAME: ${{ matrix.pdfium_library_name }}
+          PDFIUM_LIBRARY_SHA256: ${{ matrix.pdfium_library_sha256 }}
+          ARCHIVE_FORMAT: ${{ matrix.archive_format }}
+        run: scripts/release/package.sh
+
+      - name: Upload validated archive evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mimus-${{ matrix.platform }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+            dist/*-dependencies.txt
+            dist/*-inspect.ndjson
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  checksums:
+    name: Verify combined checksums
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: mimus-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify archives and create SHA256SUMS
+        run: |
+          find dist -maxdepth 1 -type f -name '*.sha256' -print0 \
+            | sort -z \
+            | xargs -0 cat > dist/SHA256SUMS
+          cd dist
+          sha256sum --check SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mimus-checksums
+          path: dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish tagged release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: checksums
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: mimus-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create release and upload archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            dist/*.tar.gz dist/*.zip dist/SHA256SUMS
