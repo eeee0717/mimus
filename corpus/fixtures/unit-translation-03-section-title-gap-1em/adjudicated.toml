@@ -12,11 +12,11 @@
 # 坐标一律在 PDF 页面空间：单位 pt、原点左下、/Rotate 之前（§2.2）。
 
 schema_version = 1
-fixture = "unit-translation-01-section-title-number"
+fixture = "unit-translation-03-section-title-gap-1em"
 tolerance_pt = 0.001000
 
 [[render]]
 page = 0
 dpi = 150
-poppler_sha256 = "667c2871ea305e2a8005aacc3058127972af0e0081072fa4c0feb9eb62ae214f"
-mutool_md5 = "7d7d42528d74f712aeb90fb98e422620"
+poppler_sha256 = "da12b588e1aaf85958f422e351074db6dfebffd609695e32e53cb067eca39f7e"
+mutool_md5 = "ff398f19dfc5d483ba1b7f17559f2ae8"

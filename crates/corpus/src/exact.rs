@@ -80,7 +80,37 @@ pub fn generate(fixture_id: &str, repo_root: &Path) -> Result<Vec<u8>> {
             repo_root,
             300,
             220,
-            b"BT\n/F1 12 Tf\n1 0 0 1 125 195 Tm\n(MIMUS) Tj\n1 0 0 1 108 195 Tm\n(I) Tj\nET\n",
+            b"BT\n/F1 12 Tf\n1 0 0 1 125 195 Tm\n[(MIMUS) 4804.666667 (I)] TJ\nET\n",
+        ),
+        "unit-translation-03-section-title-gap-1em" => section_title_standard(
+            fixture_id,
+            repo_root,
+            b"BT\n/F1 12 Tf\n1 0 0 1 125 195 Tm\n[(MIMUS) 5024 (1)] TJ\nET\n",
+        ),
+        "unit-translation-04-section-title-gap-half-em" => section_title_standard(
+            fixture_id,
+            repo_root,
+            b"BT\n/F1 12 Tf\n1 0 0 1 125 195 Tm\n[(MIMUS) 4524 (1)] TJ\nET\n",
+        ),
+        "unit-translation-05-section-title-multilevel" => section_title_standard(
+            fixture_id,
+            repo_root,
+            b"BT\n/F1 12 Tf\n1 0 0 1 125 195 Tm\n[(MIMUS) 6932 (3.2.1)] TJ\nET\n",
+        ),
+        "unit-translation-06-section-title-roman-iv" => section_title_standard(
+            fixture_id,
+            repo_root,
+            b"BT\n/F1 12 Tf\n1 0 0 1 125 195 Tm\n[(MIMUS) 5367 (IV)] TJ\nET\n",
+        ),
+        "unit-translation-07-section-title-explicit-space" => section_title_standard(
+            fixture_id,
+            repo_root,
+            b"BT\n/F1 12 Tf\n1 0 0 1 125 195 Tm\n[(MIMUS) 5342 (1 )] TJ\nET\n",
+        ),
+        "unit-translation-08-section-title-gap-over-threshold" => section_title_standard(
+            fixture_id,
+            repo_root,
+            b"BT\n/F1 12 Tf\n1 0 0 1 125 195 Tm\n[(MIMUS) 6524 (1)] TJ\nET\n",
         ),
         "unit-translation-02-whitespace-identity" => basic_text(
             fixture_id,
@@ -578,6 +608,25 @@ fn basic_text_with_page_size(
     )?;
     pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
     pdf.stream(b"/Type /CMap", operator_walk_to_unicode())?;
+    pdf.stream(b"", content)?;
+    pdf.finish(1)
+}
+
+fn section_title_standard(fixture_id: &str, repo_root: &Path, content: &[u8]) -> Result<Vec<u8>> {
+    let font = pinned_section_font(repo_root)?;
+    let mut pdf = RawPdf::new(fixture_id);
+    pdf.object(b"<< /Type /Catalog /Pages 2 0 R >>")?;
+    pdf.object(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")?;
+    pdf.object(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 220] /Resources 4 0 R /Contents 9 0 R >>",
+    )?;
+    pdf.object(b"<< /Font << /F1 5 0 R >> >>")?;
+    pdf.object(section_font_dictionary(8).as_bytes())?;
+    pdf.object(
+        b"<< /Type /FontDescriptor /FontName /MIMUSS+DejaVuSans /Flags 32 /FontBBox [-3 -15 766 743] /ItalicAngle 0 /Ascent 928 /Descent -236 /CapHeight 729 /StemV 80 /MissingWidth 600 /FontFile2 7 0 R >>",
+    )?;
+    pdf.stream(format!("/Length1 {}", font.len()).as_bytes(), &font)?;
+    pdf.stream(b"/Type /CMap", section_title_to_unicode())?;
     pdf.stream(b"", content)?;
     pdf.finish(1)
 }
@@ -2279,6 +2328,8 @@ fn free_object_slot(repo_root: &Path) -> Result<Vec<u8>> {
 }
 
 const FONT_SHA256: &str = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735";
+const SECTION_FONT_SHA256: &str =
+    "2159223903d2e878dee8e30593c75e36fb165cb6308943954583776a05fda5d1";
 const CJK_FONT_SHA256: &str = "a1677185f15e59c1ccb25e0fb320ab23d3a34d27649496eff089df41e27074ac";
 
 fn pinned_font(repo_root: &Path) -> Result<Vec<u8>> {
@@ -2288,6 +2339,18 @@ fn pinned_font(repo_root: &Path) -> Result<Vec<u8>> {
     ensure!(
         hash::of_bytes(&bytes) == FONT_SHA256,
         "pinned exact-fixture font SHA-256 changed: {}",
+        path.display()
+    );
+    Ok(bytes)
+}
+
+fn pinned_section_font(repo_root: &Path) -> Result<Vec<u8>> {
+    let path = repo_root.join("corpus/fonts/MimusSection.ttf");
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("read pinned section-title fixture font {}", path.display()))?;
+    ensure!(
+        hash::of_bytes(&bytes) == SECTION_FONT_SHA256,
+        "pinned section-title fixture font SHA-256 changed: {}",
         path.display()
     );
     Ok(bytes)
@@ -2364,6 +2427,34 @@ fn font_dictionary_with_descriptor(to_unicode_object: u32, descriptor_object: u3
     )
 }
 
+fn section_font_dictionary(to_unicode_object: u32) -> String {
+    let mut widths = [0_u16; 55];
+    for (code, width) in [
+        (32_u8, 318_u16),
+        (46, 318),
+        (49, 636),
+        (50, 636),
+        (51, 636),
+        (73, 295),
+        (77, 863),
+        (83, 635),
+        (85, 732),
+        (86, 684),
+    ] {
+        widths[usize::from(code - 32)] = width;
+    }
+    let widths = widths
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "<< /Type /Font /Subtype /TrueType /BaseFont /MIMUSS+DejaVuSans \
+         /FirstChar 32 /LastChar 86 /Widths [{widths}] /FontDescriptor 6 0 R \
+         /Encoding /WinAnsiEncoding /ToUnicode {to_unicode_object} 0 R >>"
+    )
+}
+
 fn font_dictionary_without_widths(to_unicode_object: u32) -> String {
     format!(
         "<< /Type /Font /Subtype /TrueType /BaseFont /MIMUSI+DejaVuSans \
@@ -2417,6 +2508,34 @@ endcodespacerange\n\
 <53> <0053>\n\
 <54> <0054>\n\
 <55> <0055>\n\
+endbfchar\n\
+endcmap\n\
+CMapName currentdict /CMap defineresource pop\n\
+end\n\
+end\n"
+}
+
+fn section_title_to_unicode() -> &'static [u8] {
+    b"/CIDInit /ProcSet findresource begin\n\
+12 dict begin\n\
+begincmap\n\
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+/CMapName /MimusSection-UCS def\n\
+/CMapType 2 def\n\
+1 begincodespacerange\n\
+<00> <FF>\n\
+endcodespacerange\n\
+10 beginbfchar\n\
+<20> <0020>\n\
+<2E> <002E>\n\
+<31> <0031>\n\
+<32> <0032>\n\
+<33> <0033>\n\
+<49> <0049>\n\
+<4D> <004D>\n\
+<53> <0053>\n\
+<55> <0055>\n\
+<56> <0056>\n\
 endbfchar\n\
 endcmap\n\
 CMapName currentdict /CMap defineresource pop\n\

@@ -1,0 +1,159 @@
+# unit-translation-08-section-title-gap-over-threshold -- expected manifest
+# Pinned DejaVu Sans widths and ink boxes are applied at 12pt. The title is painted
+# first inside one TJ operand; the leading digit is separated by 2.5em.
+
+schema_version = 1
+
+[identity]
+id = "unit-translation-08-section-title-gap-over-threshold"
+name = "Section number beyond the retention threshold"
+class = "unit"
+legality = "legal"
+cases = ["TRANS-01"]
+priority = "M3"
+variable = "A one-level Arabic section number is separated from its title by 2.5em, beyond the existing 2.0em retention threshold"
+
+[source]
+method = "exact-writer"
+generator = "corpus-exact-writer-v1"
+pdf = "unit-translation-08-section-title-gap-over-threshold.pdf"
+pdf_sha256 = "e251dc1b55bdde1bb6ec503c87af585310006a6b289c7d71b9e025b2c7a39f7d"
+font_provenance = "vendored"
+fonts = [
+    { file = "../../fonts/MimusSection.ttf", sha256 = "2159223903d2e878dee8e30593c75e36fb165cb6308943954583776a05fda5d1", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSS", base_name = "DejaVuSans" },
+]
+
+[[page]]
+index = 0
+media_box = [0.0, 0.0, 300.0, 220.0]
+rotate = 0
+
+[expected]
+geometry_source = "hand-written"
+tolerance_pt = 0.001
+visual_tolerance_pt = 0.01
+
+[expected.pdf]
+version = "1.7"
+header_prefix_hex = "255044462d312e370a25e2e3cfd30a"
+object_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+root_object = 1
+xref_kind = "table"
+trailer_id_hex = "756e69742d7472616e736c6174696f6e"
+info_dictionary = false
+metadata_streams = 0
+
+[expected.structure]
+pages = 1
+blocks = 6
+columns = 1
+bookmarks = 0
+bookmark_depth = 0
+annotations = 0
+form_fields = 0
+optional_content_groups = 0
+named_destinations = 0
+uri_actions = 0
+
+[[expected.block]]
+key = "TITLE_M1"
+page = 0
+column = "full"
+draw_order = 1
+reading_order = 1
+text = "M"
+baseline_origin = [125.0, 195.0]
+metric_box = [125.0, 192.168, 135.356, 206.136]
+visual_bbox = [126.177734, 195.0, 134.181641, 203.748047]
+
+[[expected.block]]
+key = "TITLE_I"
+page = 0
+column = "full"
+draw_order = 2
+reading_order = 2
+text = "I"
+baseline_origin = [135.356, 195.0]
+metric_box = [135.356, 192.168, 138.896, 206.136]
+visual_bbox = [136.533734, 195.0, 137.717328, 203.748047]
+
+[[expected.block]]
+key = "TITLE_M2"
+page = 0
+column = "full"
+draw_order = 3
+reading_order = 3
+text = "M"
+baseline_origin = [138.896, 195.0]
+metric_box = [138.896, 192.168, 149.252, 206.136]
+visual_bbox = [140.073734, 195.0, 148.077641, 203.748047]
+
+[[expected.block]]
+key = "TITLE_U"
+page = 0
+column = "full"
+draw_order = 4
+reading_order = 4
+text = "U"
+baseline_origin = [149.252, 195.0]
+metric_box = [149.252, 192.168, 158.036, 206.136]
+visual_bbox = [150.294969, 194.830078, 156.992235, 203.748047]
+
+[[expected.block]]
+key = "TITLE_S"
+page = 0
+column = "full"
+draw_order = 5
+reading_order = 5
+text = "S"
+baseline_origin = [158.036, 195.0]
+metric_box = [158.036, 192.168, 165.656, 206.136]
+visual_bbox = [158.827016, 194.830078, 164.985219, 203.90625]
+
+[[expected.block]]
+key = "SECTION_1"
+page = 0
+column = "full"
+draw_order = 6
+reading_order = 6
+text = "1"
+baseline_origin = [87.368, 195.0]
+metric_box = [87.368, 192.168, 95.0, 206.136]
+visual_bbox = [88.686359, 195.0, 93.895344, 203.748047]
+
+[[expected.content_stream]]
+object = 9
+compressed = false
+bytes = """BT
+/F1 12 Tf
+1 0 0 1 125 195 Tm
+[(MIMUS) 6524 (1)] TJ
+ET
+"""
+
+[[expected.reference]]
+from_object = 3
+path = ["/Contents"]
+to_object = 9
+
+[[expected.reference]]
+from_object = 4
+path = ["/Font", "/F1"]
+to_object = 5
+
+[[expected.behaviour]]
+id = "TRANS-01-threshold"
+assertion = "The 2.5em gap exceeds the existing 2.0em candidate threshold, so the digit remains translatable with the title and no retained-prefix geometry is published"
+observable_via = "ParagraphFind IL, captured request, Write IL and final dual-extractor output"
+
+[oracle]
+checks = [
+    "determinism",
+    "legality",
+    "page-geometry",
+    "glyphs",
+    "transformed-text-geometry",
+    "pdf-bytes",
+    "pdf-structure",
+    "render",
+]

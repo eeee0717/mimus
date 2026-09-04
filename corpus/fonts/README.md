@@ -22,6 +22,20 @@ SHA-256: `6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735`
 
 The upstream license is preserved in `LICENSE-DejaVu.txt`.
 
+`MimusSection.ttf` is the matching deterministic subset for the section-title
+geometry fixtures. It adds period, digits `1`-`3`, and `V` to the shared
+space/`I M S U` glyph set so those exact PDFs can embed every text glyph rather
+than relying on Standard 14 metrics. It was produced twice from the same
+DejaVu Sans source with fonttools 4.63.0 and the command above, changing only
+`--output-file` and:
+
+```sh
+--unicodes=U+0020,U+002E,U+0031,U+0032,U+0033,U+0049,U+004D,U+0053,U+0055,U+0056
+```
+
+Both outputs had SHA-256
+`2159223903d2e878dee8e30593c75e36fb165cb6308943954583776a05fda5d1`.
+
 ## Type1 fixture font
 
 `MimusType1.pfb` is derived from the CMMI10 Type1 font shipped by TeX Live

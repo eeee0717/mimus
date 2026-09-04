@@ -601,6 +601,20 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
                 page_index + 1
             );
         }
+        DiagnosticEvent::SectionNumberGapClamped {
+            page_index,
+            reading_order,
+            source_title_left_pt,
+            output_title_left_pt,
+            gap_pt,
+            font_size_pt,
+        } => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "info[section_number_gap_clamped]: page {} paragraph {reading_order} source_title_left={source_title_left_pt:.6}pt output_title_left={output_title_left_pt:.6}pt gap={gap_pt:.6}pt font_size={font_size_pt:.6}pt",
+                page_index + 1
+            );
+        }
         DiagnosticEvent::LinkBordersStripped { annotation_count } => {
             let _ = writeln!(
                 std::io::stderr().lock(),

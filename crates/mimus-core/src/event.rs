@@ -270,6 +270,7 @@ pub enum DiagnosticId {
     UnsupportedOutputGlyph,
     SingleLineBoundsExpanded,
     MultiLineBoundsExpanded,
+    SectionNumberGapClamped,
     LinkBordersStripped,
     TypesetOverflowDetail,
     DroppedDiagnostics,
@@ -562,6 +563,14 @@ pub enum Diagnostic {
         overflow_top_pt: f64,
         overflow_bottom_pt: f64,
     },
+    SectionNumberGapClamped {
+        page_index: usize,
+        reading_order: usize,
+        source_title_left_pt: f64,
+        output_title_left_pt: f64,
+        gap_pt: f64,
+        font_size_pt: f64,
+    },
     LinkBordersStripped {
         annotation_count: usize,
     },
@@ -607,6 +616,7 @@ impl Diagnostic {
             Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
             Self::SingleLineBoundsExpanded { .. } => DiagnosticId::SingleLineBoundsExpanded,
             Self::MultiLineBoundsExpanded { .. } => DiagnosticId::MultiLineBoundsExpanded,
+            Self::SectionNumberGapClamped { .. } => DiagnosticId::SectionNumberGapClamped,
             Self::LinkBordersStripped { .. } => DiagnosticId::LinkBordersStripped,
             Self::TypesetOverflowDetail { .. } => DiagnosticId::TypesetOverflowDetail,
         }
@@ -624,6 +634,7 @@ impl Diagnostic {
                 | Self::GlyphBboxEstimated { .. }
                 | Self::SingleLineBoundsExpanded { .. }
                 | Self::MultiLineBoundsExpanded { .. }
+                | Self::SectionNumberGapClamped { .. }
                 | Self::LinkBordersStripped { .. }
         )
     }
@@ -806,6 +817,14 @@ pub enum DiagnosticEvent {
         overflow_top_pt: f64,
         overflow_bottom_pt: f64,
     },
+    SectionNumberGapClamped {
+        page_index: usize,
+        reading_order: usize,
+        source_title_left_pt: f64,
+        output_title_left_pt: f64,
+        gap_pt: f64,
+        font_size_pt: f64,
+    },
     LinkBordersStripped {
         annotation_count: usize,
     },
@@ -853,6 +872,7 @@ impl DiagnosticEvent {
             Self::UnsupportedOutputGlyph { .. } => DiagnosticId::UnsupportedOutputGlyph,
             Self::SingleLineBoundsExpanded { .. } => DiagnosticId::SingleLineBoundsExpanded,
             Self::MultiLineBoundsExpanded { .. } => DiagnosticId::MultiLineBoundsExpanded,
+            Self::SectionNumberGapClamped { .. } => DiagnosticId::SectionNumberGapClamped,
             Self::LinkBordersStripped { .. } => DiagnosticId::LinkBordersStripped,
             Self::TypesetOverflowDetail { .. } => DiagnosticId::TypesetOverflowDetail,
             Self::DroppedDiagnostics { .. } => DiagnosticId::DroppedDiagnostics,
@@ -1149,6 +1169,21 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 reading_order: *reading_order,
                 overflow_top_pt: *overflow_top_pt,
                 overflow_bottom_pt: *overflow_bottom_pt,
+            },
+            Diagnostic::SectionNumberGapClamped {
+                page_index,
+                reading_order,
+                source_title_left_pt,
+                output_title_left_pt,
+                gap_pt,
+                font_size_pt,
+            } => Self::SectionNumberGapClamped {
+                page_index: *page_index,
+                reading_order: *reading_order,
+                source_title_left_pt: *source_title_left_pt,
+                output_title_left_pt: *output_title_left_pt,
+                gap_pt: *gap_pt,
+                font_size_pt: *font_size_pt,
             },
             Diagnostic::LinkBordersStripped { annotation_count } => Self::LinkBordersStripped {
                 annotation_count: *annotation_count,

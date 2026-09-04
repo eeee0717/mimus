@@ -94,6 +94,12 @@ doctor、determinism 与独立 verify 已进入 required CI。20 份分层真实
 0 miss、0 provider call。#38 closing PR 合入后按 `#39 → #40 → #41 → #42` 解锁 M4；
 逐 case、锚定 SHA、集群归因与 CI 时长以 #38 的 closing evidence 为持久记录。
 
+**M3.8 后续质量修正（2026-09-04，待 review/merge）**：编号标题不再把节号与标题
+首项粘连；保留节号与标题分别复原源 x 坐标，残余间距最低为 `0.25em` 并有 typed
+证据。TRANS-01 新增 6 个单变量 fixture，Corpus v1 增至 207 份；BERT 封闭缓存回放
+197 hit / 0 miss，锚定默认与双语各 108 / 0。宋体 20 篇再基线 20/20 发布、338/338
+编号标题通过、160 个 `typeset_overflow` 与 M3.7 一致，且请求准备和字号拟合政策不变。
+
 ## M4 · 发布
 
 - 资产机制：清单（名称→URL+sha256）、运行时下载、镜像可配、`assets pull` 预取。
