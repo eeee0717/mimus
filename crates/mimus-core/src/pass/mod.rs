@@ -5631,24 +5631,28 @@ struct OutputFontVariation {
     value: f32,
 }
 
-fn output_font_variations(
+#[derive(Debug, Clone, PartialEq)]
+struct OutputFontInstance {
+    variations: Vec<OutputFontVariation>,
+    postscript_name: Option<String>,
+}
+
+fn output_font_instance(
     bytes: &[u8],
     key: OutputFontKey,
-) -> std::result::Result<Vec<OutputFontVariation>, ()> {
+) -> std::result::Result<OutputFontInstance, ()> {
     use skrifa::MetadataProvider;
 
     let font = skrifa::FontRef::from_index(bytes, 0).map_err(|_| ())?;
     let axes = font.axes().iter().collect::<Vec<_>>();
     if axes.is_empty() {
-        return Ok(Vec::new());
+        return Ok(OutputFontInstance {
+            variations: Vec::new(),
+            postscript_name: None,
+        });
     }
 
-    // The Regular slot is the established default-location output contract. Keep it on the
-    // legacy subset path so adding Bold instantiation cannot change ordinary body text bytes.
-    if !key.is_bold() {
-        return Ok(Vec::new());
-    }
-
+    let slot_name = if key.is_bold() { "Bold" } else { "Regular" };
     let instances = font.named_instances();
     for index in 0..instances.len() {
         let Some(instance) = instances.get(index) else {
@@ -5658,33 +5662,45 @@ fn output_font_variations(
             .localized_strings(instance.subfamily_name_id())
             .english_or_first()
             .map(|value| value.to_string());
-        if name.as_deref() != Some("Bold") {
+        if name.as_deref() != Some(slot_name) {
             continue;
         }
         let values = instance.user_coords().collect::<Vec<_>>();
         if values.len() != axes.len() {
             return Err(());
         }
-        return Ok(axes
-            .iter()
-            .zip(values)
-            .map(|(axis, value)| OutputFontVariation {
-                tag: axis.tag().to_be_bytes(),
-                value,
-            })
-            .collect());
+        let postscript_name = instance
+            .postscript_name_id()
+            .and_then(|id| font.localized_strings(id).english_or_first())
+            .map(|value| sanitize_output_font_name(&value.to_string()))
+            .filter(|value| !value.is_empty());
+        return Ok(OutputFontInstance {
+            variations: axes
+                .iter()
+                .zip(values)
+                .map(|(axis, value)| OutputFontVariation {
+                    tag: axis.tag().to_be_bytes(),
+                    value,
+                })
+                .collect(),
+            postscript_name,
+        });
     }
 
     let weight_tag = skrifa::Tag::new(b"wght");
-    Ok(axes
-        .iter()
-        .find(|axis| axis.tag() == weight_tag)
-        .map(|axis| OutputFontVariation {
-            tag: axis.tag().to_be_bytes(),
-            value: 700.0_f32.clamp(axis.min_value(), axis.max_value()),
-        })
-        .into_iter()
-        .collect())
+    let target_weight: f32 = if key.is_bold() { 700.0 } else { 400.0 };
+    Ok(OutputFontInstance {
+        variations: axes
+            .iter()
+            .find(|axis| axis.tag() == weight_tag)
+            .map(|axis| OutputFontVariation {
+                tag: axis.tag().to_be_bytes(),
+                value: target_weight.clamp(axis.min_value(), axis.max_value()),
+            })
+            .into_iter()
+            .collect(),
+        postscript_name: None,
+    })
 }
 
 fn configured_output_font_face(
@@ -5692,11 +5708,38 @@ fn configured_output_font_face(
     key: OutputFontKey,
 ) -> std::result::Result<ttf_parser::Face<'_>, ()> {
     let mut face = ttf_parser::Face::parse(bytes, 0).map_err(|_| ())?;
-    for variation in output_font_variations(bytes, key)? {
+    for variation in output_font_instance(bytes, key)?.variations {
         face.set_variation(ttf_parser::Tag::from_bytes(&variation.tag), variation.value)
             .ok_or(())?;
     }
     Ok(face)
+}
+
+fn sanitize_output_font_name(value: &str) -> String {
+    value
+        .chars()
+        .filter(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_'))
+        .collect()
+}
+
+fn fallback_output_font_name(bytes: &[u8], source_name: &str, key: OutputFontKey) -> String {
+    use skrifa::MetadataProvider;
+
+    let family = skrifa::FontRef::from_index(bytes, 0)
+        .ok()
+        .and_then(|font| {
+            font.localized_strings(skrifa::string::StringId::TYPOGRAPHIC_FAMILY_NAME)
+                .english_or_first()
+                .or_else(|| {
+                    font.localized_strings(skrifa::string::StringId::FAMILY_NAME)
+                        .english_or_first()
+                })
+                .map(|value| sanitize_output_font_name(&value.to_string()))
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| source_name.to_owned());
+    let slot_name = if key.is_bold() { "Bold" } else { "Regular" };
+    format!("{family}-{slot_name}")
 }
 
 struct OutputFontFaces<'a> {
@@ -8703,7 +8746,7 @@ fn build_embedded_font(
 ) -> std::result::Result<(EmbeddedFont, BTreeMap<char, u16>), ()> {
     let bytes = &source_font.bytes;
     let face = configured_output_font_face(bytes, key)?;
-    let variations = output_font_variations(bytes, key)?;
+    let instance = output_font_instance(bytes, key)?;
     let mut remapper = subsetter::GlyphRemapper::new();
     let mut original = Vec::new();
     for character in used {
@@ -8711,10 +8754,11 @@ fn build_embedded_font(
         remapper.remap(glyph.0);
         original.push((*character, glyph));
     }
-    let font_bytes = if variations.is_empty() {
+    let font_bytes = if instance.variations.is_empty() {
         subsetter::subset(bytes, 0, &remapper).map_err(|_| ())?
     } else {
-        let variations = variations
+        let variations = instance
+            .variations
             .iter()
             .map(|variation| (subsetter::Tag::new(&variation.tag), variation.value))
             .collect::<Vec<_>>();
@@ -8731,12 +8775,14 @@ fn build_embedded_font(
         })
         .collect::<std::result::Result<Vec<_>, ()>>()?;
     glyphs.sort_by_key(|value| value.0);
-    let weight = if key.is_bold() { "Bold" } else { "Regular" };
     let tag = subset_tag(used, key);
+    let postscript_name = instance
+        .postscript_name
+        .unwrap_or_else(|| fallback_output_font_name(bytes, &source_font.postscript_name, key));
     Ok((
         EmbeddedFont {
             resource_name: key.resource_name().to_owned(),
-            base_font: format!("{tag}+{}-{weight}", source_font.postscript_name),
+            base_font: format!("{tag}+{postscript_name}"),
             font_bytes,
             units_per_em: face.units_per_em(),
             ascent: face.ascender(),
@@ -13160,7 +13206,7 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             "MIMUS中文测试".chars().collect()
         );
-        assert_eq!(font.base_font.len(), 6 + 1 + "NotoSansSC-Regular".len());
+        assert!(font.base_font.ends_with("+MimusTestGB2312Regular-Regular"));
         let original = document.pdf.as_ref().unwrap();
         let (first, _) =
             build_incremental(&document.original_bytes, original, &document.rewrites).unwrap();
@@ -13213,7 +13259,7 @@ mod tests {
             OutputFontKey::PrimaryBold,
         )
         .unwrap();
-        assert!(bold.base_font.ends_with("+NotoSansSC-Bold"));
+        assert!(bold.base_font.ends_with("+MimusTestGB2312Bold-Bold"));
         assert_eq!(bold_cids.len(), font.glyphs.len());
         assert_ne!(bold.font_bytes, font.font_bytes);
     }
@@ -13221,18 +13267,32 @@ mod tests {
     #[test]
     fn variable_output_font_bold_instance_configures_metrics_and_subsets() {
         let output_fonts = test_variable_output_fonts();
-        let regular_variations =
-            output_font_variations(&output_fonts.regular.bytes, OutputFontKey::PrimaryRegular)
+        let regular_instance =
+            output_font_instance(&output_fonts.regular.bytes, OutputFontKey::PrimaryRegular)
                 .unwrap();
-        let bold_variations =
-            output_font_variations(&output_fonts.bold.bytes, OutputFontKey::PrimaryBold).unwrap();
-        assert!(regular_variations.is_empty());
+        let bold_instance =
+            output_font_instance(&output_fonts.bold.bytes, OutputFontKey::PrimaryBold).unwrap();
         assert_eq!(
-            bold_variations,
+            regular_instance.variations,
+            [OutputFontVariation {
+                tag: *b"wght",
+                value: 400.0,
+            }]
+        );
+        assert_eq!(
+            bold_instance.variations,
             [OutputFontVariation {
                 tag: *b"wght",
                 value: 700.0,
             }]
+        );
+        assert_eq!(
+            regular_instance.postscript_name.as_deref(),
+            Some("NotoSansSC-Regular")
+        );
+        assert_eq!(
+            bold_instance.postscript_name.as_deref(),
+            Some("NotoSansSC-Bold")
         );
 
         let faces = OutputFontFaces::parse(&output_fonts).unwrap();
@@ -13241,9 +13301,15 @@ mod tests {
         let regular_glyph = regular_face.glyph_index('M').unwrap();
         let bold_glyph = bold_face.glyph_index('M').unwrap();
         let default_face = ttf_parser::Face::parse(&output_fonts.regular.bytes, 0).unwrap();
-        assert_eq!(
+        assert_ne!(
             regular_face.glyph_hor_advance(regular_glyph),
             default_face.glyph_hor_advance(default_face.glyph_index('M').unwrap())
+        );
+        let regular_han = regular_face.glyph_index('中').unwrap();
+        let default_han = default_face.glyph_index('中').unwrap();
+        assert_ne!(
+            regular_face.glyph_bounding_box(regular_han),
+            default_face.glyph_bounding_box(default_han)
         );
         assert_eq!(bold_face.glyph_hor_advance(bold_glyph), Some(853));
         assert_ne!(
@@ -13259,14 +13325,8 @@ mod tests {
             build_embedded_font(&used, &output_fonts.bold, OutputFontKey::PrimaryBold).unwrap();
         assert_ne!(regular.font_bytes, bold.font_bytes);
 
-        let mut legacy_regular_remapper = subsetter::GlyphRemapper::new();
-        for value in &used {
-            legacy_regular_remapper.remap(default_face.glyph_index(*value).unwrap().0);
-        }
-        assert_eq!(
-            regular.font_bytes,
-            subsetter::subset(&output_fonts.regular.bytes, 0, &legacy_regular_remapper).unwrap()
-        );
+        assert!(regular.base_font.ends_with("+NotoSansSC-Regular"));
+        assert!(bold.base_font.ends_with("+NotoSansSC-Bold"));
 
         for (embedded, cids, source) in [
             (&regular, &regular_cids, regular_face),
@@ -13284,6 +13344,21 @@ mod tests {
                     subset_face.glyph_hor_advance(ttf_parser::GlyphId(*cid)),
                     Some(*embedded_advance)
                 );
+                let actual_bounds = subset_face
+                    .glyph_bounding_box(ttf_parser::GlyphId(*cid))
+                    .unwrap();
+                let expected_bounds = source.glyph_bounding_box(source_glyph).unwrap();
+                for (actual, expected) in [
+                    (actual_bounds.x_min, expected_bounds.x_min),
+                    (actual_bounds.y_min, expected_bounds.y_min),
+                    (actual_bounds.x_max, expected_bounds.x_max),
+                    (actual_bounds.y_max, expected_bounds.y_max),
+                ] {
+                    assert!(
+                        actual.abs_diff(expected) <= 1,
+                        "{value} subset outline bound {actual} differs from configured source {expected}"
+                    );
+                }
                 assert_eq!(
                     glyph_width_1000(*embedded_advance, embedded.units_per_em),
                     (glyph_advance_em(source, source_glyph).unwrap() * 1000.0) as u32
@@ -13293,11 +13368,65 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the SHA-pinned production variable font"]
+    fn pinned_full_variable_font_regular_subset_matches_wght_400_outline() {
+        use sha2::{Digest, Sha256};
+
+        let path = std::env::var("MIMUS_PINNED_OUTPUT_FONT")
+            .expect("MIMUS_PINNED_OUTPUT_FONT must point to the pinned production VF");
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&bytes)),
+            "d68bafcb48a2707749396aa12bbbd833cb70401f3a9a689fd2902c7e0d295964"
+        );
+        let source = crate::context::OutputFont {
+            bytes,
+            postscript_name: "NotoSansSC-Thin".to_owned(),
+            source: "test:pinned-production-vf".to_owned(),
+            sha256: "d68bafcb48a2707749396aa12bbbd833cb70401f3a9a689fd2902c7e0d295964".to_owned(),
+        };
+
+        let default_face = ttf_parser::Face::parse(&source.bytes, 0).unwrap();
+        let regular_face =
+            configured_output_font_face(&source.bytes, OutputFontKey::PrimaryRegular).unwrap();
+        let default_bounds = default_face
+            .glyph_bounding_box(default_face.glyph_index('一').unwrap())
+            .unwrap();
+        let regular_glyph = regular_face.glyph_index('一').unwrap();
+        let regular_bounds = regular_face.glyph_bounding_box(regular_glyph).unwrap();
+        assert_ne!(default_bounds, regular_bounds);
+
+        let (embedded, cids) = build_embedded_font(
+            &BTreeSet::from(['一']),
+            &source,
+            OutputFontKey::PrimaryRegular,
+        )
+        .unwrap();
+        assert!(embedded.base_font.ends_with("+NotoSansSC-Regular"));
+        let subset_face = ttf_parser::Face::parse(&embedded.font_bytes, 0).unwrap();
+        let subset_bounds = subset_face
+            .glyph_bounding_box(ttf_parser::GlyphId(cids[&'一']))
+            .unwrap();
+        for (actual, expected) in [
+            (subset_bounds.x_min, regular_bounds.x_min),
+            (subset_bounds.y_min, regular_bounds.y_min),
+            (subset_bounds.x_max, regular_bounds.x_max),
+            (subset_bounds.y_max, regular_bounds.y_max),
+        ] {
+            assert!(actual.abs_diff(expected) <= 1);
+        }
+        println!(
+            "U+4E00 bounds: default={default_bounds:?}, wght400={regular_bounds:?}, subset={subset_bounds:?}"
+        );
+    }
+
+    #[test]
     fn static_output_font_subsets_remain_byte_compatible() {
         let output_fonts = test_output_fonts();
         assert!(
-            output_font_variations(&output_fonts.regular.bytes, OutputFontKey::PrimaryRegular)
+            output_font_instance(&output_fonts.regular.bytes, OutputFontKey::PrimaryRegular)
                 .unwrap()
+                .variations
                 .is_empty()
         );
         let used = BTreeSet::from(['M', '中']);

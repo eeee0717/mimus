@@ -15,10 +15,9 @@ PDF `/W` precision boundary that a 1000 units-per-em synthetic font cannot.
 `MimusTestVariable.ttf` is a deterministic five-character subset of the
 production Noto Sans SC 2.004 variable font. It retains the original `fvar`,
 `gvar`, `HVAR`, and named Regular/Bold instances so tests can prove that the
-legacy default location remains byte-compatible for Regular while one Bold
-user-coordinate location drives planning metrics and embedded outlines. It
-contains only original glyphs; the generator never synthesizes glyphs into the
-variation tables.
+`wght=400` and `wght=700` user-coordinate locations drive both planning metrics
+and embedded outlines. It contains only original glyphs; the generator never
+synthesizes glyphs into the variation tables.
 
 - Variable source SHA-256: `d68bafcb48a2707749396aa12bbbd833cb70401f3a9a689fd2902c7e0d295964`
 - fonttools: `4.63.0`
