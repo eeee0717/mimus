@@ -35,6 +35,8 @@ Use machines without an existing mimus cache. Keep the generated evidence direct
   evidence directory, and `eeee0717/mimus` as the skill source.
 - Confirm `summary.json` reports four assets, five `result` terminal events, qpdf success, and skill
   installation success. Open `roundtrip.pdf` and inspect every page.
+- On Intel macOS, confirm `libonnxruntime.1.23.2.dylib` remains beside `mimus` and the dependency
+  audit resolves it through `@executable_path`; Apple Silicon links ONNX Runtime statically.
 - Repeat on both Apple Silicon and Intel hardware; do not substitute Rosetta for either native run.
 
 ### Windows x64

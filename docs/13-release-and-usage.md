@@ -1,7 +1,8 @@
 # Release installation and usage
 
 Mimus is distributed as one platform archive containing the CLI, the matching PDFium dynamic
-library, and license material. Models, fonts, and the Agent Skill remain separate runtime assets.
+library, and license material. The macOS x64 archive also contains ONNX Runtime 1.23.2 as a dynamic
+library. Models, fonts, and the Agent Skill remain separate runtime assets.
 
 ## Install an archive
 
@@ -16,8 +17,10 @@ cd mimus-vVERSION-PLATFORM
 ```
 
 Linux may pipe the matching row to `sha256sum --check` instead. On Windows, compare `Get-FileHash`
-with the matching `SHA256SUMS` row and use `Expand-Archive`. Keep `mimus`/`mimus.exe` and the adjacent
-`libpdfium` file together. Python and Node.js are not runtime dependencies of the CLI.
+with the matching `SHA256SUMS` row and use `Expand-Archive`. Keep `mimus`/`mimus.exe` and all adjacent
+libraries together. In particular, macOS x64 requires both `libpdfium.dylib` and
+`libonnxruntime.1.23.2.dylib` beside `mimus`. Python and Node.js are not runtime dependencies of the
+CLI.
 
 For a recorded clean-machine smoke, use
 [`verify-install.sh`](../scripts/release/verify-install.sh) on macOS/Linux or
@@ -95,6 +98,9 @@ fallback. To select a local black face, point `--font` and `--font-bold` at a co
 `fallback` names remain deprecated CLI-v2 aliases.
 
 PDFium resolves from beside the executable, or from `MIMUS_PDFIUM_LIBRARY` for a custom install.
+On macOS x64, ONNX Runtime resolves only from the versioned library beside the executable; moving
+`mimus` alone makes the installation incomplete. The other release targets link ONNX Runtime
+statically.
 
 ## Terminology and output modes
 
