@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "pages": [
+    {
+      "page_index": 0,
+      "geometry": { "width": 300.0, "height": 200.0, "rotate_degrees": 0 },
+      "regions": [
+        {
+          "bounds": { "left": 135.0, "bottom": 136.0, "right": 165.0, "top": 152.0 },
+          "reading_order": 0,
+          "label": "doc_title",
+          "source": "model",
+          "confidence": 1.0
+        },
+        {
+          "bounds": { "left": 150.0, "bottom": 96.0, "right": 200.0, "top": 112.0 },
+          "reading_order": 2,
+          "label": "abstract",
+          "source": "model",
+          "confidence": 1.0
+        },
+        {
+          "bounds": { "left": 175.0, "bottom": 136.0, "right": 200.0, "top": 152.0 },
+          "reading_order": 3,
+          "label": "text",
+          "source": "model",
+          "confidence": 1.0
+        }
+      ]
+    }
+  ]
+}

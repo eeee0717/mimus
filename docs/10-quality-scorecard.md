@@ -272,7 +272,7 @@ paragraph is only a sample and never substitutes for the full formula audit.
 | STR-02 | incremental-write prefix | output bytes begin with every input byte | critical | raw bytes |
 | STR-03 | non-text object inventory | recursive qpdf JSON counts of Form, Image, Link, Annot, Outlines match | critical | pinned qpdf JSON |
 | STR-04 | masked non-text pixels | identical RGB pixels / compared pixels after masking translated bboxes plus 2 pt | critical; `10 * (1-fidelity)*1000` | pinned Poppler PPM at 72 DPI |
-| STR-05 | title/complete-author-block conservation | page-0 title and every paragraph between title and abstract/first paragraph title are policy passthrough and write-IL identical, with canonical source/write hashes | critical per failed binary invariant | ParagraphFind + Write IL |
+| STR-05 | title/complete-author-block conservation | page-0 title and every geometrically selected `text` paragraph in the title/author band are policy passthrough and write-IL identical, with canonical source/write hashes | critical per failed binary invariant | ParagraphFind + Write IL |
 
 The pixel check intentionally excludes text replacement footprints. It is sensitive to antialiasing
 and renderer versions, so comparisons must pin `pdftoppm`; it complements rather than replaces the
@@ -284,6 +284,15 @@ includes Unicode, source code, font, font size, baseline, metric box, visual bbo
 payload, and absence of a non-identity translation. Canonical SHA-256 values bind the complete
 selected source and Write blocks as evidence without adding another weighted invariant. Missing
 anchors are fail-closed to `not-applicable`, not a guessed author range.
+
+The shared geometric definition ignores paragraph index and model reading order. The bottom edge of
+the page-0 `doc_title` paragraph is the upper anchor. The nearest geometrically lower `abstract` or
+`paragraph_title` paragraph supplies its top edge as the lower anchor. The band extends by half the
+median positive font size across both anchors on each side, a line-height-scale tolerance reported
+as `band_tolerance`; only textual `text` or `fallback_line` paragraphs whose full bounds lie inside the resulting
+`band_lower`/`band_upper` interval belong to the author block. Production passthrough and STR-05
+call the same `mimus-quality-contract::title_author_band` function. A missing/reversed anchor or
+missing anchor font-size evidence remains not applicable rather than widening the band.
 
 ### 2.7 Semantic QE sidecar
 

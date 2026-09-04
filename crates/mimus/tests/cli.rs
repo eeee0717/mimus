@@ -2691,6 +2691,67 @@ fn page_zero_title_and_bounded_author_block_are_policy_passthrough() {
 }
 
 #[test]
+fn page_zero_author_geometry_ignores_reading_order_and_excludes_outside_body() {
+    let output = run_inspect_with_recording(
+        "unit-para-17-author-columns",
+        "unit-para-17-title-author-reordered",
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = parse_events(&output.stdout);
+    assert_one_terminal_last(&events, "result");
+    let paragraphs = events.last().unwrap()["il"]["pages"][0]["paragraphs"]
+        .as_array()
+        .unwrap();
+
+    let abstract_order = paragraphs
+        .iter()
+        .find(|paragraph| paragraph["text"]["chars"][0]["layout"]["label"] == "abstract")
+        .unwrap()["reading_order"]
+        .as_u64()
+        .unwrap();
+    let authors = paragraphs
+        .iter()
+        .filter(|paragraph| {
+            paragraph["text"]["chars"][0]["layout"]["label"] == "fallback_line"
+                && paragraph["bounds"]["bottom"].as_f64().unwrap() > 112.0
+                && paragraph["bounds"]["top"].as_f64().unwrap() < 136.0
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(authors.len(), 2, "{paragraphs:#?}");
+    for author in authors {
+        assert!(
+            author["reading_order"].as_u64().unwrap() > abstract_order,
+            "fallback authors must follow the model abstract in reading order: {author:#?}"
+        );
+        assert!(
+            author["text"]["chars"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|character| character["layout"]["policy"] == "passthrough"),
+            "{author:#?}"
+        );
+    }
+
+    let outside_body = paragraphs
+        .iter()
+        .find(|paragraph| paragraph["text"]["chars"][0]["layout"]["reading_order"] == 3)
+        .unwrap();
+    assert!(
+        outside_body["text"]["chars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|character| character["layout"]["policy"] == "translate"),
+        "{outside_body:#?}"
+    );
+}
+
+#[test]
 fn title_and_author_passthrough_skip_translation_and_keep_source_identity() {
     let directory = tempfile::tempdir().unwrap();
     let output_path = directory.path().join("title-author.pdf");

@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use mimus_quality_contract::conserved_tokens;
+use mimus_quality_contract::{conserved_tokens, title_author_band};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -2324,6 +2324,9 @@ struct TitleAuthorConservation {
     author_policy_passthrough: bool,
     title_write_identity: bool,
     author_write_identity: bool,
+    band_lower: f64,
+    band_upper: f64,
+    band_tolerance: f64,
     source_hash_sha256: String,
     write_hash_sha256: Option<String>,
     failures: usize,
@@ -2334,20 +2337,31 @@ fn title_author_conservation(before: &Il, write: &Il) -> Option<TitleAuthorConse
     let title = page
         .paragraphs
         .iter()
-        .find(|paragraph| has_label(paragraph, "doc_title"))?;
+        .find(|paragraph| has_only_label(paragraph, "doc_title"))?;
     let lower = page
         .paragraphs
         .iter()
-        .filter(|paragraph| paragraph.reading_order > title.reading_order)
-        .find(|paragraph| {
-            has_label(paragraph, "abstract") || has_label(paragraph, "paragraph_title")
-        })?;
+        .filter(|paragraph| {
+            has_only_label(paragraph, "abstract") || has_only_label(paragraph, "paragraph_title")
+        })
+        .filter(|paragraph| paragraph.bounds.top < title.bounds.bottom)
+        .max_by(|left, right| left.bounds.top.total_cmp(&right.bounds.top))?;
+    let band = title_author_band(
+        title.bounds.bottom,
+        lower.bounds.top,
+        title
+            .text
+            .chars
+            .iter()
+            .chain(&lower.text.chars)
+            .map(|character| character.font_size),
+    )?;
     let authors = page
         .paragraphs
         .iter()
         .filter(|paragraph| {
-            paragraph.reading_order > title.reading_order
-                && paragraph.reading_order < lower.reading_order
+            (has_only_label(paragraph, "text") || has_only_label(paragraph, "fallback_line"))
+                && band.contains(paragraph.bounds.bottom, paragraph.bounds.top)
         })
         .collect::<Vec<_>>();
     let title_after = find_paragraph(write, 0, title.reading_order);
@@ -2381,6 +2395,9 @@ fn title_author_conservation(before: &Il, write: &Il) -> Option<TitleAuthorConse
         author_policy_passthrough: author_policy,
         title_write_identity: title_identity,
         author_write_identity: author_identity,
+        band_lower: band.lower,
+        band_upper: band.upper,
+        band_tolerance: band.tolerance,
         source_hash_sha256: title_author_hash(&selected),
         write_hash_sha256: write_selected.as_deref().map(title_author_hash),
         failures,
@@ -2422,12 +2439,14 @@ fn title_author_hash(paragraphs: &[&Paragraph]) -> String {
     sha256(&serde_json::to_vec(&canonical).unwrap())
 }
 
-fn has_label(paragraph: &Paragraph, label: &str) -> bool {
-    paragraph.text.chars.iter().any(|c| {
-        c.layout
-            .as_ref()
-            .is_some_and(|layout| layout.label == label)
-    })
+fn has_only_label(paragraph: &Paragraph, label: &str) -> bool {
+    !paragraph.text.chars.is_empty()
+        && paragraph.text.chars.iter().all(|character| {
+            character
+                .layout
+                .as_ref()
+                .is_some_and(|layout| layout.label == label)
+        })
 }
 
 fn paragraph_passthrough(paragraph: &Paragraph) -> bool {
@@ -3822,6 +3841,31 @@ mod tests {
     }
 
     #[test]
+    fn title_author_conservation_uses_geometry_when_authors_follow_abstract_in_reading_order() {
+        let before: Il = serde_json::from_value(serde_json::json!({
+            "pages": [{"index": 0, "paragraphs": [
+                test_paragraph_at(0, "doc_title", "passthrough", "Title", 90.0),
+                test_paragraph_at(1, "text", "passthrough", "email@example.com", 70.0),
+                test_paragraph_at(2, "abstract", "translate", "Abstract", 30.0),
+                test_paragraph_at(3, "text", "translate", "Body outside band", 10.0),
+                test_paragraph_at(11, "fallback_line", "translate", "Author names", 60.0),
+                test_paragraph_at(12, "fallback_line", "translate", "Institution", 50.0)
+            ]}]
+        }))
+        .unwrap();
+
+        let result = title_author_conservation(&before, &before).unwrap();
+        assert_eq!(result.author_paragraphs, 3);
+        assert_eq!(
+            (result.band_lower, result.band_upper, result.band_tolerance),
+            (27.0, 93.0, 4.0)
+        );
+        assert!(!result.author_policy_passthrough);
+        assert!(result.title_policy_passthrough);
+        assert_eq!(result.failures, 1);
+    }
+
+    #[test]
     fn title_author_hash_and_identity_include_the_visual_box() {
         let document = || {
             serde_json::from_value::<Il>(serde_json::json!({
@@ -3907,21 +3951,37 @@ mod tests {
     }
 
     fn test_paragraph(reading_order: usize, label: &str, policy: &str, text: &str) -> Value {
+        test_paragraph_at(
+            reading_order,
+            label,
+            policy,
+            text,
+            100.0 - reading_order as f64 * 20.0,
+        )
+    }
+
+    fn test_paragraph_at(
+        reading_order: usize,
+        label: &str,
+        policy: &str,
+        text: &str,
+        baseline: f64,
+    ) -> Value {
         let chars = text
             .chars()
             .enumerate()
             .map(|(index, c)| serde_json::json!({
                 "unicode": c.to_string(),
-                "font_size": 10.0,
-                "baseline_origin": {"x": index as f64, "y": 10.0},
-                "box": {"left": index as f64, "bottom": 9.0, "right": index as f64 + 1.0, "top": 11.0},
-                "visual_bbox": {"left": index as f64, "bottom": 9.0, "right": index as f64 + 1.0, "top": 11.0},
+                "font_size": 8.0,
+                "baseline_origin": {"x": index as f64, "y": baseline},
+                "box": {"left": index as f64, "bottom": baseline - 1.0, "right": index as f64 + 1.0, "top": baseline + 1.0},
+                "visual_bbox": {"left": index as f64, "bottom": baseline - 1.0, "right": index as f64 + 1.0, "top": baseline + 1.0},
                 "layout": {"label": label, "policy": policy}
             }))
             .collect::<Vec<_>>();
         serde_json::json!({
             "reading_order": reading_order,
-            "bounds": {"left": 0.0, "bottom": 9.0, "right": text.len() as f64, "top": 11.0},
+            "bounds": {"left": 0.0, "bottom": baseline - 1.0, "right": text.len() as f64, "top": baseline + 1.0},
             "text": {"chars": chars}
         })
     }

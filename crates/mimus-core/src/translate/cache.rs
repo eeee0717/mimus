@@ -2,6 +2,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(test)]
+use redb::ReadableTable;
 use redb::{Database, DatabaseError, StorageError, TableDefinition};
 use sha2::{Digest, Sha256};
 
@@ -66,6 +68,11 @@ impl TermExtractionCacheKey {
 
     fn bytes(&self) -> &[u8] {
         &self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hex(&self) -> String {
+        self.0.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 }
 
@@ -238,6 +245,66 @@ impl TranslationCache {
             .commit()
             .map_err(|_| cache_error(path, "commit initialization"))
     }
+}
+
+#[cfg(test)]
+pub(crate) struct MigratedTermCacheEntry {
+    pub value: String,
+}
+
+#[cfg(test)]
+pub(crate) fn migrate_unique_terms_entry(
+    target_path: &Path,
+    expected_old_key: &TermExtractionCacheKey,
+    new_key: &TermExtractionCacheKey,
+) -> Result<MigratedTermCacheEntry> {
+    let cache = TranslationCache::open(target_path)?;
+    let read = cache
+        .database
+        .begin_read()
+        .map_err(|_| cache_operation_error("start migration read transaction"))?;
+    let table = read
+        .open_table(EXTRACTED_GLOSSARIES)
+        .map_err(|_| cache_operation_error("open migration glossary table"))?;
+    let entries = table
+        .iter()
+        .map_err(|_| cache_operation_error("iterate migration glossary table"))?
+        .map(|entry| {
+            let (key, value) =
+                entry.map_err(|_| cache_operation_error("read migration glossary entry"))?;
+            Ok((key.value().to_vec(), value.value().to_owned()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let [(stored_key, value)] = entries.as_slice() else {
+        return Err(cache_operation_error(
+            "migrate glossary: source table must contain exactly one entry",
+        ));
+    };
+    if stored_key.as_slice() != expected_old_key.bytes() {
+        return Err(cache_operation_error(
+            "migrate glossary: production old key does not match the unique stored key",
+        ));
+    }
+    let value = value.clone();
+    drop(table);
+    drop(read);
+
+    let write = cache
+        .database
+        .begin_write()
+        .map_err(|_| cache_operation_error("start migration write transaction"))?;
+    {
+        let mut table = write
+            .open_table(EXTRACTED_GLOSSARIES)
+            .map_err(|_| cache_operation_error("open migration glossary table for writing"))?;
+        table
+            .insert(new_key.bytes(), value.as_str())
+            .map_err(|_| cache_operation_error("copy migration glossary bytes"))?;
+    }
+    write
+        .commit()
+        .map_err(|_| cache_operation_error("commit migrated glossary entry"))?;
+    Ok(MigratedTermCacheEntry { value })
 }
 
 fn database_is_corrupt(error: &DatabaseError) -> bool {

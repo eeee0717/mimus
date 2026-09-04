@@ -22,3 +22,10 @@ acceptance compared the order to `adjudicated.toml` and the raw rows quoted in
 `docs/04-m0-experiment-1.md`; all six regions are `text` and follow L1-L3, R1-R3.
 The qualification prefix intentionally prevents fixture-id auto-discovery from
 changing the existing Corpus production baseline.
+
+`unit-para-17-title-author-reordered.json` is the generated author-column fixture's adjudicated
+policy overlay for the page-zero geometry regression. Its abstract has model order 2 while the two
+author regions are deliberately absent from model output and become trailing `fallback_line`
+paragraphs; a separate model `text` region lies geometrically above the title band. This proves
+author protection and its negative boundary without treating reading order or model ownership as
+the author-block delimiter.

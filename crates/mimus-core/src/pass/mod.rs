@@ -1619,24 +1619,38 @@ fn apply_title_author_passthrough(paragraphs: &mut [Paragraph]) {
     else {
         return;
     };
+    let title = &paragraphs[title_index];
     let Some(lower_index) = paragraphs
         .iter()
         .enumerate()
-        .skip(title_index + 1)
-        .find_map(|(index, paragraph)| {
+        .filter(|(_, paragraph)| {
             paragraph_has_only_label(paragraph, LayoutLabel::Abstract)
-                .then_some(index)
-                .or_else(|| {
-                    paragraph_has_only_label(paragraph, LayoutLabel::ParagraphTitle)
-                        .then_some(index)
-                })
+                || paragraph_has_only_label(paragraph, LayoutLabel::ParagraphTitle)
         })
+        .filter(|(_, paragraph)| paragraph.bounds.top < title.bounds.bottom)
+        .max_by(|(_, left), (_, right)| left.bounds.top.total_cmp(&right.bounds.top))
+        .map(|(index, _)| index)
     else {
         return;
     };
+    let lower = &paragraphs[lower_index];
+    let Some(band) = mimus_quality_contract::title_author_band(
+        title.bounds.bottom,
+        lower.bounds.top,
+        title
+            .chars()
+            .iter()
+            .chain(lower.chars())
+            .map(|character| character.font_size),
+    ) else {
+        return;
+    };
 
-    for paragraph in &mut paragraphs[title_index + 1..lower_index] {
-        if !paragraph_has_only_label(paragraph, LayoutLabel::Text) {
+    for paragraph in paragraphs {
+        if !(paragraph_has_only_label(paragraph, LayoutLabel::Text)
+            || paragraph_has_only_label(paragraph, LayoutLabel::FallbackLine))
+            || !band.contains(paragraph.bounds.bottom, paragraph.bounds.top)
+        {
             continue;
         }
         for character in paragraph_chars_mut(paragraph) {
@@ -2662,15 +2676,19 @@ pub fn styles_and_formulas(document: &mut Document, _context: &PassContext<'_>) 
     Ok(())
 }
 
-pub fn extract_terms(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
-    let document_text = document
+fn term_extraction_document_text(document: &Document) -> String {
+    document
         .prepared_translations
         .values()
         .filter(|prepared| !prepared.is_local_identity())
         .map(crate::translate::PreparedTranslation::request_text)
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
-        .join("\n\n");
+        .join("\n\n")
+}
+
+pub fn extract_terms(document: &mut Document, context: &PassContext<'_>) -> Result<()> {
+    let document_text = term_extraction_document_text(document);
     let model_id = context.translator.model_id();
     let automatic = if context.config.auto_terms && model_id != "none" && !document_text.is_empty()
     {
@@ -11551,16 +11569,20 @@ fn encrypted_pdf_error() -> MimusError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, Mutex};
 
+    use sha2::{Digest, Sha256};
+
+    use crate::PipelineConfig;
     use crate::engine::{
-        LayoutDetector, LayoutRegion, PageCharSnapshot, PdfInspector, Rasterizer, RgbaImage,
-        SingleLineLayoutDetector,
+        LayoutDetector, LayoutRegion, OnnxLayoutDetector, PageCharSnapshot, PdfInspector,
+        Rasterizer, RgbaImage, SingleLineLayoutDetector,
     };
     use crate::event::{
-        CacheStatus, DiagnosticId, EventKind, PageDegradeReason, RecordingEventSink,
+        CacheStatus, DiagnosticId, EventKind, NoopEventSink, PageDegradeReason, RecordingEventSink,
     };
     use crate::il::{PageGeometry, Point, Rect};
     use crate::translate::Translator;
@@ -11584,6 +11606,202 @@ mod tests {
                 Stage::Write,
             ]
         );
+    }
+
+    /// Dev-only recovery tool for an adjudicated policy change that removes prepared requests.
+    /// See `docs/agents/term-cache-migration.md` before running this ignored test.
+    #[test]
+    #[ignore = "requires archived BERT PDF/cache plus pinned PDFium and ONNX assets"]
+    fn migrate_bert_term_cache_after_author_geometry_policy() {
+        let source_cache = required_path_env("MIMUS_TERM_MIGRATION_SOURCE_CACHE");
+        let target_cache = required_path_env("MIMUS_TERM_MIGRATION_TARGET_CACHE");
+        let paper = required_path_env("MIMUS_TERM_MIGRATION_PDF");
+        let layout_model = required_path_env("MIMUS_TERM_MIGRATION_LAYOUT_MODEL");
+        let model = required_string_env("MIMUS_TERM_MIGRATION_MODEL");
+        let target_language = required_string_env("MIMUS_TERM_MIGRATION_TARGET_LANGUAGE");
+        let migration_date = required_string_env("MIMUS_TERM_MIGRATION_DATE");
+
+        assert_eq!(model, "m35-proxy-model");
+        assert_eq!(target_language, "zh-CN");
+        assert_eq!(
+            target_cache.file_name().unwrap(),
+            "05-bert-m3-7-author-geometry.redb"
+        );
+        assert_ne!(
+            std::fs::canonicalize(&source_cache).unwrap(),
+            std::fs::canonicalize(&target_cache).unwrap(),
+            "the archive and writable migration target must be different files"
+        );
+        assert!(
+            std::fs::metadata(&source_cache)
+                .unwrap()
+                .permissions()
+                .readonly(),
+            "the source archive must remain read-only"
+        );
+        let source_before = std::fs::read(&source_cache).unwrap();
+        let target_before = std::fs::read(&target_cache).unwrap();
+        assert_eq!(
+            target_before, source_before,
+            "start from a byte-identical cache copy before making it writable"
+        );
+        let source_sha256 = sha256_hex_for_migration(&source_before);
+
+        let pdfium = crate::engine::pdfium::PdfiumEngine::from_environment().unwrap();
+        let detector = OnnxLayoutDetector::from_file(&layout_model).unwrap();
+        let translator = crate::translate::NoneTranslator;
+        let events = NoopEventSink;
+        let mut document = Document::for_translation(&paper, target_cache.with_extension("pdf"));
+        let context = PassContext {
+            engine: &pdfium,
+            layout_detector: &detector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: PipelineConfig {
+                target_language: target_language.clone(),
+                ..PipelineConfig::default()
+            },
+        };
+        for pass in [parse, scan_detect, layout, paragraph_find] {
+            pass(&mut document, &context).unwrap();
+        }
+
+        let paragraph_find_il = document.il.clone();
+        styles_and_formulas(&mut document, &context).unwrap();
+        let new_requests = term_extraction_requests(&document);
+        let new_document_text = term_extraction_document_text(&document);
+
+        document.il = paragraph_find_il;
+        for reading_order in [11, 12] {
+            let paragraph = document.il.pages[0]
+                .paragraphs
+                .iter_mut()
+                .find(|paragraph| paragraph.reading_order == reading_order)
+                .unwrap_or_else(|| panic!("missing BERT page-0 paragraph {reading_order}"));
+            assert!(paragraph_has_only_label(
+                paragraph,
+                LayoutLabel::FallbackLine
+            ));
+            assert!(paragraph.chars().iter().all(|character| {
+                character
+                    .layout
+                    .is_some_and(|layout| layout.policy == TranslationPolicy::Passthrough)
+            }));
+            for character in paragraph_chars_mut(paragraph) {
+                character.layout.as_mut().unwrap().policy = TranslationPolicy::Translate;
+            }
+        }
+        styles_and_formulas(&mut document, &context).unwrap();
+        let old_requests = term_extraction_requests(&document);
+        let old_document_text = term_extraction_document_text(&document);
+
+        let removed = old_requests
+            .iter()
+            .filter(|(key, request)| new_requests.get(key) != Some(request))
+            .map(|(key, request)| (*key, request.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            removed.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            [(0, 11), (0, 12)]
+        );
+        assert_eq!(old_requests.len(), new_requests.len() + 2);
+        assert!(
+            new_requests
+                .iter()
+                .all(|(key, value)| old_requests.get(key) == Some(value))
+        );
+
+        let old_key = crate::translate::cache::TermExtractionCacheKey::new(
+            &old_document_text,
+            &model,
+            &target_language,
+            crate::translate::TERMS_PROMPT_VERSION,
+        );
+        let new_key = crate::translate::cache::TermExtractionCacheKey::new(
+            &new_document_text,
+            &model,
+            &target_language,
+            crate::translate::TERMS_PROMPT_VERSION,
+        );
+        assert_ne!(old_key, new_key);
+        let migrated =
+            crate::translate::cache::migrate_unique_terms_entry(&target_cache, &old_key, &new_key)
+                .unwrap();
+        let glossary = crate::translate::Glossary::from_toml(&migrated.value).unwrap();
+        let lowered = migrated.value.to_ascii_lowercase();
+        for forbidden in ["devlin", "chang", "kenton", "toutanova", "google ai"] {
+            assert!(
+                !lowered.contains(forbidden),
+                "old glossary unexpectedly contains {forbidden}"
+            );
+        }
+
+        assert_eq!(
+            sha256_hex_for_migration(&std::fs::read(&source_cache).unwrap()),
+            source_sha256,
+            "the source archive changed during migration"
+        );
+        let target_sha256 = sha256_hex_for_migration(&std::fs::read(&target_cache).unwrap());
+        let sidecar = target_cache.with_extension("provenance.json");
+        let removed = removed
+            .into_iter()
+            .map(|((page_index, reading_order), request)| {
+                serde_json::json!({
+                    "page_index": page_index,
+                    "reading_order": reading_order,
+                    "request_sha256": sha256_hex_for_migration(request.as_bytes()),
+                })
+            })
+            .collect::<Vec<_>>();
+        let provenance = serde_json::json!({
+            "schema_version": 1,
+            "operation": "copy_unique_extracted_glossary_entry",
+            "date": migration_date,
+            "source_cache_sha256": source_sha256,
+            "target_cache_sha256": target_sha256,
+            "old_key": old_key.hex(),
+            "new_key": new_key.hex(),
+            "old_document_text": {
+                "sha256": sha256_hex_for_migration(old_document_text.as_bytes()),
+                "length_bytes": old_document_text.len(),
+            },
+            "new_document_text": {
+                "sha256": sha256_hex_for_migration(new_document_text.as_bytes()),
+                "length_bytes": new_document_text.len(),
+            },
+            "removed_requests": removed,
+            "glossary_fingerprint": glossary.fingerprint(),
+            "model": model,
+            "target_language": target_language,
+            "prompt_version": crate::translate::TERMS_PROMPT_VERSION,
+            "model_calls": 0,
+        });
+        let mut encoded = serde_json::to_vec_pretty(&provenance).unwrap();
+        encoded.push(b'\n');
+        std::fs::write(&sidecar, encoded).unwrap();
+    }
+
+    fn term_extraction_requests(document: &Document) -> BTreeMap<(usize, usize), String> {
+        document
+            .prepared_translations
+            .iter()
+            .filter(|(_, prepared)| !prepared.is_local_identity())
+            .filter(|(_, prepared)| !prepared.request_text().is_empty())
+            .map(|(key, prepared)| (*key, prepared.request_text().to_owned()))
+            .collect()
+    }
+
+    fn required_path_env(name: &str) -> PathBuf {
+        PathBuf::from(required_string_env(name))
+    }
+
+    fn required_string_env(name: &str) -> String {
+        std::env::var(name).unwrap_or_else(|_| panic!("set {name} before running the migration"))
+    }
+
+    fn sha256_hex_for_migration(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
     }
 
     #[test]
