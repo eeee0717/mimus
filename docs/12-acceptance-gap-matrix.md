@@ -121,3 +121,17 @@ The clean-machine pack should retain these already-pinned regressions:
 Final semantic translation quality, terminology quality, and visual appeal remain user adjudications.
 COMETKiwi, English residue, conserved-token, bbox, overlap, and out-of-bounds values can prioritize
 pages for review; they cannot make that decision automatically.
+
+## 6. M4 release update
+
+The tables above remain the historical M3.5 evidence matrix. M4 subsequently closed the missing
+runtime asset surface with one public four-item manifest, atomic verified downloads, additive
+schema-v2 progress events, and `assets list`/`assets pull`. It also added the four-platform release
+archive workflow and the thin Agent Skill. The deprecated `fallback` font names remain aliases for
+CLI-v2 compatibility; new documentation uses only the canonical Latin names.
+
+The macOS arm64 release candidate passed a clean-cache archive journey, including all four assets,
+real PP-DocLayoutV3 inspection, source-conserving translation, Agent Skill installation, and qpdf.
+The required Linux container real-provider journey is tracked by #187 because the M4 execution host
+had no container runtime. macOS Intel and Windows x64 clean-machine checks remain explicit
+maintainer actions in [`docs/14-public-release-checklist.md`](14-public-release-checklist.md).

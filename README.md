@@ -1,8 +1,10 @@
 # mimus
 
-Layout-preserving PDF translation as a Rust CLI. Agent users will be able to install a thin companion skill with `npx skills add eeee0717/mimus`; it invokes the same CLI for agent-driven workflows.
+Layout-preserving PDF translation as a Rust CLI. Agent users can install a thin companion skill
+with `npx skills add eeee0717/mimus --skill mimus`; it invokes the same CLI through versioned NDJSON.
 
-Planning is active and implementation has just begun. See `CONTEXT.md` and `docs/`.
+See [release installation and usage](docs/13-release-and-usage.md) for archive setup, provider
+configuration, offline assets, translation workflows, diagnostics, and known limits.
 
 ## Workspace
 
@@ -46,7 +48,7 @@ The public manifest contains the PP-DocLayoutV3 model and the three default font
 Inspect it without downloading anything, or prefetch every default asset into the existing cache:
 
 ```sh
-mimus assets list --json
+mimus --json assets list
 mimus assets pull
 ```
 
@@ -54,6 +56,18 @@ Missing assets are downloaded on demand. `--asset-mirror`, `MIMUS_ASSET_MIRROR`,
 `asset_mirror` in the config file selects an HTTP(S) mirror; `MIMUS_CACHE_DIR` or `cache_dir`
 selects the cache root. Explicit model and font paths bypass downloads. Every managed download is
 size-bounded, SHA-256 checked, and atomically published only after validation.
+
+## Quick start
+
+```sh
+mimus --json assets pull
+mimus --json inspect paper.pdf
+mimus --json translate paper.pdf --output paper.zh.pdf
+```
+
+The default translation backend needs an API key in the environment or user config. The key has no
+CLI flag and is never included in resolved-configuration events. See the usage guide for the exact
+precedence and glossary, bilingual, link-border, and debug workflows.
 
 ## License
 

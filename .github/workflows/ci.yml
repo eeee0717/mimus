@@ -68,6 +68,23 @@ jobs:
       - name: Validate Agent Skill structure
         run: scripts/validate-agent-skill.sh
 
+      - name: Validate release rehearsal scripts
+        run: |
+          bash -n scripts/release/*.sh
+          python3 -W error scripts/release/test-counting-proxy.py
+
+      - name: Parse Windows release rehearsal script
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "scripts/release/verify-install.ps1", [ref]$tokens, [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -ne 0) {
+            $errors | Format-List | Out-String | Write-Error
+          }
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
