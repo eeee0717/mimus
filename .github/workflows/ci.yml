@@ -65,6 +65,9 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
+      - name: Validate Agent Skill structure
+        run: scripts/validate-agent-skill.sh
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
