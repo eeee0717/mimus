@@ -16,7 +16,11 @@ for variable in "${required[@]}"; do
 done
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/mimus-release.XXXXXX")"
+temp_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+if [[ "$RELEASE_PLATFORM" == windows-* ]] && command -v cygpath >/dev/null 2>&1; then
+  temp_root="$(cygpath -u "$temp_root")"
+fi
+work_dir="$(mktemp -d "$temp_root/mimus-release.XXXXXX")"
 trap 'rm -rf "$work_dir"' EXIT
 output_dir="${RELEASE_OUTPUT_DIR:-$repo_root/dist}"
 mkdir -p "$output_dir"
