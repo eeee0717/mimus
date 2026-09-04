@@ -46,12 +46,15 @@ def translation_command(
     output_pdf: Path,
     debug: Path | None = None,
 ) -> list[str]:
+    font_bold = args.font_bold or args.font
+    font_fallback = args.font_fallback or args.font
+    font_fallback_bold = args.font_fallback_bold or font_fallback
     command = [
         "/usr/bin/time", "-lp", str(args.mimus), "translate", str(input_pdf), "--json",
         "-o", str(output_pdf), "--backend", "openai", "--endpoint", args.endpoint,
-        "--model", "conserving-fake", "--target-language", "zh-CN", "--font",
-        str(args.font), "--font-bold", str(args.font), "--font-fallback", str(args.font),
-        "--font-fallback-bold", str(args.font), "--layout-model", str(args.layout_model),
+        "--model", args.model, "--target-language", "zh-CN", "--font",
+        str(args.font), "--font-bold", str(font_bold), "--font-fallback", str(font_fallback),
+        "--font-fallback-bold", str(font_fallback_bold), "--layout-model", str(args.layout_model),
         "--no-cache", "--no-auto-terms", "--concurrency", "4",
     ]
     if debug is not None:
@@ -376,10 +379,14 @@ def main() -> None:
     parser.add_argument("--temp-root", type=Path, required=True)
     parser.add_argument("--fake-log", type=Path, required=True)
     parser.add_argument("--endpoint", required=True)
+    parser.add_argument("--model", default="conserving-fake")
     parser.add_argument("--mimus", type=Path, required=True)
     parser.add_argument("--scorecard", type=Path, required=True)
     parser.add_argument("--pdfium", type=Path, required=True)
     parser.add_argument("--font", type=Path, required=True)
+    parser.add_argument("--font-bold", type=Path)
+    parser.add_argument("--font-fallback", type=Path)
+    parser.add_argument("--font-fallback-bold", type=Path)
     parser.add_argument("--layout-model", type=Path, required=True)
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()

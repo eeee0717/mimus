@@ -63,7 +63,27 @@ pub struct PublicationInk {
     pub crop_box: Rect,
     /// The paragraph container plus only the vertical expansion used by final ink.
     pub admissible_container: Rect,
+    /// Additive evidence for a retained section-number prefix whose source
+    /// title origin was restored with a geometric text advance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_number_gap: Option<PublicationSectionNumberGap>,
     pub components: Vec<PublicationInkComponent>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct PublicationSectionNumberGap {
+    pub prefix_glyph_count: usize,
+    /// Whether the retained prefix is emitted inside the translated glyph stream.
+    /// Older IL snapshots only covered this shared-operand shape.
+    #[serde(default = "default_true")]
+    pub prefix_in_output: bool,
+    pub source_prefix_left: f64,
+    pub source_title_left: f64,
+    pub output_prefix_width: f64,
+    pub output_title_left: f64,
+    pub gap_pt: f64,
+    pub font_size: f64,
+    pub clamped: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

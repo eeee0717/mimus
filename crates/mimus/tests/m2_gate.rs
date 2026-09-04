@@ -853,6 +853,58 @@ fn write_relative_tail_pdf(directory: &Path) -> PathBuf {
     output
 }
 
+fn write_independent_section_title_pdf(directory: &Path) -> PathBuf {
+    let input = repo_root().join(
+        "corpus/fixtures/unit-translation-03-section-title-gap-1em/unit-translation-03-section-title-gap-1em.pdf",
+    );
+    let output = directory.join("independent-section-title.pdf");
+    let mut document = lopdf::Document::load(input).unwrap();
+    document
+        .get_object_mut((9, 0))
+        .unwrap()
+        .as_stream_mut()
+        .unwrap()
+        .set_plain_content(
+            b"BT\n/F1 12 Tf\n1 0 0 1 105.368 195 Tm\n(1) Tj\n1 0 0 1 125 195 Tm\n(MIMUS) Tj\nET\n"
+                .to_vec(),
+        );
+    document.save(&output).unwrap();
+    output
+}
+
+fn write_independent_section_title_layout(directory: &Path) -> PathBuf {
+    let path = directory.join("independent-section-title-layout.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "pages": [{
+                "page_index": 0,
+                "geometry": {
+                    "width": 300.0,
+                    "height": 220.0,
+                    "rotate_degrees": 0
+                },
+                "regions": [{
+                    "bounds": {
+                        "left": 103.0,
+                        "bottom": 191.0,
+                        "right": 168.0,
+                        "top": 210.0
+                    },
+                    "reading_order": 0,
+                    "label": "paragraph_title",
+                    "source": "model",
+                    "confidence": 1.0
+                }]
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    path
+}
+
 fn write_relative_tail_layout(directory: &Path) -> PathBuf {
     let path = directory.join("relative-tail-layout.json");
     std::fs::write(
@@ -2088,18 +2140,299 @@ fn short_identity_text_in_shared_formula_operands_uses_the_same_safe_split_path(
 
 #[test]
 fn page_top_section_title_translates_without_sending_its_leading_number() {
+    struct Case {
+        fixture: &'static str,
+        prefix: &'static str,
+        source_prefix_left: f64,
+        clamped: bool,
+    }
+    let cases = [
+        Case {
+            fixture: "unit-translation-01-section-title-number",
+            prefix: "I",
+            source_prefix_left: 108.0,
+            clamped: false,
+        },
+        Case {
+            fixture: "unit-translation-03-section-title-gap-1em",
+            prefix: "1",
+            source_prefix_left: 105.368,
+            clamped: false,
+        },
+        Case {
+            fixture: "unit-translation-04-section-title-gap-half-em",
+            prefix: "1",
+            source_prefix_left: 111.368,
+            clamped: false,
+        },
+        Case {
+            fixture: "unit-translation-05-section-title-multilevel",
+            prefix: "3.2.1",
+            source_prefix_left: 82.472,
+            clamped: true,
+        },
+        Case {
+            fixture: "unit-translation-06-section-title-roman-iv",
+            prefix: "IV",
+            source_prefix_left: 101.252,
+            clamped: false,
+        },
+        Case {
+            fixture: "unit-translation-07-section-title-explicit-space",
+            prefix: "1 ",
+            source_prefix_left: 101.552,
+            clamped: false,
+        },
+    ];
+
+    for case in cases {
+        let directory = tempfile::tempdir().unwrap();
+        let debug = directory.path().join("debug");
+        let output_path = directory.path().join("section-title.pdf");
+        let server = GateResponsesServer::start([ScriptedReply::Output("<b1>标题</b1>")]);
+        let output = run_openai(
+            case.fixture,
+            &server,
+            RunOptions {
+                output: &output_path,
+                debug: Some(&debug),
+                cache: None,
+                model: "m3-section-title-model",
+                target_language: "zh-CN",
+                glossary: None,
+                auto_terms: false,
+                strict: false,
+            },
+        );
+
+        assert!(
+            output.status.success(),
+            "{}: {}",
+            case.fixture,
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1, "{}", case.fixture);
+        assert_eq!(requests[0].input, "<b1>MIMUS</b1>", "{}", case.fixture);
+
+        let paragraph_find: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(debug.join("03-paragraph_find.il.json")).unwrap(),
+        )
+        .unwrap();
+        let paragraphs = paragraph_find["pages"][0]["paragraphs"].as_array().unwrap();
+        assert_eq!(
+            paragraphs.len(),
+            1,
+            "{}: the retained prefix and title must share one paragraph",
+            case.fixture
+        );
+        let characters = paragraphs[0]["text"]["chars"].as_array().unwrap();
+        let retained_prefix = characters
+            .iter()
+            .filter(|character| {
+                character["layout"]["label"] == "number"
+                    && character["layout"]["policy"] == "passthrough"
+            })
+            .filter_map(|character| character["unicode"].as_str())
+            .collect::<String>();
+        assert_eq!(retained_prefix, case.prefix, "{}", case.fixture);
+        let source_title_left = characters
+            .iter()
+            .find(|character| {
+                character["unicode"] == "M" && character["layout"]["policy"] == "translate"
+            })
+            .and_then(|character| character["box"]["left"].as_f64())
+            .unwrap();
+        assert!(
+            (source_title_left - 125.0).abs() <= 0.001,
+            "{}",
+            case.fixture
+        );
+
+        let write: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(debug.join("09-write.il.json")).unwrap())
+                .unwrap();
+        let publication = &write["publication_ink"][0];
+        let gap = &publication["section_number_gap"];
+        let prefix_len = case.prefix.chars().count();
+        assert_eq!(gap["prefix_glyph_count"], prefix_len, "{}", case.fixture);
+        assert!(
+            (gap["source_prefix_left"].as_f64().unwrap() - case.source_prefix_left).abs() <= 0.001,
+            "{}",
+            case.fixture
+        );
+        assert_eq!(gap["source_title_left"], 125.0, "{}", case.fixture);
+        assert_eq!(gap["clamped"], case.clamped, "{}", case.fixture);
+        let output_title_left = gap["output_title_left"].as_f64().unwrap();
+        if case.clamped {
+            let font_size = gap["font_size"].as_f64().unwrap();
+            let output_prefix_width = gap["output_prefix_width"].as_f64().unwrap();
+            let expected = case.source_prefix_left + output_prefix_width + font_size * 0.25;
+            assert!((gap["gap_pt"].as_f64().unwrap() - font_size * 0.25).abs() <= 0.001);
+            assert!((output_title_left - expected).abs() <= 0.001);
+        } else {
+            assert!((output_title_left - 125.0).abs() <= 0.001);
+        }
+        let events = parse_events(&output.stdout);
+        assert_eq!(
+            events.iter().any(|event| {
+                event["event"] == "diagnostic"
+                    && event["id"] == "section_number_gap_clamped"
+                    && event["page_index"] == 0
+                    && event["reading_order"] == 0
+            }),
+            case.clamped,
+            "{}",
+            case.fixture
+        );
+        let glyphs = publication["components"][0]["glyphs"].as_array().unwrap();
+        let output_prefix = glyphs[..prefix_len]
+            .iter()
+            .filter_map(|glyph| glyph["unicode"].as_str())
+            .collect::<String>();
+        assert_eq!(output_prefix, case.prefix, "{}", case.fixture);
+        assert!(
+            (glyphs[0]["baseline_origin"]["x"].as_f64().unwrap() - case.source_prefix_left).abs()
+                <= 0.001,
+            "{}",
+            case.fixture
+        );
+        assert_eq!(glyphs[prefix_len]["unicode"], "标", "{}", case.fixture);
+        assert!(
+            (glyphs[prefix_len]["baseline_origin"]["x"].as_f64().unwrap() - output_title_left)
+                .abs()
+                <= 0.001,
+            "{}",
+            case.fixture
+        );
+
+        for extractor in ["poppler", "mupdf"] {
+            let extracted = extract_pdf_text(&output_path, extractor);
+            assert!(
+                extracted.contains("标题"),
+                "{} {extractor}: {extracted:?}",
+                case.fixture
+            );
+            assert!(
+                extracted.contains(case.prefix.trim()),
+                "{} {extractor}: {extracted:?}",
+                case.fixture
+            );
+        }
+        assert_valid_pdf(&output_path, case.fixture);
+        server.assert_clean();
+    }
+}
+
+#[test]
+fn independent_section_number_operand_stays_source_identity_and_anchors_translation() {
     let directory = tempfile::tempdir().unwrap();
+    let input = write_independent_section_title_pdf(directory.path());
+    let layout = write_independent_section_title_layout(directory.path());
     let debug = directory.path().join("debug");
-    let output_path = directory.path().join("section-title.pdf");
+    let output_path = directory
+        .path()
+        .join("independent-section-title-output.pdf");
     let server = GateResponsesServer::start([ScriptedReply::Output("<b1>标题</b1>")]);
-    let output = run_openai(
-        "unit-translation-01-section-title-number",
+    let output = run_openai_path(
+        &input,
+        Some(&layout),
         &server,
         RunOptions {
             output: &output_path,
             debug: Some(&debug),
             cache: None,
-            model: "m3-section-title-model",
+            model: "m3-independent-section-title-model",
+            target_language: "zh-CN",
+            glossary: None,
+            auto_terms: false,
+            strict: false,
+        },
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let requests = server.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        std::fs::read_to_string(debug.join("03-paragraph_find.il.json")).unwrap()
+    );
+    assert_eq!(requests[0].input, "<b1>MIMUS</b1>");
+
+    let paragraph_find: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(debug.join("03-paragraph_find.il.json")).unwrap())
+            .unwrap();
+    let characters = paragraph_find["pages"][0]["paragraphs"][0]["text"]["chars"]
+        .as_array()
+        .unwrap();
+    assert_eq!(characters[0]["unicode"], "1");
+    assert_eq!(characters[0]["layout"]["label"], "number");
+    assert_eq!(characters[0]["layout"]["policy"], "passthrough");
+    assert_ne!(
+        characters[0]["passthrough"]["byte_start"],
+        characters[1]["passthrough"]["byte_start"]
+    );
+    let source_title_left = characters[1]["box"]["left"].as_f64().unwrap();
+
+    let write: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(debug.join("09-write.il.json")).unwrap()).unwrap();
+    assert_eq!(
+        write["pages"][0]["paragraphs"][0]["text"]["chars"][0],
+        characters[0]
+    );
+    let publication = &write["publication_ink"][0];
+    let gap = &publication["section_number_gap"];
+    assert_eq!(gap["prefix_glyph_count"], 1);
+    assert_eq!(gap["prefix_in_output"], false);
+    assert_eq!(gap["clamped"], false);
+    assert!((gap["output_title_left"].as_f64().unwrap() - source_title_left).abs() <= 0.001);
+    let glyphs = publication["components"][0]["glyphs"].as_array().unwrap();
+    assert_eq!(glyphs[0]["unicode"], "标");
+    assert!(
+        (glyphs[0]["baseline_origin"]["x"].as_f64().unwrap() - source_title_left).abs() <= 0.001
+    );
+    assert!(glyphs.iter().all(|glyph| glyph["unicode"] != "1"));
+
+    let streams = decoded_page_streams(&output_path, 1);
+    assert!(
+        streams
+            .iter()
+            .any(|stream| { String::from_utf8_lossy(stream).contains("(1) Tj") })
+    );
+    assert!(
+        streams
+            .iter()
+            .all(|stream| { !String::from_utf8_lossy(stream).contains("(MIMUS) Tj") })
+    );
+    for extractor in ["poppler", "mupdf"] {
+        let extracted = extract_pdf_text(&output_path, extractor);
+        assert!(extracted.contains('1'), "{extractor}: {extracted:?}");
+        assert!(extracted.contains("标题"), "{extractor}: {extracted:?}");
+    }
+    assert_valid_pdf(&output_path, "unit-translation-03-section-title-gap-1em");
+    server.assert_clean();
+}
+
+#[test]
+fn section_number_beyond_two_em_remains_in_the_translation_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let debug = directory.path().join("debug");
+    let output_path = directory.path().join("section-title-over-threshold.pdf");
+    let server = GateResponsesServer::start([ScriptedReply::Output("<b1>1 标题</b1>")]);
+    let output = run_openai(
+        "unit-translation-08-section-title-gap-over-threshold",
+        &server,
+        RunOptions {
+            output: &output_path,
+            debug: Some(&debug),
+            cache: None,
+            model: "m3-section-title-threshold-model",
             target_language: "zh-CN",
             glossary: None,
             auto_terms: false,
@@ -2114,35 +2447,35 @@ fn page_top_section_title_translates_without_sending_its_leading_number() {
     );
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].input, "<b1>MIMUS</b1>");
+    assert!(requests[0].input.contains('1'), "{:?}", requests[0].input);
+    assert!(
+        requests[0].input.contains("MIMUS"),
+        "{:?}",
+        requests[0].input
+    );
 
     let paragraph_find: serde_json::Value =
         serde_json::from_slice(&std::fs::read(debug.join("03-paragraph_find.il.json")).unwrap())
             .unwrap();
-    let paragraphs = paragraph_find["pages"][0]["paragraphs"].as_array().unwrap();
-    assert_eq!(
-        paragraphs.len(),
-        1,
-        "the retained section number and translated title must share one paragraph"
-    );
-    let characters = paragraphs.first().unwrap()["text"]["chars"]
+    let characters = paragraph_find["pages"][0]["paragraphs"][0]["text"]["chars"]
         .as_array()
-        .unwrap()
-        .iter()
-        .collect::<Vec<_>>();
-    let section_number = characters
-        .iter()
-        .find(|character| character["unicode"] == "I" && character["box"]["left"] == 108.0)
         .unwrap();
-    assert_eq!(section_number["layout"]["label"], "number");
-    assert_eq!(section_number["layout"]["policy"], "passthrough");
+    assert!(characters.iter().all(|character| {
+        character["layout"]["label"] != "number" && character["layout"]["policy"] == "translate"
+    }));
 
+    let write: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(debug.join("09-write.il.json")).unwrap()).unwrap();
+    assert!(write["publication_ink"][0]["section_number_gap"].is_null());
     for extractor in ["poppler", "mupdf"] {
         let extracted = extract_pdf_text(&output_path, extractor);
+        assert!(extracted.contains('1'), "{extractor}: {extracted:?}");
         assert!(extracted.contains("标题"), "{extractor}: {extracted:?}");
-        assert!(extracted.contains('I'), "{extractor}: {extracted:?}");
     }
-    assert_valid_pdf(&output_path, "unit-translation-01-section-title-number");
+    assert_valid_pdf(
+        &output_path,
+        "unit-translation-08-section-title-gap-over-threshold",
+    );
     server.assert_clean();
 }
 
@@ -2213,9 +2546,9 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
         "unit-scan-01-image-only".to_owned(),
         "unit-scan-02-invisible-ocr".to_owned(),
     ]);
-    assert_eq!(ids.len(), 201, "Corpus fixture inventory changed");
+    assert_eq!(ids.len(), 207, "Corpus fixture inventory changed");
     assert_eq!(unique_cases.len(), 128, "Corpus case inventory changed");
-    assert_eq!(legal.len(), 154, "legal fixture inventory changed");
+    assert_eq!(legal.len(), 160, "legal fixture inventory changed");
     assert!(rejected.is_subset(&legal));
 
     let directory = tempfile::tempdir().unwrap();
@@ -2329,10 +2662,10 @@ fn every_legal_fixture_uses_the_loopback_responses_gate() {
             output_count += 1;
         }
     }
-    assert_eq!(output_count, 147);
+    assert_eq!(output_count, 153);
     assert_eq!(
         server.request_count(),
-        182,
+        188,
         "eligible corpus request inventory changed"
     );
     assert!(server.requests().iter().all(|request| {

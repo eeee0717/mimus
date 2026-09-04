@@ -183,6 +183,52 @@ pub fn title_author_band(
     })
 }
 
+/// The output positioning for a retained section-number prefix.
+///
+/// `gap_pt` is an explicit text advance after the output prefix. `title_left`
+/// is the resulting first title-glyph origin in page space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RetainedSectionNumberPosition {
+    pub gap_pt: f64,
+    pub title_left: f64,
+    pub clamped: bool,
+}
+
+/// Restores the source title origin after a retained section-number prefix.
+///
+/// The output prefix remains anchored at `source_prefix_left`. Its configured
+/// font width can differ from the source prefix width, so the residual advance
+/// shrinks or grows accordingly and is clamped to a 0.25em minimum.
+pub fn retained_section_number_position(
+    source_prefix_left: f64,
+    source_title_left: f64,
+    output_prefix_width: f64,
+    output_font_size: f64,
+) -> Option<RetainedSectionNumberPosition> {
+    let values = [
+        source_prefix_left,
+        source_title_left,
+        output_prefix_width,
+        output_font_size,
+    ];
+    if values.iter().any(|value| !value.is_finite())
+        || source_title_left < source_prefix_left
+        || output_prefix_width < 0.0
+        || output_font_size <= 0.0
+    {
+        return None;
+    }
+    let requested_gap = source_title_left - source_prefix_left - output_prefix_width;
+    let minimum_gap = output_font_size * 0.25;
+    let clamped = requested_gap < minimum_gap;
+    let gap_pt = requested_gap.max(minimum_gap);
+    Some(RetainedSectionNumberPosition {
+        gap_pt,
+        title_left: source_prefix_left + output_prefix_width + gap_pt,
+        clamped,
+    })
+}
+
 /// Extracts the conservative numeric, reference, and unit tokens that must be
 /// preserved by translation. Tokens are normalized only when the source and
 /// target spellings are lexically explicit equivalents.
@@ -560,6 +606,32 @@ mod tests {
     fn title_author_band_rejects_missing_line_height_and_reversed_anchors() {
         assert!(title_author_band(90.0, 30.0, []).is_none());
         assert!(title_author_band(30.0, 90.0, [10.0]).is_none());
+    }
+
+    #[test]
+    fn retained_section_number_position_restores_source_title_or_clamps_to_quarter_em() {
+        let ordinary = retained_section_number_position(72.0, 90.0, 6.0, 12.0).unwrap();
+        assert_eq!(ordinary.gap_pt, 12.0);
+        assert_eq!(ordinary.title_left, 90.0);
+        assert!(!ordinary.clamped);
+
+        let wider_prefix = retained_section_number_position(72.0, 90.0, 10.0, 12.0).unwrap();
+        assert_eq!(wider_prefix.gap_pt, 8.0);
+        assert_eq!(wider_prefix.title_left, 90.0);
+        assert!(!wider_prefix.clamped);
+
+        let clamped = retained_section_number_position(72.0, 90.0, 17.0, 12.0).unwrap();
+        assert_eq!(clamped.gap_pt, 3.0);
+        assert_eq!(clamped.title_left, 92.0);
+        assert!(clamped.clamped);
+    }
+
+    #[test]
+    fn retained_section_number_position_rejects_invalid_geometry() {
+        assert!(retained_section_number_position(90.0, 72.0, 6.0, 12.0).is_none());
+        assert!(retained_section_number_position(72.0, 90.0, -1.0, 12.0).is_none());
+        assert!(retained_section_number_position(72.0, 90.0, 6.0, 0.0).is_none());
+        assert!(retained_section_number_position(f64::NAN, 90.0, 6.0, 12.0).is_none());
     }
 
     #[test]

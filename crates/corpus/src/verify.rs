@@ -2635,7 +2635,13 @@ fn check_transformed_text_geometry(
 
     let mut blocks = manifest.expected.block.iter().collect::<Vec<_>>();
     blocks.sort_by_key(|block| block.draw_order);
-    let glyphs = mupdf_trace::glyphs(pdf)?;
+    // A PDF space participates in text advance but has no outline block. Its
+    // byte-level presence is covered by pdf-bytes; transformed geometry is
+    // intentionally an ink-glyph oracle.
+    let glyphs = mupdf_trace::glyphs(pdf)?
+        .into_iter()
+        .filter(|glyph| !glyph.unicode.chars().all(char::is_whitespace))
+        .collect::<Vec<_>>();
     let outlines = outline_blocks(manifest, pdf, frames)?;
     let arithmetic_tolerance = manifest.expected.tolerance_pt;
     let visual_tolerance = manifest

@@ -85,6 +85,43 @@ struct PublicationOwner {
     page_index: usize,
     reading_order: usize,
     admissible_container: Rect,
+    #[serde(default)]
+    section_number_gap: Option<PublicationSectionNumberGap>,
+    #[serde(default)]
+    components: Vec<PublicationComponent>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct PublicationSectionNumberGap {
+    prefix_glyph_count: usize,
+    #[serde(default = "default_true")]
+    prefix_in_output: bool,
+    source_prefix_left: f64,
+    source_title_left: f64,
+    output_prefix_width: f64,
+    output_title_left: f64,
+    gap_pt: f64,
+    font_size: f64,
+    clamped: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PublicationComponent {
+    TranslatedText {
+        glyphs: Vec<PublicationGlyph>,
+    },
+    SourceTextReplay {
+        glyphs: Vec<PublicationGlyph>,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct PublicationGlyph {
+    unicode: char,
+    baseline_origin: Point,
 }
 
 #[derive(Debug, Deserialize)]
@@ -328,7 +365,14 @@ fn measure(args: MeasureArgs) -> Result<()> {
     );
     dimensions.insert(
         "typesetting_lint".into(),
-        lint(&translated, &events, &args.output_pdf, denominator),
+        lint(
+            &before,
+            &translated,
+            &write,
+            &events,
+            &args.output_pdf,
+            denominator,
+        ),
     );
 
     let input_bytes = fs::read(&args.input_pdf)?;
@@ -713,7 +757,14 @@ fn layout(
     )
 }
 
-fn lint(after: &Il, events: &[Value], output_pdf: &Path, denominator: f64) -> Dimension {
+fn lint(
+    before: &Il,
+    after: &Il,
+    write: &Il,
+    events: &[Value],
+    output_pdf: &Path,
+    denominator: f64,
+) -> Dimension {
     let texts: Vec<&str> = after
         .pages
         .iter()
@@ -750,19 +801,343 @@ fn lint(after: &Il, events: &[Value], output_pdf: &Path, denominator: f64) -> Di
         })
         .count();
     let echoes = count_summary_array(events, "suspicious_echoes");
-    let weighted = (kinsoku * 3 + isolated + residues * 10 + whitespace + echoes) as f64;
+    let section_numbers = retained_section_number_positioning(before, write, events);
+    let weighted = (kinsoku * 3
+        + isolated
+        + residues * 10
+        + whitespace
+        + echoes
+        + section_numbers.violations * 3) as f64;
+    let mut measurements = values(&[
+        ("kinsoku_violations", kinsoku),
+        ("isolated_punctuation", isolated),
+        ("placeholder_residue", residues),
+        ("abnormal_whitespace", whitespace),
+        ("english_residual_proxy", echoes),
+    ]);
+    measurements.insert(
+        "retained_section_number_positioning".into(),
+        serde_json::to_value(section_numbers).unwrap(),
+    );
     dimension(
-        &["LNT-01", "LNT-02", "LNT-03", "LNT-04", "LNT-05"],
+        &["LNT-01", "LNT-02", "LNT-03", "LNT-04", "LNT-05", "TRANS-01"],
         weighted,
         denominator,
-        values(&[
-            ("kinsoku_violations", kinsoku),
-            ("isolated_punctuation", isolated),
-            ("placeholder_residue", residues),
-            ("abnormal_whitespace", whitespace),
-            ("english_residual_proxy", echoes),
-        ]),
+        measurements,
     )
+}
+
+#[derive(Debug, Serialize)]
+struct RetainedSectionNumberPositioning {
+    status: &'static str,
+    checked_headings: usize,
+    aligned_headings: usize,
+    clamped_headings: usize,
+    violations: usize,
+    evidence: Vec<RetainedSectionNumberEvidence>,
+}
+
+#[derive(Debug, Serialize)]
+struct RetainedSectionNumberEvidence {
+    page_index: usize,
+    reading_order: usize,
+    prefix_glyph_count: usize,
+    source_identity: bool,
+    prefix_in_output: bool,
+    source_gap_em: f64,
+    source_title_left_pt: f64,
+    output_title_left_pt: Option<f64>,
+    delta_em: Option<f64>,
+    clamped: bool,
+    typed_clamp_info: bool,
+    valid: bool,
+}
+
+fn retained_section_number_positioning(
+    before: &Il,
+    write: &Il,
+    events: &[Value],
+) -> RetainedSectionNumberPositioning {
+    let mut evidence_rows = Vec::new();
+    for page in &before.pages {
+        let Some(write_page) = write
+            .pages
+            .iter()
+            .find(|candidate| candidate.index == page.index)
+        else {
+            continue;
+        };
+        for paragraph in &page.paragraphs {
+            let mut visual_order = (0..paragraph.text.chars.len()).collect::<Vec<_>>();
+            visual_order.sort_by(|&left, &right| {
+                paragraph.text.chars[left]
+                    .box_
+                    .left
+                    .total_cmp(&paragraph.text.chars[right].box_.left)
+                    .then(left.cmp(&right))
+            });
+            let prefix_indices = visual_order
+                .iter()
+                .copied()
+                .take_while(|&index| {
+                    let character = &paragraph.text.chars[index];
+                    character.visible
+                        && character
+                            .text_transform
+                            .as_ref()
+                            .is_none_or(|value| value.kind == "upright")
+                        && character.layout.as_ref().is_some_and(|layout| {
+                            layout.label == "number" && layout.policy == "passthrough"
+                        })
+                })
+                .collect::<Vec<_>>();
+            if prefix_indices.is_empty() {
+                continue;
+            }
+            let Some(title_index) = visual_order
+                .iter()
+                .copied()
+                .skip(prefix_indices.len())
+                .find(|&index| {
+                    let character = &paragraph.text.chars[index];
+                    character.visible
+                        && character
+                            .text_transform
+                            .as_ref()
+                            .is_none_or(|value| value.kind == "upright")
+                        && character.unicode.as_deref().is_some_and(|value| {
+                            value.chars().any(|scalar| !scalar.is_whitespace())
+                        })
+                })
+            else {
+                continue;
+            };
+            let prefix = prefix_indices
+                .iter()
+                .map(|&index| &paragraph.text.chars[index])
+                .collect::<Vec<_>>();
+            let title = &paragraph.text.chars[title_index];
+            let Some(write_paragraph) = write_page
+                .paragraphs
+                .iter()
+                .find(|candidate| candidate.reading_order == paragraph.reading_order)
+            else {
+                continue;
+            };
+            let owner = write.publication_ink.iter().find(|owner| {
+                owner.page_index == page.index && owner.reading_order == paragraph.reading_order
+            });
+            let source_identity = owner.is_none() && paragraph_identity(paragraph, write_paragraph);
+            if !source_identity
+                && (write_paragraph.translated_text.is_none()
+                    || write_paragraph.preserved.is_some())
+            {
+                continue;
+            }
+
+            let source_prefix_left = prefix
+                .iter()
+                .map(|character| character.box_.left)
+                .min_by(f64::total_cmp)
+                .unwrap_or(0.0);
+            let source_title_left = title.box_.left;
+            let source_prefix_right = prefix
+                .iter()
+                .map(|character| character.box_.right)
+                .max_by(f64::total_cmp)
+                .unwrap_or(source_prefix_left);
+            let instrumentation = owner.and_then(|owner| owner.section_number_gap);
+            let output_glyphs = owner.and_then(|owner| {
+                owner
+                    .components
+                    .iter()
+                    .find_map(|component| match component {
+                        PublicationComponent::TranslatedText { glyphs } => Some(glyphs.as_slice()),
+                        PublicationComponent::Other => None,
+                        PublicationComponent::SourceTextReplay { .. } => None,
+                    })
+            });
+            let independent_prefix_identity = prefix_indices.iter().all(|&index| {
+                write_paragraph
+                    .text
+                    .chars
+                    .get(index)
+                    .is_some_and(|written| {
+                        source_character_identity(&paragraph.text.chars[index], written)
+                    })
+            });
+            let actual_prefix_left = if source_identity {
+                Some(source_prefix_left)
+            } else {
+                instrumentation.and_then(|gap| {
+                    if gap.prefix_in_output {
+                        output_glyphs
+                            .and_then(|glyphs| glyphs.first())
+                            .map(|glyph| glyph.baseline_origin.x)
+                    } else {
+                        independent_prefix_identity.then_some(source_prefix_left)
+                    }
+                })
+            };
+            let actual_title_left = if source_identity {
+                Some(source_title_left)
+            } else {
+                instrumentation.and_then(|gap| {
+                    if gap.prefix_in_output {
+                        output_glyphs
+                            .and_then(|glyphs| glyphs.get(gap.prefix_glyph_count))
+                            .or_else(|| {
+                                owner.and_then(|owner| first_independent_title_glyph(owner, title))
+                            })
+                            .map(|glyph| glyph.baseline_origin.x)
+                            .or_else(|| {
+                                title
+                                    .layout
+                                    .as_ref()
+                                    .is_some_and(|layout| layout.policy == "passthrough")
+                                    .then_some(source_title_left)
+                            })
+                    } else {
+                        owner
+                            .and_then(|owner| first_independent_title_glyph(owner, title))
+                            .map(|glyph| glyph.baseline_origin.x)
+                            .or_else(|| {
+                                title
+                                    .layout
+                                    .as_ref()
+                                    .is_some_and(|layout| layout.policy == "passthrough")
+                                    .then_some(source_title_left)
+                            })
+                    }
+                })
+            };
+            let prefix_values = prefix
+                .iter()
+                .filter_map(|character| character.unicode.as_deref())
+                .flat_map(str::chars)
+                .collect::<Vec<_>>();
+            let output_prefix_values =
+                instrumentation
+                    .filter(|gap| gap.prefix_in_output)
+                    .and_then(|gap| {
+                        output_glyphs
+                            .and_then(|glyphs| glyphs.get(..gap.prefix_glyph_count))
+                            .map(|glyphs| {
+                                glyphs.iter().map(|glyph| glyph.unicode).collect::<Vec<_>>()
+                            })
+                    });
+            let typed_clamp_info = events.iter().any(|event| {
+                event.get("event").and_then(Value::as_str) == Some("diagnostic")
+                    && event.get("id").and_then(Value::as_str) == Some("section_number_gap_clamped")
+                    && event.get("page_index").and_then(Value::as_u64) == Some(page.index as u64)
+                    && event.get("reading_order").and_then(Value::as_u64)
+                        == Some(paragraph.reading_order as u64)
+            });
+            let mut clamped = false;
+            let valid = source_identity
+                || instrumentation.is_some_and(|gap| {
+                    clamped = gap.clamped;
+                    let Some(expected) = mimus_quality_contract::retained_section_number_position(
+                        source_prefix_left,
+                        source_title_left,
+                        gap.output_prefix_width,
+                        gap.font_size,
+                    ) else {
+                        return false;
+                    };
+                    let tolerance = gap.font_size * 0.1;
+                    let evidence_matches_source =
+                        (gap.source_prefix_left - source_prefix_left).abs() <= 0.01
+                            && (gap.source_title_left - source_title_left).abs() <= 0.01;
+                    let output_matches_evidence = actual_prefix_left
+                        .is_some_and(|left| (left - source_prefix_left).abs() <= tolerance)
+                        && actual_title_left
+                            .is_some_and(|left| (left - gap.output_title_left).abs() <= 0.01)
+                        && (gap.output_title_left - expected.title_left).abs() <= 0.01
+                        && (gap.gap_pt - expected.gap_pt).abs() <= 0.01;
+                    let prefix_matches = if gap.prefix_in_output {
+                        output_prefix_values.as_ref() == Some(&prefix_values)
+                    } else {
+                        independent_prefix_identity
+                            && (gap.output_prefix_width
+                                - (source_prefix_right - source_prefix_left))
+                                .abs()
+                                <= 0.01
+                    };
+                    let terminal_matches = if expected.clamped {
+                        gap.clamped && typed_clamp_info && gap.gap_pt + 0.01 >= gap.font_size * 0.25
+                    } else {
+                        !gap.clamped
+                            && !typed_clamp_info
+                            && actual_title_left
+                                .is_some_and(|left| (left - source_title_left).abs() <= tolerance)
+                    };
+                    evidence_matches_source
+                        && output_matches_evidence
+                        && prefix_matches
+                        && gap.prefix_glyph_count == prefix.len()
+                        && expected.clamped == gap.clamped
+                        && terminal_matches
+                });
+            evidence_rows.push(RetainedSectionNumberEvidence {
+                page_index: page.index,
+                reading_order: paragraph.reading_order,
+                prefix_glyph_count: prefix.len(),
+                source_identity,
+                prefix_in_output: instrumentation.is_some_and(|gap| gap.prefix_in_output),
+                source_gap_em: round6((source_title_left - source_prefix_right) / title.font_size),
+                source_title_left_pt: round6(source_title_left),
+                output_title_left_pt: actual_title_left.map(round6),
+                delta_em: actual_title_left.map(|left| {
+                    let font_size = instrumentation.map_or(title.font_size, |gap| gap.font_size);
+                    round6((left - source_title_left).abs() / font_size)
+                }),
+                clamped,
+                typed_clamp_info,
+                valid,
+            });
+        }
+    }
+    let checked_headings = evidence_rows.len();
+    let aligned_headings = evidence_rows.iter().filter(|value| value.valid).count();
+    let clamped_headings = evidence_rows.iter().filter(|value| value.clamped).count();
+    let violations = checked_headings - aligned_headings;
+    RetainedSectionNumberPositioning {
+        status: if checked_headings == 0 {
+            "not_applicable"
+        } else {
+            "applicable"
+        },
+        checked_headings,
+        aligned_headings,
+        clamped_headings,
+        violations,
+        evidence: evidence_rows,
+    }
+}
+
+fn first_independent_title_glyph<'a>(
+    owner: &'a PublicationOwner,
+    source_title: &Char,
+) -> Option<&'a PublicationGlyph> {
+    let source_is_replayed = source_title
+        .layout
+        .as_ref()
+        .is_some_and(|layout| layout.policy == "passthrough");
+    owner
+        .components
+        .iter()
+        .find_map(|component| match component {
+            PublicationComponent::TranslatedText { glyphs } if !source_is_replayed => {
+                glyphs.first()
+            }
+            PublicationComponent::SourceTextReplay { glyphs } if source_is_replayed => {
+                glyphs.first()
+            }
+            PublicationComponent::TranslatedText { .. }
+            | PublicationComponent::SourceTextReplay { .. }
+            | PublicationComponent::Other => None,
+        })
 }
 
 fn output_line_kinsoku_violations(output_pdf: &Path) -> Option<usize> {
@@ -2485,24 +2860,31 @@ fn paragraph_identity(before: &Paragraph, after: &Paragraph) -> bool {
             .chars
             .iter()
             .zip(&after.text.chars)
-            .all(|(a, b)| {
-                a.unicode == b.unicode
-                    && a.code == b.code
-                    && a.font_size == b.font_size
-                    && a.baseline_origin.x == b.baseline_origin.x
-                    && a.baseline_origin.y == b.baseline_origin.y
-                    && a.box_.left == b.box_.left
-                    && a.box_.bottom == b.box_.bottom
-                    && a.box_.right == b.box_.right
-                    && a.box_.top == b.box_.top
-                    && a.visual_bbox == b.visual_bbox
-                    && a.font == b.font
-                    && a.passthrough == b.passthrough
-            })
+            .all(|(a, b)| source_character_identity(a, b))
         && after
             .translated_text
             .as_deref()
             .is_none_or(|text| text_equivalent(text, &source_text(before)))
+}
+
+fn source_character_identity(a: &Char, b: &Char) -> bool {
+    a.unicode == b.unicode
+        && a.visible == b.visible
+        && a.implicit_space_before == b.implicit_space_before
+        && a.code == b.code
+        && a.font_size == b.font_size
+        && a.baseline_origin.x == b.baseline_origin.x
+        && a.baseline_origin.y == b.baseline_origin.y
+        && a.box_.left == b.box_.left
+        && a.box_.bottom == b.box_.bottom
+        && a.box_.right == b.box_.right
+        && a.box_.top == b.box_.top
+        && a.visual_bbox == b.visual_bbox
+        && a.font == b.font
+        && a.passthrough == b.passthrough
+        && a.text_transform.as_ref().map(|value| value.kind.as_str())
+            == b.text_transform.as_ref().map(|value| value.kind.as_str())
+        && a.layout == b.layout
 }
 
 fn applicability_value(applicable: bool, reason: &'static str) -> Applicability {
@@ -3197,6 +3579,216 @@ mod tests {
         ];
         assert_eq!(count_cache_events(&events, "hit"), 2);
         assert_eq!(count_cache_events(&events, "miss"), 1);
+    }
+
+    #[test]
+    fn retained_section_number_measurement_uses_il_geometry_and_requires_typed_clamping() {
+        let documents = |source_title_left: f64,
+                         output_title_left: f64,
+                         output_prefix_width: f64,
+                         gap_pt: f64,
+                         clamped: bool,
+                         prefix_in_output: bool| {
+            let before: Il = serde_json::from_value(serde_json::json!({
+                "pages": [{"index": 0, "paragraphs": [{
+                    "reading_order": 7,
+                    "bounds": {"left": 70.0, "bottom": 10.0, "right": 100.0, "top": 25.0},
+                    "text": {"chars": [
+                        {
+                            "unicode": "1",
+                            "font_size": 12.0,
+                            "baseline_origin": {"x": 72.0, "y": 15.0},
+                            "box": {"left": 72.0, "bottom": 12.0, "right": 78.0, "top": 24.0},
+                            "layout": {"label": "number", "policy": "passthrough"}
+                        },
+                        {
+                            "unicode": "A",
+                            "font_size": 12.0,
+                            "baseline_origin": {"x": source_title_left, "y": 15.0},
+                            "box": {"left": source_title_left, "bottom": 12.0, "right": source_title_left + 6.0, "top": 24.0},
+                            "layout": {"label": "paragraph_title", "policy": "translate"}
+                        }
+                    ]}
+                }]}]
+            }))
+            .unwrap();
+            let output_glyphs = if prefix_in_output {
+                serde_json::json!([
+                    {"unicode": "1", "baseline_origin": {"x": 72.0, "y": 15.0}},
+                    {"unicode": "标", "baseline_origin": {"x": output_title_left, "y": 15.0}}
+                ])
+            } else {
+                serde_json::json!([
+                    {"unicode": "标", "baseline_origin": {"x": output_title_left, "y": 15.0}}
+                ])
+            };
+            let write: Il = serde_json::from_value(serde_json::json!({
+                "pages": [{"index": 0, "paragraphs": [{
+                    "reading_order": 7,
+                    "bounds": {"left": 70.0, "bottom": 10.0, "right": 100.0, "top": 25.0},
+                    "text": {"chars": [
+                        {
+                            "unicode": "1",
+                            "font_size": 12.0,
+                            "baseline_origin": {"x": 72.0, "y": 15.0},
+                            "box": {"left": 72.0, "bottom": 12.0, "right": 78.0, "top": 24.0},
+                            "layout": {"label": "number", "policy": "passthrough"}
+                        },
+                        {
+                            "unicode": "A",
+                            "font_size": 12.0,
+                            "baseline_origin": {"x": source_title_left, "y": 15.0},
+                            "box": {"left": source_title_left, "bottom": 12.0, "right": source_title_left + 6.0, "top": 24.0},
+                            "layout": {"label": "paragraph_title", "policy": "translate"}
+                        }
+                    ]},
+                    "translated_text": "标题"
+                }]}],
+                "publication_ink": [{
+                    "page_index": 0,
+                    "reading_order": 7,
+                    "admissible_container": {"left": 70.0, "bottom": 10.0, "right": 100.0, "top": 25.0},
+                    "section_number_gap": {
+                        "prefix_glyph_count": 1,
+                        "prefix_in_output": prefix_in_output,
+                        "source_prefix_left": 72.0,
+                        "source_title_left": source_title_left,
+                        "output_prefix_width": output_prefix_width,
+                        "output_title_left": output_title_left,
+                        "gap_pt": gap_pt,
+                        "font_size": 12.0,
+                        "clamped": clamped
+                    },
+                    "components": [{
+                        "kind": "translated_text",
+                        "glyphs": output_glyphs
+                    }]
+                }]
+            }))
+            .unwrap();
+            (before, write)
+        };
+
+        let (before, write) = documents(90.0, 90.0, 6.0, 12.0, false, true);
+        let ordinary = retained_section_number_positioning(&before, &write, &[]);
+        assert_eq!(ordinary.checked_headings, 1);
+        assert_eq!(ordinary.aligned_headings, 1);
+        assert_eq!(ordinary.clamped_headings, 0);
+        assert_eq!(ordinary.evidence[0].source_gap_em, 1.0);
+        assert_eq!(ordinary.violations, 0);
+
+        let (before, mut write) = documents(90.0, 90.0, 6.0, 12.0, false, true);
+        write.publication_ink.clear();
+        write.pages[0].paragraphs[0].translated_text = Some("1A".into());
+        let identity = retained_section_number_positioning(&before, &write, &[]);
+        assert_eq!(identity.checked_headings, 1);
+        assert_eq!(identity.aligned_headings, 1);
+        assert!(identity.evidence[0].source_identity);
+        assert!(!identity.evidence[0].prefix_in_output);
+        assert_eq!(identity.evidence[0].output_title_left_pt, Some(90.0));
+        assert_eq!(identity.evidence[0].delta_em, Some(0.0));
+        assert_eq!(identity.violations, 0);
+
+        let (before, write) = documents(80.0, 82.0, 7.0, 3.0, true, true);
+        let missing_info = retained_section_number_positioning(&before, &write, &[]);
+        assert_eq!(missing_info.violations, 1);
+        let events = [serde_json::json!({
+            "event": "diagnostic",
+            "id": "section_number_gap_clamped",
+            "page_index": 0,
+            "reading_order": 7
+        })];
+        let clamped = retained_section_number_positioning(&before, &write, &events);
+        assert_eq!(clamped.aligned_headings, 1);
+        assert_eq!(clamped.clamped_headings, 1);
+        assert_eq!(clamped.violations, 0);
+
+        let (before, write) = documents(90.0, 91.0, 6.0, 12.0, false, true);
+        assert_eq!(
+            retained_section_number_positioning(&before, &write, &[]).violations,
+            1
+        );
+
+        let (before, write) = documents(90.0, 90.0, 6.0, 12.0, false, false);
+        let independent = retained_section_number_positioning(&before, &write, &[]);
+        assert_eq!(independent.checked_headings, 1);
+        assert_eq!(independent.aligned_headings, 1);
+        assert!(!independent.evidence[0].source_identity);
+        assert!(!independent.evidence[0].prefix_in_output);
+        assert_eq!(independent.evidence[0].output_title_left_pt, Some(90.0));
+        assert_eq!(independent.violations, 0);
+
+        let (mut before, mut write) = documents(90.0, 90.0, 6.0, 12.0, false, false);
+        before.pages[0].paragraphs[0].text.chars[1]
+            .layout
+            .as_mut()
+            .unwrap()
+            .policy = "passthrough".into();
+        let owner = &mut write.publication_ink[0];
+        let PublicationComponent::TranslatedText { glyphs } = &mut owner.components[0] else {
+            unreachable!("fixture has translated text publication evidence");
+        };
+        glyphs[0].baseline_origin.x = 96.0;
+        owner
+            .components
+            .push(PublicationComponent::SourceTextReplay {
+                glyphs: vec![PublicationGlyph {
+                    unicode: 'F',
+                    baseline_origin: Point { x: 90.0, y: 15.0 },
+                }],
+            });
+        let formula_first = retained_section_number_positioning(&before, &write, &[]);
+        assert_eq!(formula_first.checked_headings, 1);
+        assert_eq!(formula_first.aligned_headings, 1);
+        assert_eq!(formula_first.evidence[0].output_title_left_pt, Some(90.0));
+        assert_eq!(formula_first.violations, 0);
+
+        write.publication_ink[0].components.retain(|component| {
+            !matches!(component, PublicationComponent::SourceTextReplay { .. })
+        });
+        let fixed_formula_first = retained_section_number_positioning(&before, &write, &[]);
+        assert_eq!(fixed_formula_first.checked_headings, 1);
+        assert_eq!(fixed_formula_first.aligned_headings, 1);
+        assert_eq!(
+            fixed_formula_first.evidence[0].output_title_left_pt,
+            Some(90.0)
+        );
+        assert_eq!(fixed_formula_first.violations, 0);
+
+        let (mut before, mut write) = documents(90.0, 90.0, 6.0, 12.0, false, false);
+        before.pages[0].paragraphs[0].text.chars[1]
+            .layout
+            .as_mut()
+            .unwrap()
+            .policy = "passthrough".into();
+        let owner = &mut write.publication_ink[0];
+        owner
+            .components
+            .push(PublicationComponent::SourceTextReplay {
+                glyphs: vec![PublicationGlyph {
+                    unicode: 'F',
+                    baseline_origin: Point { x: 96.0, y: 15.0 },
+                }],
+            });
+        let misplaced_formula_first = retained_section_number_positioning(&before, &write, &[]);
+        assert_eq!(misplaced_formula_first.checked_headings, 1);
+        assert_eq!(misplaced_formula_first.aligned_headings, 0);
+        assert_eq!(
+            misplaced_formula_first.evidence[0].output_title_left_pt,
+            Some(96.0)
+        );
+        assert_eq!(misplaced_formula_first.violations, 1);
+
+        let (mut before, mut write) = documents(90.0, 90.0, 6.0, 12.0, false, false);
+        before.pages[0].paragraphs[0].text.chars.swap(0, 1);
+        write.pages[0].paragraphs[0].text.chars.swap(0, 1);
+        let storage_order_differs = retained_section_number_positioning(&before, &write, &[]);
+        assert_eq!(storage_order_differs.checked_headings, 1);
+        assert_eq!(storage_order_differs.aligned_headings, 1);
+        assert_eq!(storage_order_differs.evidence[0].prefix_glyph_count, 1);
+        assert_eq!(storage_order_differs.evidence[0].source_gap_em, 1.0);
+        assert_eq!(storage_order_differs.evidence[0].source_title_left_pt, 90.0);
+        assert_eq!(storage_order_differs.violations, 0);
     }
 
     #[test]

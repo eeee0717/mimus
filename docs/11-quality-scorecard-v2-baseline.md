@@ -1,9 +1,10 @@
 # M3 scorecard v2 baseline
 
-Date: 2026-08-30, refreshed 2026-09-03. Schema: scorecard v2. Thresholds remain proposals pending
+Date: 2026-08-30, refreshed 2026-09-04. Schema: scorecard v2. Thresholds remain proposals pending
 user approval. The 20-paper cluster rows in Sections 1-3 preserve an `invalid-profile` historical
 run and are not comparable with a conserving baseline. Sections 4-8 retain separate real-anchor,
-process, acceptance, and pre-M3.7 history. Section 9 is the current Noto Serif SC 2.001 baseline.
+process, acceptance, and pre-M3.7 history. Section 9 retains the M3.7 Noto Serif SC 2.001 baseline;
+Section 10 is the current M3.8 section-number-gap baseline.
 
 ## 1. Historical evidence and conclusion (cluster `invalid-profile`)
 
@@ -447,3 +448,117 @@ The out-of-repository page-one abstract comparison is
 `9cbbe2dcf3eb50fd56491ccb6f9ad0f1ae02aad65036878a05ab58469fe03cb9`. Its left-to-right panels are
 the old Thin default, explicit Sans 400, final Serif output, and BabelDOC Source Han Serif reference,
 all rendered at 150 DPI over the same crop.
+
+## 10. M3.8 source-geometric section-number gap baseline (accepted 2026-09-04)
+
+M3.8 restores the position of the first title item after a retained section number from source
+geometry. It does not insert a whitespace glyph. The prefix remains at the source prefix x; the title
+starts at the source title x unless the output prefix would leave less than `0.25em`, in which case the
+minimum gap is used and `section_number_gap_clamped` is emitted. A real source whitespace operand is
+not added a second time. Request preparation, `force_no_space_before`, font fitting, the 8 pt floor,
+line advance, collision limits, and bounds-expansion timing are unchanged.
+
+The independent TRANS-01 scorecard consumes additive Write-IL publication evidence and the same
+`mimus-quality-contract::retained_section_number_position` arithmetic as production. Its final
+formula-first regression inspects `SourceTextReplay` glyphs, rather than mistaking the first
+following translated glyph for the title origin. A fixed formula produces no replay component;
+because it is not moved, the scorecard conservatively uses that formula's source position as its
+output identity.
+
+### 10.1 Closed-cache BERT replay
+
+The copied M3.7 migrated BERT cache was
+`e9b9c11d25a8ba2ed91b3c02961c88820f0e6aa58bdbf4fc889cf697b039a797` before replay and its source
+remained byte-identical afterward. With the endpoint fixed at closed loopback port 9, the run hit
+197/197 entries with zero misses, retries, transport failures, or model calls. It published 16 pages;
+`qpdf --check` passes and `pdffonts` reports embedded `NotoSerifSC-Regular` and
+`NotoSerifSC-Bold` subsets.
+
+TRANS-01 checks all 18 source numbered headings and aligns 18/18. In the narrower visual population
+from the M3.8 report, the 12 retained/shared headings comprise 11 translated publication rows plus
+the identity-valued `3 BERT` heading; all 12 retain visible separation. The score remains 97.502090,
+with 14 typed rows, CON-01 380/380, FOR-04 0/21, FOR-05 0/0, INK-01 zero across 181 publications and
+870 components, and STR-05 zero. The M3.7 PDF was
+`bb485d9ba02760934b5a5412f76f6a8b7b0ea2025d0cce0bcd281a559b5989fa`; the M3.8 PDF is
+`e625aa66412bcfd40ecb4d1600b5235173780fc2ebb58b2b167a642a3100fbf5`.
+
+The out-of-repository 150 DPI same-crop triptych is
+`.context/m3-8/section-gap-triptych.png`, SHA-256
+`d121fa6f13a8523b17fb7e3bfd733c148b97b16b276f63ea2e878cbc257b07cc`. Its panels are source
+`1 Introduction`, M3.8 `1 引言`, and the existing BabelDOC reference.
+
+### 10.2 Final 20-paper conserving-fake matrix
+
+| Paper | Producer | v2 | Typed | Con | Formula | Gap | Hole | Ink | Rigid | T/A |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 01 Adam | pdfTeX | 90.886015 | 556 | 1.000000 | 80 | 0 | 0 | 0 | 0 | 0 |
+| 02 ResNet | pdfTeX | 98.308487 | 22 | 1.000000 | 8 | 0 | 0 | 0 | 0 | 0 |
+| 03 SqueezeNet | pdfTeX | 94.674860 | 40 | 1.000000 | 11 | 0 | 0 | 0 | 0 | 0 |
+| 04 MobileNets | pdfTeX | 98.483627 | 4 | 1.000000 | 5 | 1 | 1 | 0 | 0 | 0 |
+| 05 BERT | pdfTeX | 97.186985 | 8 | 1.000000 | 3 | 1 | 1 | 0 | 0 | 0 |
+| 06 DDPM | pdfTeX | 95.734756 | 85 | 1.000000 | 48 | 0 | 0 | 0 | 0 | 0 |
+| 07 ViT | pdfTeX | 98.873281 | 25 | 1.000000 | 2 | 0 | 0 | 0 | 0 | 0 |
+| 08 LoRA | pdfTeX | 96.345861 | 26 | 1.000000 | 39 | 0 | 0 | 0 | 0 | 0 |
+| 09 Repliable onion routing | XeTeX | 87.242855 | 1,114 | 1.000000 | 274 | 16 | 16 | 0 | 0 | 0 |
+| 10 Compact IBE | XeTeX | 91.915119 | 106 | 1.000000 | 89 | 1 | 1 | 2 | 0 | 0 |
+| 11 SDitH hardware | XeTeX | 95.520382 | 72 | 1.000000 | 63 | 1 | 1 | 0 | 0 | 0 |
+| 12 Hertz side channel | XeTeX | 90.144154 | 35 | 1.000000 | 84 | 12 | 12 | 0 | 0 | 0 |
+| 13 Information-theoretic MPC | LuaTeX | 94.883171 | 32 | 1.000000 | 38 | 18 | 18 | 0 | 0 | 0 |
+| 14 Masked comparisons | LuaTeX | 95.925101 | 43 | 1.000000 | 39 | 0 | 0 | 0 | 0 | 0 |
+| 15 LWE two-step | LuaTeX | 90.109823 | 126 | 1.000000 | 127 | 5 | 5 | 0 | 0 | 0 |
+| 16 Supersingular orientations | LuaTeX | 83.776234 | 173 | 1.000000 | 178 | 5 | 5 | 0 | 0 | 0 |
+| 17 Informational consciousness | Word | 95.457662 | 24 | 1.000000 | 0 | 0 | 0 | 0 | 0 | 0 |
+| 18 Consciousness model | Word | 91.149963 | 85 | 1.000000 | 16 | 18 | 18 | 0 | 0 | 0 |
+| 19 Multibeam IoT | Word | 90.772033 | 50 | 1.000000 | 2 | 1 | 1 | 0 | 0 | 0 |
+| 20 Tuberculosis biosensor | Word | 96.832673 | 0 | 1.000000 | 1 | 2 | 2 | 0 | 0 | 0 |
+
+All 20 papers publish and `Internal/6` is zero. TRANS-01 aligns 338/338 retained-number headings;
+all 19 clamped rows have matching typed info. The rounded source-gap distribution and publication
+shape by producer are:
+
+| Producer | Aligned | Clamped | Shared / independent | Source gap em min / mean / max |
+| --- | ---: | ---: | ---: | ---: |
+| pdfTeX | 109/109 | 19 | 92 / 17 | 0.250000 / 0.905138 / 1.150000 |
+| XeTeX | 117/117 | 0 | 102 / 15 | 0.999000 / 1.057574 / 1.466542 |
+| LuaTeX | 102/102 | 0 | 101 / 1 | 0.963445 / 1.072514 / 1.533000 |
+| Word | 10/10 | 0 | 0 / 10 | 0.276217 / 0.482988 / 0.697904 |
+
+Aggregate CON-01 is 7,151/7,151. The accepted M3.7 count of 160 `typeset_overflow` rows is
+unchanged. FOR-04 remains the same two paper-10 findings at 2/2,418; FOR-05 is 0/46, INK-01 is zero
+across 2,973 publications and 9,804 components, and STR-05 is zero. FOR-02/FOR-03 report 81/81
+mechanical findings. The scorecard-exposed per-paper font-scale distribution is unchanged from M3.7:
+Adam remains 0.0 and the other 19 medians remain 1.0. This agrees with the code-level restriction that
+M3.8 changes section-title positioning only, not the font-size search.
+
+The primary run accepted 3,251 responses; ResNet and Onion reruns bring the log to 3,663. All requests
+name `m3-118-conserving-fake-v1`, and term extraction is zero. The exact archived fake server has
+SHA-256 `8fe024bea8fad9d6bcd233135407462f0de1ce028d8aebfb8e14a58996ba91f0`.
+ResNet is byte-identical across reruns at
+`760fb2694da56f501d577770793a5e243824a51144e8ba1274f381313f75c730`; Onion is byte-identical at
+`d9f063915376e930c6f8bcd7a6015f003412ae6bc713e524a7d36902b225687b`. Their M3.7 hashes were
+`4d21d06d90c1a4cf70e2412727d7c1b9fc53e57a85229d3acf9f9272722a7dcf` and
+`6dbf6f14262d5120b0b9bd77d065d34b930cfea0b326783f45127bfaa2597870`, respectively.
+
+### 10.3 Re-anchored real replay
+
+The M3.7 accepted working cache copied for this run had SHA-256
+`38dbfa752dc8c27ef22531c62757cfa71e3322f325db4c24368e00efe2977581`; its source hash was unchanged
+after both modes. Default and bilingual modes each hit 108/108 entries with zero misses, retries,
+transport failures, or provider calls. TRANS-01 aligns 22/22 headings in each mode. Both outputs pass
+`qpdf --check`; page counts remain 15 and 30.
+
+The default score is 97.626297, with the same two typed rows, CON-01 161/161, FOR-01 6,
+FOR-02/FOR-03 0/0, FOR-04 0/71, FOR-05 0/4, INK-01 zero across 107 publications and 348 components,
+and STR-05 zero. M3.7 default/bilingual hashes were
+`eea884d23484ff6a1336cc0c1c1c1ada60bfc593173ccc442dec75ef0e9e2ab7` and
+`1901f9ce2fecc7fb524dd7c9051f9aca18dc4afa631d9f0f846c82918331912a`; M3.8 hashes are:
+
+- default: `fe5632f8b04a408575745473b865f8f87154f96f7adb8be599d7beb1d46500a1`;
+- bilingual: `7da72f770f35085892cd06b2ee4ec07e611c9ee34736b80ecd360b7ba505de66`.
+
+After the independent-prefix, formula-first empty-segment regression was added, the release binaries
+were rebuilt and all three closed-cache runs were repeated under the same port-9 refusal boundary.
+The BERT, default anchor, and bilingual anchor PDFs were byte-identical to the artifacts above, so
+these three accepted hashes remain final. Their scorecards were also identical apart from resource
+usage and the ephemeral qpdf-produced translated-page document identifier used by the bilingual
+scorecard.

@@ -18,7 +18,7 @@ variable = "A page-top paragraph_title region whose left section number is paint
 method = "exact-writer"
 generator = "corpus-exact-writer-v1"
 pdf = "unit-translation-01-section-title-number.pdf"
-pdf_sha256 = "c5018183b489ec476a4f7bfbda61d3c0a16ad432400dc2bc3e75051cdf458e73"
+pdf_sha256 = "2d0b518c6155355f4370822657d1f7d98f249da262c73ed7c22b7850e1401d88"
 font_provenance = "vendored"
 fonts = [
     { file = "../../fonts/MimusExact.ttf", sha256 = "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735", pdf_object = 5, descriptor_object = 6, subset_tag = "MIMUSI", base_name = "DejaVuSans" },
@@ -128,9 +128,7 @@ compressed = false
 bytes = """BT
 /F1 12 Tf
 1 0 0 1 125 195 Tm
-(MIMUS) Tj
-1 0 0 1 108 195 Tm
-(I) Tj
+[(MIMUS) 4804.666667 (I)] TJ
 ET
 """
 
@@ -188,6 +186,11 @@ observable_via = "recorded layout, translation request, and paragraph-find IL"
 id = "TRANS-01-section-number"
 assertion = "The geometrically leading section number is reclassified as number passthrough, omitted from the translation request, and retained at its original position"
 observable_via = "paragraph-find IL, captured translation request, final content spans, and dual-extractor output"
+
+[[expected.behaviour]]
+id = "TRANS-01-source-title-origin"
+assertion = "Typeset keeps the output section prefix at x=108pt and restores the translated title's first-glyph origin to the source title origin x=125pt without inserting a whitespace scalar"
+observable_via = "ParagraphFind Number/passthrough labels, Write-IL section_number_gap evidence and publication glyph origins"
 
 [oracle]
 checks = [

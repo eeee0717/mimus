@@ -1704,7 +1704,7 @@ fn corpus_inventory_runs_every_fixture_through_bounded_production_paths() {
         .iter()
         .flat_map(|id| fixture_manifest(id).identity.cases)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 201, "Corpus fixture inventory changed");
+    assert_eq!(ids.len(), 207, "Corpus fixture inventory changed");
     assert_eq!(cases.len(), 128, "Corpus case inventory changed");
 
     let mut snapshot_digests = BTreeMap::new();

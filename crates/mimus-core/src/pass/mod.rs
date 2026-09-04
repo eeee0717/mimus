@@ -4875,6 +4875,22 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 .iter()
                 .find(|paragraph| paragraph.reading_order == *reading_order)
                 .expect("planned paragraph belongs to its page");
+            for (plan, gap) in plans
+                .iter()
+                .filter_map(|plan| plan.section_number_gap.map(|gap| (plan, gap)))
+                .filter(|(_, gap)| gap.clamped)
+            {
+                document
+                    .diagnostics
+                    .push(Diagnostic::SectionNumberGapClamped {
+                        page_index: page.index,
+                        reading_order: *reading_order,
+                        source_title_left_pt: gap.source_title_left,
+                        output_title_left_pt: gap.output_title_left,
+                        gap_pt: gap.gap_pt,
+                        font_size_pt: plan.font_size,
+                    });
+            }
             if paragraph.translated_text.as_deref() != Some(paragraph.source_text().as_str()) {
                 publication_ink.push(planned_publication_ink(
                     page.index,
@@ -5574,12 +5590,34 @@ struct TypesetPlan {
     spans: Vec<SpanKey>,
     lines: Vec<Vec<crate::translate::StyledCharacter>>,
     baselines: Vec<(f64, f64)>,
+    section_number_gap: Option<PlannedSectionNumberGap>,
     formula_relocations: Vec<FormulaRelocation>,
     text_vector_relocations: Vec<TextVectorRelocation>,
     ink_bounds: Vec<Rect>,
     font_size: f64,
     single_line_expansion: Option<SingleLineBoundsExpansion>,
     multi_line_expansion: Option<MultiLineBoundsExpansion>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SourceSectionNumberGeometry {
+    prefix_glyph_count: usize,
+    prefix_in_output: bool,
+    source_prefix_left: f64,
+    source_prefix_right: f64,
+    source_title_left: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PlannedSectionNumberGap {
+    prefix_glyph_count: usize,
+    prefix_in_output: bool,
+    source_prefix_left: f64,
+    source_title_left: f64,
+    output_prefix_width: f64,
+    output_title_left: f64,
+    gap_pt: f64,
+    clamped: bool,
 }
 
 #[derive(Debug)]
@@ -6033,7 +6071,7 @@ fn plan_paragraph<'a>(
             il::PreservedReason::TypesetProtocol,
         ));
     }
-    retain_shared_section_number_prefix(
+    let section_number_geometry = prepare_retained_section_number_prefix(
         all_chars,
         &mut source_segments,
         &mut translated_segments,
@@ -6087,13 +6125,48 @@ fn plan_paragraph<'a>(
                 (!mixed_with_formula)
                     .then_some(paragraph.first_line_indent)
                     .flatten(),
+                (segment_index == 0)
+                    .then_some(section_number_geometry)
+                    .flatten(),
             )
             .map(|plan| (segment_index, plan))
         })
         .collect::<std::result::Result<Vec<_>, _>>();
     let mut fixed_slot_overflow = false;
     match fixed_plans {
-        Ok(indexed_plans) => {
+        Ok(mut indexed_plans) => {
+            let formula_first = section_number_geometry.is_some_and(|geometry| {
+                section_number_title_is_formula_first(&translated_segments, geometry)
+            });
+            if formula_first
+                && !indexed_plans
+                    .iter()
+                    .any(|(_, plan)| plan.section_number_gap.is_some())
+            {
+                let (_, plan) = indexed_plans
+                    .first_mut()
+                    .ok_or(TypesetPlanError::Preserved(
+                        il::PreservedReason::TypesetProtocol,
+                    ))?;
+                let faces = OutputFontFaces::parse(output_fonts).map_err(|_| {
+                    TypesetPlanError::Preserved(il::PreservedReason::UnsupportedFont)
+                })?;
+                plan.section_number_gap = Some(
+                    planned_section_number_gap(
+                        &translated_segments[0],
+                        &faces,
+                        plan.font_size,
+                        section_number_geometry.expect("formula-first section geometry exists"),
+                    )
+                    .ok_or(TypesetPlanError::Preserved(
+                        il::PreservedReason::TypesetProtocol,
+                    ))?,
+                );
+            }
+            let fixed_formula_requires_relocation = formula_first
+                && indexed_plans
+                    .iter()
+                    .any(|(_, plan)| plan.section_number_gap.is_some_and(|gap| gap.clamped));
             let continuity_text = planned_formula_continuity_text(&indexed_plans, output_fonts);
             let plans = indexed_plans
                 .into_iter()
@@ -6103,7 +6176,7 @@ fn plan_paragraph<'a>(
                 .iter()
                 .flat_map(|plan| plan.ink_bounds.iter().copied())
                 .collect::<Vec<_>>();
-            if !rects_intersect_each_other(&paragraph_ink) {
+            if !fixed_formula_requires_relocation && !rects_intersect_each_other(&paragraph_ink) {
                 if !mixed_with_formula {
                     return Ok(plans);
                 }
@@ -6153,6 +6226,7 @@ fn plan_paragraph<'a>(
             paragraph,
             &source_segments,
             &translated_segments,
+            section_number_geometry,
             geometry.extracted,
             geometry.content_objects,
             output_fonts,
@@ -6272,6 +6346,7 @@ fn prepare_shared_formula_fixed_plans(
     }) {
         return None;
     }
+    let section_number_gap = plans.iter().find_map(|plan| plan.section_number_gap);
     let mut lines = Vec::new();
     let mut baselines = Vec::new();
     let mut ink_bounds = Vec::new();
@@ -6303,6 +6378,7 @@ fn prepare_shared_formula_fixed_plans(
         spans,
         lines,
         baselines,
+        section_number_gap,
         formula_relocations,
         text_vector_relocations: Vec::new(),
         ink_bounds,
@@ -6389,6 +6465,7 @@ fn plan_shared_number_identity<'a>(
         output_fonts,
         page_bounds,
         obstacles,
+        None,
         None,
         None,
     )
@@ -6580,12 +6657,12 @@ fn source_radical_attaches_to_formula(character: &Char, formula_bounds: Rect) ->
     overlaps_vertically && gap >= -0.05 * em && gap <= 0.25 * em
 }
 
-fn retain_shared_section_number_prefix<'a>(
+fn prepare_retained_section_number_prefix<'a>(
     all_chars: &'a [Char],
     source_segments: &mut [Vec<&'a Char>],
     translated_segments: &mut [Vec<crate::translate::StyledCharacter>],
     content_objects: &BTreeSet<u32>,
-) -> std::result::Result<(), il::PreservedReason> {
+) -> std::result::Result<Option<SourceSectionNumberGeometry>, il::PreservedReason> {
     let span = |character: &Char| {
         (
             character.passthrough.content_object,
@@ -6593,6 +6670,39 @@ fn retain_shared_section_number_prefix<'a>(
             character.passthrough.byte_end,
         )
     };
+    let mut visual_order = (0..all_chars.len()).collect::<Vec<_>>();
+    visual_order.sort_by(|&left, &right| {
+        all_chars[left]
+            .r#box
+            .left
+            .total_cmp(&all_chars[right].r#box.left)
+            .then(left.cmp(&right))
+    });
+    let prefix_indices = visual_order
+        .iter()
+        .copied()
+        .take_while(|&index| {
+            let character = &all_chars[index];
+            character.visible
+                && character.text_transform == TextTransform::Upright
+                && character.layout.is_some_and(|layout| {
+                    layout.label == LayoutLabel::Number
+                        && layout.policy == TranslationPolicy::Passthrough
+                })
+        })
+        .collect::<Vec<_>>();
+    let prefix = prefix_indices
+        .iter()
+        .map(|&index| &all_chars[index])
+        .collect::<Vec<_>>();
+    let prefix_index_set = prefix_indices.iter().copied().collect::<BTreeSet<_>>();
+    if prefix.is_empty() {
+        return Ok(None);
+    }
+    if !section_number_prefix_is_supported(&prefix) {
+        return Err(il::PreservedReason::TypesetProtocol);
+    }
+
     let translated_spans = source_segments
         .iter()
         .flatten()
@@ -6608,52 +6718,49 @@ fn retain_shared_section_number_prefix<'a>(
         })
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
-    if shared_passthrough_indices.is_empty() {
-        return Ok(());
-    }
-
-    let prefix_len = all_chars
-        .iter()
-        .take_while(|character| {
-            character.visible
-                && character.text_transform == TextTransform::Upright
-                && character.layout.is_some_and(|layout| {
-                    layout.label == LayoutLabel::Number
-                        && layout.policy == TranslationPolicy::Passthrough
-                })
-        })
-        .count();
-    let prefix = &all_chars[..prefix_len];
-    if prefix.is_empty()
-        || shared_passthrough_indices != (0..prefix_len).collect::<Vec<_>>()
-        || !section_number_prefix_is_supported(prefix)
-        || prefix
+    let prefix_in_output = !shared_passthrough_indices.is_empty();
+    if prefix_in_output
+        && (shared_passthrough_indices
             .iter()
-            .any(|character| !translated_spans.contains(&span(character)))
+            .copied()
+            .collect::<BTreeSet<_>>()
+            != prefix_index_set
+            || prefix
+                .iter()
+                .any(|character| !translated_spans.contains(&span(character))))
     {
         return Err(il::PreservedReason::TypesetProtocol);
     }
 
-    let prefix_spans = prefix.iter().map(&span).collect::<BTreeSet<_>>();
-    let matching_segments = source_segments
+    let prefix_spans = prefix
         .iter()
-        .enumerate()
-        .filter(|(_, segment)| {
-            segment
-                .iter()
-                .any(|character| prefix_spans.contains(&span(character)))
-        })
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    if matching_segments != [0]
-        || all_chars.iter().skip(prefix_len).any(|character| {
-            prefix_spans.contains(&span(character))
-                && !source_segments[0]
+        .map(|character| span(character))
+        .collect::<BTreeSet<_>>();
+    if prefix_in_output {
+        let matching_segments = source_segments
+            .iter()
+            .enumerate()
+            .filter(|(_, segment)| {
+                segment
                     .iter()
-                    .any(|source| std::ptr::eq(*source, character))
-        })
-    {
-        return Err(il::PreservedReason::TypesetProtocol);
+                    .any(|character| prefix_spans.contains(&span(character)))
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if matching_segments != [0]
+            || all_chars
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !prefix_index_set.contains(index))
+                .any(|(_, character)| {
+                    prefix_spans.contains(&span(character))
+                        && !source_segments[0]
+                            .iter()
+                            .any(|source| std::ptr::eq(*source, character))
+                })
+        {
+            return Err(il::PreservedReason::TypesetProtocol);
+        }
     }
 
     let bold = translated_segments[0]
@@ -6667,24 +6774,82 @@ fn retain_shared_section_number_prefix<'a>(
                 )
             })
         });
-    let mut retained = prefix
+    let source_prefix_left = prefix
         .iter()
-        .map(|character| crate::translate::StyledCharacter {
-            value: character
-                .unicode
-                .expect("validated section number character"),
-            bold,
+        .map(|character| character.r#box.left)
+        .min_by(f64::total_cmp)
+        .ok_or(il::PreservedReason::TypesetProtocol)?;
+    let source_prefix_right = prefix
+        .iter()
+        .map(|character| character.r#box.right)
+        .max_by(f64::total_cmp)
+        .ok_or(il::PreservedReason::TypesetProtocol)?;
+    let prefix_line_bounds = prefix
+        .iter()
+        .map(|character| character.r#box.union(character.visual_bbox))
+        .reduce(Rect::union)
+        .ok_or(il::PreservedReason::TypesetProtocol)?;
+    let title = all_chars
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !prefix_index_set.contains(index))
+        .filter(|(_, character)| {
+            let bounds = character.r#box.union(character.visual_bbox);
+            character.visible
+                && character.text_transform == TextTransform::Upright
+                && character
+                    .unicode
+                    .is_some_and(|value| !value.is_whitespace())
+                && character.r#box.left >= source_prefix_right - 0.01
+                && mimus_quality_contract::formula_items_share_line(
+                    prefix_line_bounds.bottom,
+                    prefix_line_bounds.top,
+                    bounds.bottom,
+                    bounds.top,
+                )
         })
-        .collect::<Vec<_>>();
-    retained.append(&mut translated_segments[0]);
-    translated_segments[0] = retained;
-    let mut source = prefix.iter().collect::<Vec<_>>();
-    source.append(&mut source_segments[0]);
-    source_segments[0] = source;
-    Ok(())
+        .min_by(|(left_index, left), (right_index, right)| {
+            left.r#box
+                .left
+                .total_cmp(&right.r#box.left)
+                .then(left_index.cmp(right_index))
+        })
+        .map(|(_, character)| character)
+        .ok_or(il::PreservedReason::TypesetProtocol)?;
+    let source_title_left = title.r#box.left;
+    if !source_prefix_left.is_finite()
+        || !source_prefix_right.is_finite()
+        || !source_title_left.is_finite()
+        || source_prefix_right <= source_prefix_left
+    {
+        return Err(il::PreservedReason::TypesetProtocol);
+    }
+    if prefix_in_output {
+        let mut retained = prefix
+            .iter()
+            .map(|character| crate::translate::StyledCharacter {
+                value: character
+                    .unicode
+                    .expect("validated section number character"),
+                bold,
+            })
+            .collect::<Vec<_>>();
+        retained.append(&mut translated_segments[0]);
+        translated_segments[0] = retained;
+        let mut source = prefix.clone();
+        source.append(&mut source_segments[0]);
+        source_segments[0] = source;
+    }
+    Ok(Some(SourceSectionNumberGeometry {
+        prefix_glyph_count: prefix.len(),
+        prefix_in_output,
+        source_prefix_left,
+        source_prefix_right,
+        source_title_left,
+    }))
 }
 
-fn section_number_prefix_is_supported(chars: &[Char]) -> bool {
+fn section_number_prefix_is_supported(chars: &[&Char]) -> bool {
     let values = chars
         .iter()
         .filter_map(|character| character.unicode)
@@ -6730,6 +6895,8 @@ enum FormulaFlowAtom {
     Text {
         segment_index: usize,
         characters: Vec<crate::translate::StyledCharacter>,
+        extra_advance_pt: f64,
+        section_prefix_only: bool,
     },
     Formula(usize),
 }
@@ -6753,6 +6920,7 @@ fn plan_relocated_formula_flow<'a>(
     paragraph: &Paragraph,
     source_segments: &[Vec<&Char>],
     translated_segments: &[Vec<crate::translate::StyledCharacter>],
+    section_number_geometry: Option<SourceSectionNumberGeometry>,
     extracted: &ExtractedPage,
     content_objects: &BTreeSet<lopdf::ObjectId>,
     output_fonts: &'a crate::context::OutputFonts,
@@ -6846,31 +7014,40 @@ fn plan_relocated_formula_flow<'a>(
             });
         }
     }
-    let mut atoms = Vec::new();
-    for (segment_index, segment) in translated_segments.iter().enumerate() {
-        atoms.extend(styled_text_tokens(segment).into_iter().map(|characters| {
-            FormulaFlowAtom::Text {
-                segment_index,
-                characters,
-            }
-        }));
-        if segment_index < formula_units.len() {
-            atoms.push(FormulaFlowAtom::Formula(segment_index));
-        }
-    }
-    if formula_flow_kinsoku_is_unsatisfiable(&atoms) {
-        return Err(TypesetPlanError::Preserved(
-            il::PreservedReason::TypesetOverflow,
-        ));
-    }
     let preferred = preferred_typeset_font_size(&text_chars).unwrap_or(text_chars[0].font_size);
     let first = text_chars[0];
     let mut size = preferred.max(MIN_FONT_SIZE_PT);
     loop {
+        let section_number_gap = section_number_geometry
+            .map(|source| {
+                planned_section_number_gap(&translated_segments[0], &faces, size, source).ok_or(
+                    TypesetPlanError::Preserved(il::PreservedReason::TypesetProtocol),
+                )
+            })
+            .transpose()?;
+        let inline_section_number_gap = section_number_gap.filter(|gap| gap.prefix_in_output);
+        let atoms = formula_flow_atoms(&translated_segments, inline_section_number_gap);
+        if formula_flow_kinsoku_is_unsatisfiable(&atoms) {
+            return Err(TypesetPlanError::Preserved(
+                il::PreservedReason::TypesetOverflow,
+            ));
+        }
         let ascent = faces.ascent_em() * size;
         let descent = faces.descent_em() * size;
         let first_y = first.baseline_origin.y.min(container.top - ascent);
         let may_expand = size <= MIN_FONT_SIZE_PT + 0.001;
+        let first_line_start_x = section_number_gap.map_or_else(
+            || first.baseline_origin.x.max(container.left),
+            |gap| {
+                if gap.prefix_in_output {
+                    gap.source_prefix_left
+                } else {
+                    gap.output_title_left
+                }
+            },
+        );
+        let first_line_indent =
+            section_number_gap.map(|_| (first_line_start_x - container.left).max(0.0));
         let mut slots = obstacle_aware_multiline_slots(
             container,
             first_y,
@@ -6879,15 +7056,23 @@ fn plan_relocated_formula_flow<'a>(
             size,
             page_bounds,
             obstacles,
-            None,
+            first_line_indent,
         );
         if !may_expand {
             slots.retain(|slot| slot.baseline_y + descent >= container.bottom - 0.01);
         }
-        let placement = match place_formula_flow(&atoms, &formula_units, &faces, size, &slots)
-            .ok_or(TypesetPlanError::Preserved(
-                il::PreservedReason::TypesetProtocol,
-            ))? {
+        let placement = match place_formula_flow(
+            &atoms,
+            &formula_units,
+            &faces,
+            size,
+            &slots,
+            inline_section_number_gap,
+            section_number_gap.is_some(),
+        )
+        .ok_or(TypesetPlanError::Preserved(
+            il::PreservedReason::TypesetProtocol,
+        ))? {
             FormulaFlowAttempt::Placed(placement) => placement,
             FormulaFlowAttempt::NoFit => {
                 // This is still geometric packing before the continuity oracle.
@@ -6899,9 +7084,11 @@ fn plan_relocated_formula_flow<'a>(
             }
         };
         if ink_bounds_are_safe(&placement.ink_bounds, page_bounds, obstacles) {
-            let continuity_text = formula_flow_continuity_text(&placement, &faces, size).ok_or(
-                TypesetPlanError::Preserved(il::PreservedReason::TypesetProtocol),
-            )?;
+            let continuity_text =
+                formula_flow_continuity_text(&placement, &faces, size, inline_section_number_gap)
+                    .ok_or(TypesetPlanError::Preserved(
+                    il::PreservedReason::TypesetProtocol,
+                ))?;
             let continuity_formulas = formula_units
                 .iter()
                 .zip(&placement.formula_relocations)
@@ -6951,6 +7138,7 @@ fn plan_relocated_formula_flow<'a>(
                     spans,
                     lines: placement.lines,
                     baselines: placement.baselines,
+                    section_number_gap,
                     formula_relocations: placement.formula_relocations,
                     text_vector_relocations: Vec::new(),
                     ink_bounds: placement.ink_bounds,
@@ -7433,12 +7621,48 @@ fn formula_glyph_replay(extracted: &ExtractedPage, character: &Char) -> Option<F
     })
 }
 
+fn formula_flow_atoms(
+    translated_segments: &[Vec<crate::translate::StyledCharacter>],
+    section_number_gap: Option<PlannedSectionNumberGap>,
+) -> Vec<FormulaFlowAtom> {
+    let mut atoms = Vec::new();
+    for (segment_index, segment) in translated_segments.iter().enumerate() {
+        let segment_gap = (segment_index == 0).then_some(section_number_gap).flatten();
+        let mut consumed = 0usize;
+        for characters in section_aware_styled_text_tokens(segment, segment_gap) {
+            let token_end = consumed + characters.len();
+            let section_prefix_only = segment_gap.is_some_and(|gap| {
+                segment.len() == gap.prefix_glyph_count && token_end == gap.prefix_glyph_count
+            });
+            let extra_advance_pt = segment_gap
+                .filter(|gap| {
+                    consumed <= gap.prefix_glyph_count
+                        && (token_end > gap.prefix_glyph_count || section_prefix_only)
+                })
+                .map_or(0.0, |gap| gap.gap_pt);
+            atoms.push(FormulaFlowAtom::Text {
+                segment_index,
+                characters,
+                extra_advance_pt,
+                section_prefix_only,
+            });
+            consumed = token_end;
+        }
+        if segment_index + 1 < translated_segments.len() {
+            atoms.push(FormulaFlowAtom::Formula(segment_index));
+        }
+    }
+    atoms
+}
+
 fn place_formula_flow(
     atoms: &[FormulaFlowAtom],
     formula_units: &[SourceFormulaUnit<'_>],
     faces: &OutputFontFaces<'_>,
     size: f64,
     slots: &[TypesetLineSlot],
+    section_number_gap: Option<PlannedSectionNumberGap>,
+    anchor_first_slot: bool,
 ) -> Option<FormulaFlowAttempt> {
     let mut lines = Vec::<Vec<crate::translate::StyledCharacter>>::new();
     let mut baselines = Vec::<(f64, f64)>::new();
@@ -7454,9 +7678,11 @@ fn place_formula_flow(
     let mut open_text_slot = None;
     for (atom_index, atom) in atoms.iter().enumerate() {
         let width = match atom {
-            FormulaFlowAtom::Text { characters, .. } => {
-                styled_token_width(characters, faces, size)?
-            }
+            FormulaFlowAtom::Text {
+                characters,
+                extra_advance_pt,
+                ..
+            } => styled_token_width(characters, faces, size)? + extra_advance_pt,
             FormulaFlowAtom::Formula(index) => {
                 let unit = formula_units.get(*index)?;
                 unit.bounds.right - unit.bounds.left
@@ -7479,6 +7705,9 @@ fn place_formula_flow(
             if unbreakable_width <= slot.right - cursor + 0.01 {
                 break;
             }
+            if anchor_first_slot && atom_index == 0 {
+                return Some(FormulaFlowAttempt::NoFit);
+            }
             slot_index += 1;
             let Some(next_slot) = slots.get(slot_index) else {
                 return Some(FormulaFlowAttempt::NoFit);
@@ -7491,6 +7720,7 @@ fn place_formula_flow(
             FormulaFlowAtom::Text {
                 segment_index,
                 characters,
+                ..
             } => {
                 if open_text_slot != Some(slot_index) {
                     lines.push(Vec::new());
@@ -7549,7 +7779,8 @@ fn place_formula_flow(
         }
         cursor += width;
     }
-    let mut ink_bounds = planned_line_ink_bounds(&lines, &baselines, faces, size)?;
+    let mut ink_bounds =
+        planned_line_ink_bounds(&lines, &baselines, faces, size, section_number_gap)?;
     ink_bounds.extend(formula_ink);
     Some(FormulaFlowAttempt::Placed(FormulaFlowPlacement {
         lines,
@@ -7568,7 +7799,11 @@ fn formula_flow_atom_width(
     size: f64,
 ) -> Option<f64> {
     match atom {
-        FormulaFlowAtom::Text { characters, .. } => styled_token_width(characters, faces, size),
+        FormulaFlowAtom::Text {
+            characters,
+            extra_advance_pt,
+            ..
+        } => Some(styled_token_width(characters, faces, size)? + extra_advance_pt),
         FormulaFlowAtom::Formula(index) => {
             let unit = formula_units.get(*index)?;
             Some(unit.bounds.right - unit.bounds.left)
@@ -7583,11 +7818,21 @@ fn formula_flow_atoms_must_stay_together(left: &FormulaFlowAtom, right: &Formula
             .iter()
             .find(|character| !character.value.is_whitespace())
             .is_some_and(|character| formula_adjacent_punctuation(character.value)),
-        (FormulaFlowAtom::Text { characters, .. }, FormulaFlowAtom::Formula(_)) => characters
-            .iter()
-            .rev()
-            .find(|character| !character.value.is_whitespace())
-            .is_some_and(|character| formula_adjacent_punctuation(character.value)),
+        (
+            FormulaFlowAtom::Text {
+                characters,
+                section_prefix_only,
+                ..
+            },
+            FormulaFlowAtom::Formula(_),
+        ) => {
+            *section_prefix_only
+                || characters
+                    .iter()
+                    .rev()
+                    .find(|character| !character.value.is_whitespace())
+                    .is_some_and(|character| formula_adjacent_punctuation(character.value))
+        }
         _ => false,
     }
 }
@@ -7626,6 +7871,7 @@ fn planned_formula_continuity_text(
                     &plan.baselines,
                     &faces,
                     plan.font_size,
+                    plan.section_number_gap.filter(|gap| gap.prefix_in_output),
                 )?,
             })
         })
@@ -7636,8 +7882,15 @@ fn formula_flow_continuity_text(
     placement: &FormulaFlowPlacement,
     faces: &OutputFontFaces<'_>,
     size: f64,
+    section_number_gap: Option<PlannedSectionNumberGap>,
 ) -> Option<Vec<FormulaContinuityText>> {
-    let lines = formula_continuity_lines(&placement.lines, &placement.baselines, faces, size)?;
+    let lines = formula_continuity_lines(
+        &placement.lines,
+        &placement.baselines,
+        faces,
+        size,
+        section_number_gap,
+    )?;
     if lines.len() != placement.line_segment_indices.len() {
         return None;
     }
@@ -7661,6 +7914,7 @@ fn formula_continuity_lines(
     baselines: &[(f64, f64)],
     faces: &OutputFontFaces<'_>,
     size: f64,
+    section_number_gap: Option<PlannedSectionNumberGap>,
 ) -> Option<Vec<FormulaContinuityLine>> {
     if lines.len() != baselines.len() {
         return None;
@@ -7668,8 +7922,12 @@ fn formula_continuity_lines(
     lines
         .iter()
         .zip(baselines)
-        .map(|(line, &(x, y))| {
-            let width = styled_token_width(line, faces, size)?;
+        .enumerate()
+        .map(|(line_index, (line, &(x, y)))| {
+            let width = styled_token_width(line, faces, size)?
+                + section_number_gap
+                    .filter(|gap| line_index == 0 && line.len() > gap.prefix_glyph_count)
+                    .map_or(0.0, |gap| gap.gap_pt);
             let first = line
                 .iter()
                 .find(|character| !character.value.is_whitespace());
@@ -8102,6 +8360,59 @@ fn styled_token_width(
     })
 }
 
+fn planned_section_number_gap(
+    translated: &[crate::translate::StyledCharacter],
+    faces: &OutputFontFaces<'_>,
+    size: f64,
+    source: SourceSectionNumberGeometry,
+) -> Option<PlannedSectionNumberGap> {
+    if source.prefix_glyph_count == 0
+        || (source.prefix_in_output
+            && (translated.is_empty() || source.prefix_glyph_count > translated.len()))
+    {
+        return None;
+    }
+    let output_prefix_width = if source.prefix_in_output {
+        styled_token_width(&translated[..source.prefix_glyph_count], faces, size)?
+    } else {
+        source.source_prefix_right - source.source_prefix_left
+    };
+    let position = mimus_quality_contract::retained_section_number_position(
+        source.source_prefix_left,
+        source.source_title_left,
+        output_prefix_width,
+        size,
+    )?;
+    Some(PlannedSectionNumberGap {
+        prefix_glyph_count: source.prefix_glyph_count,
+        prefix_in_output: source.prefix_in_output,
+        source_prefix_left: source.source_prefix_left,
+        source_title_left: source.source_title_left,
+        output_prefix_width,
+        output_title_left: position.title_left,
+        gap_pt: position.gap_pt,
+        clamped: position.clamped,
+    })
+}
+
+fn section_number_title_is_formula_first(
+    translated_segments: &[Vec<crate::translate::StyledCharacter>],
+    source: SourceSectionNumberGeometry,
+) -> bool {
+    translated_segments.first().is_some_and(|segment| {
+        let prefix_glyph_count = if source.prefix_in_output {
+            source.prefix_glyph_count
+        } else {
+            0
+        };
+        segment.get(prefix_glyph_count..).is_some_and(|title| {
+            title
+                .iter()
+                .all(|character| character.value.is_whitespace())
+        })
+    })
+}
+
 fn translated_rect(rect: Rect, delta_x: f64, delta_y: f64) -> Rect {
     Rect {
         left: rect.left + delta_x,
@@ -8121,6 +8432,7 @@ fn plan_text_segment<'a>(
     obstacles: &[Rect],
     line_slots: Option<&[TypesetLineSlot]>,
     first_line_indent: Option<f64>,
+    section_number_geometry: Option<SourceSectionNumberGeometry>,
 ) -> std::result::Result<TypesetPlan, TypesetPlanError<'a>> {
     if chars.is_empty() {
         return Err(TypesetPlanError::Preserved(
@@ -8149,6 +8461,7 @@ fn plan_text_segment<'a>(
             spans,
             lines: Vec::new(),
             baselines: Vec::new(),
+            section_number_gap: None,
             formula_relocations: Vec::new(),
             text_vector_relocations: Vec::new(),
             ink_bounds: Vec::new(),
@@ -8191,11 +8504,38 @@ fn plan_text_segment<'a>(
     let preferred = preferred_typeset_font_size(chars).unwrap_or(chars[0].font_size);
     let first = chars[0];
     let source_is_single_line = source_is_single_line(chars);
-    let single_line_start_x = first.baseline_origin.x.max(container.left);
     let mut size = preferred.max(MIN_FONT_SIZE_PT);
     loop {
+        let section_number_gap = section_number_geometry
+            .map(|source| {
+                planned_section_number_gap(&translated, &faces, size, source).ok_or(
+                    TypesetPlanError::Preserved(il::PreservedReason::TypesetProtocol),
+                )
+            })
+            .transpose()?;
+        let inline_section_number_gap = section_number_gap.filter(|gap| gap.prefix_in_output);
+        let single_line_start_x = section_number_gap.map_or_else(
+            || first.baseline_origin.x.max(container.left),
+            |gap| {
+                if gap.prefix_in_output {
+                    gap.source_prefix_left
+                } else {
+                    gap.output_title_left
+                }
+            },
+        );
+        let effective_first_line_indent = section_number_gap.map_or_else(
+            || first_line_indent.unwrap_or(0.0),
+            |_| (single_line_start_x - container.left).max(0.0),
+        );
         if let Some(slots) = line_slots
-            && let Some(slotted_lines) = wrap_styled_text_in_slots(&translated, &faces, size, slots)
+            && let Some(slotted_lines) = wrap_styled_text_in_slots(
+                &translated,
+                &faces,
+                size,
+                slots,
+                inline_section_number_gap,
+            )
         {
             let lines = slotted_lines
                 .iter()
@@ -8203,12 +8543,21 @@ fn plan_text_segment<'a>(
                 .collect::<Vec<_>>();
             let baselines = slotted_lines
                 .iter()
-                .map(|(slot_index, _)| {
+                .enumerate()
+                .map(|(line_index, (slot_index, _))| {
                     let slot = slots[*slot_index];
-                    (slot.left, slot.baseline_y)
+                    (
+                        if line_index == 0 {
+                            section_number_gap.map_or(slot.left, |_| single_line_start_x)
+                        } else {
+                            slot.left
+                        },
+                        slot.baseline_y,
+                    )
                 })
                 .collect::<Vec<_>>();
-            if let Some(ink_bounds) = planned_line_ink_bounds(&lines, &baselines, &faces, size)
+            if let Some(ink_bounds) =
+                planned_line_ink_bounds(&lines, &baselines, &faces, size, inline_section_number_gap)
                 && ink_bounds
                     .iter()
                     .zip(&slotted_lines)
@@ -8222,6 +8571,7 @@ fn plan_text_segment<'a>(
                     spans,
                     lines,
                     baselines,
+                    section_number_gap,
                     formula_relocations: Vec::new(),
                     text_vector_relocations: Vec::new(),
                     ink_bounds,
@@ -8237,7 +8587,8 @@ fn plan_text_segment<'a>(
                 &faces,
                 size,
                 container.right - container.left,
-                first_line_indent.unwrap_or(0.0),
+                effective_first_line_indent,
+                inline_section_number_gap,
             )
         {
             if source_is_single_line
@@ -8251,12 +8602,14 @@ fn plan_text_segment<'a>(
                     container,
                     page_bounds,
                     obstacles,
+                    inline_section_number_gap,
                 )
             {
                 return Ok(TypesetPlan {
                     spans,
                     lines,
                     baselines: vec![(single_line_start_x, fit.baseline_y)],
+                    section_number_gap,
                     formula_relocations: Vec::new(),
                     text_vector_relocations: Vec::new(),
                     ink_bounds: vec![fit.ink_bounds],
@@ -8274,7 +8627,7 @@ fn plan_text_segment<'a>(
                 .map(|(index, _)| {
                     (
                         if index == 0 {
-                            container.left + first_line_indent.unwrap_or(0.0)
+                            container.left + effective_first_line_indent
                         } else {
                             container.left
                         },
@@ -8283,7 +8636,8 @@ fn plan_text_segment<'a>(
                 })
                 .collect::<Vec<_>>();
             let last_y = baselines.last().unwrap().1;
-            if let Some(ink_bounds) = planned_line_ink_bounds(&lines, &baselines, &faces, size)
+            if let Some(ink_bounds) =
+                planned_line_ink_bounds(&lines, &baselines, &faces, size, inline_section_number_gap)
                 && ink_bounds_are_safe(&ink_bounds, page_bounds, obstacles)
             {
                 let overflow_top = (first_y + ascent - container.top).max(0.0);
@@ -8295,6 +8649,7 @@ fn plan_text_segment<'a>(
                         spans,
                         lines,
                         baselines,
+                        section_number_gap,
                         formula_relocations: Vec::new(),
                         text_vector_relocations: Vec::new(),
                         ink_bounds,
@@ -8318,25 +8673,41 @@ fn plan_text_segment<'a>(
                     size,
                     page_bounds,
                     obstacles,
-                    first_line_indent,
+                    Some(effective_first_line_indent),
                 );
-                if let Some(slotted_lines) =
-                    wrap_styled_text_in_slots(&translated, &faces, size, &slots)
-                {
+                if let Some(slotted_lines) = wrap_styled_text_in_slots(
+                    &translated,
+                    &faces,
+                    size,
+                    &slots,
+                    inline_section_number_gap,
+                ) {
                     let lines = slotted_lines
                         .iter()
                         .map(|(_, line)| line.clone())
                         .collect::<Vec<_>>();
                     let baselines = slotted_lines
                         .iter()
-                        .map(|(slot_index, _)| {
+                        .enumerate()
+                        .map(|(line_index, (slot_index, _))| {
                             let slot = slots[*slot_index];
-                            (slot.left, slot.baseline_y)
+                            (
+                                if line_index == 0 {
+                                    section_number_gap.map_or(slot.left, |_| single_line_start_x)
+                                } else {
+                                    slot.left
+                                },
+                                slot.baseline_y,
+                            )
                         })
                         .collect::<Vec<_>>();
-                    if let Some(ink_bounds) =
-                        planned_line_ink_bounds(&lines, &baselines, &faces, size)
-                        && ink_bounds_are_safe(&ink_bounds, page_bounds, obstacles)
+                    if let Some(ink_bounds) = planned_line_ink_bounds(
+                        &lines,
+                        &baselines,
+                        &faces,
+                        size,
+                        inline_section_number_gap,
+                    ) && ink_bounds_are_safe(&ink_bounds, page_bounds, obstacles)
                     {
                         let first_baseline = baselines.first().unwrap().1;
                         let last_baseline = baselines.last().unwrap().1;
@@ -8347,6 +8718,7 @@ fn plan_text_segment<'a>(
                             spans,
                             lines,
                             baselines,
+                            section_number_gap,
                             formula_relocations: Vec::new(),
                             text_vector_relocations: Vec::new(),
                             ink_bounds,
@@ -8377,11 +8749,22 @@ fn planned_line_ink_bounds(
     baselines: &[(f64, f64)],
     faces: &OutputFontFaces<'_>,
     size: f64,
+    section_number_gap: Option<PlannedSectionNumberGap>,
 ) -> Option<Vec<Rect>> {
     lines
         .iter()
         .zip(baselines)
-        .map(|(line, &(x, y))| styled_line_ink_bounds(line, faces, size, x, y))
+        .enumerate()
+        .map(|(line_index, (line, &(x, y)))| {
+            styled_line_ink_bounds_with_gap(
+                line,
+                faces,
+                size,
+                x,
+                y,
+                (line_index == 0).then_some(section_number_gap).flatten(),
+            )
+        })
         .collect()
 }
 
@@ -8494,8 +8877,16 @@ fn single_line_ink_fit(
     container: Rect,
     page_bounds: Rect,
     obstacles: &[Rect],
+    section_number_gap: Option<PlannedSectionNumberGap>,
 ) -> Option<SingleLineInkFit> {
-    let ink = styled_line_ink_bounds(line, faces, size, start_x, baseline_y)?;
+    let ink = styled_line_ink_bounds_with_gap(
+        line,
+        faces,
+        size,
+        start_x,
+        baseline_y,
+        section_number_gap,
+    )?;
     if ink.left < container.left - 0.01 || ink.right > container.right + 0.01 {
         return None;
     }
@@ -8544,6 +8935,7 @@ fn single_line_ink_fit(
     })
 }
 
+#[cfg(test)]
 fn styled_line_ink_bounds(
     line: &[crate::translate::StyledCharacter],
     faces: &OutputFontFaces<'_>,
@@ -8551,9 +8943,23 @@ fn styled_line_ink_bounds(
     start_x: f64,
     baseline_y: f64,
 ) -> Option<Rect> {
+    styled_line_ink_bounds_with_gap(line, faces, size, start_x, baseline_y, None)
+}
+
+fn styled_line_ink_bounds_with_gap(
+    line: &[crate::translate::StyledCharacter],
+    faces: &OutputFontFaces<'_>,
+    size: f64,
+    start_x: f64,
+    baseline_y: f64,
+    section_number_gap: Option<PlannedSectionNumberGap>,
+) -> Option<Rect> {
     let mut x = start_x;
     let mut ink = None;
-    for character in line {
+    for (index, character) in line.iter().enumerate() {
+        if section_number_gap.is_some_and(|gap| index == gap.prefix_glyph_count) {
+            x += section_number_gap.unwrap().gap_pt;
+        }
         let face = faces.face_for(*character)?;
         let glyph = face.glyph_index(character.value)?;
         let scale = size / f64::from(face.units_per_em());
@@ -8615,6 +9021,7 @@ fn wrap_styled_text(
     size: f64,
     width: f64,
     first_line_indent: f64,
+    section_number_gap: Option<PlannedSectionNumberGap>,
 ) -> Option<Vec<Vec<crate::translate::StyledCharacter>>> {
     if !styled_text_kinsoku_is_satisfiable(text) {
         return None;
@@ -8625,12 +9032,19 @@ fn wrap_styled_text(
     }
     let mut lines = vec![Vec::new()];
     let mut line_width = 0.0;
-    for token in styled_text_tokens(text) {
-        let token_width = token.iter().try_fold(0.0, |sum, character| {
+    let mut consumed = 0usize;
+    for token in section_aware_styled_text_tokens(text, section_number_gap) {
+        let token_end = consumed + token.len();
+        let mut token_width = token.iter().try_fold(0.0, |sum, character| {
             let face = faces.face_for(*character)?;
             let glyph = face.glyph_index(character.value)?;
             Some(sum + glyph_advance_em(face, glyph)? * size)
         })?;
+        if section_number_gap.is_some_and(|gap| {
+            consumed <= gap.prefix_glyph_count && token_end > gap.prefix_glyph_count
+        }) {
+            token_width += section_number_gap.unwrap().gap_pt;
+        }
         let line_limit = if lines.len() == 1 {
             first_line_width
         } else {
@@ -8648,6 +9062,7 @@ fn wrap_styled_text(
         }
         lines.last_mut().unwrap().extend(token);
         line_width += token_width;
+        consumed = token_end;
     }
     Some(lines)
 }
@@ -8727,6 +9142,7 @@ fn wrap_styled_text_in_slots(
     faces: &OutputFontFaces<'_>,
     size: f64,
     slots: &[TypesetLineSlot],
+    section_number_gap: Option<PlannedSectionNumberGap>,
 ) -> Option<Vec<(usize, Vec<crate::translate::StyledCharacter>)>> {
     if !styled_text_kinsoku_is_satisfiable(text) {
         return None;
@@ -8734,12 +9150,19 @@ fn wrap_styled_text_in_slots(
     let mut lines = Vec::<(usize, Vec<crate::translate::StyledCharacter>)>::new();
     let mut slot_index = 0_usize;
     let mut line_width = 0.0;
-    for token in styled_text_tokens(text) {
-        let token_width = token.iter().try_fold(0.0, |sum, character| {
+    let mut consumed = 0usize;
+    for token in section_aware_styled_text_tokens(text, section_number_gap) {
+        let token_end = consumed + token.len();
+        let mut token_width = token.iter().try_fold(0.0, |sum, character| {
             let face = faces.face_for(*character)?;
             let glyph = face.glyph_index(character.value)?;
             Some(sum + glyph_advance_em(face, glyph)? * size)
         })?;
+        if section_number_gap.is_some_and(|gap| {
+            consumed <= gap.prefix_glyph_count && token_end > gap.prefix_glyph_count
+        }) {
+            token_width += section_number_gap.unwrap().gap_pt;
+        }
         loop {
             let slot = slots.get(slot_index)?;
             let slot_width = slot.right - slot.left;
@@ -8762,10 +9185,36 @@ fn wrap_styled_text_in_slots(
             }
             lines.last_mut().unwrap().1.extend(token);
             line_width += token_width;
+            consumed = token_end;
             break;
         }
     }
     Some(lines)
+}
+
+fn section_aware_styled_text_tokens(
+    text: &[crate::translate::StyledCharacter],
+    section_number_gap: Option<PlannedSectionNumberGap>,
+) -> Vec<Vec<crate::translate::StyledCharacter>> {
+    let mut tokens = styled_text_tokens(text);
+    let Some(gap) = section_number_gap else {
+        return tokens;
+    };
+    let mut consumed = 0usize;
+    let Some(title_token_index) = tokens.iter().position(|token| {
+        consumed += token.len();
+        consumed > gap.prefix_glyph_count
+    }) else {
+        return tokens;
+    };
+    if title_token_index > 0 {
+        let joined = tokens
+            .drain(..=title_token_index)
+            .flatten()
+            .collect::<Vec<_>>();
+        tokens.insert(0, joined);
+    }
+    tokens
 }
 
 fn styled_text_tokens(
@@ -9534,8 +9983,41 @@ fn install_text_replacements(
             while run_end < line.len() && built_font_key(fonts, line[run_end]) == Some(key) {
                 run_end += 1;
             }
+            if index == 0
+                && let Some(gap) = plan.section_number_gap
+                && gap.prefix_in_output
+                && run_start < gap.prefix_glyph_count
+                && run_end > gap.prefix_glyph_count
+            {
+                run_end = gap.prefix_glyph_count;
+            }
             if emitted_run && run_start > 0 {
-                command.push_str(" Tj ");
+                if index == 0
+                    && plan.section_number_gap.is_some_and(|gap| {
+                        gap.prefix_in_output && run_start == gap.prefix_glyph_count
+                    })
+                {
+                    let gap = plan.section_number_gap.unwrap();
+                    let title_matrix =
+                        content_relative_text_matrix(*content_transform, gap.output_title_left, y)
+                            .ok_or_else(|| {
+                                MimusError::internal(
+                                    InternalReason::InvariantViolation,
+                                    "section-number gap has a singular content transform",
+                                )
+                            })?;
+                    command.push_str(&format!(
+                        " Tj\n{} {} {} {} {} {} Tm ",
+                        pdf_number(title_matrix[0]),
+                        pdf_number(title_matrix[1]),
+                        pdf_number(title_matrix[2]),
+                        pdf_number(title_matrix[3]),
+                        pdf_number(title_matrix[4]),
+                        pdf_number(title_matrix[5])
+                    ));
+                } else {
+                    command.push_str(" Tj ");
+                }
             }
             let output_font = fonts.get(&key).ok_or_else(|| {
                 MimusError::internal(
@@ -9936,10 +10418,19 @@ fn planned_line_characters(
     fonts: &BTreeMap<OutputFontKey, BuiltOutputFont>,
 ) -> Vec<Vec<TypesetCharacter>> {
     let mut output = Vec::with_capacity(plan.lines.len());
-    for (line, &(start_x, baseline_y)) in plan.lines.iter().zip(&plan.baselines) {
+    for (line_index, (line, &(start_x, baseline_y))) in
+        plan.lines.iter().zip(&plan.baselines).enumerate()
+    {
         let mut x = start_x;
         let mut planned_line = Vec::with_capacity(line.len());
-        for character in line {
+        for (character_index, character) in line.iter().enumerate() {
+            if line_index == 0
+                && plan.section_number_gap.is_some_and(|gap| {
+                    gap.prefix_in_output && character_index == gap.prefix_glyph_count
+                })
+            {
+                x += plan.section_number_gap.unwrap().gap_pt;
+            }
             let key =
                 built_font_key(fonts, *character).expect("typeset character has an embedded font");
             let font = &fonts[&key].font;
@@ -9977,10 +10468,19 @@ fn planned_line_publication_glyphs(
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
     let mut output = Vec::with_capacity(plan.lines.len());
-    for (line, &(start_x, baseline_y)) in plan.lines.iter().zip(&plan.baselines) {
+    for (line_index, (line, &(start_x, baseline_y))) in
+        plan.lines.iter().zip(&plan.baselines).enumerate()
+    {
         let mut x = start_x;
         let mut planned_line = Vec::with_capacity(line.len());
-        for character in line {
+        for (character_index, character) in line.iter().enumerate() {
+            if line_index == 0
+                && plan.section_number_gap.is_some_and(|gap| {
+                    gap.prefix_in_output && character_index == gap.prefix_glyph_count
+                })
+            {
+                x += plan.section_number_gap.unwrap().gap_pt;
+            }
             let key = built_font_key(fonts, *character).ok_or_else(|| {
                 MimusError::internal(
                     InternalReason::InvariantViolation,
@@ -10042,6 +10542,30 @@ fn planned_publication_ink(
     plans: &[TypesetPlan],
     fonts: &BTreeMap<OutputFontKey, BuiltOutputFont>,
 ) -> Result<il::PublicationInk> {
+    let section_number_plans = plans
+        .iter()
+        .filter_map(|plan| plan.section_number_gap.map(|gap| (plan, gap)))
+        .collect::<Vec<_>>();
+    if section_number_plans.len() > 1 {
+        return Err(MimusError::internal(
+            InternalReason::InvariantViolation,
+            "a publication has multiple retained section-number gaps",
+        ));
+    }
+    let section_number_gap =
+        section_number_plans
+            .first()
+            .map(|(plan, gap)| il::PublicationSectionNumberGap {
+                prefix_glyph_count: gap.prefix_glyph_count,
+                prefix_in_output: gap.prefix_in_output,
+                source_prefix_left: gap.source_prefix_left,
+                source_title_left: gap.source_title_left,
+                output_prefix_width: gap.output_prefix_width,
+                output_title_left: gap.output_title_left,
+                gap_pt: gap.gap_pt,
+                font_size: plan.font_size,
+                clamped: gap.clamped,
+            });
     let mut components = Vec::new();
     let mut next_formula_group = 1usize;
     for plan in plans {
@@ -10144,6 +10668,7 @@ fn planned_publication_ink(
         reading_order: paragraph.reading_order,
         crop_box,
         admissible_container,
+        section_number_gap,
         components,
     })
 }
@@ -12557,6 +13082,7 @@ mod tests {
             &[],
             None,
             Some(20.0),
+            None,
         )
         .unwrap();
 
@@ -14021,6 +14547,7 @@ mod tests {
             container,
             page,
             &[],
+            None,
         )
         .unwrap()
         .expansion
@@ -14039,6 +14566,7 @@ mod tests {
                 container,
                 page,
                 &[ink],
+                None,
             )
             .is_none()
         );
@@ -14058,6 +14586,7 @@ mod tests {
                 container,
                 page,
                 &[prefix_obstacle],
+                None,
             )
             .is_none()
         );
@@ -14071,6 +14600,7 @@ mod tests {
                 container,
                 page,
                 &[prefix_obstacle],
+                None,
             )
             .is_some()
         );
@@ -14087,6 +14617,7 @@ mod tests {
                     ..page
                 },
                 &[],
+                None,
             )
             .is_none()
         );
@@ -14115,8 +14646,18 @@ mod tests {
             top: 200.0,
         };
 
-        let fit = single_line_ink_fit(&line, &faces, 12.0, 72.0, baseline_y, container, page, &[])
-            .unwrap();
+        let fit = single_line_ink_fit(
+            &line,
+            &faces,
+            12.0,
+            72.0,
+            baseline_y,
+            container,
+            page,
+            &[],
+            None,
+        )
+        .unwrap();
         assert!(fit.baseline_y < baseline_y);
         assert!(fit.expansion.is_none());
         assert!(rect_contains(container, fit.ink_bounds, 0.01));
@@ -14201,6 +14742,7 @@ mod tests {
             &[phantom],
             None,
             None,
+            None,
         );
         assert!(
             matches!(
@@ -14220,6 +14762,7 @@ mod tests {
             &output_fonts,
             page_bounds,
             &[],
+            None,
             None,
             None,
         )
@@ -14456,6 +14999,7 @@ mod tests {
                 bold: false,
             }]],
             baselines: vec![(owner_origin.x - 18.0, owner_origin.y)],
+            section_number_gap: None,
             formula_relocations: Vec::new(),
             text_vector_relocations: Vec::new(),
             ink_bounds: Vec::new(),
@@ -14670,6 +15214,89 @@ mod tests {
         assert!(!styled_text_kinsoku_is_satisfiable(&styled("）甲")));
         assert!(!styled_text_kinsoku_is_satisfiable(&styled("甲（")));
         assert!(styled_text_kinsoku_is_satisfiable(&styled("甲（）乙")));
+    }
+
+    #[test]
+    fn retained_section_number_and_first_title_token_stay_on_the_same_line() {
+        let styled = |text: &str| {
+            text.chars()
+                .map(|value| crate::translate::StyledCharacter { value, bold: false })
+                .collect::<Vec<_>>()
+        };
+        let output_fonts = test_output_fonts();
+        let faces = OutputFontFaces::parse(&output_fonts).unwrap();
+        let assert_wrapping = |text: &str, prefix_glyph_count: usize, expected_first: &str| {
+            let text = styled(text);
+            let gap = PlannedSectionNumberGap {
+                prefix_glyph_count,
+                prefix_in_output: true,
+                source_prefix_left: 72.0,
+                source_title_left: 90.0,
+                output_prefix_width: 6.0,
+                output_title_left: 90.0,
+                gap_pt: 12.0,
+                clamped: false,
+            };
+            let first_token = section_aware_styled_text_tokens(&text, Some(gap))[0].clone();
+            let width = styled_token_width(&first_token, &faces, 12.0).unwrap() + gap.gap_pt;
+            let lines = wrap_styled_text(&text, &faces, 12.0, width + 0.01, 0.0, Some(gap))
+                .expect("the retained prefix and first title token fit together");
+            let first = lines[0]
+                .iter()
+                .map(|character| character.value)
+                .collect::<String>();
+            assert_eq!(first, expected_first);
+            assert!(lines.len() > 1, "the remaining title should wrap");
+        };
+
+        assert_wrapping("1标题", 1, "1标");
+        assert_wrapping("1 标题", 2, "1 标");
+    }
+
+    #[test]
+    fn independent_section_number_allows_formula_before_the_first_translated_segment() {
+        let styled = |text: &str| {
+            text.chars()
+                .map(|value| crate::translate::StyledCharacter { value, bold: false })
+                .collect::<Vec<_>>()
+        };
+        let output_fonts = test_output_fonts();
+        let faces = OutputFontFaces::parse(&output_fonts).unwrap();
+        let source = SourceSectionNumberGeometry {
+            prefix_glyph_count: 1,
+            prefix_in_output: false,
+            source_prefix_left: 72.0,
+            source_prefix_right: 78.0,
+            source_title_left: 90.0,
+        };
+
+        let gap = planned_section_number_gap(&[], &faces, 12.0, source)
+            .expect("an independently retained prefix does not require translated prefix glyphs");
+        assert!(!gap.prefix_in_output);
+        assert_eq!(gap.output_prefix_width, 6.0);
+        assert_eq!(gap.gap_pt, 12.0);
+        assert_eq!(gap.output_title_left, 90.0);
+
+        let shared = SourceSectionNumberGeometry {
+            prefix_in_output: true,
+            ..source
+        };
+        assert!(planned_section_number_gap(&[], &faces, 12.0, shared).is_none());
+        let shared_gap = planned_section_number_gap(&styled("1"), &faces, 12.0, shared)
+            .expect("a shared prefix may be followed immediately by a formula");
+        let atoms = formula_flow_atoms(&[styled("1"), styled("标题")], Some(shared_gap));
+        let FormulaFlowAtom::Text {
+            extra_advance_pt,
+            section_prefix_only,
+            ..
+        } = &atoms[0]
+        else {
+            panic!("the shared section prefix is the first formula-flow atom");
+        };
+        assert!(*section_prefix_only);
+        assert!((*extra_advance_pt - shared_gap.gap_pt).abs() <= 0.001);
+        assert!(matches!(atoms[1], FormulaFlowAtom::Formula(0)));
+        assert!(formula_flow_atoms_must_stay_together(&atoms[0], &atoms[1]));
     }
 
     #[test]
@@ -15310,6 +15937,7 @@ mod tests {
                 bold: false,
             }]],
             baselines: vec![(25.0, 100.0)],
+            section_number_gap: None,
             formula_relocations: Vec::new(),
             text_vector_relocations: Vec::new(),
             ink_bounds: Vec::new(),
@@ -15392,6 +16020,7 @@ mod tests {
                 bold: false,
             }]],
             baselines: vec![(x, 100.0)],
+            section_number_gap: None,
             formula_relocations: Vec::new(),
             text_vector_relocations: Vec::new(),
             ink_bounds: Vec::new(),
@@ -15467,6 +16096,7 @@ mod tests {
                 bold: false,
             }]],
             baselines: vec![(x, 100.0)],
+            section_number_gap: None,
             formula_relocations: Vec::new(),
             text_vector_relocations: Vec::new(),
             ink_bounds: Vec::new(),
@@ -15905,6 +16535,9 @@ mod tests {
         chars[0].layout.as_mut().unwrap().label = LayoutLabel::Number;
         chars[0].layout.as_mut().unwrap().policy = TranslationPolicy::Passthrough;
         document.extracted_pages[0].layout_regions[0].bounds = layout_bounds;
+        let source_prefix_left = chars[0].r#box.left;
+        let source_title_left = chars[1].r#box.left;
+        chars.swap(0, 1);
         document.il.pages[0].paragraphs = vec![Paragraph {
             reading_order: 0,
             bounds: layout_bounds,
@@ -15924,6 +16557,262 @@ mod tests {
             .map(|character| character.unicode)
             .collect::<String>();
         assert_eq!(values, "1中文");
+        let output_prefix_left = document.rewrites[0].typeset_characters[0].baseline_origin.x;
+        let output_title_left = document.rewrites[0].typeset_characters[1].baseline_origin.x;
+        assert!((output_prefix_left - source_prefix_left).abs() <= 0.001);
+        assert!(output_title_left >= source_title_left);
+        let evidence = document.il.publication_ink[0]
+            .section_number_gap
+            .expect("retained section-number geometry is published");
+        assert_eq!(evidence.prefix_glyph_count, 1);
+        assert!(evidence.clamped);
+        assert!((evidence.gap_pt - evidence.font_size * 0.25).abs() <= 0.001);
+        assert!((evidence.output_title_left - output_title_left).abs() <= 0.001);
+        assert!(
+            document
+                .diagnostics
+                .entries()
+                .iter()
+                .any(|diagnostic| matches!(
+                    diagnostic,
+                    Diagnostic::SectionNumberGapClamped {
+                        page_index: 0,
+                        reading_order: 0,
+                        ..
+                    }
+                ))
+        );
+    }
+
+    #[test]
+    fn typeset_positions_title_after_visually_leading_independent_source_section_number() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("independent-section-title.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        pdf.get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(
+                b"BT /F1 12 Tf\n1 0 0 1 72 120 Tm\n(M) Tj\n1 0 0 1 94 120 Tm\n(IMUS) Tj\nET\n"
+                    .to_vec(),
+            );
+        pdf.save(&input).unwrap();
+        let mut document = Document::for_inspection(&input);
+        let engine = FakeEngine::default();
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &CountingTranslator::default(),
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let paragraph = document.il.pages[0].paragraphs.pop().unwrap();
+        let TextCarrier::Chars { mut chars } = paragraph.text;
+        let layout_bounds = Rect {
+            left: 72.0,
+            bottom: 119.0,
+            right: 172.0,
+            top: 129.0,
+        };
+        for character in &mut chars {
+            let layout = character.layout.as_mut().unwrap();
+            layout.bounds = layout_bounds;
+            layout.label = LayoutLabel::ParagraphTitle;
+            layout.policy = TranslationPolicy::Translate;
+        }
+        chars[0].unicode = Some('1');
+        chars[0].layout.as_mut().unwrap().label = LayoutLabel::Number;
+        chars[0].layout.as_mut().unwrap().policy = TranslationPolicy::Passthrough;
+        document.extracted_pages[0].layout_regions[0].bounds = layout_bounds;
+        let source_prefix_left = chars[0].r#box.left;
+        let source_prefix_width = chars[0].r#box.right - source_prefix_left;
+        let source_title_left = chars[1].r#box.left;
+        let number_span = (
+            chars[0].passthrough.content_object,
+            chars[0].passthrough.byte_start,
+            chars[0].passthrough.byte_end,
+        );
+        let title_span = (
+            chars[1].passthrough.content_object,
+            chars[1].passthrough.byte_start,
+            chars[1].passthrough.byte_end,
+        );
+        assert_ne!(number_span, title_span);
+        chars.swap(0, 1);
+        document.il.pages[0].paragraphs = vec![Paragraph {
+            reading_order: 0,
+            bounds: layout_bounds,
+            first_line_indent: None,
+            text: TextCarrier::Chars { chars },
+            translated_text: Some("中文".to_owned()),
+            translation_conservation: None,
+            preserved: None,
+        }];
+
+        typeset(&mut document, &context).unwrap();
+
+        assert!(document.il.pages[0].paragraphs[0].preserved.is_none());
+        let rewrite = &document.rewrites[0];
+        let values = rewrite
+            .typeset_characters
+            .iter()
+            .map(|character| character.unicode)
+            .collect::<String>();
+        assert_eq!(values, "中文");
+        assert!(
+            (rewrite.typeset_characters[0].baseline_origin.x - source_title_left).abs() <= 0.001
+        );
+        assert!(rewrite.replacements.iter().all(|replacement| {
+            (
+                replacement.content_object.0,
+                replacement.byte_start,
+                replacement.byte_end,
+            ) != number_span
+        }));
+        assert!(rewrite.replacements.iter().any(|replacement| {
+            (
+                replacement.content_object.0,
+                replacement.byte_start,
+                replacement.byte_end,
+            ) == title_span
+        }));
+        let evidence = document.il.publication_ink[0]
+            .section_number_gap
+            .expect("independent section-number geometry is published");
+        assert_eq!(evidence.prefix_glyph_count, 1);
+        assert!(!evidence.prefix_in_output);
+        assert!((evidence.source_prefix_left - source_prefix_left).abs() <= 0.001);
+        assert!((evidence.output_prefix_width - source_prefix_width).abs() <= 0.001);
+        assert!((evidence.output_title_left - source_title_left).abs() <= 0.001);
+        assert!(!evidence.clamped);
+    }
+
+    #[test]
+    fn independent_section_number_before_fixed_formula_publishes_gap_without_moving_formula() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory
+            .path()
+            .join("independent-number-formula-title.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        pdf.get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(
+                b"BT /F1 12 Tf\n1 0 0 1 72 140 Tm\n(M) Tj\n1 0 0 1 90 140 Tm\n(U) Tj\n1 0 0 1 104 140 Tm\n(MIMUS) Tj\n1 0 0 1 104 126 Tm\n(MIMUS) Tj\nET\n"
+                    .to_vec(),
+            );
+        pdf.save(&input).unwrap();
+        let mut document = Document::for_inspection(&input);
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: "{v1}<b1>\u{540e}\u{6587}</b1>",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let mut chars = document.il.pages[0]
+            .paragraphs
+            .iter()
+            .flat_map(|paragraph| paragraph.chars().iter().cloned())
+            .collect::<Vec<_>>();
+        chars.sort_by(|left, right| {
+            right
+                .baseline_origin
+                .y
+                .total_cmp(&left.baseline_origin.y)
+                .then_with(|| left.baseline_origin.x.total_cmp(&right.baseline_origin.x))
+        });
+        let owner = Rect {
+            left: 72.0,
+            bottom: 110.0,
+            right: 220.0,
+            top: 152.0,
+        };
+        for character in &mut chars {
+            let layout = character.layout.as_mut().unwrap();
+            layout.bounds = owner;
+            layout.label = LayoutLabel::ParagraphTitle;
+            layout.policy = TranslationPolicy::Translate;
+        }
+        document.extracted_pages[0].layout_regions[0].bounds = owner;
+
+        let number_index = chars
+            .iter()
+            .position(|character| {
+                character.unicode == Some('M') && (character.baseline_origin.x - 72.0).abs() <= 0.01
+            })
+            .unwrap();
+        chars[number_index].unicode = Some('3');
+        let number_layout = chars[number_index].layout.as_mut().unwrap();
+        number_layout.label = LayoutLabel::Number;
+        number_layout.policy = TranslationPolicy::Passthrough;
+        let number_span = span_key(&chars[number_index], (9, 0));
+        let source_prefix_left = chars[number_index].r#box.left;
+
+        let formula_index = chars
+            .iter()
+            .position(|character| character.unicode == Some('U'))
+            .unwrap();
+        let formula_span = span_key(&chars[formula_index], (9, 0));
+        let source_title_left = chars[formula_index].r#box.left;
+        let formula_layout = chars[formula_index].layout.as_mut().unwrap();
+        formula_layout.label = LayoutLabel::InlineFormula;
+        formula_layout.policy = TranslationPolicy::Passthrough;
+        document.il.pages[0].paragraphs = vec![Paragraph {
+            reading_order: 0,
+            bounds: owner,
+            first_line_indent: None,
+            text: TextCarrier::Chars { chars },
+            translated_text: None,
+            translation_conservation: None,
+            preserved: None,
+        }];
+
+        styles_and_formulas(&mut document, &context).unwrap();
+        let request_text = document
+            .prepared_translations
+            .values()
+            .next()
+            .unwrap()
+            .request_text();
+        assert!(!request_text.contains('3'));
+        assert!(request_text.starts_with("{v1}"), "{request_text:?}");
+        translate(&mut document, &context).unwrap();
+        typeset(&mut document, &context).unwrap();
+
+        assert_eq!(document.il.pages[0].paragraphs[0].preserved, None);
+        let rewrite = &document.rewrites[0];
+        assert!(rewrite.replacements.iter().all(|replacement| {
+            let span = (
+                replacement.content_object,
+                replacement.byte_start,
+                replacement.byte_end,
+            );
+            span != number_span && span != formula_span
+        }));
+        let evidence = document.il.publication_ink[0]
+            .section_number_gap
+            .expect("the fixed formula-first title publishes section-number geometry");
+        assert!(!evidence.prefix_in_output);
+        assert!(!evidence.clamped);
+        assert!((evidence.source_prefix_left - source_prefix_left).abs() <= 0.001);
+        assert!((evidence.source_title_left - source_title_left).abs() <= 0.001);
+        assert!((evidence.output_title_left - source_title_left).abs() <= 0.001);
     }
 
     #[test]
@@ -17754,6 +18643,186 @@ mod tests {
     }
 
     #[test]
+    fn numbered_multiline_heading_relocates_formula_and_retains_source_gap() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("numbered-formula-heading.pdf");
+        let mut pdf = LopdfDocument::load(fixture()).unwrap();
+        pdf.get_object_mut((9, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(
+                b"BT /F1 12 Tf\n1 0 0 1 72 140 Tm\n[(M) -500 (IMUS)] TJ\n1 0 0 1 220 140 Tm\n(U) Tj\n1 0 0 1 230 140 Tm\n(S) Tj\n1 0 0 1 72 126 Tm\n(MIMUS) Tj\nET\n"
+                    .to_vec(),
+            );
+        pdf.save(&input).unwrap();
+        let mut document = Document::for_inspection(&input);
+        let engine = FakeEngine::default();
+        let translator = StaticTranslator {
+            output: "<b1>\u{53cd}\u{5411}\u{8fc7}\u{7a0b}</b1>{v1}<b2>\u{6269}\u{6563}\u{6a21}\u{578b}</b2>",
+            calls: AtomicUsize::new(0),
+        };
+        let events = RecordingEventSink::default();
+        let context = PassContext {
+            engine: &engine,
+            layout_detector: &SingleLineLayoutDetector,
+            translator: &translator,
+            events: &events,
+            snapshots: None,
+            config: config_with_test_output_fonts(),
+        };
+        inspect(&mut document, &context).unwrap();
+
+        let mut chars = document.il.pages[0]
+            .paragraphs
+            .iter()
+            .flat_map(|paragraph| paragraph.chars().iter().cloned())
+            .collect::<Vec<_>>();
+        chars.sort_by(|left, right| {
+            right
+                .baseline_origin
+                .y
+                .total_cmp(&left.baseline_origin.y)
+                .then_with(|| left.baseline_origin.x.total_cmp(&right.baseline_origin.x))
+        });
+        let owner = Rect {
+            left: 72.0,
+            bottom: 110.0,
+            right: 280.0,
+            top: 152.0,
+        };
+        for character in &mut chars {
+            let layout = character.layout.as_mut().unwrap();
+            layout.bounds = owner;
+            layout.label = LayoutLabel::ParagraphTitle;
+            layout.policy = TranslationPolicy::Translate;
+        }
+        document.extracted_pages[0].layout_regions[0].bounds = owner;
+
+        let number_index = chars
+            .iter()
+            .position(|character| {
+                character.unicode == Some('M') && character.baseline_origin.y > 130.0
+            })
+            .unwrap();
+        let title_index = chars
+            .iter()
+            .position(|character| {
+                character.unicode == Some('I') && character.baseline_origin.y > 130.0
+            })
+            .unwrap();
+        let number_span = (
+            chars[number_index].passthrough.content_object,
+            chars[number_index].passthrough.byte_start,
+            chars[number_index].passthrough.byte_end,
+        );
+        let title_span = (
+            chars[title_index].passthrough.content_object,
+            chars[title_index].passthrough.byte_start,
+            chars[title_index].passthrough.byte_end,
+        );
+        assert_eq!(
+            number_span, title_span,
+            "the number shares the title operand"
+        );
+        let source_prefix_left = chars[number_index].r#box.left;
+        let source_title_left = chars[title_index].r#box.left;
+        chars[number_index].unicode = Some('3');
+        let number_layout = chars[number_index].layout.as_mut().unwrap();
+        number_layout.label = LayoutLabel::Number;
+        number_layout.policy = TranslationPolicy::Passthrough;
+
+        let formula_index = chars
+            .iter()
+            .position(|character| {
+                character.unicode == Some('U') && character.baseline_origin.x > 200.0
+            })
+            .unwrap();
+        let formula_span = (
+            (chars[formula_index].passthrough.content_object, 0),
+            chars[formula_index].passthrough.byte_start,
+            chars[formula_index].passthrough.byte_end,
+        );
+        let source_formula_x = chars[formula_index].baseline_origin.x;
+        let formula_layout = chars[formula_index].layout.as_mut().unwrap();
+        formula_layout.label = LayoutLabel::InlineFormula;
+        formula_layout.policy = TranslationPolicy::Passthrough;
+        document.il.pages[0].paragraphs = vec![Paragraph {
+            reading_order: 0,
+            bounds: owner,
+            first_line_indent: None,
+            text: TextCarrier::Chars { chars },
+            translated_text: None,
+            translation_conservation: None,
+            preserved: None,
+        }];
+
+        styles_and_formulas(&mut document, &context).unwrap();
+        let request_text = document
+            .prepared_translations
+            .values()
+            .next()
+            .unwrap()
+            .request_text();
+        assert!(!request_text.contains('3'));
+        assert!(request_text.contains("{v1}"));
+        translate(&mut document, &context).unwrap();
+        typeset(&mut document, &context).unwrap();
+
+        assert_eq!(document.il.pages[0].paragraphs[0].preserved, None);
+        let rewrite = &document.rewrites[0];
+        let output_prefix = rewrite
+            .typeset_characters
+            .iter()
+            .find(|character| character.unicode == '3')
+            .unwrap();
+        let output_title = rewrite
+            .typeset_characters
+            .iter()
+            .find(|character| character.unicode == '\u{53cd}')
+            .unwrap();
+        let evidence = document.il.publication_ink[0]
+            .section_number_gap
+            .expect("relocated formula flow publishes its section-number geometry");
+        assert!((output_prefix.baseline_origin.x - source_prefix_left).abs() <= 0.001);
+        assert!(
+            (output_title.baseline_origin.x - source_title_left).abs() <= 0.01,
+            "output title x {} does not match source title x {}; evidence={evidence:?}",
+            output_title.baseline_origin.x,
+            source_title_left
+        );
+        assert!(evidence.prefix_in_output);
+        assert!(!evidence.clamped);
+        assert!((evidence.output_title_left - output_title.baseline_origin.x).abs() <= 0.001);
+
+        let formula_replacement = rewrite
+            .replacements
+            .iter()
+            .find(|replacement| {
+                (
+                    replacement.content_object,
+                    replacement.byte_start,
+                    replacement.byte_end,
+                ) == formula_span
+            })
+            .expect("the distant formula is relocated");
+        assert!(
+            formula_replacement
+                .replacement
+                .windows(3)
+                .any(|window| window == b"(U)")
+        );
+        let relocated_formula_x = rewrite
+            .typeset_characters
+            .iter()
+            .find(|character| character.unicode == 'U')
+            .unwrap()
+            .baseline_origin
+            .x;
+        assert!(relocated_formula_x + 50.0 < source_formula_x);
+    }
+
+    #[test]
     fn relocated_formula_moves_its_uniquely_owned_vector_rule() {
         let directory = tempfile::tempdir().unwrap();
         let input = directory.path().join("vector-formula-relocation.pdf");
@@ -18900,6 +19969,8 @@ mod tests {
                     value: '\u{ff0c}',
                     bold: false,
                 }],
+                extra_advance_pt: 0.0,
+                section_prefix_only: false,
             },
         ];
         let slots = [TypesetLineSlot {
@@ -18909,7 +19980,7 @@ mod tests {
         }];
 
         assert!(matches!(
-            place_formula_flow(&atoms, &formula_units, &faces, 12.0, &slots),
+            place_formula_flow(&atoms, &formula_units, &faces, 12.0, &slots, None, false),
             Some(FormulaFlowAttempt::NoFit)
         ));
     }
@@ -19008,6 +20079,7 @@ mod tests {
             paragraph,
             &source_segments,
             &translated_segments,
+            None,
             &document.extracted_pages[0],
             &content_objects,
             &output_fonts,
@@ -19067,7 +20139,7 @@ mod tests {
         ];
 
         let FormulaFlowAttempt::Placed(placement) =
-            place_formula_flow(&atoms, &formula_units, &faces, 12.0, &slots).unwrap()
+            place_formula_flow(&atoms, &formula_units, &faces, 12.0, &slots, None, false).unwrap()
         else {
             panic!("the adjacent formula group fits in the second slot");
         };
@@ -19079,6 +20151,10 @@ mod tests {
         assert_eq!(relocated.len(), 2);
         assert!((relocated[0].y - relocated[1].y).abs() <= 0.01);
         assert!((relocated[1].x - relocated[0].x - 8.0).abs() <= 0.01);
+        assert!(matches!(
+            place_formula_flow(&atoms, &formula_units, &faces, 12.0, &slots, None, true),
+            Some(FormulaFlowAttempt::NoFit)
+        ));
     }
 
     #[test]
