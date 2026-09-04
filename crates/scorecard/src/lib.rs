@@ -40,6 +40,7 @@ pub enum InkViolationKind {
     OutsideOwningContainer,
     MissingOutputGlyph,
     MissingOutputInk,
+    OutputFontRouting,
     CrossParagraphCollision,
     RetainedInkCollision,
     InvalidFormulaOwnership,
@@ -57,6 +58,7 @@ impl InkViolationKind {
             Self::OutsideOwningContainer => "outside_owning_container",
             Self::MissingOutputGlyph => "missing_output_glyph",
             Self::MissingOutputInk => "missing_output_ink",
+            Self::OutputFontRouting => "output_font_routing",
             Self::CrossParagraphCollision => "cross_paragraph_collision",
             Self::RetainedInkCollision => "retained_ink_collision",
             Self::InvalidFormulaOwnership => "invalid_formula_ownership",
@@ -220,6 +222,18 @@ struct PublicationGlyph {
     unicode: char,
     baseline_origin: Point,
     ink_bounds: Rect,
+    #[serde(default)]
+    font_slot: Option<OutputFontSlot>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum OutputFontSlot {
+    CjkRegular,
+    CjkBold,
+    LatinRegular,
+    LatinBold,
+    LatinSymbol,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -761,6 +775,74 @@ fn validate_glyph_ink_bounds(
             Some(component_index),
             "glyph ink extends outside its component summary bounds",
         );
+    }
+    validate_output_font_routing(publication, component_index, component, glyphs, violations);
+}
+
+fn validate_output_font_routing(
+    publication: &PublicationInk,
+    component_index: usize,
+    component: &PublicationInkComponent,
+    glyphs: &[PublicationGlyph],
+    violations: &mut Vec<InkViolation>,
+) {
+    match component {
+        PublicationInkComponent::TranslatedText { .. } => {
+            // Historical IL predates slot provenance. Once one glyph in a
+            // component carries it, require and validate the complete set.
+            if !glyphs.iter().any(|glyph| glyph.font_slot.is_some()) {
+                return;
+            }
+            for glyph in glyphs {
+                let valid = matches!(
+                    (
+                        mimus_quality_contract::output_script_preference(glyph.unicode),
+                        glyph.font_slot,
+                    ),
+                    (
+                        mimus_quality_contract::OutputScriptPreference::Cjk,
+                        Some(OutputFontSlot::CjkRegular | OutputFontSlot::CjkBold),
+                    ) | (
+                        mimus_quality_contract::OutputScriptPreference::Latin,
+                        Some(
+                            OutputFontSlot::LatinRegular
+                                | OutputFontSlot::LatinBold
+                                | OutputFontSlot::LatinSymbol,
+                        ),
+                    ) | (
+                        mimus_quality_contract::OutputScriptPreference::Default,
+                        Some(_)
+                    )
+                );
+                if !valid {
+                    push_violation(
+                        violations,
+                        InkViolationKind::OutputFontRouting,
+                        publication.page_index,
+                        publication.reading_order,
+                        Some(component_index),
+                        format!(
+                            "translated glyph {:?} has incompatible output slot {:?}",
+                            glyph.unicode, glyph.font_slot
+                        ),
+                    );
+                }
+            }
+        }
+        PublicationInkComponent::SourceTextReplay { .. } => {
+            if glyphs.iter().any(|glyph| glyph.font_slot.is_some()) {
+                push_violation(
+                    violations,
+                    InkViolationKind::OutputFontRouting,
+                    publication.page_index,
+                    publication.reading_order,
+                    Some(component_index),
+                    "source text replay must not claim an output-font slot",
+                );
+            }
+        }
+        PublicationInkComponent::VectorPath { .. }
+        | PublicationInkComponent::InlineImage { .. } => {}
     }
 }
 
@@ -1819,6 +1901,38 @@ mod tests {
             (audit.required_publications, audit.checked_components),
             (1, 1)
         );
+    }
+
+    #[test]
+    fn instrumented_output_font_slots_use_the_shared_script_policy() {
+        let component = |unicode, font_slot| {
+            serde_json::json!({
+                "kind": "translated_text",
+                "ownership_group": 0,
+                "bounds": {"left": 19.0, "bottom": 18.0, "right": 30.0, "top": 25.0},
+                "glyphs": [{
+                    "unicode": unicode,
+                    "baseline_origin": {"x": 20.0, "y": 20.0},
+                    "ink_bounds": {
+                        "left": 19.0, "bottom": 18.0, "right": 30.0, "top": 25.0
+                    },
+                    "font_slot": font_slot
+                }]
+            })
+        };
+        let valid = audit_publication_ink(
+            &il(serde_json::json!([component("中", "cjk_regular")])),
+            &trace(""),
+        )
+        .unwrap();
+        assert!(!kinds(&valid).contains(&InkViolationKind::OutputFontRouting));
+
+        let invalid = audit_publication_ink(
+            &il(serde_json::json!([component("中", "latin_regular")])),
+            &trace(""),
+        )
+        .unwrap();
+        assert!(kinds(&invalid).contains(&InkViolationKind::OutputFontRouting));
     }
 
     #[test]

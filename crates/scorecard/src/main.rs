@@ -1152,19 +1152,56 @@ fn output_line_kinsoku_violations(output_pdf: &Path) -> Option<usize> {
         return None;
     }
     let document: StextDocument = serde_json::from_slice(&fs::read(temp.path()).ok()?).ok()?;
-    Some(
-        document
-            .pages
-            .iter()
-            .flat_map(|page| &page.blocks)
-            .flat_map(|block| &block.lines)
-            .filter(|line| {
-                let text = line.text.trim();
-                text.starts_with(mimus_quality_contract::forbidden_line_start)
-                    || text.ends_with(mimus_quality_contract::forbidden_line_end)
-            })
-            .count(),
-    )
+    Some(stext_kinsoku_violations(&document))
+}
+
+fn stext_kinsoku_violations(document: &StextDocument) -> usize {
+    document
+        .pages
+        .iter()
+        .map(|page| {
+            let lines = page
+                .blocks
+                .iter()
+                .flat_map(|block| &block.lines)
+                .collect::<Vec<_>>();
+            lines
+                .iter()
+                .enumerate()
+                .filter(|(index, line)| {
+                    let text = line.text.trim();
+                    let has_left = lines
+                        .iter()
+                        .enumerate()
+                        .any(|(candidate_index, candidate)| {
+                            candidate_index != *index
+                                && stext_fragments_are_adjacent(candidate, line)
+                        });
+                    let has_right = lines
+                        .iter()
+                        .enumerate()
+                        .any(|(candidate_index, candidate)| {
+                            candidate_index != *index
+                                && stext_fragments_are_adjacent(line, candidate)
+                        });
+                    (text.starts_with(mimus_quality_contract::forbidden_line_start) && !has_left)
+                        || (text.ends_with(mimus_quality_contract::forbidden_line_end)
+                            && !has_right)
+                })
+                .count()
+        })
+        .sum()
+}
+
+fn stext_fragments_are_adjacent(left: &StextLine, right: &StextLine) -> bool {
+    let gap = right.bbox.x - (left.bbox.x + left.bbox.w);
+    mimus_quality_contract::formula_items_share_line(
+        left.bbox.y,
+        left.bbox.y + left.bbox.h,
+        right.bbox.y,
+        right.bbox.y + right.bbox.h,
+    ) && gap >= -0.01
+        && gap <= left.bbox.h.max(right.bbox.h) * 1.5 + 0.01
 }
 
 fn structure(before: &Il, write: &Il, e: &Evidence, denominator: f64) -> Dimension {
@@ -4475,6 +4512,29 @@ mod tests {
             formula_neighbor_gaps(&lines, &[3, 4, 5], formula_bbox),
             (Some(9.0), Some(2.0))
         );
+    }
+
+    #[test]
+    fn kinsoku_counts_visual_lines_instead_of_same_baseline_font_fragments() {
+        let line = |x, y, w, h, text: &str| StextLine {
+            bbox: StextBox { x, y, w, h },
+            text: text.into(),
+        };
+        let document = StextDocument {
+            pages: vec![StextPage {
+                blocks: vec![StextBlock {
+                    lines: vec![
+                        line(10.0, 10.0, 20.0, 9.0, "模型（"),
+                        line(30.0, 11.0, 25.0, 8.0, "BERT"),
+                        line(55.0, 10.0, 8.0, 9.0, "）。"),
+                        line(10.0, 30.0, 8.0, 9.0, "），"),
+                        line(10.0, 50.0, 20.0, 9.0, "下一（"),
+                    ],
+                }],
+            }],
+        };
+
+        assert_eq!(stext_kinsoku_violations(&document), 2);
     }
 
     #[test]

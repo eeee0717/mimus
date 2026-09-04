@@ -568,12 +568,15 @@ fn render_diagnostic(diagnostic: DiagnosticEvent) {
             missing_characters,
             font_source,
             font_sha256,
-            fallback_font_source,
-            fallback_font_sha256,
+            latin_font_source,
+            latin_font_sha256,
+            symbol_font_source,
+            symbol_font_sha256,
+            ..
         } => {
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "warning[unsupported_output_glyph]: page {} paragraph {reading_order} missing {missing_characters:?} in primary {font_source} ({font_sha256}) and fallback {fallback_font_source} ({fallback_font_sha256})",
+                "warning[unsupported_output_glyph]: page {} paragraph {reading_order} missing {missing_characters:?} in CJK {font_source} ({font_sha256}), Latin {latin_font_source} ({latin_font_sha256}), and STIX Math {symbol_font_source} ({symbol_font_sha256})",
                 page_index + 1
             );
         }

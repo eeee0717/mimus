@@ -6,11 +6,19 @@ ASCII, GB2312 level-one Han characters, and common Chinese punctuation. The
 small donor glyph set is intentionally reused: these assets test coverage,
 subsetting, extraction, and asset injection, not visual font quality.
 
-`MimusTestFallback-Regular.ttf` and `MimusTestFallback-Bold.ttf` are
-deterministic subsets of the production DejaVu Sans 2.35 fallback files. They
-contain only `U+2217`, `U+0141`, and `U+03F5` plus the required glyphs. Keeping
-DejaVu's 2048 units-per-em and original advances is intentional: it covers the
-PDF `/W` precision boundary that a 1000 units-per-em synthetic font cannot.
+The STIX test assets mirror the production routing contract:
+
+- `MimusTestLatinText.ttf` is a variable subset of STIX Two Text 2.13 b171.
+  It covers ASCII, `U+0141`, `U+03F5`, and `U+201C`, and retains the original
+  Regular/Bold named instances.
+- `MimusTestLatinSymbol.ttf` is a static subset of STIX Two Math 2.12 b168a
+  containing `U+2217`, which STIX Two Text does not cover.
+- `MimusTestLatin.ttf` is a compact STIX Two Math subset used at the public
+  self-provided-font seam. It covers ASCII and all routing oracle characters.
+
+The split Text/Math assets prove same-family symbol fallback. The combined
+asset lets CLI tests provide both public Latin weight slots without requiring
+an additional public symbol-font option.
 
 `MimusTestVariable.ttf` is a deterministic five-character subset of the
 production Noto Sans SC 2.004 variable font. It retains the original `fvar`,
@@ -20,12 +28,8 @@ and embedded outlines. It contains only original glyphs; the generator never
 synthesizes glyphs into the variation tables.
 
 - Variable source SHA-256: `d68bafcb48a2707749396aa12bbbd833cb70401f3a9a689fd2902c7e0d295964`
-- fonttools: `4.63.0`
-
-The pinned upstream files are from Matplotlib tag `v3.11.1`:
-
-- Regular source SHA-256: `3fdf69cabf06049ea70a00b5919340e2ce1e6d02b0cc3c4b44fb6801bd1e0d22`
-- Bold source SHA-256: `b184b89e3c1075f22f6b71575b6fc20d4972b3cfd3b23322ca6fd596dcaef167`
+- STIX Two Text source SHA-256: `7962b8b7811e6a896c9a91a0bccbb5241047770eb24d4997c5cb5fe21d5c0df2`
+- STIX Two Math source SHA-256: `562551b15b836e6e01d1b7350909baf3c8c8d83260c1190fbf4544333e6936de`
 - fonttools: `4.63.0`
 
 They are never referenced by production code or embedded in the release
@@ -53,44 +57,37 @@ python3 crates/mimus/tests/assets/fonts/generate_test_fonts.py \
   corpus/fonts/MimusCJKBold.ttf /tmp/bold-b.ttf "Mimus Test GB2312 Bold"
 cmp /tmp/bold-a.ttf /tmp/bold-b.ttf
 
-pyftsubset DejaVuSans.ttf \
-  --output-file=/tmp/fallback-regular-a.ttf \
-  --unicodes=U+0141,U+03F5,U+2217 \
-  --layout-features='' --no-hinting --glyph-names --legacy-cmap \
-  --no-symbol-cmap --notdef-glyph --notdef-outline --recommended-glyphs \
-  '--name-IDs=0,1,2,3,4,5,6' --no-name-legacy '--name-languages=0x409' \
-  --no-harfbuzz-repacker --no-recalc-timestamp --canonical-order
-pyftsubset DejaVuSans.ttf \
-  --output-file=/tmp/fallback-regular-b.ttf \
-  --unicodes=U+0141,U+03F5,U+2217 \
-  --layout-features='' --no-hinting --glyph-names --legacy-cmap \
-  --no-symbol-cmap --notdef-glyph --notdef-outline --recommended-glyphs \
-  '--name-IDs=0,1,2,3,4,5,6' --no-name-legacy '--name-languages=0x409' \
-  --no-harfbuzz-repacker --no-recalc-timestamp --canonical-order
-cmp /tmp/fallback-regular-a.ttf /tmp/fallback-regular-b.ttf
+python3 crates/mimus/tests/assets/fonts/generate_test_fonts.py \
+  'STIXTwoText[wght].ttf' /tmp/latin-text-a.ttf \
+  --characters='Łϵ“' --ascii --variable-subset
+python3 crates/mimus/tests/assets/fonts/generate_test_fonts.py \
+  'STIXTwoText[wght].ttf' /tmp/latin-text-b.ttf \
+  --characters='Łϵ“' --ascii --variable-subset
+cmp /tmp/latin-text-a.ttf /tmp/latin-text-b.ttf
 
-pyftsubset DejaVuSans-Bold.ttf \
-  --output-file=/tmp/fallback-bold-a.ttf \
-  --unicodes=U+0141,U+03F5,U+2217 \
-  --layout-features='' --no-hinting --glyph-names --legacy-cmap \
-  --no-symbol-cmap --notdef-glyph --notdef-outline --recommended-glyphs \
-  '--name-IDs=0,1,2,3,4,5,6' --no-name-legacy '--name-languages=0x409' \
-  --no-harfbuzz-repacker --no-recalc-timestamp --canonical-order
-pyftsubset DejaVuSans-Bold.ttf \
-  --output-file=/tmp/fallback-bold-b.ttf \
-  --unicodes=U+0141,U+03F5,U+2217 \
-  --layout-features='' --no-hinting --glyph-names --legacy-cmap \
-  --no-symbol-cmap --notdef-glyph --notdef-outline --recommended-glyphs \
-  '--name-IDs=0,1,2,3,4,5,6' --no-name-legacy '--name-languages=0x409' \
-  --no-harfbuzz-repacker --no-recalc-timestamp --canonical-order
-cmp /tmp/fallback-bold-a.ttf /tmp/fallback-bold-b.ttf
+python3 crates/mimus/tests/assets/fonts/generate_test_fonts.py \
+  STIXTwoMath-Regular.ttf /tmp/latin-symbol-a.ttf \
+  --characters='∗' --variable-subset
+python3 crates/mimus/tests/assets/fonts/generate_test_fonts.py \
+  STIXTwoMath-Regular.ttf /tmp/latin-symbol-b.ttf \
+  --characters='∗' --variable-subset
+cmp /tmp/latin-symbol-a.ttf /tmp/latin-symbol-b.ttf
+
+python3 crates/mimus/tests/assets/fonts/generate_test_fonts.py \
+  STIXTwoMath-Regular.ttf /tmp/latin-a.ttf \
+  --characters='Łϵ∗“' --ascii --variable-subset
+python3 crates/mimus/tests/assets/fonts/generate_test_fonts.py \
+  STIXTwoMath-Regular.ttf /tmp/latin-b.ttf \
+  --characters='Łϵ∗“' --ascii --variable-subset
+cmp /tmp/latin-a.ttf /tmp/latin-b.ttf
 ```
 
-The upstream licenses are preserved in `LICENSE-Noto-Sans-SC.txt` and
-`LICENSE-DejaVu.txt`.
+The Noto and STIX derivatives are licensed under the OFL 1.1 text preserved in
+`LICENSE-OFL-1.1.txt`.
 
 - Regular SHA-256: `510d0470ca8b77f035fe8e7143526207088c1bdad017451cf253020f72397d63`
 - Bold SHA-256: `1a917349eb06866f5701532f0cea586d184edadbd1cfdd3f034f3a18f2ff5316`
-- Fallback Regular SHA-256: `3634d4b65a151c61dcb82968f6a3bdc33435d062c4c69a5ea57e3db20122ac1e`
-- Fallback Bold SHA-256: `d0f2fdc62e7cdf6e35c8b0629b19084917991603c0d51fe94109128176352b83`
+- Latin Text SHA-256: `15253cedd8e67b26019900b09b048af23f3e4c1f2e0b352eeb50ccb39491d9a5`
+- Latin Symbol SHA-256: `defb3cf75af1da832e26016183c6aff54985e580b24141bb5bbb48f32411c352`
+- Combined Latin SHA-256: `621539180203f4667d247c49c8bf4102112b28e1627190ca625ebd1e61848a5f`
 - Variable SHA-256: `a1105d5892eaad20ed1ad692827b06a7adc392f214a835740fa4d94bf5029ac5`

@@ -19,17 +19,26 @@ cargo test --workspace --all-targets --all-features
 
 ## Output fonts
 
-Translated text defaults to the SHA-pinned Noto Serif SC variable font (宋体), with Regular and
-Bold instantiated at `wght=400` and `wght=700`. To use a sans-serif/黑体 face instead, provide its
-Regular and Bold slots explicitly; one variable font may serve both:
+Translated text uses two SHA-pinned font families. Han, CJK forms, and Chinese-context punctuation
+prefer Noto Serif SC (宋体); ASCII, Latin, Greek, Cyrillic, numbers, and mathematical symbols prefer
+STIX Two Text, with STIX Two Math as the same-family symbol fallback. Regular and Bold variable-font
+slots are instantiated at `wght=400` and `wght=700`. Line metrics come only from the CJK family;
+STIX glyphs use the same size and baseline without scaling.
+
+To use custom fonts, provide both CJK and Latin weight slots; one variable font may serve both
+weights in a family:
 
 ```sh
 mimus translate --font /path/to/NotoSansSC-VF.ttf \
-  --font-bold /path/to/NotoSansSC-VF.ttf input.pdf
+  --font-bold /path/to/NotoSansSC-VF.ttf \
+  --font-latin /path/to/STIXTwoText.ttf \
+  --font-latin-bold /path/to/STIXTwoText.ttf input.pdf
 ```
 
-The existing flag, environment, config, cache, and asset-mirror precedence is unchanged. DejaVu
-Sans 2.35 remains the fallback for characters absent from the primary CJK font.
+The precedence remains flag, environment, config, validated cache, then pinned manifest download.
+The canonical Latin names are `--font-latin` / `--font-latin-bold`, `MIMUS_FONT_LATIN` /
+`MIMUS_FONT_LATIN_BOLD`, and `font_latin` / `font_latin_bold`. The former `fallback` names remain
+deprecated aliases for CLI v2 compatibility.
 
 ## License
 

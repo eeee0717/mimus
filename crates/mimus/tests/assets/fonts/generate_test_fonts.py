@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build deterministic cmap-rich test fonts from the OFL Noto Sans SC fixtures."""
+"""Build deterministic cmap-rich test fonts from pinned OFL sources."""
 
 from argparse import ArgumentParser
 from copy import deepcopy
@@ -66,8 +66,13 @@ def build(source: Path, output: Path, family: str, characters: str | None) -> No
     font.save(output, reorderTables=True)
 
 
-def build_variable_subset(source: Path, output: Path, characters: str) -> None:
-    unicodes = ",".join(f"U+{ord(value):04X}" for value in dict.fromkeys(characters))
+def build_variable_subset(
+    source: Path, output: Path, characters: str, include_ascii: bool
+) -> None:
+    selected = list(characters)
+    if include_ascii:
+        selected.extend(chr(value) for value in range(0x20, 0x7F))
+    unicodes = ",".join(f"U+{ord(value):04X}" for value in dict.fromkeys(selected))
     output.parent.mkdir(parents=True, exist_ok=True)
     result = subset.main(
         [
@@ -100,12 +105,15 @@ def main() -> None:
     parser.add_argument("output", type=Path)
     parser.add_argument("family", nargs="?")
     parser.add_argument("--characters")
+    parser.add_argument("--ascii", action="store_true")
     parser.add_argument("--variable-subset", action="store_true")
     arguments = parser.parse_args()
     if arguments.variable_subset:
         if arguments.characters is None:
             parser.error("--variable-subset requires --characters")
-        build_variable_subset(arguments.source, arguments.output, arguments.characters)
+        build_variable_subset(
+            arguments.source, arguments.output, arguments.characters, arguments.ascii
+        )
     else:
         if arguments.family is None:
             parser.error("family is required unless --variable-subset is used")

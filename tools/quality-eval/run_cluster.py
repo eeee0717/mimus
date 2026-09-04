@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,13 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def check_pdf(path: Path, evidence: Path) -> None:
+    result = subprocess.run(["qpdf", "--check", str(path)], capture_output=True, check=False)
+    evidence.write_bytes(result.stdout + result.stderr)
+    if result.returncode != 0:
+        raise RuntimeError(f"qpdf --check failed for {path}")
+
+
 def fake_log_slice(path: Path, start: int, output: Path) -> int:
     if not path.exists():
         output.write_text("", encoding="ascii")
@@ -40,6 +48,36 @@ def fake_log_slice(path: Path, start: int, output: Path) -> int:
     return end
 
 
+def font_attribution(path: Path) -> dict[str, Any]:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    slots: Counter[str] = Counter()
+    scalar_counts: dict[str, Counter[str]] = {}
+    missing_slot = 0
+    for publication in document.get("publication_ink", []):
+        for component in publication.get("components", []):
+            if component.get("kind") != "translated_text":
+                continue
+            for glyph in component.get("glyphs", []):
+                slot = glyph.get("font_slot")
+                if slot is None:
+                    missing_slot += 1
+                    continue
+                slots[slot] += 1
+                scalar_counts.setdefault(slot, Counter())[glyph["unicode"]] += 1
+    return {
+        "page_count": len(document["pages"]),
+        "glyphs_by_slot": dict(sorted(slots.items())),
+        "unique_scalars_by_slot": {
+            slot: sorted(values, key=ord) for slot, values in sorted(scalar_counts.items())
+        },
+        "scalar_counts_by_slot": {
+            slot: {value: values[value] for value in sorted(values, key=ord)}
+            for slot, values in sorted(scalar_counts.items())
+        },
+        "missing_font_slot": missing_slot,
+    }
+
+
 def translation_command(
     args: argparse.Namespace,
     input_pdf: Path,
@@ -47,16 +85,22 @@ def translation_command(
     debug: Path | None = None,
 ) -> list[str]:
     font_bold = args.font_bold or args.font
-    font_fallback = args.font_fallback or args.font
-    font_fallback_bold = args.font_fallback_bold or font_fallback
+    font_latin = args.font_latin or args.font
+    font_latin_bold = args.font_latin_bold or font_latin
     command = [
         "/usr/bin/time", "-lp", str(args.mimus), "translate", str(input_pdf), "--json",
         "-o", str(output_pdf), "--backend", "openai", "--endpoint", args.endpoint,
-        "--model", args.model, "--target-language", "zh-CN", "--font",
-        str(args.font), "--font-bold", str(font_bold), "--font-fallback", str(font_fallback),
-        "--font-fallback-bold", str(font_fallback_bold), "--layout-model", str(args.layout_model),
+        "--model", args.model, "--target-language", "zh-CN", "--layout-model", str(args.layout_model),
         "--no-cache", "--no-auto-terms", "--concurrency", "4",
     ]
+    for flag, path in (
+        ("--font", args.font),
+        ("--font-bold", font_bold),
+        ("--font-latin", font_latin),
+        ("--font-latin-bold", font_latin_bold),
+    ):
+        if path is not None:
+            command.extend([flag, str(path)])
     if debug is not None:
         command.extend(["--debug", str(debug)])
     return command
@@ -78,6 +122,8 @@ def measure_one(args: argparse.Namespace, corpus_dir: Path, suffix: str = "") ->
             "MIMUS_PDFIUM_LIBRARY": str(args.pdfium),
         }
     )
+    if args.cache_dir is not None:
+        env["MIMUS_CACHE_DIR"] = str(args.cache_dir)
     with tempfile.TemporaryDirectory(prefix=f"scorecard-{name}-", dir=args.temp_root) as temp_name:
         temp = Path(temp_name)
         output_pdf = temp / "output.pdf"
@@ -110,6 +156,9 @@ def measure_one(args: argparse.Namespace, corpus_dir: Path, suffix: str = "") ->
                 json.dumps(failure, indent=2, sort_keys=True) + "\n", encoding="utf-8"
             )
             return failure
+        compact_dir = args.output_dir / "evidence"
+        compact_dir.mkdir(parents=True, exist_ok=True)
+        check_pdf(output_pdf, compact_dir / f"{name}{suffix}.qpdf-check.txt")
         scorecard_command = [
             str(args.scorecard), "measure", "--ndjson", str(ndjson), "--debug-dir", str(debug),
             "--input-pdf", str(input_pdf), "--output-pdf", str(output_pdf), "--json-out",
@@ -117,15 +166,27 @@ def measure_one(args: argparse.Namespace, corpus_dir: Path, suffix: str = "") ->
             "conserving-fake", "--process-log", str(process_log), "--resource-usage", str(resource),
         ]
         subprocess.run(scorecard_command, env=env, check=True)
-        compact_dir = args.output_dir / "evidence"
-        compact_dir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ndjson, compact_dir / f"{name}{suffix}.ndjson")
         shutil.copyfile(resource, compact_dir / f"{name}{suffix}.time")
+        attribution = font_attribution(debug / "09-write.il.json")
+        (compact_dir / f"{name}{suffix}.font-attribution.json").write_text(
+            json.dumps(attribution, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        pdffonts = subprocess.run(
+            ["pdffonts", str(output_pdf)], capture_output=True, check=False
+        )
+        (compact_dir / f"{name}{suffix}.pdffonts.txt").write_bytes(
+            pdffonts.stdout + pdffonts.stderr
+        )
+        if pdffonts.returncode != 0:
+            raise RuntimeError(f"pdffonts failed for {name}{suffix}")
         report = json.loads(report_json.read_text(encoding="utf-8"))
         report["paper"] = name
         report["producer"] = (corpus_dir / "layer").read_text(encoding="utf-8").strip()
         report["output_sha256_recomputed"] = sha256(output_pdf)
-        report["pages"] = len(json.loads((debug / "09-write.il.json").read_text())["pages"])
+        report["pages"] = attribution["page_count"]
+        report["font_attribution"] = attribution
         return report
 
 
@@ -146,6 +207,8 @@ def hash_only_rerun(
             "MIMUS_PDFIUM_LIBRARY": str(args.pdfium),
         }
     )
+    if args.cache_dir is not None:
+        env["MIMUS_CACHE_DIR"] = str(args.cache_dir)
     with tempfile.TemporaryDirectory(prefix=f"scorecard-hash-{name}-", dir=args.temp_root) as temp_name:
         temp = Path(temp_name)
         output_pdf = temp / "output.pdf"
@@ -165,6 +228,8 @@ def hash_only_rerun(
         shutil.copyfile(resource, compact_dir / f"{name}{suffix}.time")
         events = [json.loads(line) for line in ndjson.read_text().splitlines() if line.strip()]
         error = next((event for event in reversed(events) if event.get("event") == "error"), None)
+        if exit_code == 0:
+            check_pdf(output_pdf, compact_dir / f"{name}{suffix}.qpdf-check.txt")
         result = {
             "schema_version": 2,
             "evaluation_profile": "conserving-fake",
@@ -194,6 +259,13 @@ def resumed_report(args: argparse.Namespace, corpus_dir: Path) -> dict[str, Any]
             (event.get("pages") for event in reversed(events) if event.get("event") == "result"),
             None,
         )
+        attribution_path = (
+            args.output_dir / "evidence" / f"{corpus_dir.name}.font-attribution.json"
+        )
+        if attribution_path.exists():
+            report["font_attribution"] = json.loads(
+                attribution_path.read_text(encoding="utf-8")
+            )
         return report
     existing_failure = args.output_dir / f"{corpus_dir.name}.failure.json"
     if existing_failure.exists():
@@ -235,6 +307,7 @@ def compact_row(report: dict[str, Any], v1: dict[str, Any] | None) -> dict[str, 
             "output_sha256": None,
             "pages": None,
             "per_page_timing": None,
+            "font_attribution": None,
         }
     dimensions = report["dimensions"]
     conservation = dimensions["mistranslation_risk"]["measurements"][
@@ -276,6 +349,7 @@ def compact_row(report: dict[str, Any], v1: dict[str, Any] | None) -> dict[str, 
         "output_sha256": report["output_sha256_recomputed"],
         "pages": report["pages"],
         "per_page_timing": None,
+        "font_attribution": report.get("font_attribution"),
     }
 
 
@@ -286,6 +360,14 @@ def aggregate(rows: list[dict[str, Any]], reproducibility: list[dict[str, Any]])
         if row["typed_degraded_paragraphs"] is not None
     )
     by_producer: dict[str, dict[str, Any]] = {}
+    font_slots: Counter[str] = Counter()
+    missing_font_slots = 0
+    for row in rows:
+        attribution = row.get("font_attribution")
+        if attribution is None:
+            continue
+        font_slots.update(attribution["glyphs_by_slot"])
+        missing_font_slots += attribution["missing_font_slot"]
     for producer in sorted({row["producer"] for row in rows}):
         producer_rows = [row for row in rows if row["producer"] == producer]
         producer_typed = sorted(
@@ -315,6 +397,8 @@ def aggregate(rows: list[dict[str, Any]], reproducibility: list[dict[str, Any]])
             "typed_degradation_median": (typed[(len(typed) - 1) // 2] + typed[len(typed) // 2]) / 2 if typed else None,
             "typed_degradation_worst": max(typed) if typed else None,
             "ink_violations": sum(row["ink_violations"] or 0 for row in rows),
+            "font_glyphs_by_slot": dict(sorted(font_slots.items())),
+            "missing_font_slot": missing_font_slots,
             "by_producer": by_producer,
         },
         "reproducibility": reproducibility,
@@ -383,10 +467,11 @@ def main() -> None:
     parser.add_argument("--mimus", type=Path, required=True)
     parser.add_argument("--scorecard", type=Path, required=True)
     parser.add_argument("--pdfium", type=Path, required=True)
-    parser.add_argument("--font", type=Path, required=True)
+    parser.add_argument("--cache-dir", type=Path)
+    parser.add_argument("--font", type=Path)
     parser.add_argument("--font-bold", type=Path)
-    parser.add_argument("--font-fallback", type=Path)
-    parser.add_argument("--font-fallback-bold", type=Path)
+    parser.add_argument("--font-latin", type=Path)
+    parser.add_argument("--font-latin-bold", type=Path)
     parser.add_argument("--layout-model", type=Path, required=True)
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()

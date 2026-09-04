@@ -4562,7 +4562,8 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                 Err(TypesetPlanError::MissingGlyphs {
                     missing_characters,
                     primary_font,
-                    fallback_font,
+                    latin_font,
+                    symbol_font,
                 }) => {
                     document
                         .diagnostics
@@ -4572,8 +4573,10 @@ pub fn typeset(document: &mut Document, context: &PassContext<'_>) -> Result<()>
                             missing_characters,
                             font_source: primary_font.source.clone(),
                             font_sha256: primary_font.sha256.clone(),
-                            fallback_font_source: fallback_font.source.clone(),
-                            fallback_font_sha256: fallback_font.sha256.clone(),
+                            latin_font_source: latin_font.source.clone(),
+                            latin_font_sha256: latin_font.sha256.clone(),
+                            symbol_font_source: symbol_font.source.clone(),
+                            symbol_font_sha256: symbol_font.sha256.clone(),
                         });
                     preserved.push((
                         page.index,
@@ -5721,28 +5724,30 @@ struct BuiltOutputFont {
 enum OutputFontKey {
     PrimaryRegular,
     PrimaryBold,
-    FallbackRegular,
-    FallbackBold,
+    LatinRegular,
+    LatinBold,
+    LatinSymbol,
 }
 
 impl OutputFontKey {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::PrimaryRegular,
         Self::PrimaryBold,
-        Self::FallbackRegular,
-        Self::FallbackBold,
+        Self::LatinRegular,
+        Self::LatinBold,
+        Self::LatinSymbol,
     ];
 
     const fn is_bold(self) -> bool {
-        matches!(self, Self::PrimaryBold | Self::FallbackBold)
+        matches!(self, Self::PrimaryBold | Self::LatinBold)
     }
 
-    const fn for_style(bold: bool, fallback: bool) -> Self {
-        match (bold, fallback) {
+    const fn for_style(bold: bool, latin: bool) -> Self {
+        match (bold, latin) {
             (false, false) => Self::PrimaryRegular,
             (true, false) => Self::PrimaryBold,
-            (false, true) => Self::FallbackRegular,
-            (true, true) => Self::FallbackBold,
+            (false, true) => Self::LatinRegular,
+            (true, true) => Self::LatinBold,
         }
     }
 
@@ -5750,8 +5755,33 @@ impl OutputFontKey {
         match self {
             Self::PrimaryRegular => "MimusR",
             Self::PrimaryBold => "MimusB",
-            Self::FallbackRegular => "MimusFR",
-            Self::FallbackBold => "MimusFB",
+            Self::LatinRegular => "MimusLR",
+            Self::LatinBold => "MimusLB",
+            Self::LatinSymbol => "MimusLS",
+        }
+    }
+
+    const fn publication_slot(self) -> il::OutputFontSlot {
+        match self {
+            Self::PrimaryRegular => il::OutputFontSlot::CjkRegular,
+            Self::PrimaryBold => il::OutputFontSlot::CjkBold,
+            Self::LatinRegular => il::OutputFontSlot::LatinRegular,
+            Self::LatinBold => il::OutputFontSlot::LatinBold,
+            Self::LatinSymbol => il::OutputFontSlot::LatinSymbol,
+        }
+    }
+
+    fn preference_order(value: char, bold: bool) -> [Self; 3] {
+        let cjk = Self::for_style(bold, false);
+        let latin = Self::for_style(bold, true);
+        match mimus_quality_contract::output_script_preference(value) {
+            mimus_quality_contract::OutputScriptPreference::Latin => {
+                [latin, Self::LatinSymbol, cjk]
+            }
+            mimus_quality_contract::OutputScriptPreference::Cjk
+            | mimus_quality_contract::OutputScriptPreference::Default => {
+                [cjk, latin, Self::LatinSymbol]
+            }
         }
     }
 }
@@ -5853,7 +5883,7 @@ fn sanitize_output_font_name(value: &str) -> String {
         .collect()
 }
 
-fn fallback_output_font_name(bytes: &[u8], source_name: &str, key: OutputFontKey) -> String {
+fn derived_output_font_name(bytes: &[u8], source_name: &str, key: OutputFontKey) -> String {
     use skrifa::MetadataProvider;
 
     let family = skrifa::FontRef::from_index(bytes, 0)
@@ -5876,8 +5906,9 @@ fn fallback_output_font_name(bytes: &[u8], source_name: &str, key: OutputFontKey
 struct OutputFontFaces<'a> {
     primary_regular: ttf_parser::Face<'a>,
     primary_bold: ttf_parser::Face<'a>,
-    fallback_regular: ttf_parser::Face<'a>,
-    fallback_bold: ttf_parser::Face<'a>,
+    latin_regular: ttf_parser::Face<'a>,
+    latin_bold: ttf_parser::Face<'a>,
+    latin_symbol: ttf_parser::Face<'a>,
 }
 
 impl<'a> OutputFontFaces<'a> {
@@ -5891,13 +5922,17 @@ impl<'a> OutputFontFaces<'a> {
                 &fonts.bold.bytes,
                 OutputFontKey::PrimaryBold,
             )?,
-            fallback_regular: configured_output_font_face(
-                &fonts.fallback_regular.bytes,
-                OutputFontKey::FallbackRegular,
+            latin_regular: configured_output_font_face(
+                &fonts.latin_regular.bytes,
+                OutputFontKey::LatinRegular,
             )?,
-            fallback_bold: configured_output_font_face(
-                &fonts.fallback_bold.bytes,
-                OutputFontKey::FallbackBold,
+            latin_bold: configured_output_font_face(
+                &fonts.latin_bold.bytes,
+                OutputFontKey::LatinBold,
+            )?,
+            latin_symbol: configured_output_font_face(
+                &fonts.latin_symbol.bytes,
+                OutputFontKey::LatinSymbol,
             )?,
         })
     }
@@ -5906,21 +5941,16 @@ impl<'a> OutputFontFaces<'a> {
         match key {
             OutputFontKey::PrimaryRegular => &self.primary_regular,
             OutputFontKey::PrimaryBold => &self.primary_bold,
-            OutputFontKey::FallbackRegular => &self.fallback_regular,
-            OutputFontKey::FallbackBold => &self.fallback_bold,
+            OutputFontKey::LatinRegular => &self.latin_regular,
+            OutputFontKey::LatinBold => &self.latin_bold,
+            OutputFontKey::LatinSymbol => &self.latin_symbol,
         }
     }
 
     fn key_for(&self, value: char, bold: bool) -> Option<OutputFontKey> {
-        let primary = OutputFontKey::for_style(bold, false);
-        if self.face(primary).glyph_index(value).is_some() {
-            return Some(primary);
-        }
-        let fallback = OutputFontKey::for_style(bold, true);
-        self.face(fallback)
-            .glyph_index(value)
-            .is_some()
-            .then_some(fallback)
+        OutputFontKey::preference_order(value, bold)
+            .into_iter()
+            .find(|&key| self.face(key).glyph_index(value).is_some())
     }
 
     fn face_for(
@@ -5932,7 +5962,7 @@ impl<'a> OutputFontFaces<'a> {
     }
 
     fn ascent_em(&self) -> f64 {
-        OutputFontKey::ALL
+        [OutputFontKey::PrimaryRegular, OutputFontKey::PrimaryBold]
             .into_iter()
             .map(|key| {
                 let face = self.face(key);
@@ -5942,7 +5972,7 @@ impl<'a> OutputFontFaces<'a> {
     }
 
     fn descent_em(&self) -> f64 {
-        OutputFontKey::ALL
+        [OutputFontKey::PrimaryRegular, OutputFontKey::PrimaryBold]
             .into_iter()
             .map(|key| {
                 let face = self.face(key);
@@ -5950,6 +5980,47 @@ impl<'a> OutputFontFaces<'a> {
             })
             .fold(f64::INFINITY, f64::min)
     }
+}
+
+/// Validates the five configured output slots before PDF parsing begins.
+///
+/// Variable-font instances are resolved through the same path used by
+/// Typeset, then each family is checked against its public coverage sample.
+pub fn validate_output_font_configuration(
+    fonts: &OutputFonts,
+) -> std::result::Result<(), &'static str> {
+    let faces = OutputFontFaces::parse(fonts)
+        .map_err(|_| "an output-font weight slot could not be instantiated")?;
+    for (key, sample, message) in [
+        (
+            OutputFontKey::PrimaryRegular,
+            "中文，。：“”",
+            "the CJK Regular font does not cover the required CJK sample",
+        ),
+        (
+            OutputFontKey::PrimaryBold,
+            "中文，。：“”",
+            "the CJK Bold font does not cover the required CJK sample",
+        ),
+        (
+            OutputFontKey::LatinRegular,
+            "AaZz09.,Łϵ",
+            "the Latin Regular font does not cover the required ASCII, Latin, and Greek sample",
+        ),
+        (
+            OutputFontKey::LatinBold,
+            "AaZz09.,Łϵ",
+            "the Latin Bold font does not cover the required ASCII, Latin, and Greek sample",
+        ),
+    ] {
+        if sample
+            .chars()
+            .any(|character| faces.face(key).glyph_index(character).is_none())
+        {
+            return Err(message);
+        }
+    }
+    Ok(())
 }
 
 const MIN_FONT_SIZE_PT: f64 = 8.0;
@@ -5966,7 +6037,8 @@ enum TypesetPlanError<'a> {
     MissingGlyphs {
         missing_characters: String,
         primary_font: &'a OutputFont,
-        fallback_font: &'a OutputFont,
+        latin_font: &'a OutputFont,
+        symbol_font: &'a OutputFont,
     },
 }
 
@@ -7006,11 +7078,12 @@ fn plan_relocated_formula_flow<'a>(
                 } else {
                     &output_fonts.regular
                 },
-                fallback_font: if is_bold {
-                    &output_fonts.fallback_bold
+                latin_font: if is_bold {
+                    &output_fonts.latin_bold
                 } else {
-                    &output_fonts.fallback_regular
+                    &output_fonts.latin_regular
                 },
+                symbol_font: &output_fonts.latin_symbol,
             });
         }
     }
@@ -8490,11 +8563,12 @@ fn plan_text_segment<'a>(
                 } else {
                     &output_fonts.regular
                 },
-                fallback_font: if is_bold {
-                    &output_fonts.fallback_bold
+                latin_font: if is_bold {
+                    &output_fonts.latin_bold
                 } else {
-                    &output_fonts.fallback_regular
+                    &output_fonts.latin_regular
                 },
+                symbol_font: &output_fonts.latin_symbol,
             });
         }
     }
@@ -9306,7 +9380,7 @@ fn build_embedded_font(
     let tag = subset_tag(used, key);
     let postscript_name = instance
         .postscript_name
-        .unwrap_or_else(|| fallback_output_font_name(bytes, &source_font.postscript_name, key));
+        .unwrap_or_else(|| derived_output_font_name(bytes, &source_font.postscript_name, key));
     Ok((
         EmbeddedFont {
             resource_name: key.resource_name().to_owned(),
@@ -9347,8 +9421,9 @@ fn build_typeset_fonts<'a>(
         let source_font = match key {
             OutputFontKey::PrimaryRegular => &configured_fonts.regular,
             OutputFontKey::PrimaryBold => &configured_fonts.bold,
-            OutputFontKey::FallbackRegular => &configured_fonts.fallback_regular,
-            OutputFontKey::FallbackBold => &configured_fonts.fallback_bold,
+            OutputFontKey::LatinRegular => &configured_fonts.latin_regular,
+            OutputFontKey::LatinBold => &configured_fonts.latin_bold,
+            OutputFontKey::LatinSymbol => &configured_fonts.latin_symbol,
         };
         let (font, cids) = build_embedded_font(&used, source_font, key).map_err(|_| {
             MimusError::internal(
@@ -9823,8 +9898,9 @@ fn subset_tag(used: &BTreeSet<char>, key: OutputFontKey) -> String {
     let mut hash = match key {
         OutputFontKey::PrimaryRegular => 0x811c9dc5u32,
         OutputFontKey::PrimaryBold => 0x811c9dc4u32,
-        OutputFontKey::FallbackRegular => 0x811c9dc3u32,
-        OutputFontKey::FallbackBold => 0x811c9dc2u32,
+        OutputFontKey::LatinRegular => 0x811c9dc3u32,
+        OutputFontKey::LatinBold => 0x811c9dc2u32,
+        OutputFontKey::LatinSymbol => 0x811c9dc1u32,
     };
     for character in used {
         hash ^= u32::from(*character);
@@ -10256,18 +10332,13 @@ fn built_font_key(
     fonts: &BTreeMap<OutputFontKey, BuiltOutputFont>,
     character: crate::translate::StyledCharacter,
 ) -> Option<OutputFontKey> {
-    let primary = OutputFontKey::for_style(character.bold, false);
-    if fonts
-        .get(&primary)
-        .is_some_and(|font| font.cids.contains_key(&character.value))
-    {
-        return Some(primary);
-    }
-    let fallback = OutputFontKey::for_style(character.bold, true);
-    fonts
-        .get(&fallback)
-        .is_some_and(|font| font.cids.contains_key(&character.value))
-        .then_some(fallback)
+    OutputFontKey::preference_order(character.value, character.bold)
+        .into_iter()
+        .find(|key| {
+            fonts
+                .get(key)
+                .is_some_and(|font| font.cids.contains_key(&character.value))
+        })
 }
 
 fn state_preserving_empty_replacement(
@@ -10526,6 +10597,7 @@ fn planned_line_publication_glyphs(
                 unicode: character.value,
                 baseline_origin,
                 ink_bounds,
+                font_slot: Some(key.publication_slot()),
             });
             x += f64::from(glyph_width_1000(advance, font.font.units_per_em)) / 1000.0
                 * plan.font_size;
@@ -10616,6 +10688,7 @@ fn planned_publication_ink(
                         unicode: glyph.unicode,
                         baseline_origin: glyph.baseline_origin,
                         ink_bounds,
+                        font_slot: None,
                     })
                     .collect(),
             });
@@ -12780,13 +12853,14 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../mimus/tests/assets/fonts/MimusTestGB2312-Bold.ttf"
         ));
-        let fallback_regular = include_bytes!(concat!(
+        let latin_regular = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../mimus/tests/assets/fonts/MimusTestFallback-Regular.ttf"
+            "/../mimus/tests/assets/fonts/MimusTestLatinText.ttf"
         ));
-        let fallback_bold = include_bytes!(concat!(
+        let latin_bold = latin_regular;
+        let latin_symbol = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../mimus/tests/assets/fonts/MimusTestFallback-Bold.ttf"
+            "/../mimus/tests/assets/fonts/MimusTestLatinSymbol.ttf"
         ));
         crate::context::OutputFonts {
             regular: crate::context::OutputFont {
@@ -12803,18 +12877,25 @@ mod tests {
                 sha256: "1a917349eb06866f5701532f0cea586d184edadbd1cfdd3f034f3a18f2ff5316"
                     .to_owned(),
             },
-            fallback_regular: crate::context::OutputFont {
-                bytes: fallback_regular.to_vec(),
-                postscript_name: "DejaVuSans".to_owned(),
-                source: "test:fallback-regular".to_owned(),
-                sha256: "3634d4b65a151c61dcb82968f6a3bdc33435d062c4c69a5ea57e3db20122ac1e"
+            latin_regular: crate::context::OutputFont {
+                bytes: latin_regular.to_vec(),
+                postscript_name: "STIXTwoText-Regular".to_owned(),
+                source: "test:latin-regular".to_owned(),
+                sha256: "15253cedd8e67b26019900b09b048af23f3e4c1f2e0b352eeb50ccb39491d9a5"
                     .to_owned(),
             },
-            fallback_bold: crate::context::OutputFont {
-                bytes: fallback_bold.to_vec(),
-                postscript_name: "DejaVuSans-Bold".to_owned(),
-                source: "test:fallback-bold".to_owned(),
-                sha256: "d0f2fdc62e7cdf6e35c8b0629b19084917991603c0d51fe94109128176352b83"
+            latin_bold: crate::context::OutputFont {
+                bytes: latin_bold.to_vec(),
+                postscript_name: "STIXTwoText-Bold".to_owned(),
+                source: "test:latin-bold".to_owned(),
+                sha256: "15253cedd8e67b26019900b09b048af23f3e4c1f2e0b352eeb50ccb39491d9a5"
+                    .to_owned(),
+            },
+            latin_symbol: crate::context::OutputFont {
+                bytes: latin_symbol.to_vec(),
+                postscript_name: "STIXTwoMath-Regular".to_owned(),
+                source: "test:latin-symbol".to_owned(),
+                sha256: "defb3cf75af1da832e26016183c6aff54985e580b24141bb5bbb48f32411c352"
                     .to_owned(),
             },
         }
@@ -13929,7 +14010,7 @@ mod tests {
     }
 
     #[test]
-    fn translated_cjk_builds_a_deterministic_searchable_subset() {
+    fn translated_mixed_script_text_builds_deterministic_searchable_subsets() {
         let mut document = Document::new(fixture(), "unused.pdf");
         let engine = FakeEngine::default();
         let events = RecordingEventSink::default();
@@ -13993,25 +14074,60 @@ mod tests {
                 _ => None,
             })
             .flatten()
-            .map(|glyph| (glyph.unicode, glyph.baseline_origin))
+            .map(|glyph| (glyph.unicode, glyph.baseline_origin, glyph.font_slot))
             .collect::<Vec<_>>();
         assert_eq!(
-            publication_glyphs,
+            publication_glyphs
+                .iter()
+                .map(|(unicode, origin, _)| (*unicode, *origin))
+                .collect::<Vec<_>>(),
             rewrite
                 .typeset_characters
                 .iter()
                 .map(|glyph| (glyph.unicode, glyph.baseline_origin))
                 .collect::<Vec<_>>()
         );
-        let font = &rewrite.embedded_fonts[0];
+        for (unicode, _, slot) in &publication_glyphs {
+            let expected = if unicode.is_ascii() {
+                il::OutputFontSlot::LatinRegular
+            } else {
+                il::OutputFontSlot::CjkRegular
+            };
+            assert_eq!(*slot, Some(expected), "unexpected slot for {unicode}");
+        }
+        assert_eq!(rewrite.embedded_fonts.len(), 2);
+        let cjk_font = rewrite
+            .embedded_fonts
+            .iter()
+            .find(|font| font.resource_name == OutputFontKey::PrimaryRegular.resource_name())
+            .unwrap();
         assert_eq!(
-            font.glyphs
+            cjk_font
+                .glyphs
                 .iter()
                 .map(|(_, value, _)| *value)
                 .collect::<BTreeSet<_>>(),
-            "MIMUS中文测试".chars().collect()
+            "中文测试".chars().collect()
         );
-        assert!(font.base_font.ends_with("+MimusTestGB2312Regular-Regular"));
+        assert!(
+            cjk_font
+                .base_font
+                .ends_with("+MimusTestGB2312Regular-Regular")
+        );
+        let latin_font = rewrite
+            .embedded_fonts
+            .iter()
+            .find(|font| font.resource_name == OutputFontKey::LatinRegular.resource_name())
+            .unwrap();
+        assert_eq!(
+            latin_font
+                .glyphs
+                .iter()
+                .map(|(_, value, _)| *value)
+                .collect::<BTreeSet<_>>(),
+            "MIMUS".chars().collect()
+        );
+        assert!(latin_font.base_font.ends_with("+STIXTwoText-Regular"));
         let original = document.pdf.as_ref().unwrap();
         let (first, _) =
             build_incremental(&document.original_bytes, original, &document.rewrites).unwrap();
@@ -14024,18 +14140,20 @@ mod tests {
         let output = LopdfDocument::load_mem(&first).unwrap();
         let page_id = output.get_pages()[&1];
         let fonts = output.get_page_fonts(page_id).unwrap();
-        let type0 = fonts.get(b"MimusR".as_slice()).unwrap();
-        let cmap_id = type0.get(b"ToUnicode").unwrap().as_reference().unwrap();
-        let cmap = output
-            .get_object(cmap_id)
-            .unwrap()
-            .as_stream()
-            .unwrap()
-            .decompressed_content()
-            .unwrap();
-        let cmap = String::from_utf8(cmap).unwrap();
-        for (cid, value, _) in &font.glyphs {
-            assert!(cmap.contains(&format!("<{cid:04X}> <{:04X}>", u32::from(*value))));
+        for embedded in [cjk_font, latin_font] {
+            let type0 = fonts.get(embedded.resource_name.as_bytes()).unwrap();
+            let cmap_id = type0.get(b"ToUnicode").unwrap().as_reference().unwrap();
+            let cmap = output
+                .get_object(cmap_id)
+                .unwrap()
+                .as_stream()
+                .unwrap()
+                .decompressed_content()
+                .unwrap();
+            let cmap = String::from_utf8(cmap).unwrap();
+            for (cid, value, _) in &embedded.glyphs {
+                assert!(cmap.contains(&format!("<{cid:04X}> <{:04X}>", u32::from(*value))));
+            }
         }
         let pdfium = crate::engine::pdfium::PdfiumEngine::from_environment().unwrap();
         let actual = pdfium.page_characters(&first, 0).unwrap();
@@ -14065,8 +14183,11 @@ mod tests {
         )
         .unwrap();
         assert!(bold.base_font.ends_with("+MimusTestGB2312Bold-Bold"));
-        assert_eq!(bold_cids.len(), font.glyphs.len());
-        assert_ne!(bold.font_bytes, font.font_bytes);
+        assert_eq!(
+            bold_cids.len(),
+            "MIMUS中文测试".chars().collect::<BTreeSet<_>>().len()
+        );
+        assert_ne!(bold.font_bytes, cjk_font.font_bytes);
     }
 
     #[test]
@@ -14173,6 +14294,50 @@ mod tests {
     }
 
     #[test]
+    fn output_font_routing_uses_script_preference_then_same_family_symbol_fallback() {
+        let fonts = test_output_fonts();
+        let faces = OutputFontFaces::parse(&fonts).unwrap();
+
+        assert_eq!(
+            faces.key_for('中', false),
+            Some(OutputFontKey::PrimaryRegular)
+        );
+        assert_eq!(faces.key_for('A', false), Some(OutputFontKey::LatinRegular));
+        assert_eq!(faces.key_for('ϵ', false), Some(OutputFontKey::LatinRegular));
+        assert_eq!(
+            faces.key_for('“', false),
+            Some(OutputFontKey::PrimaryRegular)
+        );
+        assert_eq!(faces.key_for('∗', false), Some(OutputFontKey::LatinSymbol));
+        assert_eq!(faces.key_for('A', true), Some(OutputFontKey::LatinBold));
+        assert_eq!(faces.key_for('∗', true), Some(OutputFontKey::LatinSymbol));
+        assert_eq!(faces.key_for('😀', false), None);
+    }
+
+    #[test]
+    fn line_metrics_are_derived_only_from_the_cjk_family() {
+        let fonts = test_output_fonts();
+        let faces = OutputFontFaces::parse(&fonts).unwrap();
+        let expected_ascent = [OutputFontKey::PrimaryRegular, OutputFontKey::PrimaryBold]
+            .into_iter()
+            .map(|key| {
+                let face = faces.face(key);
+                f64::from(face.ascender()) / f64::from(face.units_per_em())
+            })
+            .fold(f64::NEG_INFINITY, f64::max);
+        let expected_descent = [OutputFontKey::PrimaryRegular, OutputFontKey::PrimaryBold]
+            .into_iter()
+            .map(|key| {
+                let face = faces.face(key);
+                f64::from(face.descender()) / f64::from(face.units_per_em())
+            })
+            .fold(f64::INFINITY, f64::min);
+
+        assert_eq!(faces.ascent_em(), expected_ascent);
+        assert_eq!(faces.descent_em(), expected_descent);
+    }
+
+    #[test]
     #[ignore = "requires the SHA-pinned production variable font"]
     fn pinned_full_variable_font_regular_subset_matches_wght_400_outline() {
         use sha2::{Digest, Sha256};
@@ -14223,6 +14388,52 @@ mod tests {
         println!(
             "U+4E00 bounds: default={default_bounds:?}, wght400={regular_bounds:?}, subset={subset_bounds:?}"
         );
+    }
+
+    #[test]
+    #[ignore = "requires the SHA-pinned production STIX fonts"]
+    fn pinned_stix_text_instances_and_math_fallback_match_the_manifest() {
+        use sha2::{Digest, Sha256};
+
+        let text_path = std::env::var("MIMUS_PINNED_LATIN_FONT")
+            .expect("MIMUS_PINNED_LATIN_FONT must point to STIX Two Text");
+        let text_bytes = std::fs::read(text_path).unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&text_bytes)),
+            "7962b8b7811e6a896c9a91a0bccbb5241047770eb24d4997c5cb5fe21d5c0df2"
+        );
+        let regular = output_font_instance(&text_bytes, OutputFontKey::LatinRegular).unwrap();
+        let bold = output_font_instance(&text_bytes, OutputFontKey::LatinBold).unwrap();
+        assert_eq!(regular.variations[0].value, 400.0);
+        assert_eq!(bold.variations[0].value, 700.0);
+        assert_eq!(regular.postscript_name, None);
+        assert_eq!(bold.postscript_name, None);
+        assert_eq!(
+            derived_output_font_name(&text_bytes, "STIXTwoText", OutputFontKey::LatinRegular),
+            "STIXTwoText-Regular"
+        );
+        assert_eq!(
+            derived_output_font_name(&text_bytes, "STIXTwoText", OutputFontKey::LatinBold),
+            "STIXTwoText-Bold"
+        );
+        let text_face =
+            configured_output_font_face(&text_bytes, OutputFontKey::LatinRegular).unwrap();
+        for value in "AZaz09Łϵ“".chars() {
+            assert!(text_face.glyph_index(value).is_some(), "missing {value}");
+        }
+        assert!(text_face.glyph_index('∗').is_none());
+
+        let math_path = std::env::var("MIMUS_PINNED_SYMBOL_FONT")
+            .expect("MIMUS_PINNED_SYMBOL_FONT must point to STIX Two Math");
+        let math_bytes = std::fs::read(math_path).unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&math_bytes)),
+            "562551b15b836e6e01d1b7350909baf3c8c8d83260c1190fbf4544333e6936de"
+        );
+        let math_face =
+            configured_output_font_face(&math_bytes, OutputFontKey::LatinSymbol).unwrap();
+        assert!(math_face.glyph_index('∗').is_some());
+        assert!(math_face.tables().glyf.is_some());
     }
 
     #[test]
@@ -14421,8 +14632,9 @@ mod tests {
                 output_fonts: Some(crate::context::OutputFonts {
                     regular: output_font.clone(),
                     bold: output_font.clone(),
-                    fallback_regular: output_font.clone(),
-                    fallback_bold: output_font,
+                    latin_regular: output_font.clone(),
+                    latin_bold: output_font.clone(),
+                    latin_symbol: output_font,
                 }),
                 ..crate::context::PipelineConfig::default()
             },
@@ -14451,13 +14663,17 @@ mod tests {
                 missing_characters,
                 font_source,
                 font_sha256,
-                fallback_font_source,
-                fallback_font_sha256,
+                latin_font_source,
+                latin_font_sha256,
+                symbol_font_source,
+                symbol_font_sha256,
             } if missing_characters == "中文测试"
                 && font_source == "test:missing-glyph"
                 && font_sha256 == "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735"
-                && fallback_font_source == "test:missing-glyph"
-                && fallback_font_sha256 == "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735"
+                && latin_font_source == "test:missing-glyph"
+                && latin_font_sha256 == "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735"
+                && symbol_font_source == "test:missing-glyph"
+                && symbol_font_sha256 == "6e1e40974dce5dca579f3f191dd7dcc9953e6e04165d69f36d01aa8242a24735"
         )));
     }
 
@@ -16489,7 +16705,7 @@ mod tests {
             .as_stream_mut()
             .unwrap()
             .set_plain_content(
-                b"BT /F1 12 Tf\n1 0 0 1 72 120 Tm\n[(M) -100 (IMUS)] TJ\nET\n".to_vec(),
+                b"BT /F1 12 Tf\n1 0 0 1 72 120 Tm\n[(I) -100 (MUS)] TJ\nET\n".to_vec(),
             );
         pdf.save(&input).unwrap();
         let mut document = Document::for_inspection(&input);
@@ -16565,7 +16781,7 @@ mod tests {
             .section_number_gap
             .expect("retained section-number geometry is published");
         assert_eq!(evidence.prefix_glyph_count, 1);
-        assert!(evidence.clamped);
+        assert!(evidence.clamped, "{evidence:?}");
         assert!((evidence.gap_pt - evidence.font_size * 0.25).abs() <= 0.001);
         assert!((evidence.output_title_left - output_title_left).abs() <= 0.001);
         assert!(

@@ -128,6 +128,19 @@ pub struct PublicationGlyph {
     /// Final visual ink for this glyph. Glyphs without an outline use a zero-area
     /// rectangle at the baseline origin.
     pub ink_bounds: Rect,
+    /// Output slot provenance for translated text. Source-font replay omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_slot: Option<OutputFontSlot>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputFontSlot {
+    CjkRegular,
+    CjkBold,
+    LatinRegular,
+    LatinBold,
+    LatinSymbol,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -1,3 +1,5 @@
+The Noto Sans SC and STIX test derivatives in this directory use this license.
+
 This Font Software is licensed under the SIL Open Font License,
 Version 1.1.
 
