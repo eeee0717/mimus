@@ -17,7 +17,7 @@ clap = { version = "4", features = ["derive"] }
 insta = "1"
 image = { version = "0.25", default-features = false }
 lopdf = { version = "0.44", default-features = false }
-ort = "=2.0.0-rc.13"
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "tracing", "download-binaries", "tls-native", "copy-dylibs", "api-23"] }
 pdfium-render = { version = "=0.9.1", default-features = false, features = ["pdfium_7763", "thread_safe"] }
 quick-xml = "0.41"
 rayon = "1"

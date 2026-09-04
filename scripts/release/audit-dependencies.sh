@@ -1,22 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "usage: audit-dependencies.sh PLATFORM MIMUS_BINARY PDFIUM_LIBRARY" >&2
+if [[ $# -lt 3 || $# -gt 4 ]]; then
+  echo "usage: audit-dependencies.sh PLATFORM MIMUS_BINARY PDFIUM_LIBRARY [ONNXRUNTIME_LIBRARY]" >&2
   exit 2
 fi
 
 platform="$1"
 binary="$2"
 pdfium="$3"
+onnxruntime="${4:-}"
 
 [[ -f "$binary" ]] || { echo "missing mimus binary: $binary" >&2; exit 1; }
 [[ -f "$pdfium" ]] || { echo "missing PDFium library: $pdfium" >&2; exit 1; }
+if [[ -n "$onnxruntime" ]]; then
+  [[ -f "$onnxruntime" ]] || { echo "missing ONNX Runtime library: $onnxruntime" >&2; exit 1; }
+fi
 
 audit_macos_file() {
   local path="$1"
   local dependency
   while IFS= read -r dependency; do
+    if [[ -n "$onnxruntime" && "$dependency" == "@executable_path/$(basename "$onnxruntime")" ]]; then
+      continue
+    fi
     case "$dependency" in
       /System/Library/*|/usr/lib/*|./libpdfium.dylib) ;;
       *)
@@ -61,21 +68,44 @@ audit_windows_file() {
 
 printf 'mimus release dependency audit\n'
 printf 'platform: %s\n' "$platform"
-printf 'ONNX Runtime: statically linked by ort-sys; no runtime library required\n'
+if [[ -n "$onnxruntime" ]]; then
+  printf 'ONNX Runtime: loaded at runtime from the adjacent %s\n' "$(basename "$onnxruntime")"
+else
+  printf 'ONNX Runtime: statically linked by ort-sys; no runtime library required\n'
+fi
 printf 'PDFium: loaded at runtime from the adjacent %s\n\n' "$(basename "$pdfium")"
 
 case "$platform" in
   macos-*)
-    nm -gU "$binary" | grep '_OrtGetApiBase$' > /dev/null || {
-      echo "ONNX Runtime static symbol is missing from the macOS binary" >&2
-      exit 1
-    }
+    if [[ -n "$onnxruntime" ]]; then
+      nm -gU "$onnxruntime" | grep '_OrtGetApiBase$' > /dev/null || {
+        echo "ONNX Runtime API symbol is missing from the bundled macOS library" >&2
+        exit 1
+      }
+      otool -L "$binary" | awk '{print $1}' \
+        | grep -Fx "@executable_path/$(basename "$onnxruntime")" > /dev/null || {
+          echo "mimus does not resolve the adjacent ONNX Runtime library" >&2
+          exit 1
+        }
+    else
+      nm -gU "$binary" | grep '_OrtGetApiBase$' > /dev/null || {
+        echo "ONNX Runtime static symbol is missing from the macOS binary" >&2
+        exit 1
+      }
+    fi
     audit_macos_file "$binary"
     audit_macos_file "$pdfium"
+    if [[ -n "$onnxruntime" ]]; then
+      audit_macos_file "$onnxruntime"
+    fi
     printf '%s\n' '--- mimus: otool -L ---'
     otool -L "$binary"
     printf '\n%s\n' '--- PDFium: otool -L ---'
     otool -L "$pdfium"
+    if [[ -n "$onnxruntime" ]]; then
+      printf '\n%s\n' '--- ONNX Runtime: otool -L ---'
+      otool -L "$onnxruntime"
+    fi
     ;;
   linux-*)
     nm -g "$binary" | grep 'OrtGetApiBase$' > /dev/null || {

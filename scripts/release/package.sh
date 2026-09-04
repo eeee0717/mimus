@@ -64,6 +64,34 @@ actual_pdfium_library_sha256="$(sha256_file "$pdfium_source")"
   exit 1
 }
 
+ort_source=''
+if [[ -n "${ORT_ARCHIVE:-}" ]]; then
+  for variable in ORT_ARCHIVE_URL ORT_ARCHIVE_SHA256 ORT_LIBRARY_PATH ORT_LIBRARY_NAME ORT_LIBRARY_SHA256; do
+    [[ -n "${!variable:-}" ]] || {
+      echo "missing required ONNX Runtime environment variable: $variable" >&2
+      exit 2
+    }
+  done
+
+  ort_archive="$work_dir/$ORT_ARCHIVE"
+  download_or_copy "${ORT_ARCHIVE_PATH:-}" "$ORT_ARCHIVE_URL" "$ort_archive"
+  actual_ort_archive_sha256="$(sha256_file "$ort_archive")"
+  [[ "$actual_ort_archive_sha256" == "$ORT_ARCHIVE_SHA256" ]] || {
+    echo "ONNX Runtime archive SHA-256 mismatch: expected $ORT_ARCHIVE_SHA256, got $actual_ort_archive_sha256" >&2
+    exit 1
+  }
+  mkdir "$work_dir/onnxruntime"
+  tar -xzf "$ort_archive" -C "$work_dir/onnxruntime"
+  ort_source="$work_dir/onnxruntime/$ORT_LIBRARY_PATH"
+  actual_ort_library_sha256="$(sha256_file "$ort_source")"
+  [[ "$actual_ort_library_sha256" == "$ORT_LIBRARY_SHA256" ]] || {
+    echo "ONNX Runtime library SHA-256 mismatch: expected $ORT_LIBRARY_SHA256, got $actual_ort_library_sha256" >&2
+    exit 1
+  }
+  export ORT_LIB_PATH="$(dirname "$ort_source")"
+  export ORT_PREFER_DYNAMIC_LINK=1
+fi
+
 layout_model="$work_dir/inference.onnx"
 download_or_copy "${LAYOUT_MODEL_PATH:-}" \
   'https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_onnx/resolve/46bbdf188bb0a772c08aed74882ce7e51a8f1ea6/inference.onnx' \
@@ -97,10 +125,18 @@ cp "$repo_root/release/README.md" "$stage/README.md"
 cp "$repo_root/crates/mimus/tests/assets/fonts/LICENSE-OFL-1.1.txt" "$stage/licenses/OFL-1.1.txt"
 cp "$work_dir/pdfium/LICENSE" "$stage/licenses/pdfium/pdfium-binaries-LICENSE"
 cp -R "$work_dir/pdfium/licenses/." "$stage/licenses/pdfium/"
+if [[ -n "$ort_source" ]]; then
+  cp "$ort_source" "$stage/$ORT_LIBRARY_NAME"
+  install_name_tool -id "@executable_path/$ORT_LIBRARY_NAME" \
+    "$stage/$ORT_LIBRARY_NAME"
+  install_name_tool -change "@rpath/$ORT_LIBRARY_NAME" \
+    "@executable_path/$ORT_LIBRARY_NAME" "$stage/mimus$executable_suffix"
+fi
 
 "$repo_root/scripts/release/rust-dependency-licenses.sh" > "$stage/RUST_DEPENDENCIES.txt"
 "$repo_root/scripts/release/audit-dependencies.sh" \
   "$RELEASE_PLATFORM" "$stage/mimus$executable_suffix" "$stage/$PDFIUM_LIBRARY_NAME" \
+  "${ORT_LIBRARY_NAME:+$stage/$ORT_LIBRARY_NAME}" \
   > "$stage/DEPENDENCIES.txt"
 
 "$stage/mimus$executable_suffix" --help > /dev/null

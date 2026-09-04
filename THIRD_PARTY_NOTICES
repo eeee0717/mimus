@@ -18,8 +18,11 @@ Sources:
 
 ## ONNX Runtime
 
-The `ort` and `ort-sys` Rust crates statically link the ONNX Runtime CPU library into `mimus`.
-ONNX Runtime is licensed under the MIT License.
+The `ort` and `ort-sys` Rust crates link the ONNX Runtime CPU library into `mimus`. Release targets
+use ONNX Runtime 1.28.0 statically except macOS x64, whose archive includes Microsoft's final Intel
+macOS binary, ONNX Runtime 1.23.2, as an adjacent dynamic library. The Rust wrapper is compiled
+against C API 23 on every platform, which both runtime versions provide. ONNX Runtime is licensed
+under the MIT License.
 
 Copyright (c) Microsoft Corporation. All rights reserved.
 

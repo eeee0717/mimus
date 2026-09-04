@@ -1,7 +1,8 @@
 # mimus release archive
 
-This archive contains the `mimus` command and the matching PDFium dynamic library. Keep both files
-in the same directory. No Python or Node.js runtime is required.
+This archive contains the `mimus` command and the matching PDFium dynamic library. The macOS x64
+archive also contains the matching ONNX Runtime dynamic library. Keep the executable and all
+adjacent libraries in the same directory. No Python or Node.js runtime is required.
 
 Verify the download against the release `SHA256SUMS`, then run:
 
