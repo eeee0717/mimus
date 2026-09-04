@@ -95,6 +95,10 @@ CLI 机器协议版本升为 2；IL 的 `schema_version` 独立保持 1。每行
   `font_latin_symbol_*` source/SHA-256 字段；旧 `font_fallback_*` 字段保留且与对应 Latin
   值恒等。`unsupported_output_glyph` 同样增加 canonical Latin 与 symbol 身份并保留旧
   fallback 身份别名。均为 additive v2 扩展，不升 schema。
+- 2026-09-04 M4 #39：增加非终结
+  `asset_download_started/progress/finished { name, bytes, sha256, ... }` 事件；`assets list`
+  与 `assets pull` 复用既有 `result` 终结事件并分别增加 `assets` 清单/就绪项。二者页数与
+  warning 数为 0，正常可写流仍恰有一个终结事件；公开协议保持 v2。
 
 ## 后果
 

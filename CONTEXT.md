@@ -11,7 +11,7 @@
 | 2 | 版面检测模型：PP-DocLayoutV3 官方 ONNX（131 MB，25 类，含阅读顺序） | [ADR-0002](docs/adr/0002-pp-doclayoutv3.md) |
 | 3 | V1 仅原生 PDF 路径（扫描件报错拒绝）；OCR 后置 V2，IR/架构预留 | [ADR-0003](docs/adr/0003-v1-native-pdf-path.md) |
 | 4 | 许可：MIT 单许可 | [ADR-0004](docs/adr/0004-mit-license.md) |
-| 5 | 分发：单 archive 解压即用；模型/字体资产运行时下载 + 自备逃生门 + 镜像可配 | [ADR-0005](docs/adr/0005-distribution.md) |
+| 5 | 分发：单 archive 解压即用；模型/字体由一个公开 SHA-256 清单统一管理，沿用既有缓存路径并支持缺失时按需下载、`assets list` 查看、`assets pull` 预取、自备路径与镜像；下载只在同目录临时文件完成校验后原子落位 | [ADR-0005](docs/adr/0005-distribution.md) |
 | 6 | 引擎组合：lopdf（对象树/增量写回/原始字节）+ pdfium-render（当前度量/光栅化后端，trait 边界后）+ 自写操作符走查。firecrawl-pdfium 仅在补齐 T1/F1/O1 并重新资格验证后才可替换 | [ADR-0006](docs/adr/0006-engine-combination.md) |
 | 7 | IR：单字符粒度 + 双盒 + Rust enum + serde JSON 快照（schema_version） | [ADR-0007](docs/adr/0007-ir-design.md) |
 | 8 | 目标用户：开源发布，面向"读外文 PDF 的中文研究者"；验收场景=作者本人日常翻译 arXiv 论文 | — |
@@ -151,7 +151,7 @@ model `inline_formula` 的**存在性**保持绝对权威，但模型框边缘�
 
 ### 资产与分发
 
-- **资产（assets）机制**：模型/字体统一管理——运行时下载 + sha256 校验 + 缓存 + 镜像可配 + 自备路径逃生门（ADR-0005）。
+- **资产（assets）机制**：模型/字体的唯一公开清单，固定名称、版本、URL、SHA-256 与向后兼容缓存相对路径；运行时按需下载或由 `assets pull` 预取，校验后原子落位，并保留镜像与自备路径逃生门（ADR-0005）。
 
 ### Agent 集成
 

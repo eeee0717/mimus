@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::ValueEnum;
-use mimus_core::error::{MimusError, Result, UsageReason};
+use mimus_core::error::{AssetReason, MimusError, Result, UsageReason};
 use mimus_core::translate::{Glossary, NoneTranslator, OpenAiTranslator, Translator};
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -74,10 +74,7 @@ pub(crate) struct ResolvedConfig {
     pub font_latin_bold: Option<FontPathSelection>,
     pub layout_model: Option<LayoutModelPathSelection>,
     pub asset_mirror: Option<String>,
-    pub font_cjk_cache_dir: PathBuf,
-    pub font_latin_cache_dir: PathBuf,
-    pub font_latin_symbol_cache_dir: PathBuf,
-    pub layout_model_cache_dir: PathBuf,
+    pub asset_cache_root: PathBuf,
     pub user_glossary: Glossary,
     pub dump_glossary: Option<PathBuf>,
     pub auto_terms: bool,
@@ -92,7 +89,12 @@ pub(crate) struct ResolvedConfig {
 pub(crate) struct ResolvedLayoutConfig {
     pub layout_model: Option<LayoutModelPathSelection>,
     pub asset_mirror: Option<String>,
-    pub layout_model_cache_dir: PathBuf,
+    pub asset_cache_root: PathBuf,
+}
+
+pub(crate) struct ResolvedAssetsConfig {
+    pub asset_mirror: Option<String>,
+    pub asset_cache_root: PathBuf,
 }
 
 impl ResolvedConfig {
@@ -197,13 +199,6 @@ impl ResolvedConfig {
                 )
                 .with_hint("set MIMUS_CACHE_DIR or provide explicit font and layout-model paths")
             })?;
-        let font_cjk_cache_dir = asset_cache_root.join("fonts/noto-serif-sc-2.001");
-        let font_latin_cache_dir = asset_cache_root.join("fonts/stix-two-text-2.13b171");
-        let font_latin_symbol_cache_dir = asset_cache_root.join("fonts/stix-two-math-2.12b168a");
-        let layout_model_cache_dir = asset_cache_root.join(format!(
-            "models/pp-doclayoutv3-{}",
-            crate::layout_assets::MODEL_COMMIT
-        ));
         let user_glossary = overrides
             .glossary
             .as_deref()
@@ -246,10 +241,7 @@ impl ResolvedConfig {
             font_latin_bold,
             layout_model,
             asset_mirror,
-            font_cjk_cache_dir,
-            font_latin_cache_dir,
-            font_latin_symbol_cache_dir,
-            layout_model_cache_dir,
+            asset_cache_root,
             user_glossary,
             dump_glossary: overrides.dump_glossary,
             auto_terms: !overrides.no_auto_terms,
@@ -307,10 +299,36 @@ impl ResolvedLayoutConfig {
         Ok(Self {
             layout_model,
             asset_mirror,
-            layout_model_cache_dir: asset_cache_root.join(format!(
-                "models/pp-doclayoutv3-{}",
-                crate::layout_assets::MODEL_COMMIT
-            )),
+            asset_cache_root,
+        })
+    }
+}
+
+impl ResolvedAssetsConfig {
+    pub(crate) fn load(asset_mirror: Option<String>) -> Result<Self> {
+        load_dotenv_local()?;
+        let file = read_file_config()?;
+        let environment = EnvironmentConfig::read();
+        let asset_mirror = choose_optional(
+            asset_mirror,
+            environment.asset_mirror,
+            file.asset_mirror,
+            "asset mirror",
+        )?;
+        let asset_cache_root = environment
+            .cache_dir
+            .or(file.cache_dir)
+            .or_else(default_asset_cache_root)
+            .ok_or_else(|| {
+                MimusError::asset(
+                    AssetReason::AssetUnavailable,
+                    "could not determine the asset cache directory",
+                )
+                .with_hint("set MIMUS_CACHE_DIR")
+            })?;
+        Ok(Self {
+            asset_mirror,
+            asset_cache_root,
         })
     }
 }

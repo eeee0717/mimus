@@ -40,6 +40,21 @@ The canonical Latin names are `--font-latin` / `--font-latin-bold`, `MIMUS_FONT_
 `MIMUS_FONT_LATIN_BOLD`, and `font_latin` / `font_latin_bold`. The former `fallback` names remain
 deprecated aliases for CLI v2 compatibility.
 
+## Runtime assets
+
+The public manifest contains the PP-DocLayoutV3 model and the three default font files above.
+Inspect it without downloading anything, or prefetch every default asset into the existing cache:
+
+```sh
+mimus assets list --json
+mimus assets pull
+```
+
+Missing assets are downloaded on demand. `--asset-mirror`, `MIMUS_ASSET_MIRROR`, or
+`asset_mirror` in the config file selects an HTTP(S) mirror; `MIMUS_CACHE_DIR` or `cache_dir`
+selects the cache root. Explicit model and font paths bypass downloads. Every managed download is
+size-bounded, SHA-256 checked, and atomically published only after validation.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

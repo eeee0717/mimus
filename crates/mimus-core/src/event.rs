@@ -56,6 +56,25 @@ pub enum EventKind {
         paragraph_index: usize,
         status: CacheStatus,
     },
+    AssetDownloadStarted {
+        name: String,
+        version: String,
+        bytes: u64,
+        sha256: String,
+    },
+    AssetDownloadProgress {
+        name: String,
+        bytes: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        total_bytes: Option<u64>,
+        sha256: String,
+    },
+    AssetDownloadFinished {
+        name: String,
+        bytes: u64,
+        sha256: String,
+        cache_path: String,
+    },
     StageStarted {
         stage: Stage,
     },
@@ -190,6 +209,31 @@ pub enum ResultPayload {
     Inspect {
         il: il::Document,
     },
+    AssetsList {
+        assets: Vec<AssetManifestEntry>,
+    },
+    AssetsPull {
+        assets: Vec<AssetReadyEntry>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AssetManifestEntry {
+    pub name: String,
+    pub kind: String,
+    pub version: String,
+    pub url: String,
+    pub sha256: String,
+    pub cache_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AssetReadyEntry {
+    pub name: String,
+    pub bytes: u64,
+    pub sha256: String,
+    pub cache_path: String,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -2004,5 +2048,53 @@ mod tests {
                 DiagnosticEvent::TranslationFailureProfile { .. }
             ]
         ));
+    }
+
+    #[test]
+    fn asset_manifest_progress_and_terminal_results_are_additive_v2_events() {
+        let started = serde_json::to_value(Event::new(EventKind::AssetDownloadStarted {
+            name: "pp-doclayoutv3".to_owned(),
+            version: "commit".to_owned(),
+            bytes: 0,
+            sha256: "abc123".to_owned(),
+        }))
+        .unwrap();
+        assert_eq!(started["schema_version"], 2);
+        assert_eq!(started["event"], "asset_download_started");
+        assert_eq!(started["name"], "pp-doclayoutv3");
+        assert_eq!(started["bytes"], 0);
+        assert_eq!(started["sha256"], "abc123");
+
+        let progress = serde_json::to_value(Event::new(EventKind::AssetDownloadProgress {
+            name: "pp-doclayoutv3".to_owned(),
+            bytes: 1024,
+            total_bytes: Some(4096),
+            sha256: "abc123".to_owned(),
+        }))
+        .unwrap();
+        assert_eq!(progress["event"], "asset_download_progress");
+        assert_eq!(progress["total_bytes"], 4096);
+
+        let result = Event::new(EventKind::Result {
+            result: ResultPayload::AssetsList {
+                assets: vec![AssetManifestEntry {
+                    name: "pp-doclayoutv3".to_owned(),
+                    kind: "model".to_owned(),
+                    version: "commit".to_owned(),
+                    url: "https://example.invalid/model.onnx".to_owned(),
+                    sha256: "abc123".to_owned(),
+                    cache_path: "models/example/model.onnx".to_owned(),
+                }],
+            },
+            pages: 0,
+            warnings: 0,
+        });
+        assert!(result.kind.is_terminal());
+        let result = serde_json::to_value(result).unwrap();
+        assert_eq!(result["event"], "result");
+        assert_eq!(
+            result["assets"][0]["cache_path"],
+            "models/example/model.onnx"
+        );
     }
 }

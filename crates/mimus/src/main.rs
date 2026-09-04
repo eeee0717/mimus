@@ -1,5 +1,6 @@
 //! `mimus` - the CLI boundary defined by ADR-0001.
 
+mod assets;
 mod config;
 mod debug;
 mod font_assets;
@@ -13,14 +14,18 @@ use std::process::ExitCode;
 
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser, Subcommand};
-use config::{Backend, ConfigOverrides, ResolvedConfig, ResolvedLayoutConfig};
+use config::{
+    Backend, ConfigOverrides, ResolvedAssetsConfig, ResolvedConfig, ResolvedLayoutConfig,
+};
 use debug::DebugArtifacts;
 use mimus_core::engine::pdfium::PdfiumEngine;
 use mimus_core::engine::{
     LayoutDetector, OnnxLayoutDetector, RecordedLayoutDetector, SingleLineLayoutDetector,
 };
 use mimus_core::error::{ErrorReason, InternalReason, IoReason, MimusError, Result, UsageReason};
-use mimus_core::event::{ConfigurationResolved, Event, EventKind, EventSink, ResultPayload};
+use mimus_core::event::{
+    AssetReadyEntry, ConfigurationResolved, Event, EventKind, EventSink, ResultPayload,
+};
 use mimus_core::pass;
 use mimus_core::translate::NoneTranslator;
 use mimus_core::{Document, PassContext, PassSnapshotSink, PipelineConfig};
@@ -46,6 +51,29 @@ enum Command {
     Translate(Box<TranslateArgs>),
     /// Inspect the IL produced by the read-only pipeline prefix.
     Inspect(InspectArgs),
+    /// List or prefetch runtime model and font assets.
+    Assets(AssetsArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct AssetsArgs {
+    #[command(subcommand)]
+    command: AssetsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum AssetsCommand {
+    /// List the SHA-pinned public asset manifest.
+    List,
+    /// Download and validate every default runtime asset.
+    Pull(AssetsPullArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct AssetsPullArgs {
+    /// Base URL used to mirror model and output-font assets.
+    #[arg(long, value_name = "URL")]
+    asset_mirror: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -223,6 +251,80 @@ fn main() -> ExitCode {
     match command {
         Command::Translate(args) => run_translate(*args, &session),
         Command::Inspect(args) => run_inspect(args, &session),
+        Command::Assets(args) => run_assets(args, &session),
+    }
+}
+
+fn run_assets(args: AssetsArgs, session: &ProtocolSession) -> ExitCode {
+    match args.command {
+        AssetsCommand::List => session.finish_result(
+            ResultPayload::AssetsList {
+                assets: assets::manifest_entries(),
+            },
+            0,
+            0,
+        ),
+        AssetsCommand::Pull(args) => run_assets_pull(args, session),
+    }
+}
+
+fn run_assets_pull(args: AssetsPullArgs, session: &ProtocolSession) -> ExitCode {
+    let resolved = match ResolvedAssetsConfig::load(args.asset_mirror) {
+        Ok(value) => value,
+        Err(error) => return session.finish_error(error),
+    };
+    let fonts = match font_assets::resolve_fonts(
+        font_assets::FontSelections {
+            regular: None,
+            bold: None,
+            latin_regular: None,
+            latin_bold: None,
+        },
+        &resolved.asset_cache_root,
+        resolved.asset_mirror.as_deref(),
+        session,
+    ) {
+        Ok(value) => value,
+        Err(error) => return session.finish_error(error),
+    };
+    let model = match layout_assets::resolve_layout_model(
+        None,
+        &resolved.asset_cache_root,
+        resolved.asset_mirror.as_deref(),
+        session,
+    ) {
+        Ok(value) => value,
+        Err(error) => return session.finish_error(error),
+    };
+    let ready = vec![
+        ready_asset(
+            assets::AssetId::NotoSerifSc,
+            fonts.regular.bytes.len() as u64,
+            fonts.regular.source,
+        ),
+        ready_asset(
+            assets::AssetId::StixTwoText,
+            fonts.latin_regular.bytes.len() as u64,
+            fonts.latin_regular.source,
+        ),
+        ready_asset(
+            assets::AssetId::StixTwoMath,
+            fonts.latin_symbol.bytes.len() as u64,
+            fonts.latin_symbol.source,
+        ),
+        ready_asset(assets::AssetId::PpDocLayoutV3, model.bytes, model.source),
+    ];
+    session.finish_result(ResultPayload::AssetsPull { assets: ready }, 0, 0)
+}
+
+fn ready_asset(id: assets::AssetId, bytes: u64, source: String) -> AssetReadyEntry {
+    let descriptor = assets::descriptor(id);
+    AssetReadyEntry {
+        name: descriptor.name.to_owned(),
+        bytes,
+        sha256: descriptor.sha256.to_owned(),
+        cache_path: descriptor.cache_path.to_owned(),
+        source,
     }
 }
 
@@ -272,12 +374,9 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
             latin_regular: resolved.font_latin.as_ref(),
             latin_bold: resolved.font_latin_bold.as_ref(),
         },
-        font_assets::FontCacheDirs {
-            cjk: &resolved.font_cjk_cache_dir,
-            latin: &resolved.font_latin_cache_dir,
-            latin_symbol: &resolved.font_latin_symbol_cache_dir,
-        },
+        &resolved.asset_cache_root,
         resolved.asset_mirror.as_deref(),
+        session,
     ) {
         Ok(value) => value,
         Err(error) => return session.finish_error(error),
@@ -296,8 +395,9 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         args.layout,
         args.layout_replay.as_deref(),
         resolved.layout_model.as_ref(),
-        &resolved.layout_model_cache_dir,
+        &resolved.asset_cache_root,
         resolved.asset_mirror.as_deref(),
+        session,
     ) {
         Ok(value) => value,
         Err(error) => return session.finish_error(error),
@@ -415,10 +515,11 @@ fn run_inspect(args: InspectArgs, session: &ProtocolSession) -> ExitCode {
             .and_then(|config| config.layout_model.as_ref()),
         layout_config
             .as_ref()
-            .map_or_else(|| Path::new(""), |config| &config.layout_model_cache_dir),
+            .map_or_else(|| Path::new(""), |config| &config.asset_cache_root),
         layout_config
             .as_ref()
             .and_then(|config| config.asset_mirror.as_deref()),
+        session,
     ) {
         Ok(value) => value,
         Err(error) => return session.finish_error(error),
@@ -485,8 +586,9 @@ fn create_layout_detector(
     mode: LayoutMode,
     replay: Option<&Path>,
     explicit_model: Option<&config::LayoutModelPathSelection>,
-    model_cache_dir: &Path,
+    asset_cache_root: &Path,
     asset_mirror: Option<&str>,
+    events: &dyn EventSink,
 ) -> Result<CreatedLayoutDetector> {
     if let Some(path) = replay {
         let bytes = std::fs::read(path).map_err(|error| {
@@ -513,7 +615,12 @@ fn create_layout_detector(
             model_sha256: None,
         });
     }
-    let model = layout_assets::resolve_layout_model(explicit_model, model_cache_dir, asset_mirror)?;
+    let model = layout_assets::resolve_layout_model(
+        explicit_model,
+        asset_cache_root,
+        asset_mirror,
+        events,
+    )?;
     Ok(CreatedLayoutDetector {
         detector: Box::new(OnnxLayoutDetector::from_file(&model.path)?),
         mode: mode.as_str(),

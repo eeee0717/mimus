@@ -77,6 +77,7 @@ reason_enum!(InputReason {
 });
 
 reason_enum!(AssetReason {
+    AssetUnavailable => "asset_unavailable",
     PdfiumUnavailable => "pdfium_unavailable",
     OutputFontUnavailable => "output_font_unavailable",
     LayoutModelUnavailable => "layout_model_unavailable",

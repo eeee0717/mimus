@@ -135,6 +135,30 @@ impl<W: Write + Send> ProtocolSession<W> {
             }
             EventKind::ConfigurationResolved { .. } => {}
             EventKind::TranslationCache { .. } => {}
+            EventKind::AssetDownloadStarted { name, version, .. } => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "downloading asset {name} ({version})..."
+                );
+            }
+            EventKind::AssetDownloadProgress {
+                name,
+                bytes,
+                total_bytes,
+                ..
+            } => {
+                let total = total_bytes.map_or_else(String::new, |value| format!("/{value}"));
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "asset {name}: {bytes}{total} bytes"
+                );
+            }
+            EventKind::AssetDownloadFinished { name, bytes, .. } => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "asset {name}: ready ({bytes} bytes)"
+                );
+            }
             EventKind::StageStarted { stage } => {
                 let _ = writeln!(std::io::stderr().lock(), "{}...", human_stage_name(stage));
             }
@@ -156,6 +180,23 @@ impl<W: Write + Send> ProtocolSession<W> {
                 let bytes = match result {
                     ResultPayload::Translate { output, .. } => format!("{output}\n").into_bytes(),
                     ResultPayload::Inspect { il } => mimus_core::il::canonical_json(&il)?,
+                    ResultPayload::AssetsList { assets } => assets
+                        .into_iter()
+                        .map(|asset| {
+                            format!(
+                                "{}\t{}\t{}\t{}\t{}\n",
+                                asset.name,
+                                asset.version,
+                                asset.sha256,
+                                asset.cache_path,
+                                asset.url
+                            )
+                        })
+                        .collect::<String>()
+                        .into_bytes(),
+                    ResultPayload::AssetsPull { assets } => {
+                        format!("{} assets ready\n", assets.len()).into_bytes()
+                    }
                 };
                 write_bytes(state, &bytes)?;
                 if state.output == OutputState::Open {
