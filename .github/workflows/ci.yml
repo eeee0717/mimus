@@ -43,14 +43,24 @@ jobs:
             "https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_onnx/resolve/$LAYOUT_MODEL_COMMIT/inference.onnx"
           echo "$LAYOUT_MODEL_SHA256  pp-doclayoutv3.onnx" | sha256sum --check
 
-      - name: Install pinned production output font
+      - name: Install pinned production output fonts
         env:
           NOTO_COMMIT: 523d033d6cb47f4a80c58a35753646f5c3608a78
           NOTO_SERIF_SC_VF_SHA256: 69467baf421bdbb32b292d6c092ed033ca32e5f7a0d06194e69901287b50b2f3
+          STIX_FONTS_COMMIT: 744a22a4dd626cd14d75728aef34fc8ad7c85db0
+          GOOGLE_FONTS_COMMIT: 9017368e541f77a66e2302f474d2142d1bb77f5c
+          STIX_TWO_TEXT_VF_SHA256: 7962b8b7811e6a896c9a91a0bccbb5241047770eb24d4997c5cb5fe21d5c0df2
+          STIX_TWO_MATH_SHA256: 562551b15b836e6e01d1b7350909baf3c8c8d83260c1190fbf4544333e6936de
         run: |
           curl --fail --location --retry 3 --output NotoSerifSC-VF.ttf \
             "https://raw.githubusercontent.com/notofonts/noto-cjk/$NOTO_COMMIT/Serif/Variable/TTF/Subset/NotoSerifSC-VF.ttf"
           echo "$NOTO_SERIF_SC_VF_SHA256  NotoSerifSC-VF.ttf" | sha256sum --check
+          curl --fail --location --retry 3 --output 'STIXTwoText[wght].ttf' \
+            "https://raw.githubusercontent.com/stipub/stixfonts/$STIX_FONTS_COMMIT/fonts/variable_ttf/STIXTwoText%5Bwght%5D.ttf"
+          echo "$STIX_TWO_TEXT_VF_SHA256  STIXTwoText[wght].ttf" | sha256sum --check
+          curl --fail --location --retry 3 --output STIXTwoMath-Regular.ttf \
+            "https://raw.githubusercontent.com/google/fonts/$GOOGLE_FONTS_COMMIT/ofl/stixtwomath/STIXTwoMath-Regular.ttf"
+          echo "$STIX_TWO_MATH_SHA256  STIXTwoMath-Regular.ttf" | sha256sum --check
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -70,6 +80,15 @@ jobs:
         run: >-
           cargo test --locked --offline -p mimus-core
           pass::tests::pinned_full_variable_font_regular_subset_matches_wght_400_outline
+          -- --ignored --exact
+
+      - name: Verify production STIX instances and symbol fallback
+        env:
+          MIMUS_PINNED_LATIN_FONT: ${{ github.workspace }}/STIXTwoText[wght].ttf
+          MIMUS_PINNED_SYMBOL_FONT: ${{ github.workspace }}/STIXTwoMath-Regular.ttf
+        run: >-
+          cargo test --locked --offline -p mimus-core
+          pass::tests::pinned_stix_text_instances_and_math_fallback_match_the_manifest
           -- --ignored --exact
 
       - name: Audit committed Corpus v1 evidence

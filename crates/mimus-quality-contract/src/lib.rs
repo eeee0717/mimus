@@ -2,6 +2,80 @@
 
 mod agl;
 
+/// Preferred output-font family for one translated Unicode scalar.
+///
+/// This policy is shared by production typesetting and independent quality
+/// measurement. Preference is not exclusive: callers may try the other
+/// family when the preferred family does not contain the scalar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputScriptPreference {
+    Cjk,
+    Latin,
+    Default,
+}
+
+/// Classifies a translated scalar for the two-family output-font policy.
+#[must_use]
+pub const fn output_script_preference(character: char) -> OutputScriptPreference {
+    match character as u32 {
+        // Chinese-context punctuation must stay with the CJK family even
+        // though STIX also covers much of General Punctuation.
+        0x2010..=0x2027
+        | 0x2e80..=0x2eff
+        | 0x2f00..=0x2fdf
+        | 0x2ff0..=0x2fff
+        | 0x3000..=0x303f
+        | 0x3040..=0x309f
+        | 0x30a0..=0x30ff
+        | 0x3100..=0x312f
+        | 0x3130..=0x318f
+        | 0x3190..=0x319f
+        | 0x31a0..=0x31bf
+        | 0x31c0..=0x31ef
+        | 0x31f0..=0x31ff
+        | 0x3200..=0x32ff
+        | 0x3300..=0x33ff
+        | 0x3400..=0x4dbf
+        | 0x4e00..=0x9fff
+        | 0xa960..=0xa97f
+        | 0xac00..=0xd7af
+        | 0xd7b0..=0xd7ff
+        | 0xf900..=0xfaff
+        | 0xfe10..=0xfe1f
+        | 0xfe30..=0xfe4f
+        | 0xff00..=0xffef
+        | 0x1aff0..=0x1afff
+        | 0x1b000..=0x1b16f
+        | 0x1f200..=0x1f2ff
+        | 0x20000..=0x2ee5f
+        | 0x2f800..=0x2fa1f
+        | 0x30000..=0x323af => OutputScriptPreference::Cjk,
+
+        // Latin-family text and the technical-symbol blocks for which STIX
+        // Two Text is the canonical translated-text face.
+        0x0020..=0x007e
+        | 0x00a0..=0x02ff
+        | 0x0300..=0x036f
+        | 0x0370..=0x052f
+        | 0x1c80..=0x1c8f
+        | 0x1d00..=0x1dbf
+        | 0x1e00..=0x1fff
+        | 0x2070..=0x209f
+        | 0x20d0..=0x20ff
+        | 0x2100..=0x214f
+        | 0x2190..=0x22ff
+        | 0x27c0..=0x2bff
+        | 0x2de0..=0x2dff
+        | 0xa640..=0xa69f
+        | 0xa720..=0xa7ff
+        | 0xab30..=0xab6f
+        | 0x10780..=0x107bf
+        | 0x1d400..=0x1d7ff
+        | 0x1df00..=0x1dfff => OutputScriptPreference::Latin,
+        _ => OutputScriptPreference::Default,
+    }
+}
+
 /// Returns whether a translated line may not begin with `character` under the
 /// V1 Chinese kinsoku policy.
 pub fn forbidden_line_start(character: char) -> bool {
@@ -591,6 +665,30 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_script_policy_covers_each_documented_family() {
+        for value in ['中', '。', '“', '—', 'あ', '한', 'Ａ', '\u{20000}'] {
+            assert_eq!(
+                output_script_preference(value),
+                OutputScriptPreference::Cjk,
+                "unexpected class for U+{:04X}",
+                value as u32
+            );
+        }
+        for value in ['A', '9', '.', 'Ł', 'ϵ', 'Ж', 'ℏ', '∗', '→', '²'] {
+            assert_eq!(
+                output_script_preference(value),
+                OutputScriptPreference::Latin,
+                "unexpected class for U+{:04X}",
+                value as u32
+            );
+        }
+        assert_eq!(
+            output_script_preference('😀'),
+            OutputScriptPreference::Default
+        );
+    }
 
     #[test]
     fn title_author_band_uses_geometry_and_half_median_anchor_font_size() {

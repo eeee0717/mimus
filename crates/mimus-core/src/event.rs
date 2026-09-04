@@ -106,11 +106,27 @@ pub struct ConfigurationResolved {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_bold_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_latin_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_latin_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_latin_bold_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_latin_bold_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_latin_symbol_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_latin_symbol_sha256: Option<String>,
+    /// Deprecated alias of `font_latin_source`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub font_fallback_regular_source: Option<String>,
+    /// Deprecated alias of `font_latin_sha256`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_fallback_regular_sha256: Option<String>,
+    /// Deprecated alias of `font_latin_bold_source`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_fallback_bold_source: Option<String>,
+    /// Deprecated alias of `font_latin_bold_sha256`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_fallback_bold_sha256: Option<String>,
     pub layout_mode: String,
@@ -548,8 +564,10 @@ pub enum Diagnostic {
         missing_characters: String,
         font_source: String,
         font_sha256: String,
-        fallback_font_source: String,
-        fallback_font_sha256: String,
+        latin_font_source: String,
+        latin_font_sha256: String,
+        symbol_font_source: String,
+        symbol_font_sha256: String,
     },
     SingleLineBoundsExpanded {
         page_index: usize,
@@ -802,8 +820,12 @@ pub enum DiagnosticEvent {
         missing_characters: String,
         font_source: String,
         font_sha256: String,
+        latin_font_source: String,
+        latin_font_sha256: String,
         fallback_font_source: String,
         fallback_font_sha256: String,
+        symbol_font_source: String,
+        symbol_font_sha256: String,
     },
     SingleLineBoundsExpanded {
         page_index: usize,
@@ -1137,16 +1159,22 @@ impl From<&Diagnostic> for DiagnosticEvent {
                 missing_characters,
                 font_source,
                 font_sha256,
-                fallback_font_source,
-                fallback_font_sha256,
+                latin_font_source,
+                latin_font_sha256,
+                symbol_font_source,
+                symbol_font_sha256,
             } => Self::UnsupportedOutputGlyph {
                 page_index: *page_index,
                 reading_order: *reading_order,
                 missing_characters: missing_characters.clone(),
                 font_source: font_source.clone(),
                 font_sha256: font_sha256.clone(),
-                fallback_font_source: fallback_font_source.clone(),
-                fallback_font_sha256: fallback_font_sha256.clone(),
+                latin_font_source: latin_font_source.clone(),
+                latin_font_sha256: latin_font_sha256.clone(),
+                fallback_font_source: latin_font_source.clone(),
+                fallback_font_sha256: latin_font_sha256.clone(),
+                symbol_font_source: symbol_font_source.clone(),
+                symbol_font_sha256: symbol_font_sha256.clone(),
             },
             Diagnostic::SingleLineBoundsExpanded {
                 page_index,
@@ -1608,8 +1636,10 @@ mod tests {
                 missing_characters: "龘".to_owned(),
                 font_source: "flag:/tmp/font.ttf".to_owned(),
                 font_sha256: "abc123".to_owned(),
-                fallback_font_source: "flag:/tmp/fallback.ttf".to_owned(),
-                fallback_font_sha256: "def456".to_owned(),
+                latin_font_source: "flag:/tmp/latin.ttf".to_owned(),
+                latin_font_sha256: "def456".to_owned(),
+                symbol_font_source: "cache:/tmp/stix-math.ttf".to_owned(),
+                symbol_font_sha256: "ghi789".to_owned(),
             }),
         }))
         .unwrap();
@@ -1619,8 +1649,12 @@ mod tests {
         assert_eq!(value["missing_characters"], "龘");
         assert_eq!(value["font_source"], "flag:/tmp/font.ttf");
         assert_eq!(value["font_sha256"], "abc123");
-        assert_eq!(value["fallback_font_source"], "flag:/tmp/fallback.ttf");
+        assert_eq!(value["latin_font_source"], "flag:/tmp/latin.ttf");
+        assert_eq!(value["latin_font_sha256"], "def456");
+        assert_eq!(value["fallback_font_source"], "flag:/tmp/latin.ttf");
         assert_eq!(value["fallback_font_sha256"], "def456");
+        assert_eq!(value["symbol_font_source"], "cache:/tmp/stix-math.ttf");
+        assert_eq!(value["symbol_font_sha256"], "ghi789");
     }
 
     #[test]

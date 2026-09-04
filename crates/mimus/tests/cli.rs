@@ -309,20 +309,17 @@ fn test_font_path(weight: &str) -> PathBuf {
         .join(format!("MimusTestGB2312-{weight}.ttf"))
 }
 
-fn test_fallback_font_path(weight: &str) -> PathBuf {
+fn test_latin_font_path() -> PathBuf {
     repo_root()
         .join("crates/mimus/tests/assets/fonts")
-        .join(format!("MimusTestFallback-{weight}.ttf"))
+        .join("MimusTestLatin.ttf")
 }
 
 fn configure_test_fonts(command: &mut Command) {
     command.env("MIMUS_FONT_REGULAR", test_font_path("Regular"));
     command.env("MIMUS_FONT_BOLD", test_font_path("Bold"));
-    command.env(
-        "MIMUS_FONT_FALLBACK_REGULAR",
-        test_fallback_font_path("Regular"),
-    );
-    command.env("MIMUS_FONT_FALLBACK_BOLD", test_fallback_font_path("Bold"));
+    command.env("MIMUS_FONT_LATIN", test_latin_font_path());
+    command.env("MIMUS_FONT_LATIN_BOLD", test_latin_font_path());
 }
 
 #[derive(Debug, Deserialize)]
@@ -1039,6 +1036,42 @@ fn help_and_bare_invocation_succeed() {
 }
 
 #[test]
+fn translate_help_exposes_canonical_and_deprecated_latin_font_flags() {
+    let output = Command::new(BIN)
+        .args(["translate", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    for flag in [
+        "--font-latin",
+        "--font-latin-bold",
+        "--font-fallback",
+        "--font-fallback-bold",
+    ] {
+        assert!(help.contains(flag), "missing {flag} in {help}");
+    }
+    assert!(help.contains("Deprecated alias for --font-latin"));
+}
+
+#[test]
+fn canonical_and_deprecated_latin_flags_conflict() {
+    let output = Command::new(BIN)
+        .args([
+            "translate",
+            "--font-latin",
+            "canonical.ttf",
+            "--font-fallback",
+            "deprecated.ttf",
+            "input.pdf",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+}
+
+#[test]
 fn usage_errors_use_exit_code_one() {
     let output = Command::new(BIN).arg("not-a-command").output().unwrap();
     assert_eq!(output.status.code(), Some(1));
@@ -1199,7 +1232,7 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
     let config = directory.path().join("config.toml");
     std::fs::write(
         &config,
-        "backend = 'none'\nbase_url = 'https://file.invalid'\nmodel = 'file-model'\ntarget_language = 'file-language'\nfont_regular = 'file-regular.ttf'\nfont_bold = 'file-bold.ttf'\nfont_fallback_regular = 'file-fallback-regular.ttf'\nfont_fallback_bold = 'file-fallback-bold.ttf'\ncache = 'file-cache.redb'\nconcurrency = 2\nrequest_timeout_secs = 180\n",
+        "backend = 'none'\nbase_url = 'https://file.invalid'\nmodel = 'file-model'\ntarget_language = 'file-language'\nfont_regular = 'file-regular.ttf'\nfont_bold = 'file-bold.ttf'\nfont_latin = 'file-latin.ttf'\nfont_latin_bold = 'file-latin-bold.ttf'\ncache = 'file-cache.redb'\nconcurrency = 2\nrequest_timeout_secs = 180\n",
     )
     .unwrap();
     let output_path = directory.path().join("translated.pdf");
@@ -1215,8 +1248,8 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
         .env("MIMUS_BACKEND", "invalid-but-overridden")
         .env("MIMUS_FONT_REGULAR", "env-regular.ttf")
         .env("MIMUS_FONT_BOLD", "env-bold.ttf")
-        .env("MIMUS_FONT_FALLBACK_REGULAR", "env-fallback-regular.ttf")
-        .env("MIMUS_FONT_FALLBACK_BOLD", "env-fallback-bold.ttf")
+        .env("MIMUS_FONT_LATIN", "env-latin.ttf")
+        .env("MIMUS_FONT_LATIN_BOLD", "env-latin-bold.ttf")
         .args([
             "--json",
             "translate",
@@ -1241,10 +1274,10 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
         .arg(test_font_path("Regular"))
         .arg("--font-bold")
         .arg(test_font_path("Bold"))
-        .arg("--font-fallback")
-        .arg(test_fallback_font_path("Regular"))
-        .arg("--font-fallback-bold")
-        .arg(test_fallback_font_path("Bold"))
+        .arg("--font-latin")
+        .arg(test_latin_font_path())
+        .arg("--font-latin-bold")
+        .arg(test_latin_font_path())
         .arg("--output")
         .arg(&output_path)
         .arg(fixture())
@@ -1285,24 +1318,48 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
         "1a917349eb06866f5701532f0cea586d184edadbd1cfdd3f034f3a18f2ff5316"
     );
     assert!(
-        resolved["font_fallback_regular_source"]
+        resolved["font_latin_source"]
             .as_str()
             .unwrap()
             .starts_with("flag:")
+    );
+    assert_eq!(
+        resolved["font_latin_sha256"],
+        "621539180203f4667d247c49c8bf4102112b28e1627190ca625ebd1e61848a5f"
+    );
+    assert!(
+        resolved["font_latin_bold_source"]
+            .as_str()
+            .unwrap()
+            .starts_with("flag:")
+    );
+    assert_eq!(
+        resolved["font_latin_bold_sha256"],
+        "621539180203f4667d247c49c8bf4102112b28e1627190ca625ebd1e61848a5f"
+    );
+    assert_eq!(
+        resolved["font_latin_symbol_source"],
+        resolved["font_latin_source"]
+    );
+    assert_eq!(
+        resolved["font_latin_symbol_sha256"],
+        resolved["font_latin_sha256"]
+    );
+    assert_eq!(
+        resolved["font_fallback_regular_source"],
+        resolved["font_latin_source"]
     );
     assert_eq!(
         resolved["font_fallback_regular_sha256"],
-        "3634d4b65a151c61dcb82968f6a3bdc33435d062c4c69a5ea57e3db20122ac1e"
+        resolved["font_latin_sha256"]
     );
-    assert!(
-        resolved["font_fallback_bold_source"]
-            .as_str()
-            .unwrap()
-            .starts_with("flag:")
+    assert_eq!(
+        resolved["font_fallback_bold_source"],
+        resolved["font_latin_bold_source"]
     );
     assert_eq!(
         resolved["font_fallback_bold_sha256"],
-        "d0f2fdc62e7cdf6e35c8b0629b19084917991603c0d51fe94109128176352b83"
+        resolved["font_latin_bold_sha256"]
     );
     assert_eq!(resolved["cache_enabled"], true);
     assert_eq!(resolved["cache_path"], "flag-cache.redb");
@@ -1312,6 +1369,119 @@ fn translation_config_resolves_each_non_secret_field_flag_then_env_then_file() {
     assert!(resolved.get("layout_model_source").is_none());
     assert!(resolved.get("layout_model_sha256").is_none());
     assert!(events.iter().all(|event| event.get("api_key").is_none()));
+}
+
+#[test]
+fn deprecated_latin_font_flags_env_and_config_remain_aliases() {
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("deprecated-flags.pdf");
+    let flags = Command::new(BIN)
+        .env(PDFIUM_ENV, pdfium_library())
+        .env("MIMUS_FONT_REGULAR", test_font_path("Regular"))
+        .env("MIMUS_FONT_BOLD", test_font_path("Bold"))
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "none",
+            "--layout",
+            "single-line",
+            "--font-fallback",
+        ])
+        .arg(test_latin_font_path())
+        .arg("--font-fallback-bold")
+        .arg(test_latin_font_path())
+        .arg("--output")
+        .arg(&output_path)
+        .arg(fixture())
+        .output()
+        .unwrap();
+    assert!(
+        flags.status.success(),
+        "{}",
+        String::from_utf8_lossy(&flags.stderr)
+    );
+
+    let output_path = directory.path().join("deprecated-env.pdf");
+    let environment = Command::new(BIN)
+        .env(PDFIUM_ENV, pdfium_library())
+        .env("MIMUS_FONT_REGULAR", test_font_path("Regular"))
+        .env("MIMUS_FONT_BOLD", test_font_path("Bold"))
+        .env("MIMUS_FONT_FALLBACK_REGULAR", test_latin_font_path())
+        .env("MIMUS_FONT_FALLBACK_BOLD", test_latin_font_path())
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "none",
+            "--layout",
+            "single-line",
+            "--output",
+        ])
+        .arg(&output_path)
+        .arg(fixture())
+        .output()
+        .unwrap();
+    assert!(environment.status.success());
+
+    let config = directory.path().join("deprecated-config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "font_fallback_regular = {:?}\nfont_fallback_bold = {:?}\n",
+            test_latin_font_path(),
+            test_latin_font_path()
+        ),
+    )
+    .unwrap();
+    let output_path = directory.path().join("deprecated-config.pdf");
+    let file = Command::new(BIN)
+        .env(PDFIUM_ENV, pdfium_library())
+        .env("MIMUS_CONFIG_FILE", config)
+        .env("MIMUS_FONT_REGULAR", test_font_path("Regular"))
+        .env("MIMUS_FONT_BOLD", test_font_path("Bold"))
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "none",
+            "--layout",
+            "single-line",
+            "--output",
+        ])
+        .arg(&output_path)
+        .arg(fixture())
+        .output()
+        .unwrap();
+    assert!(file.status.success());
+}
+
+#[test]
+fn canonical_latin_environment_names_win_over_deprecated_aliases() {
+    let directory = tempfile::tempdir().unwrap();
+    let output_path = directory.path().join("canonical-env.pdf");
+    let output = Command::new(BIN)
+        .env(PDFIUM_ENV, pdfium_library())
+        .env("MIMUS_FONT_REGULAR", test_font_path("Regular"))
+        .env("MIMUS_FONT_BOLD", test_font_path("Bold"))
+        .env("MIMUS_FONT_LATIN", test_latin_font_path())
+        .env("MIMUS_FONT_LATIN_BOLD", test_latin_font_path())
+        .env("MIMUS_FONT_FALLBACK_REGULAR", "missing-regular.ttf")
+        .env("MIMUS_FONT_FALLBACK_BOLD", "missing-bold.ttf")
+        .args([
+            "--json",
+            "translate",
+            "--backend",
+            "none",
+            "--layout",
+            "single-line",
+            "--output",
+        ])
+        .arg(&output_path)
+        .arg(fixture())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
 }
 
 #[test]
@@ -1358,11 +1528,8 @@ fn empty_secret_alias_falls_through_to_the_next_nonempty_alias() {
         .env("MODEL_ID", "test-model")
         .env("MIMUS_FONT_REGULAR", test_font_path("Regular"))
         .env("MIMUS_FONT_BOLD", test_font_path("Bold"))
-        .env(
-            "MIMUS_FONT_FALLBACK_REGULAR",
-            test_fallback_font_path("Regular"),
-        )
-        .env("MIMUS_FONT_FALLBACK_BOLD", test_fallback_font_path("Bold"))
+        .env("MIMUS_FONT_LATIN", test_latin_font_path())
+        .env("MIMUS_FONT_LATIN_BOLD", test_latin_font_path())
         .args(["--json", "translate", "--layout", "single-line"])
         .arg(fixture())
         .output()
@@ -1386,6 +1553,8 @@ fn missing_output_fonts_fail_fast_as_asset_without_contacting_a_public_endpoint(
         .env("MIMUS_ASSET_MIRROR", "http://127.0.0.1:9")
         .env_remove("MIMUS_FONT_REGULAR")
         .env_remove("MIMUS_FONT_BOLD")
+        .env_remove("MIMUS_FONT_LATIN")
+        .env_remove("MIMUS_FONT_LATIN_BOLD")
         .env_remove("MIMUS_FONT_FALLBACK_REGULAR")
         .env_remove("MIMUS_FONT_FALLBACK_BOLD")
         .args(["--json", "translate", "--backend", "none"])
@@ -3023,7 +3192,7 @@ fn tall_summation_ink_has_one_model_formula_owner_and_one_placeholder() {
 }
 
 #[test]
-fn mixed_source_descents_emit_primary_and_fallback_runs_on_one_baseline() {
+fn mixed_source_descents_emit_cjk_and_latin_runs_on_one_baseline() {
     let id = "unit-type-11-mixed-descents";
     let directory = tempfile::tempdir().unwrap();
     let output_path = directory.path().join("translated.pdf");
@@ -3053,8 +3222,8 @@ fn mixed_source_descents_emit_primary_and_fallback_runs_on_one_baseline() {
     );
     assert!(
         content
-            .windows(b"/MimusFR".len())
-            .any(|part| part == b"/MimusFR"),
+            .windows(b"/MimusLR".len())
+            .any(|part| part == b"/MimusLR"),
         "{}",
         String::from_utf8_lossy(&content)
     );
@@ -3202,11 +3371,31 @@ fn adjacent_han_and_latin_runs_receive_zero_automatic_spacing() {
         "模B模"
     );
     let font_attributes = mupdf_element_attributes(&output_path, b"font");
-    assert_eq!(font_attributes.len(), 1, "{font_attributes:#?}");
+    assert_eq!(font_attributes.len(), 3, "{font_attributes:#?}");
+    assert!(
+        font_attributes[0]["name"].contains("MimusTestGB2312Regular"),
+        "{font_attributes:#?}"
+    );
+    assert!(
+        font_attributes[1]["name"].contains("STIXTwoMath"),
+        "{font_attributes:#?}"
+    );
+    assert!(
+        font_attributes[2]["name"].contains("MimusTestGB2312Regular"),
+        "{font_attributes:#?}"
+    );
     let font_size = number(&font_attributes[0], "size");
-    let font_bytes = std::fs::read(test_font_path("Regular")).unwrap();
-    let face = ttf_parser::Face::parse(&font_bytes, 0).unwrap();
-    let expected_advance = |character| {
+    assert!(
+        font_attributes
+            .iter()
+            .all(|font| (number(font, "size") - font_size).abs() < f64::EPSILON),
+        "{font_attributes:#?}"
+    );
+    let cjk_font_bytes = std::fs::read(test_font_path("Regular")).unwrap();
+    let cjk_face = ttf_parser::Face::parse(&cjk_font_bytes, 0).unwrap();
+    let latin_font_bytes = std::fs::read(test_latin_font_path()).unwrap();
+    let latin_face = ttf_parser::Face::parse(&latin_font_bytes, 0).unwrap();
+    let expected_advance = |face: &ttf_parser::Face<'_>, character| {
         let glyph = face.glyph_index(character).unwrap();
         let advance = u64::from(face.glyph_hor_advance(glyph).unwrap());
         let units = u64::from(face.units_per_em());
@@ -3216,8 +3405,8 @@ fn adjacent_han_and_latin_runs_receive_zero_automatic_spacing() {
         .iter()
         .map(|character| number(character, "x"))
         .collect::<Vec<_>>();
-    assert!((origins[1] - origins[0] - expected_advance('模')).abs() < 0.01);
-    assert!((origins[2] - origins[1] - expected_advance('B')).abs() < 0.01);
+    assert!((origins[1] - origins[0] - expected_advance(&cjk_face, '模')).abs() < 0.01);
+    assert!((origins[2] - origins[1] - expected_advance(&latin_face, 'B')).abs() < 0.01);
 }
 
 #[test]
@@ -6050,11 +6239,8 @@ fn missing_pdfium_uses_asset_exit_code_three() {
         .env(PDFIUM_ENV, directory.path().join("missing-libpdfium.dylib"))
         .env("MIMUS_FONT_REGULAR", test_font_path("Regular"))
         .env("MIMUS_FONT_BOLD", test_font_path("Bold"))
-        .env(
-            "MIMUS_FONT_FALLBACK_REGULAR",
-            test_fallback_font_path("Regular"),
-        )
-        .env("MIMUS_FONT_FALLBACK_BOLD", test_fallback_font_path("Bold"))
+        .env("MIMUS_FONT_LATIN", test_latin_font_path())
+        .env("MIMUS_FONT_LATIN_BOLD", test_latin_font_path())
         .args([
             "translate",
             "--backend",
@@ -6080,11 +6266,8 @@ fn a_closed_stdout_pipe_does_not_turn_success_into_a_panic() {
         .env(PDFIUM_ENV, pdfium_library())
         .env("MIMUS_FONT_REGULAR", test_font_path("Regular"))
         .env("MIMUS_FONT_BOLD", test_font_path("Bold"))
-        .env(
-            "MIMUS_FONT_FALLBACK_REGULAR",
-            test_fallback_font_path("Regular"),
-        )
-        .env("MIMUS_FONT_FALLBACK_BOLD", test_fallback_font_path("Bold"))
+        .env("MIMUS_FONT_LATIN", test_latin_font_path())
+        .env("MIMUS_FONT_LATIN_BOLD", test_latin_font_path())
         .args([
             "--json",
             "translate",

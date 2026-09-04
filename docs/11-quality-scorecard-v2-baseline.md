@@ -3,8 +3,8 @@
 Date: 2026-08-30, refreshed 2026-09-04. Schema: scorecard v2. Thresholds remain proposals pending
 user approval. The 20-paper cluster rows in Sections 1-3 preserve an `invalid-profile` historical
 run and are not comparable with a conserving baseline. Sections 4-8 retain separate real-anchor,
-process, acceptance, and pre-M3.7 history. Section 9 retains the M3.7 Noto Serif SC 2.001 baseline;
-Section 10 is the current M3.8 section-number-gap baseline.
+process, acceptance, and pre-M3.7 history. Sections 9 and 10 retain the M3.7 and M3.8 baselines;
+Section 11 is the current M3.9 two-family output-font baseline.
 
 ## 1. Historical evidence and conclusion (cluster `invalid-profile`)
 
@@ -562,3 +562,124 @@ The BERT, default anchor, and bilingual anchor PDFs were byte-identical to the a
 these three accepted hashes remain final. Their scorecards were also identical apart from resource
 usage and the ephemeral qpdf-produced translated-page document identifier used by the bilingual
 scorecard.
+
+## 11. M3.9 Noto Serif SC + STIX Two baseline (accepted 2026-09-04)
+
+M3.9 routes translated glyphs by script while retaining Noto Serif SC 2.001 as the default CJK
+family. Han, CJK punctuation and fullwidth forms, kana, hangul, CJK compatibility ranges, and
+`U+2010-2027` prefer the Noto CJK slots. ASCII, Latin, Greek, Cyrillic, Letterlike Symbols,
+Mathematical Operators, Arrows, and Superscripts/Subscripts prefer STIX Two Text; a Text miss tries
+STIX Two Math before Noto. All other scalars prefer Noto, then Text, then Math. Regular/Bold remains
+style-preserving, while line ascent/descent still comes only from Noto. STIX glyphs use the same
+baseline and point size without scaling.
+
+The production assets are:
+
+| Family / role | Pinned source | File | Bytes | SHA-256 | Cache directory |
+| --- | --- | --- | ---: | --- | --- |
+| Noto Serif SC 2.001, CJK Regular/Bold | noto-cjk `523d033d6cb47f4a80c58a35753646f5c3608a78` | `NotoSerifSC-VF.ttf` | 25,139,544 | `69467baf421bdbb32b292d6c092ed033ca32e5f7a0d06194e69901287b50b2f3` | `fonts/noto-serif-sc-2.001/` |
+| STIX Two Text 2.13 b171, Latin Regular/Bold | stipub/stixfonts tag `v2.13b171`, commit `744a22a4dd626cd14d75728aef34fc8ad7c85db0` | `STIXTwoText[wght].ttf` | 418,956 | `7962b8b7811e6a896c9a91a0bccbb5241047770eb24d4997c5cb5fe21d5c0df2` | `fonts/stix-two-text-2.13b171/` |
+| STIX Two Math 2.12 b168a, symbol | google/fonts `9017368e541f77a66e2302f474d2142d1bb77f5c` | `STIXTwoMath-Regular.ttf` | 1,517,976 | `562551b15b836e6e01d1b7350909baf3c8c8d83260c1190fbf4544333e6936de` | `fonts/stix-two-math-2.12b168a/` |
+
+The upstream STIX Text variable TTF contains exact named `Regular` and `Bold` instances. Its
+google/fonts copy at the pinned commit is byte-identical, but the production manifest uses the
+stipub/stixfonts source according to the recorded priority. The Math fallback remains the separately
+pinned 2.12 b168a build; the STIX `v2.13b171` tag carries a later Math build and is not byte-identical.
+DejaVu is absent from the production manifest, CI asset list, and translated output resources.
+
+The coverage audit consumed the final Write IL from the 20-paper cluster plus BERT and the 1706
+anchor: 22 artifacts, 316,596 published translated glyphs, and 960 unique scalars. Preference
+classification found 805 CJK, 148 Latin, and seven default scalars. STIX Two Text covers 122/148
+Latin-preferred scalars; STIX Two Math covers all remaining 26, so the complete routing stack has
+zero unresolved published scalars. In particular, Text covers `U+0141 Ł` and `U+03F5 ϵ`, and Math
+covers `U+2217 ∗`.
+
+### 11.1 Closed-cache replays and routing attribution
+
+The source BERT cache SHA-256 remained
+`06f860a4ad3ca9c14c590937493f431885fd40c3291e7a167b02f997e4a63e8e`. The final replay hit 197/197
+entries with zero misses, retries, transport failures, or provider calls. It publishes 16 pages,
+passes `qpdf --check`, and has SHA-256
+`0fc257f527772d8d5ab25703edc0a487c88482710809b80246d2354f4499ad67`, replacing the M3.8 hash
+`e625aa66412bcfd40ecb4d1600b5235173780fc2ebb58b2b167a642a3100fbf5`. Its score is 97.711486 with
+14 typed degraded rows, CON-01 380/380, FOR-01 3, FOR-02/FOR-03 1/1, FOR-04 0/24, FOR-05 0/0,
+INK-01 zero across 181 publications and 865 components, and STR-05 zero.
+
+BERT routes 11,272 Han and 1,453 CJK-punctuation occurrences exclusively to CJK slots. It routes
+3,569 Latin letters, 955 ASCII digits, and 1,693 ASCII punctuation/space occurrences exclusively to
+Latin slots. Its complete slot counts are CJK Regular/Bold 12,510/215, Latin Regular/Bold 6,108/112,
+and symbol 5, with zero missing slots or routing violations.
+
+The source anchor cache likewise remained
+`3c46b63544b0b0daebf0eebb9e5dc48e2c9207302f0c7cf58d49b02426977fef`. Default and bilingual modes
+each hit 108/108 entries with zero misses, retries, transport failures, or provider calls, and both
+pass `qpdf --check`. The default output has SHA-256
+`990bc9cb9b1ce40e60b07859c09d749ef3b4b0597e05d6b6756407752572462a`; the bilingual output has
+SHA-256 `ac5a884c2d95b257cd18d1a3e20145d46534eb3e6ce220974fa70f6687dc6369`. Their M3.8 hashes were
+`fe5632f8b04a408575745473b865f8f87154f96f7adb8be599d7beb1d46500a1` and
+`7da72f770f35085892cd06b2ee4ec07e611c9ee34736b80ecd360b7ba505de66`.
+
+The default anchor score is 97.984829 with two typed degraded rows, CON-01 161/161, FOR-01 6,
+FOR-02/FOR-03 0/0, FOR-04 0/71, FOR-05 0/4, INK-01 zero across 107 publications and 345 components,
+and STR-05 zero. The bilingual translated-page score is 96.240998 and has the same translated-page
+measurements. Anchor attribution routes all 6,871 Han, 617 CJK-punctuation, 735 Latin-letter, 371
+digit, and 621 ASCII punctuation/space occurrences to their required families. Its slot counts are
+CJK Regular/Bold 7,373/115, Latin Regular/Bold 1,668/66, and symbol 2, again with no missing slot or
+routing violation.
+
+### 11.2 Final 20-paper conserving-fake matrix
+
+| Paper | Producer | v2 | Typed | Con | Formula | Gap | Hole | Ink | Missing slot | T/A |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 01 Adam | pdfTeX | 90.886015 | 556 | 1.000000 | 80 | 0 | 0 | 0 | 0 | 0 |
+| 02 ResNet | pdfTeX | 98.134288 | 22 | 1.000000 | 8 | 0 | 0 | 0 | 0 | 0 |
+| 03 SqueezeNet | pdfTeX | 94.465575 | 40 | 1.000000 | 11 | 1 | 1 | 0 | 0 | 0 |
+| 04 MobileNets | pdfTeX | 98.484099 | 4 | 1.000000 | 5 | 1 | 1 | 0 | 0 | 0 |
+| 05 BERT | pdfTeX | 97.603764 | 7 | 1.000000 | 3 | 0 | 0 | 0 | 0 | 0 |
+| 06 DDPM | pdfTeX | 95.725823 | 86 | 1.000000 | 48 | 0 | 0 | 0 | 0 | 0 |
+| 07 ViT | pdfTeX | 98.873060 | 25 | 1.000000 | 2 | 0 | 0 | 0 | 0 | 0 |
+| 08 LoRA | pdfTeX | 96.322690 | 26 | 1.000000 | 39 | 0 | 0 | 0 | 0 | 0 |
+| 09 Repliable onion routing | XeTeX | 87.417939 | 1,114 | 1.000000 | 274 | 15 | 15 | 0 | 0 | 0 |
+| 10 Compact IBE | XeTeX | 91.980191 | 107 | 1.000000 | 89 | 0 | 0 | 0 | 0 | 0 |
+| 11 SDitH hardware | XeTeX | 95.555682 | 72 | 1.000000 | 63 | 0 | 0 | 0 | 0 | 0 |
+| 12 Hertz side channel | XeTeX | 90.821073 | 34 | 1.000000 | 84 | 1 | 1 | 0 | 0 | 0 |
+| 13 Information-theoretic MPC | LuaTeX | 95.629699 | 30 | 1.000000 | 38 | 4 | 4 | 0 | 0 | 0 |
+| 14 Masked comparisons | LuaTeX | 95.943565 | 42 | 1.000000 | 39 | 0 | 0 | 0 | 0 | 0 |
+| 15 LWE two-step | LuaTeX | 90.331388 | 130 | 1.000000 | 127 | 1 | 1 | 0 | 0 | 0 |
+| 16 Supersingular orientations | LuaTeX | 83.930155 | 173 | 1.000000 | 178 | 2 | 2 | 0 | 0 | 0 |
+| 17 Informational consciousness | Word | 95.457717 | 24 | 1.000000 | 0 | 0 | 0 | 0 | 0 | 0 |
+| 18 Consciousness model | Word | 91.203943 | 85 | 1.000000 | 16 | 17 | 17 | 0 | 0 | 0 |
+| 19 Multibeam IoT | Word | 90.854784 | 51 | 1.000000 | 2 | 0 | 0 | 0 | 0 | 0 |
+| 20 Tuberculosis biosensor | Word | 97.384452 | 1 | 1.000000 | 1 | 0 | 0 | 0 | 0 | 0 |
+
+All 20 papers publish, `Internal/6` is zero, and all 20 outputs plus both deterministic reruns pass
+`qpdf --check`. The primary run accepted 3,251 conserving responses; the ResNet and Repliable onion
+runs bring the total to 3,663. Every request names `m3-118-conserving-fake-v1`, term calls are zero,
+and no real provider was used. Aggregate CON-01 is 7,151/7,151. The typed total is 2,629, median 41,
+and worst 1,114. FOR-04 remains the same two accepted findings at 2/2,416; FOR-05 is 0/45; INK-01 is
+zero across 2,970 publications and 9,624 components; STR-05 is zero. FOR-02/FOR-03 remain 42/42.
+Adam's median font scale remains 0.0 and the other 19 remain 1.0.
+
+The complete cluster slot counts are CJK Regular 121,323, CJK Bold 2,119, Latin Regular 161,555,
+Latin Bold 3,147, and symbol 278. Missing slots and routing violations are zero. Seven typed missing-
+glyph diagnostics remain for source-private PUA scalars already present in the real papers, outside
+the published translated-glyph coverage population: SqueezeNet `13:8` (`U+F8FA`); Consciousness
+model `7:6` (`U+F0DE`), `9:25` (`U+F0CC`), `12:0` and `15:4` (`U+F061`), and `16:1`
+(`U+F0D8 U+F0DE`); Multibeam `1:4` (`U+F0E0`). No audited public Unicode scalar is unresolved.
+
+M3.8 had 160 `typeset_overflow` rows; M3.9 has 163. Added rows are DDPM `4:79`, Compact IBE `7:3`,
+Information-theoretic MPC `12:6`, LWE `6:7`, `12:17`, and `27:22`, Multibeam `3:10`, and
+Tuberculosis `3:5`. Removed rows are BERT `4:31`, Hertz `14:12`, Information-theoretic MPC `7:13`,
+Masked comparisons `15:37`, and Supersingular orientations `30:9`, which is now
+`typeset_protocol`. A control replay proves DDPM `4:79` publishes under M3.8 but reaches the
+unchanged final-ink collision rejection after M3.9 reflow. Recovering the eight added rows requires
+layout, collision, or formula-policy work outside this milestone; issue #185 records the exact
+exception instead of weakening the 8 pt, collision, CropBox, kinsoku, or formula-continuity gates.
+
+ResNet is byte-identical across reruns at
+`5c1c40ef89ebc6baccbc9fe8933acf82821b43ac86b44d91c3432c7f875b7124`; Repliable onion routing is
+byte-identical at `31bf2b337cef07bfcd13749e81305d46ea061b8e730931fda38c3d4f71f3050a`.
+The out-of-repository source/M3.8/M3.9 BERT page-one triptych is
+`.context/m3-9/visual/bert-page1-source-m3-8-m3-9-triptych.png`, SHA-256
+`289fcd05c145273b23bc28eeef046a19635f95b1e7ffe6cab14c2d2170280eab`; it includes the target
+`Peters et al., 2018a` citation and its digits.

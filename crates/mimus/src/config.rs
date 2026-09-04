@@ -36,8 +36,8 @@ pub(crate) struct ConfigOverrides {
     pub target_language: Option<String>,
     pub font_regular: Option<PathBuf>,
     pub font_bold: Option<PathBuf>,
-    pub font_fallback_regular: Option<PathBuf>,
-    pub font_fallback_bold: Option<PathBuf>,
+    pub font_latin: Option<PathBuf>,
+    pub font_latin_bold: Option<PathBuf>,
     pub layout_model: Option<PathBuf>,
     pub asset_mirror: Option<String>,
     pub glossary: Option<PathBuf>,
@@ -70,11 +70,13 @@ pub(crate) struct ResolvedConfig {
     pub target_language: String,
     pub font_regular: Option<FontPathSelection>,
     pub font_bold: Option<FontPathSelection>,
-    pub font_fallback_regular: Option<FontPathSelection>,
-    pub font_fallback_bold: Option<FontPathSelection>,
+    pub font_latin: Option<FontPathSelection>,
+    pub font_latin_bold: Option<FontPathSelection>,
     pub layout_model: Option<LayoutModelPathSelection>,
     pub asset_mirror: Option<String>,
-    pub font_cache_dir: PathBuf,
+    pub font_cjk_cache_dir: PathBuf,
+    pub font_latin_cache_dir: PathBuf,
+    pub font_latin_symbol_cache_dir: PathBuf,
     pub layout_model_cache_dir: PathBuf,
     pub user_glossary: Glossary,
     pub dump_glossary: Option<PathBuf>,
@@ -163,15 +165,15 @@ impl ResolvedConfig {
         );
         let font_bold =
             choose_font_path(overrides.font_bold, environment.font_bold, file.font_bold);
-        let font_fallback_regular = choose_font_path(
-            overrides.font_fallback_regular,
-            environment.font_fallback_regular,
-            file.font_fallback_regular,
+        let font_latin = choose_font_path(
+            overrides.font_latin,
+            environment.font_latin,
+            file.font_latin,
         );
-        let font_fallback_bold = choose_font_path(
-            overrides.font_fallback_bold,
-            environment.font_fallback_bold,
-            file.font_fallback_bold,
+        let font_latin_bold = choose_font_path(
+            overrides.font_latin_bold,
+            environment.font_latin_bold,
+            file.font_latin_bold,
         );
         let layout_model = choose_layout_model_path(
             overrides.layout_model,
@@ -195,7 +197,9 @@ impl ResolvedConfig {
                 )
                 .with_hint("set MIMUS_CACHE_DIR or provide explicit font and layout-model paths")
             })?;
-        let font_cache_dir = asset_cache_root.join("fonts/noto-serif-sc-2.001");
+        let font_cjk_cache_dir = asset_cache_root.join("fonts/noto-serif-sc-2.001");
+        let font_latin_cache_dir = asset_cache_root.join("fonts/stix-two-text-2.13b171");
+        let font_latin_symbol_cache_dir = asset_cache_root.join("fonts/stix-two-math-2.12b168a");
         let layout_model_cache_dir = asset_cache_root.join(format!(
             "models/pp-doclayoutv3-{}",
             crate::layout_assets::MODEL_COMMIT
@@ -238,11 +242,13 @@ impl ResolvedConfig {
             target_language,
             font_regular,
             font_bold,
-            font_fallback_regular,
-            font_fallback_bold,
+            font_latin,
+            font_latin_bold,
             layout_model,
             asset_mirror,
-            font_cache_dir,
+            font_cjk_cache_dir,
+            font_latin_cache_dir,
+            font_latin_symbol_cache_dir,
             layout_model_cache_dir,
             user_glossary,
             dump_glossary: overrides.dump_glossary,
@@ -321,8 +327,10 @@ struct FileConfig {
     api_key: Option<String>,
     font_regular: Option<PathBuf>,
     font_bold: Option<PathBuf>,
-    font_fallback_regular: Option<PathBuf>,
-    font_fallback_bold: Option<PathBuf>,
+    #[serde(alias = "font_fallback", alias = "font_fallback_regular")]
+    font_latin: Option<PathBuf>,
+    #[serde(alias = "font_fallback_bold")]
+    font_latin_bold: Option<PathBuf>,
     layout_model: Option<PathBuf>,
     asset_mirror: Option<String>,
     cache_dir: Option<PathBuf>,
@@ -339,8 +347,8 @@ struct EnvironmentConfig {
     api_key: Option<String>,
     font_regular: Option<PathBuf>,
     font_bold: Option<PathBuf>,
-    font_fallback_regular: Option<PathBuf>,
-    font_fallback_bold: Option<PathBuf>,
+    font_latin: Option<PathBuf>,
+    font_latin_bold: Option<PathBuf>,
     layout_model: Option<PathBuf>,
     asset_mirror: Option<String>,
     cache_dir: Option<PathBuf>,
@@ -366,8 +374,10 @@ impl EnvironmentConfig {
             api_key: first_nonempty_env(&["MIMUS_OPENAI_API_KEY", "OPENAI_API_KEY", "API_KEY"]),
             font_regular: first_env(&["MIMUS_FONT_REGULAR"]).map(PathBuf::from),
             font_bold: first_env(&["MIMUS_FONT_BOLD"]).map(PathBuf::from),
-            font_fallback_regular: first_env(&["MIMUS_FONT_FALLBACK_REGULAR"]).map(PathBuf::from),
-            font_fallback_bold: first_env(&["MIMUS_FONT_FALLBACK_BOLD"]).map(PathBuf::from),
+            font_latin: first_env(&["MIMUS_FONT_LATIN", "MIMUS_FONT_FALLBACK_REGULAR"])
+                .map(PathBuf::from),
+            font_latin_bold: first_env(&["MIMUS_FONT_LATIN_BOLD", "MIMUS_FONT_FALLBACK_BOLD"])
+                .map(PathBuf::from),
             layout_model: first_env(&["MIMUS_LAYOUT_MODEL"]).map(PathBuf::from),
             asset_mirror: first_env(&["MIMUS_ASSET_MIRROR"]),
             cache_dir: first_env(&["MIMUS_CACHE_DIR"]).map(PathBuf::from),

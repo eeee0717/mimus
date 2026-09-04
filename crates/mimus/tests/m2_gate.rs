@@ -418,10 +418,10 @@ fn test_font_path(weight: &str) -> PathBuf {
         .join(format!("MimusTestGB2312-{weight}.ttf"))
 }
 
-fn test_fallback_font_path(weight: &str) -> PathBuf {
+fn test_latin_font_path() -> PathBuf {
     repo_root()
         .join("crates/mimus/tests/assets/fonts")
-        .join(format!("MimusTestFallback-{weight}.ttf"))
+        .join("MimusTestLatin.ttf")
 }
 
 fn fixture_manifest(id: &str) -> FixtureManifest {
@@ -486,11 +486,8 @@ fn run_openai_path_with_extra_args(
         .env(PDFIUM_ENV, pdfium_library())
         .env("MIMUS_FONT_REGULAR", test_font_path("Regular"))
         .env("MIMUS_FONT_BOLD", test_font_path("Bold"))
-        .env(
-            "MIMUS_FONT_FALLBACK_REGULAR",
-            test_fallback_font_path("Regular"),
-        )
-        .env("MIMUS_FONT_FALLBACK_BOLD", test_fallback_font_path("Bold"))
+        .env("MIMUS_FONT_LATIN", test_latin_font_path())
+        .env("MIMUS_FONT_LATIN_BOLD", test_latin_font_path())
         .env("MIMUS_OPENAI_API_KEY", SECRET_CANARY)
         .env("MIMUS_CONFIG_FILE", config_file)
         .env("HTTP_PROXY", "http://127.0.0.1:9")
@@ -1173,7 +1170,7 @@ fn output_font_coverage_miss_degrades_only_the_affected_paragraph() {
 }
 
 #[test]
-fn fallback_font_renders_missing_primary_glyphs_for_both_extractors() {
+fn latin_font_renders_latin_and_symbol_glyphs_for_both_extractors() {
     let directory = tempfile::tempdir().unwrap();
     let output_path = directory.path().join("fallback.pdf");
     let server = GateResponsesServer::start([ScriptedReply::Output("中∗Łϵ")]);
@@ -1213,7 +1210,7 @@ fn fallback_font_renders_missing_primary_glyphs_for_both_extractors() {
 }
 
 #[test]
-fn glyph_missing_from_primary_and_fallback_keeps_paragraph_with_both_font_identities() {
+fn glyph_missing_from_both_families_keeps_paragraph_with_font_identities() {
     let directory = tempfile::tempdir().unwrap();
     let output_path = directory.path().join("missing-both.pdf");
     let server = GateResponsesServer::start([ScriptedReply::Output("中龘")]);
@@ -1249,7 +1246,7 @@ fn glyph_missing_from_primary_and_fallback_keeps_paragraph_with_both_font_identi
         diagnostic["fallback_font_source"]
             .as_str()
             .unwrap()
-            .contains("Fallback")
+            .contains("MimusTestLatin")
     );
     assert_eq!(
         events
@@ -1766,8 +1763,8 @@ fn multiline_block_that_reaches_retained_ink_stays_typed_overflow() {
 
 #[test]
 fn mixed_formula_slots_write_the_wide_line_and_preserve_the_narrow_line() {
-    const TRANSLATION: &str = "M{v1}M{v2}\u{7ed3}\u{6784}\u{7a33}\u{5b9a}";
-    const RESTORED: &str = "MM\u{7ed3}\u{6784}\u{7a33}\u{5b9a}";
+    const TRANSLATION: &str = "I{v1}I{v2}\u{7ed3}\u{6784}\u{7a33}\u{5b9a}";
+    const RESTORED: &str = "II\u{7ed3}\u{6784}\u{7a33}\u{5b9a}";
 
     let directory = tempfile::tempdir().unwrap();
     let debug = directory.path().join("debug");
@@ -2169,7 +2166,7 @@ fn page_top_section_title_translates_without_sending_its_leading_number() {
             fixture: "unit-translation-05-section-title-multilevel",
             prefix: "3.2.1",
             source_prefix_left: 82.472,
-            clamped: true,
+            clamped: false,
         },
         Case {
             fixture: "unit-translation-06-section-title-roman-iv",

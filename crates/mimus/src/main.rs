@@ -73,10 +73,16 @@ struct TranslateArgs {
     /// Bold output font file.
     #[arg(long, value_name = "TTF_OR_OTF")]
     font_bold: Option<PathBuf>,
-    /// Regular fallback output font file.
+    /// Regular Latin output font file.
+    #[arg(long, value_name = "TTF_OR_OTF", conflicts_with = "font_fallback")]
+    font_latin: Option<PathBuf>,
+    /// Bold Latin output font file.
+    #[arg(long, value_name = "TTF_OR_OTF", conflicts_with = "font_fallback_bold")]
+    font_latin_bold: Option<PathBuf>,
+    /// Deprecated alias for --font-latin.
     #[arg(long, value_name = "TTF_OR_OTF")]
     font_fallback: Option<PathBuf>,
-    /// Bold fallback output font file.
+    /// Deprecated alias for --font-latin-bold.
     #[arg(long, value_name = "TTF_OR_OTF")]
     font_fallback_bold: Option<PathBuf>,
     /// PP-DocLayoutV3 ONNX model file.
@@ -235,8 +241,8 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
         target_language: args.target_language,
         font_regular: args.font,
         font_bold: args.font_bold,
-        font_fallback_regular: args.font_fallback,
-        font_fallback_bold: args.font_fallback_bold,
+        font_latin: args.font_latin.or(args.font_fallback),
+        font_latin_bold: args.font_latin_bold.or(args.font_fallback_bold),
         layout_model: args.layout_model,
         asset_mirror: args.asset_mirror,
         glossary: args.glossary,
@@ -260,11 +266,17 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
     let endpoint = resolved.base_url.clone();
     let model = resolved.model.clone();
     let output_fonts = match font_assets::resolve_fonts(
-        resolved.font_regular.as_ref(),
-        resolved.font_bold.as_ref(),
-        resolved.font_fallback_regular.as_ref(),
-        resolved.font_fallback_bold.as_ref(),
-        &resolved.font_cache_dir,
+        font_assets::FontSelections {
+            regular: resolved.font_regular.as_ref(),
+            bold: resolved.font_bold.as_ref(),
+            latin_regular: resolved.font_latin.as_ref(),
+            latin_bold: resolved.font_latin_bold.as_ref(),
+        },
+        font_assets::FontCacheDirs {
+            cjk: &resolved.font_cjk_cache_dir,
+            latin: &resolved.font_latin_cache_dir,
+            latin_symbol: &resolved.font_latin_symbol_cache_dir,
+        },
         resolved.asset_mirror.as_deref(),
     ) {
         Ok(value) => value,
@@ -274,10 +286,12 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
     let font_regular_sha256 = output_fonts.regular.sha256.clone();
     let font_bold_source = output_fonts.bold.source.clone();
     let font_bold_sha256 = output_fonts.bold.sha256.clone();
-    let font_fallback_regular_source = output_fonts.fallback_regular.source.clone();
-    let font_fallback_regular_sha256 = output_fonts.fallback_regular.sha256.clone();
-    let font_fallback_bold_source = output_fonts.fallback_bold.source.clone();
-    let font_fallback_bold_sha256 = output_fonts.fallback_bold.sha256.clone();
+    let font_latin_source = output_fonts.latin_regular.source.clone();
+    let font_latin_sha256 = output_fonts.latin_regular.sha256.clone();
+    let font_latin_bold_source = output_fonts.latin_bold.source.clone();
+    let font_latin_bold_sha256 = output_fonts.latin_bold.sha256.clone();
+    let font_latin_symbol_source = output_fonts.latin_symbol.source.clone();
+    let font_latin_symbol_sha256 = output_fonts.latin_symbol.sha256.clone();
     let layout_detector = match create_layout_detector(
         args.layout,
         args.layout_replay.as_deref(),
@@ -314,10 +328,16 @@ fn run_translate(args: TranslateArgs, session: &ProtocolSession) -> ExitCode {
             font_regular_sha256: Some(font_regular_sha256),
             font_bold_source: Some(font_bold_source),
             font_bold_sha256: Some(font_bold_sha256),
-            font_fallback_regular_source: Some(font_fallback_regular_source),
-            font_fallback_regular_sha256: Some(font_fallback_regular_sha256),
-            font_fallback_bold_source: Some(font_fallback_bold_source),
-            font_fallback_bold_sha256: Some(font_fallback_bold_sha256),
+            font_latin_source: Some(font_latin_source.clone()),
+            font_latin_sha256: Some(font_latin_sha256.clone()),
+            font_latin_bold_source: Some(font_latin_bold_source.clone()),
+            font_latin_bold_sha256: Some(font_latin_bold_sha256.clone()),
+            font_latin_symbol_source: Some(font_latin_symbol_source),
+            font_latin_symbol_sha256: Some(font_latin_symbol_sha256),
+            font_fallback_regular_source: Some(font_latin_source),
+            font_fallback_regular_sha256: Some(font_latin_sha256),
+            font_fallback_bold_source: Some(font_latin_bold_source),
+            font_fallback_bold_sha256: Some(font_latin_bold_sha256),
             layout_mode: layout_detector.mode.to_owned(),
             layout_model_source: layout_detector.model_source.clone(),
             layout_model_sha256: layout_detector.model_sha256.clone(),
