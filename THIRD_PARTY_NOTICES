@@ -1,0 +1,101 @@
+# Third-party notices
+
+This distribution contains or interoperates with the components below. Exact Rust package
+versions, declared SPDX expressions, and source repositories are recorded in the generated
+`RUST_DEPENDENCIES.txt` shipped in every release archive.
+
+## PDFium and pdfium-binaries
+
+The archive includes a PDFium dynamic library from bblanchon/pdfium-binaries, pinned to
+`chromium/8009`. PDFium is distributed under a BSD-style license and incorporates other
+third-party components. The complete license set shipped by that exact upstream archive is copied
+unchanged into `licenses/pdfium/` in each mimus archive.
+
+Sources:
+
+- https://github.com/bblanchon/pdfium-binaries/tree/chromium/8009
+- https://pdfium.googlesource.com/pdfium/
+
+## ONNX Runtime
+
+The `ort` and `ort-sys` Rust crates link the ONNX Runtime CPU library into `mimus`. Release targets
+use ONNX Runtime 1.28.0 statically except macOS x64, whose archive includes Microsoft's final Intel
+macOS binary, ONNX Runtime 1.23.2, as an adjacent dynamic library. The Rust wrapper is compiled
+against C API 23 on every platform, which both runtime versions provide. ONNX Runtime is licensed
+under the MIT License.
+
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction,
+including without limitation the rights to use, copy, modify, merge, publish, distribute,
+sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT
+OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Source: https://github.com/microsoft/onnxruntime
+
+## Microsoft Visual C++ Runtime
+
+The Windows x64 archive includes the following Microsoft Visual C++ Runtime files from Visual
+Studio Redist version 14.44.35112: `msvcp140.dll`, `msvcp140_1.dll`, `vcruntime140.dll`, and
+`vcruntime140_1.dll`. They are distributed with the application under the Visual Studio license's
+Distributable Code terms.
+
+Microsoft's deployment guidance, including local deployment, is available at:
+https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files?view=msvc-170
+
+## PP-DocLayoutV3
+
+The model is not included in the archive. Mimus downloads the SHA-256-pinned
+PaddlePaddle/PP-DocLayoutV3 ONNX model on demand. The model repository declares Apache-2.0.
+
+Copyright (c) PaddlePaddle Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in
+compliance with the License. You may obtain a copy of the License at
+https://www.apache.org/licenses/LICENSE-2.0. Unless required by applicable law or agreed to in
+writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific
+language governing permissions and limitations under the License.
+
+Source: https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_onnx
+
+## Noto Serif SC
+
+The font is not included in the archive. Mimus downloads the SHA-256-pinned Noto Serif SC 2.001
+variable font on demand. It is licensed under the SIL Open Font License, Version 1.1. The complete
+OFL 1.1 text is included as `licenses/OFL-1.1.txt`.
+
+Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.
+
+Source: https://github.com/notofonts/noto-cjk
+
+## STIX Two Text and STIX Two Math
+
+The fonts are not included in the archive. Mimus downloads SHA-256-pinned STIX Two Text 2.13 b171
+and STIX Two Math 2.12 b168a files on demand. They are licensed under the SIL Open Font License,
+Version 1.1. The complete OFL 1.1 text is included as `licenses/OFL-1.1.txt`.
+
+Copyright 2001-2021 The STIX Fonts Project Authors (https://github.com/stipub/stixfonts).
+
+Sources:
+
+- https://github.com/stipub/stixfonts
+- https://github.com/google/fonts/tree/main/ofl/stixtwomath
+
+## Rust dependencies
+
+The executable statically incorporates Rust libraries under their package-declared licenses. The
+archive's generated `RUST_DEPENDENCIES.txt` is the exact normal-dependency inventory for the locked
+build, including `ort`, `pdfium-render`, `lopdf`, `reqwest`, `redb`, `skrifa`, `subsetter`, and
+`ttf-parser`. Corresponding license texts are distributed in each crate's source package from
+crates.io; source URLs and SPDX expressions are preserved in the inventory.
