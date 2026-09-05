@@ -46,6 +46,11 @@ download_or_copy() {
 
 cd "$repo_root"
 
+package_id="$(cargo pkgid --locked -p mimus)"
+version="${package_id##*#}"
+version="${version##*@}"
+"$repo_root/scripts/release/check-tag-version.sh" "$version"
+
 pdfium_archive="$work_dir/$PDFIUM_ARCHIVE"
 download_or_copy "${PDFIUM_ARCHIVE_PATH:-}" \
   "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8009/$PDFIUM_ARCHIVE" \
@@ -104,9 +109,6 @@ actual_model_sha256="$(sha256_file "$layout_model")"
 }
 
 cargo build --release --locked --target "$RUST_TARGET"
-package_id="$(cargo pkgid --locked -p mimus)"
-version="${package_id##*#}"
-version="${version##*@}"
 archive_root="mimus-v${version}-${RELEASE_PLATFORM}"
 stage_parent="$work_dir/stage"
 stage="$stage_parent/$archive_root"
