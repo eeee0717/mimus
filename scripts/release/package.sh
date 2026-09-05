@@ -108,9 +108,6 @@ actual_model_sha256="$(sha256_file "$layout_model")"
   exit 1
 }
 
-if [[ "$RELEASE_PLATFORM" == windows-* ]]; then
-  export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static"
-fi
 cargo build --release --locked --target "$RUST_TARGET"
 archive_root="mimus-v${version}-${RELEASE_PLATFORM}"
 stage_parent="$work_dir/stage"
