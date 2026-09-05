@@ -33,8 +33,19 @@ if (-not $ReleaseRoot) {
     throw "Archive has no mimus release directory"
 }
 $Mimus = Join-Path $ReleaseRoot.FullName "mimus.exe"
-if (-not (Test-Path -LiteralPath $Mimus -PathType Leaf)) {
-    throw "Archive has no mimus.exe"
+$RequiredFiles = @(
+    "mimus.exe",
+    "pdfium.dll",
+    "msvcp140.dll",
+    "msvcp140_1.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll"
+)
+foreach ($RequiredFile in $RequiredFiles) {
+    $RequiredPath = Join-Path $ReleaseRoot.FullName $RequiredFile
+    if (-not (Test-Path -LiteralPath $RequiredPath -PathType Leaf)) {
+        throw "Archive is missing adjacent runtime file: $RequiredFile"
+    }
 }
 $env:MIMUS_CACHE_DIR = Join-Path $EvidenceDirectory "cache"
 

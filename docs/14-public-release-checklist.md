@@ -47,8 +47,10 @@ Use machines without an existing mimus cache. Keep the generated evidence direct
   directory, and `eeee0717/mimus` as the skill source.
 - Confirm `summary.json` reports four assets, five `result` terminal events, qpdf success, and skill
   installation success. Open `roundtrip.pdf` and inspect every page.
-- Confirm `mimus.exe` runs with only the adjacent `pdfium.dll`; no Python or Node.js process is
-  involved after the Agent Skill installation check.
+- Confirm `mimus.exe`, `pdfium.dll`, `msvcp140.dll`, `msvcp140_1.dll`, `vcruntime140.dll`, and
+  `vcruntime140_1.dll` remain in the same directory and the CLI runs without a separately installed
+  VC++ Redistributable. No Python or Node.js process is involved after the Agent Skill installation
+  check.
 
 Any platform failure blocks announcing the Release. Preserve the archive, input SHA, NDJSON,
 `DEPENDENCIES.txt`, qpdf output, and evidence directory when filing the defect.

@@ -3,6 +3,8 @@
 Mimus is distributed as one platform archive containing the CLI, the matching PDFium dynamic
 library, and license material. The macOS x64 archive also contains ONNX Runtime 1.23.2 as a dynamic
 library. Models, fonts, and the Agent Skill remain separate runtime assets.
+The Windows x64 archive additionally contains the four Microsoft Visual C++ Runtime DLLs directly
+imported by `mimus.exe`.
 
 ## Install an archive
 
@@ -21,6 +23,12 @@ with the matching `SHA256SUMS` row and use `Expand-Archive`. Keep `mimus`/`mimus
 libraries together. In particular, macOS x64 requires both `libpdfium.dylib` and
 `libonnxruntime.1.23.2.dylib` beside `mimus`. Python and Node.js are not runtime dependencies of the
 CLI.
+
+On Windows, keep `mimus.exe`, `pdfium.dll`, `msvcp140.dll`, `msvcp140_1.dll`,
+`vcruntime140.dll`, and `vcruntime140_1.dll` in the same directory. The four VC runtime DLLs are
+version- and SHA-256-pinned app-local dependencies from the matching Visual Studio Redist. The
+ONNX Runtime backend directly imports DirectML, D3D12, and DXGI, so the minimum supported system is
+Windows 10 version 1903 or later, or Windows 11.
 
 For a recorded clean-machine smoke, use
 [`verify-install.sh`](../scripts/release/verify-install.sh) on macOS/Linux or
@@ -100,7 +108,8 @@ fallback. To select a local black face, point `--font` and `--font-bold` at a co
 PDFium resolves from beside the executable, or from `MIMUS_PDFIUM_LIBRARY` for a custom install.
 On macOS x64, ONNX Runtime resolves only from the versioned library beside the executable; moving
 `mimus` alone makes the installation incomplete. The other release targets link ONNX Runtime
-statically.
+statically. On Windows, moving `mimus.exe` without `pdfium.dll` and the four VC runtime DLLs also
+makes the installation incomplete.
 
 ## Terminology and output modes
 
