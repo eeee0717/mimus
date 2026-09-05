@@ -77,6 +77,11 @@ jobs:
             pdfium_library_path: bin/pdfium.dll
             pdfium_library_name: pdfium.dll
             pdfium_library_sha256: 3aabcd60cec7c2bae8e40d63110b6b53dfe657015f268496fdf9ef9460cbe4d5
+            vc_redist_version: DISCOVER
+            vc_msvcp140_sha256: DISCOVER
+            vc_msvcp140_1_sha256: DISCOVER
+            vc_vcruntime140_sha256: DISCOVER
+            vc_vcruntime140_1_sha256: DISCOVER
             archive_format: zip
 
     steps:
@@ -104,6 +109,11 @@ jobs:
           ORT_LIBRARY_PATH: ${{ matrix.ort_library_path }}
           ORT_LIBRARY_NAME: ${{ matrix.ort_library_name }}
           ORT_LIBRARY_SHA256: ${{ matrix.ort_library_sha256 }}
+          VC_REDIST_VERSION: ${{ matrix.vc_redist_version }}
+          VC_MSVCP140_SHA256: ${{ matrix.vc_msvcp140_sha256 }}
+          VC_MSVCP140_1_SHA256: ${{ matrix.vc_msvcp140_1_sha256 }}
+          VC_VCRUNTIME140_SHA256: ${{ matrix.vc_vcruntime140_sha256 }}
+          VC_VCRUNTIME140_1_SHA256: ${{ matrix.vc_vcruntime140_1_sha256 }}
           ARCHIVE_FORMAT: ${{ matrix.archive_format }}
         run: scripts/release/package.sh
 

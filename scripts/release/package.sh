@@ -44,6 +44,124 @@ download_or_copy() {
   fi
 }
 
+windows_path_to_unix() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -u "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+find_vswhere() {
+  local program_files_x86 candidate
+  if command -v vswhere.exe >/dev/null 2>&1; then
+    command -v vswhere.exe
+    return
+  fi
+  if command -v vswhere >/dev/null 2>&1; then
+    command -v vswhere
+    return
+  fi
+  program_files_x86="$(printenv 'ProgramFiles(x86)' 2>/dev/null || true)"
+  [[ -n "$program_files_x86" ]] || return 1
+  candidate="$(windows_path_to_unix "$program_files_x86")/Microsoft Visual Studio/Installer/vswhere.exe"
+  [[ -x "$candidate" ]] || return 1
+  printf '%s\n' "$candidate"
+}
+
+expected_vc_runtime_sha256() {
+  case "${1^^}" in
+    MSVCP140.DLL) printf '%s\n' "${VC_MSVCP140_SHA256:-}" ;;
+    MSVCP140_1.DLL) printf '%s\n' "${VC_MSVCP140_1_SHA256:-}" ;;
+    VCRUNTIME140.DLL) printf '%s\n' "${VC_VCRUNTIME140_SHA256:-}" ;;
+    VCRUNTIME140_1.DLL) printf '%s\n' "${VC_VCRUNTIME140_1_SHA256:-}" ;;
+    *) return 1 ;;
+  esac
+}
+
+bundle_windows_vc_runtime() {
+  local binary_path="$1"
+  local stage_dir="$2"
+  local vswhere vs_install toolset_version toolset_series redist_base redist_dir
+  local actual_vc_redist_version vc_crt_dir variable
+  local dependency source actual_sha expected_sha invalid=0
+  local -a redist_candidates
+
+  for variable in VC_REDIST_VERSION VC_MSVCP140_SHA256 VC_MSVCP140_1_SHA256 \
+    VC_VCRUNTIME140_SHA256 VC_VCRUNTIME140_1_SHA256; do
+    [[ -n "${!variable:-}" ]] || {
+      echo "missing required VC runtime environment variable: $variable" >&2
+      return 2
+    }
+  done
+
+  vswhere="$(find_vswhere)" || {
+    echo "could not locate vswhere.exe" >&2
+    return 1
+  }
+  vs_install="$("$vswhere" -latest -products '*' \
+    -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 \
+    -property installationPath | tr -d '\r')"
+  [[ -n "$vs_install" ]] || {
+    echo "vswhere.exe did not find a Visual Studio installation with the x64 VC tools" >&2
+    return 1
+  }
+  vs_install="$(windows_path_to_unix "$vs_install")"
+  toolset_version="$(tr -d '\r\n' < "$vs_install/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt")"
+  toolset_series="${toolset_version%.*}"
+  redist_base="$vs_install/VC/Redist/MSVC"
+  shopt -s nullglob
+  redist_candidates=("$redist_base/$toolset_series".*)
+  shopt -u nullglob
+  ((${#redist_candidates[@]} > 0)) || {
+    echo "no VC Redist directory matches compiler toolset series $toolset_series under $redist_base" >&2
+    return 1
+  }
+  redist_dir="$(printf '%s\n' "${redist_candidates[@]}" | sort -V | tail -n 1)"
+  actual_vc_redist_version="$(basename "$redist_dir")"
+  vc_crt_dir="$redist_dir/x64/Microsoft.VC143.CRT"
+  [[ -d "$vc_crt_dir" ]] || {
+    echo "missing VC143 CRT directory: $vc_crt_dir" >&2
+    return 1
+  }
+
+  printf '%s\n' '--- mimus.exe: objdump -p imports ---'
+  objdump -p "$binary_path" | awk '/DLL Name:/ {print}'
+  printf 'VC compiler toolset version: %s\n' "$toolset_version"
+  printf 'VC Redist directory version: %s\n' "$actual_vc_redist_version"
+  if [[ "$actual_vc_redist_version" != "$VC_REDIST_VERSION" ]]; then
+    echo "VC Redist version mismatch: expected $VC_REDIST_VERSION, got $actual_vc_redist_version" >&2
+    invalid=1
+  fi
+
+  while IFS= read -r dependency; do
+    case "${dependency^^}" in
+      MSVCP140*.DLL|VCRUNTIME140*.DLL|CONCRT140.DLL) ;;
+      *) continue ;;
+    esac
+    expected_sha="$(expected_vc_runtime_sha256 "$dependency")" || {
+      echo "imported VC runtime DLL has no configured SHA-256 pin: $dependency" >&2
+      invalid=1
+      continue
+    }
+    source="$(find "$vc_crt_dir" -maxdepth 1 -type f -iname "$dependency" -print -quit)"
+    [[ -n "$source" ]] || {
+      echo "imported VC runtime DLL is absent from $vc_crt_dir: $dependency" >&2
+      invalid=1
+      continue
+    }
+    actual_sha="$(sha256_file "$source")"
+    printf 'VC runtime DLL: %s SHA-256 %s\n' "$(basename "$source")" "$actual_sha"
+    cp "$source" "$stage_dir/$(basename "$source")"
+    if [[ "$actual_sha" != "$expected_sha" ]]; then
+      echo "VC runtime SHA-256 mismatch for $dependency: expected $expected_sha, got $actual_sha" >&2
+      invalid=1
+    fi
+  done < <(objdump -p "$binary_path" | awk '/DLL Name:/ {print $3}')
+
+  return "$invalid"
+}
+
 cd "$repo_root"
 
 package_id="$(cargo pkgid --locked -p mimus)"
@@ -127,6 +245,9 @@ cp "$repo_root/release/README.md" "$stage/README.md"
 cp "$repo_root/crates/mimus/tests/assets/fonts/LICENSE-OFL-1.1.txt" "$stage/licenses/OFL-1.1.txt"
 cp "$work_dir/pdfium/LICENSE" "$stage/licenses/pdfium/pdfium-binaries-LICENSE"
 cp -R "$work_dir/pdfium/licenses/." "$stage/licenses/pdfium/"
+if [[ "$RELEASE_PLATFORM" == windows-* ]]; then
+  bundle_windows_vc_runtime "$stage/mimus$executable_suffix" "$stage"
+fi
 if [[ -n "$ort_source" ]]; then
   cp "$ort_source" "$stage/$ORT_LIBRARY_NAME"
   install_name_tool -id "@executable_path/$ORT_LIBRARY_NAME" \

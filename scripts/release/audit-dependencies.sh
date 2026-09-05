@@ -51,14 +51,52 @@ audit_linux_file() {
   )
 }
 
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum < "$1" | awk '{print $1}'
+  else
+    shasum -a 256 < "$1" | awk '{print $1}'
+  fi
+}
+
+expected_vc_runtime_sha256() {
+  case "${1^^}" in
+    MSVCP140.DLL) printf '%s\n' "${VC_MSVCP140_SHA256:-}" ;;
+    MSVCP140_1.DLL) printf '%s\n' "${VC_MSVCP140_1_SHA256:-}" ;;
+    VCRUNTIME140.DLL) printf '%s\n' "${VC_VCRUNTIME140_SHA256:-}" ;;
+    VCRUNTIME140_1.DLL) printf '%s\n' "${VC_VCRUNTIME140_1_SHA256:-}" ;;
+    *) return 1 ;;
+  esac
+}
+
 audit_windows_file() {
   local path="$1"
-  local dependency upper
+  local dependency upper expected_sha adjacent actual_sha
   local invalid=0
   while IFS= read -r dependency; do
     upper="$(printf '%s' "$dependency" | tr '[:lower:]' '[:upper:]')"
     case "$upper" in
       ADVAPI32.DLL|BCRYPT.DLL|BCRYPTPRIMITIVES.DLL|CRYPT32.DLL|D3D12.DLL|DBGHELP.DLL|DIRECTML.DLL|DNSAPI.DLL|DXGI.DLL|GDI32.DLL|IPHLPAPI.DLL|KERNEL32.DLL|MSVCRT.DLL|NORMALIZ.DLL|NTDLL.DLL|OLE32.DLL|OLEAUT32.DLL|POWRPROF.DLL|RPCRT4.DLL|SECUR32.DLL|SETUPAPI.DLL|SHELL32.DLL|USER32.DLL|USERENV.DLL|WS2_32.DLL|API-MS-WIN-CORE-*.DLL|API-MS-WIN-CRT-*.DLL) ;;
+      MSVCP140*.DLL|VCRUNTIME140*.DLL|CONCRT140.DLL)
+        expected_sha="$(expected_vc_runtime_sha256 "$dependency")" || {
+          echo "imported VC runtime DLL has no configured SHA-256 pin: $dependency" >&2
+          invalid=1
+          continue
+        }
+        adjacent="$(find "$(dirname "$binary")" -maxdepth 1 -type f -iname "$dependency" -print -quit)"
+        if [[ -z "$adjacent" ]]; then
+          echo "VC runtime dependency is not adjacent to mimus.exe: $dependency" >&2
+          invalid=1
+          continue
+        fi
+        actual_sha="$(sha256_file "$adjacent")"
+        if [[ "$actual_sha" != "$expected_sha" ]]; then
+          echo "adjacent VC runtime SHA-256 mismatch for $dependency: expected $expected_sha, got $actual_sha" >&2
+          invalid=1
+          continue
+        fi
+        printf 'VC runtime: bundled adjacent %s (SHA-256 %s)\n' "$(basename "$adjacent")" "$actual_sha"
+        ;;
       *)
         echo "non-system Windows dependency is not bundled: $dependency" >&2
         invalid=1
