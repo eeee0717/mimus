@@ -322,6 +322,23 @@ fn configure_test_fonts(command: &mut Command) {
     command.env("MIMUS_FONT_LATIN_BOLD", test_latin_font_path());
 }
 
+fn walkdir_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut directories = vec![root.to_owned()];
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                directories.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
 #[derive(Debug, Deserialize)]
 struct FixtureManifest {
     identity: ManifestIdentity,
@@ -1028,11 +1045,81 @@ fn help_and_bare_invocation_succeed() {
     let help = String::from_utf8(help.stdout).unwrap();
     assert!(help.contains("translate"));
     assert!(help.contains("inspect"));
+    assert!(help.contains("assets"));
     assert!(help.contains("--json"));
 
     let bare = Command::new(BIN).output().unwrap();
     assert!(bare.status.success());
     assert!(!bare.stdout.is_empty());
+}
+
+#[test]
+fn assets_list_exposes_the_unique_pinned_manifest_without_touching_runtime_assets() {
+    let output = Command::new(BIN)
+        .env("MIMUS_CONFIG_FILE", "missing-config.toml")
+        .env("MIMUS_CACHE_DIR", "missing-cache")
+        .args(["--json", "assets", "list"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let events = parse_events(&output.stdout);
+    assert_one_terminal_last(&events, "result");
+    let assets = events[0]["assets"].as_array().unwrap();
+    assert_eq!(assets.len(), 4);
+    assert_eq!(
+        assets
+            .iter()
+            .map(|asset| asset["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "noto-serif-sc",
+            "stix-two-text",
+            "stix-two-math",
+            "pp-doclayoutv3"
+        ]
+    );
+    assert_eq!(
+        assets[0]["cache_path"],
+        "fonts/noto-serif-sc-2.001/NotoSerifSC-VF.ttf"
+    );
+    assert_eq!(
+        assets[3]["cache_path"],
+        "models/pp-doclayoutv3-46bbdf188bb0a772c08aed74882ce7e51a8f1ea6/inference.onnx"
+    );
+    let rendered = String::from_utf8(output.stdout).unwrap();
+    assert!(!rendered.contains("DejaVu"));
+}
+
+#[test]
+fn assets_pull_offline_fails_as_asset_three_without_temporary_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let output = Command::new(BIN)
+        .env("MIMUS_CONFIG_FILE", directory.path().join("missing.toml"))
+        .env("MIMUS_CACHE_DIR", &cache)
+        .args([
+            "--json",
+            "assets",
+            "pull",
+            "--asset-mirror",
+            "http://127.0.0.1:9",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stderr.is_empty());
+    let events = parse_events(&output.stdout);
+    assert_one_terminal_last(&events, "error");
+    assert_eq!(events.first().unwrap()["event"], "asset_download_started");
+    assert_eq!(events.last().unwrap()["category"], "asset");
+    assert_eq!(events.last().unwrap()["reason"], "output_font_unavailable");
+    let files = if cache.exists() {
+        walkdir_files(&cache)
+    } else {
+        Vec::new()
+    };
+    assert!(files.is_empty(), "unexpected cache files: {files:?}");
 }
 
 #[test]
