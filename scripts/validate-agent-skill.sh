@@ -18,7 +18,7 @@ fail() {
 
 grep -Fx 'name: mimus' "$skill" > /dev/null || fail "frontmatter name must be mimus"
 grep -Eq '^description: .+' "$skill" || fail "frontmatter description is required"
-grep -Fx 'compatibility: Requires mimus >=0.0.0 and <0.1.0 on PATH.' "$skill" > /dev/null || \
+grep -Fx 'compatibility: Requires mimus >=0.1.0-alpha.1 and <0.2.0 on PATH.' "$skill" > /dev/null || \
   fail "CLI semver compatibility range is missing"
 
 for invocation in \

@@ -372,7 +372,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "corpus"
-version = "0.0.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1148,7 +1148,7 @@ checksum = "e20f57f9918e5bd7bc58c22cdd70a6afc7375d4dd9683af5f2b34bd3d2bba619"
 
 [[package]]
 name = "m0-experiment-2"
-version = "0.0.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "approx",
@@ -1195,7 +1195,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mimus"
-version = "0.0.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "clap",
  "dotenvy",
@@ -1217,7 +1217,7 @@ dependencies = [
 
 [[package]]
 name = "mimus-core"
-version = "0.0.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "image",
  "lopdf",
@@ -1241,7 +1241,7 @@ dependencies = [
 
 [[package]]
 name = "mimus-quality-contract"
-version = "0.0.0"
+version = "0.1.0-alpha.1"
 
 [[package]]
 name = "miniz_oxide"
@@ -1820,7 +1820,7 @@ dependencies = [
 
 [[package]]
 name = "scorecard"
-version = "0.0.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "clap",
