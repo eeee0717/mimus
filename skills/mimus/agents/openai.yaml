@@ -1,0 +1,3 @@
+interface:
+  display_name: "Mimus"
+  short_description: "Translate and inspect PDFs with mimus"
