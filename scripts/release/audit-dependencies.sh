@@ -160,6 +160,7 @@ case "$platform" in
     ldd "$pdfium"
     ;;
   windows-*)
+    printf 'VC Redist: %s\n' "${VC_REDIST_VERSION:?missing VC_REDIST_VERSION}"
     if objdump -p "$binary" | awk '/DLL Name:/ {print $3}' | grep -qi onnxruntime; then
       echo "ONNX Runtime must not remain a Windows runtime dependency" >&2
       exit 1

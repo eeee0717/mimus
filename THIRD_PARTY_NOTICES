@@ -43,6 +43,16 @@ OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWA
 
 Source: https://github.com/microsoft/onnxruntime
 
+## Microsoft Visual C++ Runtime
+
+The Windows x64 archive includes the following Microsoft Visual C++ Runtime files from Visual
+Studio Redist version 14.44.35112: `msvcp140.dll`, `msvcp140_1.dll`, `vcruntime140.dll`, and
+`vcruntime140_1.dll`. They are distributed with the application under the Visual Studio license's
+Distributable Code terms.
+
+Microsoft's deployment guidance, including local deployment, is available at:
+https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files?view=msvc-170
+
 ## PP-DocLayoutV3
 
 The model is not included in the archive. Mimus downloads the SHA-256-pinned

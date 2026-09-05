@@ -21,6 +21,19 @@
    大小、哈希及兼容性全部通过后才原子 rename。失败由临时文件生命周期清理，进程不会
    发布半成品。机器模式使用 CLI v2 的 `asset_download_started/progress/finished` additive
    事件，人类模式将两级进度写 stderr。
+7. 各平台 archive 的可执行文件与动态库清单固定如下；此外每包共同包含 `LICENSE`、
+   `THIRD_PARTY_NOTICES`、`licenses/`、`README.md`、`DEPENDENCIES.txt` 和
+   `RUST_DEPENDENCIES.txt`：
+   - macOS arm64：`mimus`、`libpdfium.dylib`；
+   - macOS x64：`mimus`、`libpdfium.dylib`、`libonnxruntime.1.23.2.dylib`；
+   - Linux x64：`mimus`、`libpdfium.so`；
+   - Windows x64：`mimus.exe`、`pdfium.dll`、`msvcp140.dll`、`msvcp140_1.dll`、
+     `vcruntime140.dll`、`vcruntime140_1.dll`。
+8. Windows 的四个 VC runtime DLL 取自 runner 上与编译 toolset 配套的 Visual Studio
+   Redist 目录，仅在版本目录和各文件 SHA-256 均与 release matrix 钉值相符时随包。Windows
+   loader 会先搜索应用目录，且这四个 DLL 均非 KnownDLL，因此与 `mimus.exe` 相邻的
+   app-local 部署满足解压即用合同。`mimus.exe` 还直接导入 DirectML、D3D12 与 DXGI，最低
+   支持 Windows 10 1903 或更高版本，以及 Windows 11。
 
 ## 后果
 
@@ -28,6 +41,8 @@
 - 统一资产清单与预取机制已由 #39 落地；字体与模型解析不得再维护平行 manifest。
 - 首次运行需联网下载约 150 MB 资产，需在 CLI 首跑体验中明示进度。
 - Agent Skill 与二进制分开安装；skill 必须声明兼容的 CLI 版本，并针对受支持 release 做前向验证。
+- Windows archive 比依赖系统预装 VC++ Redistributable 多四个文件，但安装状态不再影响启动，
+  runner 镜像升级也会因版本或哈希漂移而 fail-closed。
 
 字体槽位、兼容性与自备路径合同见 [ADR-0018](0018-output-font-assets.md)；生产 layout
 模型身份见 [ADR-0019](0019-production-layout-detector.md)。二者的默认资产身份均由 #39
