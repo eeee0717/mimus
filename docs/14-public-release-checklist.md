@@ -7,9 +7,10 @@ following irreversible/public steps.
 
 - Merge the M4 pull requests in dependency order: assets, archives, Agent Skill, rehearsal/docs.
 - Resolve the Linux container rehearsal follow-up (#187) and attach its `summary.json` to #42.
-- Choose the public version. The tag must exactly match the Cargo version as `v<version>`; if Cargo
-  remains `0.0.0`, the matching tag is `v0.0.0`. A `v0.1.0` release requires updating Cargo and the
-  Agent Skill compatibility range, then rebuilding all artifacts.
+- Cargo is `0.1.0-alpha.1`, so the matching tag is `v0.1.0-alpha.1`; tags containing `-` are
+  automatically marked as pre-releases. When promoting to a stable version, update the workspace
+  version, lockfile entries, both Agent Skill compatibility declarations, and their validation
+  expectation together, then rebuild all artifacts.
 - Confirm CI and the release archive matrix are green at the exact commit to tag.
 - Preserve the immutable `04-mobilenets.cache.redb` recorded by the Linux rehearsal before removing
   its workspace.

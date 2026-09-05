@@ -10,5 +10,10 @@ if GITHUB_REF_TYPE=tag GITHUB_REF_NAME=v9.9.9 "$check" 0.0.0 >/dev/null 2>&1; th
 fi
 
 GITHUB_REF_TYPE=tag GITHUB_REF_NAME=v0.0.0 "$check" 0.0.0
+GITHUB_REF_TYPE=tag GITHUB_REF_NAME=v0.1.0-alpha.1 "$check" 0.1.0-alpha.1
+if GITHUB_REF_TYPE=tag GITHUB_REF_NAME=v0.1.0 "$check" 0.1.0-alpha.1 >/dev/null 2>&1; then
+  echo "stable tag unexpectedly matched a prerelease version" >&2
+  exit 1
+fi
 GITHUB_REF_TYPE=branch GITHUB_REF_NAME=m4-release "$check" 0.0.0
-printf 'tag/version gate rejects a mismatched tag and preserves non-tag runs\n'
+printf 'tag/version gate accepts exact versions, rejects mismatches, and preserves non-tag runs\n'

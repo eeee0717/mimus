@@ -1,7 +1,7 @@
 ---
 name: mimus
 description: Use when translating or inspecting PDFs with the mimus CLI, preparing its runtime assets, or handling its versioned machine-protocol results.
-compatibility: Requires mimus >=0.0.0 and <0.1.0 on PATH.
+compatibility: Requires mimus >=0.1.0-alpha.1 and <0.2.0 on PATH.
 ---
 
 # Mimus
@@ -13,7 +13,7 @@ Drive the installed `mimus` CLI through schema-v2 NDJSON. The CLI is the behavio
 
 1. Run `command -v mimus`. When it is absent, stop and direct the user to the matching archive at
    <https://github.com/eeee0717/mimus/releases>. Leave binary and asset installation to the user.
-2. Run `mimus --version` and require `>=0.0.0, <0.1.0`. When it is outside that range, stop and
+2. Run `mimus --version` and require `>=0.1.0-alpha.1 and <0.2.0`. When it is outside that range, stop and
    direct the user to a compatible Release.
 3. Choose the workflow below. Read command-specific help only when options beyond the shown core
    invocation are needed.
