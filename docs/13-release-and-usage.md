@@ -6,6 +6,35 @@ library. Models, fonts, and the Agent Skill remain separate runtime assets.
 The Windows x64 archive additionally contains the four Microsoft Visual C++ Runtime DLLs directly
 imported by `mimus.exe`.
 
+## Platform status
+
+| Target | Status | Current evidence |
+| --- | --- | --- |
+| macOS arm64 (Apple Silicon) | Supported | Maintainer hardware plus release CI |
+| macOS x64 | Preview/best-effort | Hosted CI build, dependency audit, and real-model smoke |
+| Linux x64 | Preview/best-effort | Hosted CI build, dependency audit, and real-model smoke |
+| Windows x64 | Preview/best-effort | Hosted CI build, dependency audit, and real-model smoke |
+
+Preview archives are intentionally kept available, but do not carry a compatibility guarantee.
+Each remains preview until it passes maintainer-controlled native clean-machine installation, a
+real-document run, and manual visual acceptance. “macOS arm64” is specific: there are no Linux
+arm64 or Windows arm64 release artifacts.
+
+## Install with mise on Apple Silicon
+
+The current prerelease can be installed directly from GitHub through mise. Alpha releases require
+an explicit prerelease opt-in:
+
+```sh
+mise use -g 'github:eeee0717/mimus[prerelease=true]@0.1.0-alpha.1'
+mimus --version
+```
+
+Mimus is not currently listed in the official mise registry. The `github:` backend is the supported
+mise installation route for this alpha and keeps `mimus` beside its packaged dynamic library.
+Official registry submission is tracked in [#196](https://github.com/eeee0717/mimus/issues/196) for
+stable `0.1.0`.
+
 ## Install an archive
 
 Download the archive and `SHA256SUMS` from the same GitHub Release. Verify the archive before
@@ -26,9 +55,9 @@ CLI.
 
 On Windows, keep `mimus.exe`, `pdfium.dll`, `msvcp140.dll`, `msvcp140_1.dll`,
 `vcruntime140.dll`, and `vcruntime140_1.dll` in the same directory. The four VC runtime DLLs are
-version- and SHA-256-pinned app-local dependencies from the matching Visual Studio Redist. The
-ONNX Runtime backend directly imports DirectML, D3D12, and DXGI, so the minimum supported system is
-Windows 10 version 1903 or later, or Windows 11.
+version- and SHA-256-pinned app-local dependencies from the matching Visual Studio Redist. ONNX
+Runtime directly imports DirectML, D3D12, and DXGI, so the Windows preview archive requires Windows
+10 version 1903 or later, or Windows 11.
 
 For a recorded clean-machine smoke, use
 [`verify-install.sh`](../scripts/release/verify-install.sh) on macOS/Linux or

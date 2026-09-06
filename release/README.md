@@ -1,5 +1,10 @@
 # mimus release archive
 
+The supported release target is macOS arm64 (Apple Silicon). macOS x64, Linux x64, and Windows x64
+archives are preview/best-effort builds without a compatibility guarantee; they have passed hosted
+CI build, dependency audit, and real-model smoke tests but not maintainer-controlled native
+clean-machine and manual visual acceptance.
+
 This archive contains the `mimus` command and the matching PDFium dynamic library. The macOS x64
 archive also contains the matching ONNX Runtime dynamic library. The Windows archive includes the
 four pinned Microsoft Visual C++ Runtime DLLs imported by `mimus.exe`: `msvcp140.dll`,

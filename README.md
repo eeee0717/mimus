@@ -6,6 +6,26 @@ with `npx skills add eeee0717/mimus --skill mimus`; it invokes the same CLI thro
 See [release installation and usage](docs/13-release-and-usage.md) for archive setup, provider
 configuration, offline assets, translation workflows, diagnostics, and known limits.
 
+## Platform support
+
+The supported release target is **macOS arm64 (Apple Silicon)**. macOS x64, Linux x64, and Windows
+x64 archives are published as preview/best-effort builds: their hosted CI build, dependency audit,
+and real-model smoke tests pass, but they have not completed maintainer-controlled native
+clean-machine and manual visual acceptance. They do not carry a compatibility guarantee yet.
+
+The current alpha can be installed on Apple Silicon directly from its GitHub Release through mise;
+the prerelease opt-in is required:
+
+```sh
+mise use -g 'github:eeee0717/mimus[prerelease=true]@0.1.0-alpha.1'
+mimus --version
+```
+
+Mimus is not yet listed in the official mise registry. The direct `github:` backend above is the
+supported mise route for this alpha. Official registry submission is tracked in
+[#196](https://github.com/eeee0717/mimus/issues/196) for stable `0.1.0`. See the release guide for
+manual archive verification.
+
 ## Workspace
 
 | Crate | Kind | Role |
