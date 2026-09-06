@@ -64,6 +64,7 @@
 | 55 | V1 写回器只改写页面顶层 `/Contents`，**不翻译 Form XObject 内文字**。仅含 Form-owned `Translate` 文字的段落以 additive IL v1 / CLI v2 原因 `form_xobject_content` typed 保留；同时含页面级 `Translate` 文字的混合段继续处理页面级单元，不因 Form 片段整段保留。若页面全部可见直立文字均在 Form 内，且文档至少有一个这类页面含 `Translate` 内容，则按整页包装根因将这些 wrapper 页的全部段落 typed 入账（覆盖 pdfpages/pdfjam 与带封面 reprint）。该原因优先于 `unreliable_unicode`，`--strict` 可阻断发布；纯 `Passthrough` 图表 Form 文档不触发。Form 内改写推迟到 V1 后候选 | [ADR-0013](docs/adr/0013-bounded-walk-and-graded-degradation.md)、[ADR-0017](docs/adr/0017-translation-degradation-and-strict.md) |
 | 56 | **用户裁定（2026-09-03）**：输出主字体正式默认使用 Noto Serif SC 2.001（宋体），以匹配 Times 类论文正文；Noto Sans SC 等黑体继续通过 `--font` / `--font-bold` 显式选择。此项不是待验证候选，后续再基线以宋体为准 | [ADR-0018](docs/adr/0018-output-font-assets.md) |
 | 57 | 保留编号标题的节号时，节号锚在源节号左边，标题首项锚在源标题左边；二者间距由源几何复原而非插入空格。若输出节号更宽，残余间距最低夹紧到 `0.25em` 并发 `section_number_gap_clamped` typed info；源中真实空格的 advance 不重复叠加。默认与双语模式同规则，请求文本、`force_no_space_before`、字号拟合、8 pt 下限、行距和扩张时机均不变 | [docs/10-quality-scorecard.md](docs/10-quality-scorecard.md) §2.4.1/§2.4.2 |
+| 58 | **用户裁定（2026-09-06）**：正式平台支持仅为 macOS arm64（Apple Silicon）。macOS x64、Linux x64、Windows x64 archive 继续发布为 preview/best-effort：其 GitHub-hosted CI 构建、依赖审计与真实模型冒烟已通过，但尚无维护者控制的原生干净机和人工视觉验收，因此不作兼容性保证。不得把此口径简称为泛化的“arm64 支持”；项目没有 Linux/Windows arm64 产物 | [ADR-0005](docs/adr/0005-distribution.md) |
 
 ## 翻译政策表（PP-DocLayoutV3 · 25 类）
 
